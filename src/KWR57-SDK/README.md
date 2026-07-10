@@ -7,8 +7,7 @@
 代码按 **协议 → 传输 → 驱动 → 应用** 四层组织，各层职责单一、可独立测试与替换。
 
 ## 1. 硬件连接
-
-传感器为 4 线 + 屏蔽的多芯线缆（接线以实物标签为准，见手册 4.4 节）：
+接线以实物标签为准，见手册 4.4 节。
 
 | 序号 | 芯线颜色 | 定义 | 接到 USB-CAN 模块 |
 |---|---|---|---|
@@ -23,11 +22,11 @@
 > CAN 总线两端需要 **120 Ω 终端电阻**；多数 USB-CAN 模块可跳线/开关启用内置终端电阻。
 
 连接拓扑：
-
-```txt
-┌──────────┐   USB    ┌──────────────┐   CAN_H/CAN_L  ┌──────────────┐   红/黑
-│   PC     │────────▶│  USB-CAN 模块 │◀────────────▶│ KWR57 传感器 │ ◀────── 9~24VDC 电源
-└──────────┘          └──────────────┘                └──────────────┘
+```mermaid
+graph LR
+    PC[PC] -->|USB| USB-CAN模块[USB-CAN 模块]
+    USB-CAN模块 <-->|CAN_H/CAN_L| KWR57传感器[KWR57 传感器]
+    电源[9~24VDC 电源] -.->|红/黑| KWR57传感器
 ```
 
 ## 2. 通信协议（手册 4.3 节）
@@ -36,7 +35,7 @@
 
 ### 2.1 数据输出（传感器 → 上位机）
 
-六个通道为 **IEEE754 单精度浮点**，每通道 4 字节，一个采样点分 **3 帧** 发送，用 CAN ID 区分：
+六个通道为 **IEEE754 单精度浮点**（实测为**小端**字节序），每通道 4 字节，一个采样点分 **3 帧** 发送，用 CAN ID 区分：
 
 | CAN ID | data[0:4] | data[4:8] |
 |---|---|---|
@@ -44,9 +43,8 @@
 | `0x16` | Fz | Mx |
 | `0x17` | My | Mz |
 
-> 实测 KWR57 数据帧中的 IEEE754 浮点采用 **小端** 字节序。
-
-### 2.2 指令（上位机 → 传感器，默认发往 CAN ID `0x10`）
+### 2.2 指令（上位机 → 传感器）
+默认发往 CAN ID `0x10`
 
 | 功能 | data 字节 | 说明 |
 |---|---|---|
@@ -60,10 +58,9 @@
 
 
 ## 3. 代码结构与分层
-
-```
-KWR57-SDK/                 ← 纯 Python SDK（非 ROS 包；位于 end_effector_ros 工作区）
-├── kwr57_sensor/           import 名为 kwr57_sensor 的模块
+```txt
+KWR57-SDK/             纯 Python SDK（非 ROS 包）
+├── kwr57_sensor/      模块文件夹
 │   ├── protocol.py    协议层：常量 / 指令构造 / 数据帧解码 / 三帧组装（纯逻辑，无 I/O）
 │   ├── transport.py   传输层：封装 python-can，屏蔽不同 USB-CAN 适配器差异
 │   ├── driver.py      驱动层：KWR57Sensor 高层 API（组合协议层 + 传输层）
@@ -73,16 +70,13 @@ KWR57-SDK/                 ← 纯 Python SDK（非 ROS 包；位于 end_effecto
 │   ├── read_wrench.py  最小调用示例
 │   ├── set_id.py       设置/复位设备 CAN ID（同总线挂多个设备前置步骤）
 │   └── web_wrench.py   六轴 Web 可视化示例
-├── setup.py / pyproject.toml   让 kwr57_sensor 可 pip 安装（供 ROS 节点导入）
+├── setup.py / pyproject.toml   让 kwr57_sensor 可 pip 安装，并注册 kwr57-read 命令
 ├── requirements.txt
 └── README.md
 ```
 
-> **ROS 2 用户**：本 SDK 是纯 Python 库，可 `pip install -e .` 单独使用（非 ROS）。
-> ROS 2 封装在同一工作区的 **`kwr57_ros`** 包（bridge 架构）：通用 `can_bridge` 独占总线并以
-> `can_msgs/Frame` 收发，KWR57 只是一个**设备节点**（订阅总线帧、过滤自己的 CAN ID、
-> 发 `geometry_msgs/WrenchStamped`）。安装/运行/多设备/demo 见 `../kwr57_ros/README.md` 与顶层 README。
-> 注意：ROS 2 节点跑在 foxy 的系统 `python3`(3.8) 上，而非 conda `robot`。
+> **ROS2 用户**：本 SDK 是纯 Python 库，可 `pip install -e .` 单独使用（非 ROS）
+> ROS2 封装在同一工作区的 **`kwr57_ros`** 包（bridge 架构）：通用 `can_bridge` 独占总线并以 `can_msgs/Frame` 收发，KWR57 只是一个**设备节点**（订阅总线帧、过滤自己的 CAN ID、发 `geometry_msgs/WrenchStamped`）。安装/运行/多设备/demo 见 [`../kwr57_ros/README.md`](../kwr57_ros/README.md) 与顶层 README
 
 - **协议层 `protocol.py`**：只做“字节 ↔ 语义”转换，不碰硬件，可脱离设备做单元测试。
   核心是 `WrenchAssembler`——把 `0x15/0x16/0x17` 三帧缓存并集齐后组装成一个 `Wrench`。
@@ -95,19 +89,21 @@ KWR57-SDK/                 ← 纯 Python SDK（非 ROS 包；位于 end_effecto
   六个条形以及合力/合力矩箭头，无需本地图形环境，适合 SSH 远程使用。
 
 数据流：
-
-```
+```txt
 CAN 帧 ──recv──▶ transport ──(id,data)──▶ WrenchAssembler ──集齐3帧──▶ Wrench ──▶ 应用
-指令   ◀─send─── transport ◀──bytes────── protocol.build_*()  ◀─────── 驱动方法
+指令   ◀─send─── transport ◀──bytes────── protocol.build_*() ◀─────── 驱动方法
 ```
 
 
 ## 4. 安装
 
-```powershell
-cd kwr57_can_sensor
+```sh
+cd KWR57-SDK
 pip install -r requirements.txt
+pip install -e .
 ```
+
+安装后可在任意目录运行 `kwr57-read`。`-e` 表示以可编辑模式安装，修改源码后无需重新安装。
 
 `python-can` 会自动支持大多数 USB-CAN 模块。个别适配器需额外驱动/后端：
 
@@ -123,9 +119,7 @@ pip install -r requirements.txt
 
 ## 5. CANalyst-II 从零配置（Windows）
 
-CANalyst-II 这类“CAN 分析仪”通常不是串口设备，插上后不会出现在
-“端口 (COM 和 LPT)”里，也不会有 `COM5` 这类端口号。本库通过
-`python-can` 的 `canalystii` 后端访问它。
+CANalyst-II 这类“CAN 分析仪”通常不是串口设备，插上后不会出现在“端口 (COM 和 LPT)”里，也不会有 `COM5` 这类端口号。本库通过 `python-can` 的 [`canalystii`](https://pypi.org/project/canalystii/) 后端访问它。厂商自带一个UI工具，其实不用安装。
 
 ### 5.1 安装厂商驱动
 
@@ -152,8 +146,9 @@ Get-PnpDevice -PresentOnly |
 建议用 `.venv`：
 
 ```powershell
-cd kwr57_can_sensor
+cd KWR57-SDK
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
 CANalyst-II 需要这些 Python 依赖：
@@ -201,36 +196,21 @@ Fx=  -0.500 Fy=  -0.297 Fz=  -0.088 | Mx=-0.0077 My=+0.0078 Mz=+0.0001
 
 ### 5.5 Linux 上使用 CANalyst-II
 
-
 #### 1：安装系统依赖
-
 ```bash
 sudo apt update
 sudo apt install -y python3-pip libusb-1.0-0
 ```
 
 #### 2：安装 Python 依赖
-
-如果你用 conda/micromamba（例如 `robot`）：
-
+在虚拟环境（venv或conda之类）中安装依赖：
 ```bash
-source ~/.bashrc
-conda activate robot
-python -m pip install -r requirements.txt
-```
-
-如果你用 venv：
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
 #### 3：配置系统权限（必做）
 
 CANalyst-II 常见 USB ID 是 `04d8:0053`。创建 udev 规则：
-
 ```bash
 echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="04d8", ATTR{idProduct}=="0053", MODE="0666", GROUP="plugdev"' | sudo tee /etc/udev/rules.d/99-canalystii.rules
 sudo udevadm control --reload-rules
@@ -238,42 +218,36 @@ sudo udevadm trigger
 ```
 
 确保当前用户在 `plugdev` 组：
-
 ```bash
 id -nG | grep -w plugdev || echo 'not in plugdev'
 ```
 
 若不在组内：
-
 ```bash
 sudo usermod -aG plugdev $USER
 ```
 
-然后重新登录，并拔插一次设备。
+然后重新登录，可能要拔插一次设备。
 
 #### 4：验证
 
 先看系统是否识别设备：
-
 ```bash
 lsusb | grep -i -E '04d8|can|canalyst|chuangxin'
 ```
 
 再跑示例：
-
 ```bash
 python examples/read_wrench.py
 ```
 
 Linux 参数与 Windows 一致：
-
 ```python
 INTERFACE = "canalystii"
 CHANNEL = "0"   # CAN1；如果接 CAN2，改为 "1"
 ```
 
 #### 常见报错
-
 - `RuntimeError: Unable to load libusb backend ... dll`：请更新到当前版本代码（已按系统自动选择 `.so/.dylib/.dll`）。
 - `usb.core.USBError: [Errno 13] Access denied`：通常是 udev/用户组权限未生效，重做步骤 3 并重新登录。
 
@@ -284,61 +258,38 @@ CHANNEL = "0"   # CAN1；如果接 CAN2，改为 "1"
 
 ```powershell
 # CANalyst-II + Windows
-python -m kwr57_sensor.cli --interface canalystii --channel 0
+kwr57-read --interface canalystii --channel 0
 
 # CANable(slcan) + Windows COM5
-python -m kwr57_sensor.cli --interface slcan --channel COM5
+kwr57-read --interface slcan --channel COM5
 
 # 先把内部采样率设为 500Hz，再以 16ms 周期上传
-python -m kwr57_sensor.cli --interface slcan --channel COM5 --rate-hz 500 --period-ms 16
+kwr57-read --interface slcan --channel COM5 --rate-hz 500 --period-ms 16
 
 # Linux SocketCAN
-python -m kwr57_sensor.cli --interface socketcan --channel can0
+kwr57-read --interface socketcan --channel can0
 ```
 
-输出示例：
+也可以继续使用模块方式运行：`python -m kwr57_sensor.cli ...`
 
+输出示例：
 ```
 Fx=  +0.123 Fy=  -0.045 Fz=  +2.310  |  Mx=+0.0012 My=-0.0034 Mz=+0.0007  [  20.0 Hz]
 ```
 
-### 6.2 Web 可视化（浏览器查看，适合 SSH）
-
-`examples/web_wrench.py` 会启动一个本地 HTTP 服务，在浏览器中实时显示六个轴的数值条形图，
-并用箭头显示合力与合力矩的 XY 投影，左上角圆点显示 Z 轴分量大小与方向。
-它只依赖 Python 标准库，不需要本地图形环境（Tkinter/X11），因此适合 SSH 远程使用。
-
+### 6.2 可视化
+`examples/web_wrench.py` 会启动一个本地 HTTP 服务，在浏览器中（默认绑定 `0.0.0.0:8765`）实时显示六个轴的数值条形图，适合 SSH 环境下查看。
 ```bash
 # CANalyst-II
 python examples/web_wrench.py --interface canalystii --channel 0
-
 # CANable(slcan) + COM5
 python examples/web_wrench.py --interface slcan --channel COM5
 
-# 不连接硬件，预览界面
+# 不连接硬件的预览：加 --demo
 python examples/web_wrench.py --demo
 ```
 
-启动后在浏览器打开（默认绑定 `127.0.0.1:8765`）：
-
-```text
-http://127.0.0.1:8765
-```
-
-通过 SSH 远程时，在本地机器做端口转发即可在本地浏览器查看：
-
-```bash
-ssh -L 8765:127.0.0.1:8765 user@server
-```
-
-如需在局域网内其它机器直接访问，可绑定到所有网卡（注意安全）：
-
-```bash
-python examples/web_wrench.py --demo --host 0.0.0.0 --port 8765
-```
-
 如果条形或箭头过早顶满，可按实际量程调整显示比例：
-
 ```bash
 python examples/web_wrench.py --interface canalystii --channel 0 --force-scale 50 --torque-scale 2
 ```
@@ -359,7 +310,6 @@ with KWR57Sensor.open(interface="canalystii", channel="0") as sensor:
 ```
 
 也可复用已有的 python-can 总线，自行构造传输层：
-
 ```python
 from kwr57_sensor import KWR57Sensor, CanTransport
 

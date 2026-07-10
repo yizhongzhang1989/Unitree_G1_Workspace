@@ -37,15 +37,13 @@ _CMD_SETTLE_S = 0.1
 
 @dataclass
 class DeviceSpec:
-    """同总线上一个 KWR57 设备的标识。
+    """同总线上一个 KWR57 设备的标识
 
     key:          用户自定义标签（如 "left"），read() 会用它标明数据来源。
     cmd_id:       该设备的命令(接收)ID；出厂默认 0x10。多设备若要单独下发命令，
-                  应各自不同（否则一条命令会同时作用于共享该 ID 的所有设备）。
-    data_base_id: 该设备的数据发送起始 CAN ID；出厂默认 0x15，对应帧
-                  data_base_id / +1 / +2。**同总线各设备必须互不相同**。
-    data_ids:     可选，直接指定三帧数据 CAN ID（非连续时用）；给出则忽略
-                  data_base_id。
+                  应各自不同（否则一条命令会同时作用于共享该 ID 的所有设备）
+    data_base_id: 该设备的数据发送起始 CAN ID；出厂默认 0x15，对应帧 data_base_id / +1 / +2。**同总线各设备必须互不相同**
+    data_ids:     可选，直接指定三帧数据 CAN ID（非连续时用）；给出则忽略 data_base_id
     """
     key: str = "default"
     cmd_id: int = protocol.CAN_ID_CMD
@@ -62,20 +60,20 @@ class DeviceSpec:
 
 
 class KWR57Sensor:
-    """KWR57 CAN 传感器高层驱动（一条总线，1 个或多个设备）。
+    """KWR57 CAN 传感器高层驱动（一条总线，1 个或多个设备）
 
-    通过一个已打开的 CanTransport 与传感器通信；也可用便捷类方法
-    :meth:`open` 直接根据 python-can 的 interface/channel 打开。
+    通过一个已打开的 CanTransport 与传感器通信；
+    也可用便捷类方法: `open` 直接根据 python-can 的 interface/channel 打开。
     """
 
     def __init__(self, transport: CanTransport, *,
                  cmd_id: int = protocol.CAN_ID_CMD,
                  data_ids: Optional[Sequence[int]] = None,
                  devices: Optional[Sequence[DeviceSpec]] = None) -> None:
-        """transport: 已打开的传输层实例。
+        """transport: 已打开的传输层实例
 
-        单设备：给 cmd_id / data_ids（省略则用出厂 0x10 / 0x15-0x17）。
-        多设备：给 devices=[DeviceSpec, ...]（各设备 CAN ID 必须互不相同）。
+        单设备：给 cmd_id / data_ids（省略则用出厂 0x10 / 0x15,0x16,0x17）
+        多设备：给 devices=[DeviceSpec, ...]（各设备 CAN ID 必须互不相同）
         """
         self._t = transport
         if devices is None:
@@ -101,7 +99,7 @@ class KWR57Sensor:
 
         self._primary = self._devices[0].key
         self._single = len(self._devices) == 1
-        # 命令按“唯一命令 ID”下发，避免共享 cmd_id 的设备被重复发送。
+        # 命令按“唯一命令 ID”下发，避免共享 cmd_id 的设备被重复发送
         self._cmd_ids: List[int] = list(dict.fromkeys(d.cmd_id for d in self._devices))
         self._ignored = 0   # 不属于任何设备三帧的 CAN 帧数量
 
@@ -114,9 +112,9 @@ class KWR57Sensor:
              data_ids: Optional[Sequence[int]] = None,
              devices: Optional[Sequence[DeviceSpec]] = None,
              **bus_kwargs) -> "KWR57Sensor":
-        """根据 python-can 的 interface/channel 打开总线并返回驱动实例。
+        """根据 python-can 的 interface/channel 打开总线并返回驱动实例
 
-        单设备用 cmd_id / data_base_id / data_ids；多设备用 devices=[DeviceSpec]。
+        单设备用 cmd_id / data_base_id / data_ids；多设备用 devices=[DeviceSpec]
         """
         transport = CanTransport(interface=interface, channel=channel,
                                  bitrate=bitrate, **bus_kwargs)
@@ -135,22 +133,19 @@ class KWR57Sensor:
 
     @property
     def keys(self) -> List[str]:
-        """所有设备的 key（保持配置顺序）。"""
+        """所有设备的 key（保持配置顺序）"""
         return [d.key for d in self._devices]
 
     # --- 指令：数据流 ------------------------------------------------------
     def start_stream(self, period_ms: int = 1,
                      rate_hz: Optional[int] = 1000, *,
                      verify: bool = True) -> None:
-        """开始连续上传实时数据。
+        """开始连续上传实时数据
 
-        period_ms: 上传周期(ms)，例如 1 -> 约 1000Hz、8 -> 约 125Hz。
-                   默认 1ms，为传感器支持的最高上传频率。
-        rate_hz:   传感器内部采样率(Hz)，默认 1000（最高档）。设为 None 则
-                   沿用传感器当前采样率，不主动修改。
+        period_ms: 上传周期(ms)，默认 1ms，为传感器支持的最高上传频率
+        rate_hz:   传感器内部采样率(Hz)，默认 1000（最高档）。设为 None 则沿用传感器当前采样率，不主动修改
         verify:    发送实时命令后校验是否真正起流，未起流则自动重发；默认开启。
-                   传感器处理配置命令需要时间，背靠背下发会导致实时命令丢失、
-                   进而完全收不到数据，本参数用于消除该启动竞态。
+                   传感器处理配置命令需要时间，背靠背下发会导致实时命令丢失、进而完全收不到数据，本参数用于消除该启动竞态。
         """
         self.stop_stream()
         time.sleep(_CMD_SETTLE_S)          # 等“停止”生效后再清空接收队列
@@ -167,7 +162,7 @@ class KWR57Sensor:
 
     def _ensure_streaming(self, period_ms: int, *, attempts: int = 3,
                           probe_s: float = 0.2) -> bool:
-        """确认数据流已真正开始；探测窗口内几乎收不到帧则重发实时命令。
+        """确认数据流已真正开始；探测窗口内几乎收不到帧则重发实时命令
 
         传感器偶发丢失实时命令而完全不上传（表现为只发 1 帧后沉默）。
         在 probe_s 内探测：收到 >=2 帧即认为起流成功；否则重发命令重试。
@@ -191,12 +186,12 @@ class KWR57Sensor:
         return False
 
     def stop_stream(self) -> None:
-        """停止所有设备的数据上传（周期设为 0）。"""
+        """停止所有设备的数据上传（周期设为 0）"""
         for cid in self._cmd_ids:
             self._t.send(cid, protocol.build_stop_command())
 
     def set_sample_rate(self, rate_hz: int) -> None:
-        """对所有设备设置内部采样率(100/200/400/500/600/1000 Hz)。"""
+        """对所有设备设置内部采样率(100/200/400/500/600/1000 Hz)"""
         for cid in self._cmd_ids:
             self._t.send(cid, protocol.build_sample_rate_command(rate_hz))
 
@@ -207,13 +202,12 @@ class KWR57Sensor:
                      protocol.build_modify_id_command(host_id, sensor_id))
 
     def factory_reset_id(self) -> None:
-        """恢复出厂 ID（接收 0x10 / 发送 0x15）。手册要求在 0x000 下发送。"""
-        self._t.send(protocol.CAN_ID_FACTORY_RESET,
-                     protocol.build_factory_reset_id_command())
+        """恢复出厂 ID（接收 0x10 / 发送 0x15）"""
+        self._t.send(protocol.CAN_ID_FACTORY_RESET, protocol.build_factory_reset_id_command())
 
     # --- 读取 --------------------------------------------------------------
     def read(self, timeout: float = 0.1) -> Optional[Tuple[str, Wrench]]:
-        """读取下一组集齐的六轴数据，返回 (device_key, Wrench)。
+        """读取下一组集齐的六轴数据，返回 (device_key, Wrench)
 
         持续接收 CAN 帧并按 CAN ID 分发给对应设备的组装器；哪个设备先集齐
         三帧就先返回它。timeout 秒内没有任何设备集齐则返回 None。
@@ -238,7 +232,7 @@ class KWR57Sensor:
                 return key, wrench
 
     def read_wrench(self, timeout: float = 0.1) -> Optional[Wrench]:
-        """单设备便捷读取：读取下一组完整六轴测量值，直接返回 Wrench。
+        """单设备便捷读取：读取下一组完整六轴测量值，直接返回 Wrench
 
         多设备时返回“最先集齐的那一组”的 Wrench（不含 key）；需要区分来源
         请改用 :meth:`read`。
@@ -248,7 +242,7 @@ class KWR57Sensor:
 
     def read_latest_wrench(self, timeout: float = 0.1,
                            max_extra_frames: int = 64) -> Optional[Wrench]:
-        """读取一组数据后尽量追到接收队列里的最新完整样本（单设备场景）。
+        """读取一组数据后尽量追到接收队列里的最新完整样本（单设备场景）
 
         适合发布线程或可视化在处理速度低于上传速度时使用，避免发布旧样本；
         最多额外消费 max_extra_frames 帧，避免长时间霸占线程。
@@ -272,7 +266,7 @@ class KWR57Sensor:
         return latest
 
     def read_wrench_si(self, timeout: float = 0.1) -> Optional[Wrench]:
-        """读取下一组数据，并按 kgf/kgf*m -> N/N*m 换算。"""
+        """读取下一组数据，并按 kgf/kgf*m -> N/N*m 换算"""
         wrench = self.read_wrench(timeout=timeout)
         return None if wrench is None else wrench.to_si()
 
@@ -282,21 +276,21 @@ class KWR57Sensor:
 
     @property
     def ignored_frames(self) -> int:
-        """收到但不属于任何设备数据三帧的 CAN 帧数量。"""
+        """收到但不属于任何设备数据三帧的 CAN 帧数量"""
         return self._ignored
 
     @property
     def dropped_sequences(self) -> int:
-        """因乱序、丢帧或半包超时而丢弃的采样序列数量（所有设备合计）。"""
+        """因乱序、丢帧或半包超时而丢弃的采样序列数量（所有设备合计）"""
         return sum(a.dropped_sequences for a in self._assemblers.values())
 
     @property
     def malformed_frames(self) -> int:
-        """数据 CAN ID 正确但 DLC 不足 8 字节的异常帧数量（所有设备合计）。"""
+        """数据 CAN ID 正确但 DLC 不足 8 字节的异常帧数量（所有设备合计）"""
         return sum(a.malformed_frames for a in self._assemblers.values())
 
     def close(self) -> None:
-        """停止数据流并关闭总线。"""
+        """停止数据流并关闭总线"""
         try:
             self.stop_stream()
         except Exception:  # noqa: BLE001 - 关闭阶段尽量不抛异常

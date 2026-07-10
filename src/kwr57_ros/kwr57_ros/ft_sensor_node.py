@@ -1,4 +1,4 @@
-"""ROS 2 KWR57 device node (bridge mode).
+"""ROS 2 KWR57 device node (bridge mode)
 
 一设备一节点：本节点**不直接开总线**，而是通过通用 ``can_bridge`` 共享总线：
   - 订阅 ``rx_topic``（``can_msgs/Frame``，BEST_EFFORT），按本设备的 CAN ID 过滤、
@@ -49,6 +49,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+# 见 KWR57-SDK；需要安装
 from kwr57_sensor import Wrench, WrenchAssembler
 from kwr57_sensor import protocol
 from kwr57_sensor import KWR57Sensor
@@ -73,10 +74,9 @@ class KWR57DeviceNode(Node):
         self.declare_parameter("autostart", True)
         self.declare_parameter("tare_on_start", False)
         # --- direct-bus (high-rate) mode ---------------------------------
-        # bridge 模式逐帧走 DDS，在本机 1000Hz(3000 帧/s) 下会因 GIL 争用丢帧、
-        # wrench 掉到 ~130Hz。direct 模式让本节点用 SDK 紧循环直接读总线+组包，
-        # 只发布 ~1000Hz 的 WrenchStamped（已实测可满速）。注意：direct 模式
-        # 独占物理 CAN 设备，同一设备上不能再跑 bridge 或其它节点。
+        # bridge 模式逐帧走 DDS，在本机 1000Hz(3000 帧/s) 下会因 GIL 争用丢帧、wrench 掉到 ~130Hz
+        # direct 模式让本节点用 SDK 紧循环直接读总线+组包，只发布 ~1000Hz 的 WrenchStamped（实测可满速）
+        # 注意：direct 模式独占物理 CAN 设备，同一设备上不能再跑 bridge 或其它节点
         self.declare_parameter("direct_bus", False)
         self.declare_parameter("interface", "canalystii")
         self.declare_parameter("channel", "0")

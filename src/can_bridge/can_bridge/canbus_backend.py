@@ -1,7 +1,7 @@
-"""第1层 CAN Driver：打开一条 python-can 总线（后端无关）。
+"""第1层 CAN Driver：打开一条 python-can 总线（后端无关）
 
-对 CANalyst-II 需要为 PyUSB 准备 libusb 后端并预检查权限（否则底层库可能报
-NoBackendError 或直接崩溃）。本模块与任何具体设备无关，供通用 bridge 使用。
+对 CANalyst-II 需要为 PyUSB 准备 libusb 后端并预检查权限（否则底层库可能报 NoBackendError 或直接崩溃）
+本模块与任何具体设备无关，供通用 bridge 使用
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _is_canalystii(interface: str) -> bool:
 
 
 def _prepare_canalystii_backend() -> None:
-    """为 PyUSB 配置 libusb backend（按系统自动选择动态库）。"""
+    """为 PyUSB 配置 libusb backend（按系统自动选择动态库）"""
     try:
         import libusb_package
         import usb.backend.libusb1
@@ -78,7 +78,7 @@ def _prepare_canalystii_backend() -> None:
 
 
 def _ensure_canalystii_usb_access() -> None:
-    """Linux 下预检查 USB 设备权限，避免后续底层库崩溃。"""
+    """Linux 下预检查 USB 设备权限，避免后续底层库崩溃"""
     if _platform_name() != "linux":
         return
     try:
@@ -104,7 +104,7 @@ def _ensure_canalystii_usb_access() -> None:
 
 
 def open_bus(interface: str, channel: str, bitrate: int, **kwargs) -> "can.BusABC":
-    """打开并返回一条 python-can 总线。
+    """打开并返回一条 python-can 总线
 
     interface/channel: python-can 适配器标识（canalystii/socketcan/slcan/...）。
     bitrate:           总线比特率。

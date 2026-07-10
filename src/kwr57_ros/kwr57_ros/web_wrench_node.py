@@ -1,7 +1,7 @@
-"""ROS 2 web visualizer for the KWR57 wrench topic (SSH-friendly).
+"""ROS2 web visualizer for the KWR57 wrench topic (SSH-friendly)
 
 Same browser UI as ``examples/web_wrench.py`` (六轴条形图 + 力/力矩 XY 矢量投影),
-but the data source is a ROS 2 topic instead of the CAN bus: it subscribes to a
+but the data source is a ROS2 topic instead of the CAN bus: it subscribes to a
 ``geometry_msgs/WrenchStamped`` topic (BEST_EFFORT, matching the sensor node's
 publisher) and feeds each sample into the exact same HTTP visualizer.
 
@@ -13,8 +13,7 @@ Run:
     ros2 run kwr57_ft_sensor web_wrench
     ros2 run kwr57_ft_sensor web_wrench --ros-args -p port:=8080 -p topic:=/ft/wrench
 
-Open in browser:  http://127.0.0.1:8765
-SSH tunnel:       ssh -L 8765:127.0.0.1:8765 user@server
+Open in browser:  http://<ipv4>:8765
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ class WebWrenchNode(Node):
         super().__init__("kwr57_web_wrench")
 
         self.declare_parameter("topic", "/kwr57_ft_sensor/wrench_raw")
-        self.declare_parameter("host", "127.0.0.1")
+        self.declare_parameter("host", "0.0.0.0")
         self.declare_parameter("port", 8765)
         self.declare_parameter("force_scale", 10.0)
         self.declare_parameter("torque_scale", 0.25)

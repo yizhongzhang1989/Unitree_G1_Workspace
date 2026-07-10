@@ -1,4 +1,4 @@
-"""Launch ONE KWR57 device node.
+"""Launch ONE KWR57 device node
 
 两种模式：
   - bridge 模式（默认）：需先跑 ``can_bridge`` 独占总线，本节点只订阅

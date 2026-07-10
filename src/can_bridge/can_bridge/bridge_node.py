@@ -1,7 +1,6 @@
-"""第2层 CAN Bus Bridge：python-can 总线 <-> can_msgs/Frame（支持多通道）。
+"""第2层 CAN Bus Bridge：python-can 总线 <-> can_msgs/Frame（支持多通道）
 
-一个 bridge 进程独占**一个物理 USB-CAN 设备**，可同时桥接该设备的多条 CAN 通道
-（如 CANalyst-II 的 CAN1/CAN2 = 通道 0/1）：
+一个 bridge 进程独占一个物理 USB-CAN 设备，可同时桥接该设备的多条 CAN 通道（如 CANalyst-II 的 CAN1/CAN2 = 通道 0/1）
   - 一个专用总线线程持续 recv()，按 ``msg.channel`` 把帧发布为 can_msgs/Frame 到
     对应通道的 ``/<bus_name>/rx``；
   - 订阅各通道的 ``/<bus_name>/tx``，把命令帧标记通道后经同一线程 send() 出去

@@ -1,4 +1,4 @@
-"""Minimal ROS 2 demo subscriber for the KWR57 wrench topic.
+"""Minimal ROS 2 demo subscriber for the KWR57 wrench topic
 
 Subscribes with BEST_EFFORT QoS (matching the sensor node's publisher) and
 prints the latest 6-axis wrench plus the measured message rate. Useful as a

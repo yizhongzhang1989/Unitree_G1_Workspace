@@ -1,46 +1,46 @@
 # end_effector_ros
 
-末端执行器（力传感器 + 夹爪）的 ROS 2 集成工作区，采用**"CAN 总线作为共享资源"**的分层架构：
-一个通用 `can_bridge` 独占物理 CAN 总线，各设备只是**订阅总线帧、按 CAN ID 过滤**的独立
+末端执行器（力传感器 + 夹爪）的 ROS 2 集成工作区，采用 **"CAN 总线作为共享资源"** 的分层架构：
+一个通用 `can_bridge` 独占物理 CAN 总线，各设备只是 **订阅总线帧、按 CAN ID 过滤** 的独立
 设备节点。**一设备一节点**，同一条总线可挂多个同构/异构设备；换接线只换启动配置，驱动不改。
 
 设备：2 个力传感器（KWR57）+ 2 个夹爪（Gloria-M）。支持两种接线：
-- **单总线**：所有设备都在 CANalyst-II 的 CAN1（`/can0`）。
+- **单总线**：所有设备都在 CANalyst-II 的统一 CAN 上（`/can0` 或者 `/can1`）。
 - **双总线**：一个力传感器 + 一个夹爪为一组（一个手臂），分别接两条总线（`/can0`、`/can1`）。
 
 ```
 第1层 CAN Driver : python-can 后端（canalystii/socketcan/...）
 第2层 can_bridge : 独占一个 USB-CAN 设备、可同时桥接多通道；发布 /canX/rx，订阅 /canX/tx
-第3层 设备节点   : kwr57_ros / gloria_ros，各订阅 /canX/rx 过滤自己的 ID
+第3层 设备节点    : kwr57_ros / gloria_ros，各订阅 /canX/rx 过滤自己的 ID
 第4层 bringup    : robot_bringup 用 launch/config 描述单/双总线接线
 ```
 
-消息契约用标准 `can_msgs/Frame`（与 [ros2_socketcan] 一致）；日后换 SocketCAN 硬件可直接换官方桥。
+消息契约用标准 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）；日后换 SocketCAN 硬件可直接换官方桥。
 
----
 
 ## 目录
 
 ```
-end_effector_ros/                 ← 一个 colcon workspace + 你自己的 git 仓库
+end_effector_ros/                 一个 colcon workspace
+├── README.md
+├── .gitignore
 ├── .gitmodules
 ├── scripts/                      env.sh（环境）/ run.sh（一键单/双总线，含清理）
-├── src/
-│   ├── can_bridge/               通用 CAN bridge（多通道）
-│   ├── KWR57-SDK/                力传感器 SDK（纯Python，非 ROS 包，pip 安装；非ROS也可用）
-│   ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
-│   ├── gloria_ros/               夹爪 ROS 设备节点（复用 gloria_m_sdk 的 MIT 协议）
-│   ├── Gloria-M-SDK/   ← git submodule（云犀夹爪 SDK，非本仓库）
-│   └── robot_bringup/            单/双总线 launch + config
+└── src/
+    ├── can_bridge/               通用 CAN bridge（多通道）
+    |
+    ├── KWR57-SDK/                力传感器 SDK（纯Python，pip 安装；非ROS可用）
+    ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
+    |
+    ├── Gloria-M-SDK/             git submodule（云犀夹爪 SDK）
+    ├── gloria_ros/               夹爪 ROS 设备节点（复用 gloria_m_sdk 的 MIT 协议）
+    |
+    └── robot_bringup/            单/双总线 launch + config
 ```
 
-- 你自己的代码放在本仓库里（普通目录）；**别人的仓库**（Gloria-M-SDK）用 **git submodule** 链接。
-- **SDK 保留**：`KWR57-SDK`(模块 `kwr57_sensor`) 和 `gloria_m_sdk` 都作为纯 Python SDK 保留供非 ROS 使用；
-  ROS 封装**复用 SDK 的方法**（协议打包/解包），不重复实现。
-- 夹爪 SDK 整体要求 Python≥3.11，但其 `protocol_mit`/`types` 兼容 3.8，故 `gloria_ros`
-  只 import 这部分（运行时按 submodule 路径加载），绕开版本限制、无需 SDK 的串口传输层。
+- SDK 保留：`KWR57-SDK`(模块 `kwr57_sensor`) 和 `gloria_m_sdk` 都作为纯 Python SDK 保留供非 ROS 使用；ROS 封装复用 SDK 的方法，不重复实现。
+- 夹爪 SDK 整体要求 Python≥3.11，但其 `protocol_mit`/`types` 兼容 3.8，故 `gloria_ros` 只 import 这部分（运行时按 submodule 路径加载），绕开版本限制、无需 SDK 的串口传输层。
 
----
 
 ## 环境与安装
 
@@ -56,18 +56,18 @@ python3 -m pip install --user 'python-can>=4.0' canalystii 'libusb-package>=1.0.
 git clone --recurse-submodules <本仓库URL> ~/end_effector_ros
 # 已克隆则： git submodule update --init --recursive
 
-# 力传感器 SDK（纯Python，非 ROS 包）装进 foxy python，供 ROS 节点 import
+# SDK 安装，供 ROS 节点 import
 python3 -m pip install --user -e ~/end_effector_ros/src/KWR57-SDK
+python3 -m pip install --user -e ~/end_effector_ros/src/Gloria-M-SDK
 
-# 构建（KWR57-SDK / Gloria-M-SDK 带 COLCON_IGNORE，不被 colcon 编译）
+# 构建（KWR57-SDK 带 COLCON_IGNORE，不被 colcon 编译；Gloria-M-SDK 是 submodule 不好修改，需要用 --packages-ignore 指明）
 cd ~/end_effector_ros
-colcon build --symlink-install
+colcon build --symlink-install --packages-ignore KWR57-SDK Gloria-M-SDK
 source install/setup.bash
 ```
 
 CANalyst-II 需 udev 权限（VID:PID 04d8:0053），见 `src/can_bridge/README.md`。
 
----
 
 ## 运行
 

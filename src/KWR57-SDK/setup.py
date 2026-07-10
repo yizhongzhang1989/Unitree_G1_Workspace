@@ -11,4 +11,9 @@ setup(
         "canalystii>=0.1",
         "libusb-package>=1.0.24",
     ],
+    entry_points={
+        "console_scripts": [
+            "kwr57-read=kwr57_sensor.cli:main",
+        ],
+    },
 )

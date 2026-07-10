@@ -1,6 +1,6 @@
-"""独立的命令行读取工具（应用层示例）。
+"""独立的命令行读取工具（应用层示例）
 
-用于连线 / 通信 / 传感器本身的快速验证，无需搭建完整上位机程序。
+用于连线 / 通信 / 传感器本身的快速验证，无需搭建完整上位机程序
 
 运行：
     python -m kwr57_sensor.cli --interface slcan --channel COM5
@@ -23,8 +23,7 @@ def _int_auto(value: str) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="KWR57 六轴力/力矩传感器 CAN 读取工具（独立运行）")
+    ap = argparse.ArgumentParser(description="KWR57 六轴力/力矩传感器 CAN 读取工具（独立运行）")
     ap.add_argument("--interface", required=True,
                     help="python-can 适配器类型，如 slcan / gs_usb / pcan / socketcan")
     ap.add_argument("--channel", required=True,
@@ -32,11 +31,11 @@ def main() -> int:
     ap.add_argument("--period-ms", type=int, default=1,
                     help="数据上传周期(ms)，默认 1 (~1000Hz，最高)")
     ap.add_argument("--rate-hz", type=int, default=1000,
-                    help="传感器内部采样率 (100/200/400/500/600/1000)，默认 1000（最高）")
+                    help="传感器内部采样率 (100/200/400/500/600/1000)，默认 1000")
     ap.add_argument("--data-base-id", type=_int_auto, default=0x15,
                     help="传感器数据起始 CAN ID，默认 0x15；如修改过下位机 ID 请同步设置")
     ap.add_argument("--si", action="store_true",
-                    help="按 kgf/kgf*m -> N/N*m 换算后显示，便于对接 ROS Wrench")
+                    help="按 kgf/kgf*m -> N/N*m 换算后显示")
     ap.add_argument("--print-hz", type=float, default=20.0,
                     help="控制台最大刷新率(Hz)，默认 20")
     args = ap.parse_args()

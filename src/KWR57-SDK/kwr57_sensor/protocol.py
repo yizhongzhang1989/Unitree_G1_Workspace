@@ -36,10 +36,10 @@ from typing import Dict, Optional, Sequence, Tuple
 
 # --- CAN 标识符 ------------------------------------------------------------
 CAN_ID_CMD = 0x10            # 上位机 -> 传感器：默认命令(接收)ID
-CAN_ID_DATA_FX_FY = 0x15     # 传感器 -> 上位机：Fx, Fy
+CAN_ID_DATA_FX_FY = 0x15     # 传感器 -> 上位机：Fx, Fy；默认发送的起始 ID
 CAN_ID_DATA_FZ_MX = 0x16     # 传感器 -> 上位机：Fz, Mx
 CAN_ID_DATA_MY_MZ = 0x17     # 传感器 -> 上位机：My, Mz
-CAN_ID_FACTORY_RESET = 0x000  # 恢复出厂 ID 时使用的仲裁 ID
+CAN_ID_FACTORY_RESET = 0x000 # 恢复出厂 ID 时使用的仲裁 ID
 
 # 一个完整采样由这三帧组成，顺序为 0x15 -> 0x16 -> 0x17
 DATA_IDS: Tuple[int, int, int] = (
@@ -47,7 +47,7 @@ DATA_IDS: Tuple[int, int, int] = (
 )
 
 # 手册基本规格写的是 kg / kgm。需要给 ROS geometry_msgs/WrenchStamped 发布
-# SI 单位时，通常按 kgf -> N 换算；原始读取路径保持不换算。
+# SI 单位时，通常按 kgf -> N 换算；原始读取路径保持不换算
 KGF_TO_NEWTON = 9.80665
 
 # --- 指令码 ---------------------------------------------------------------
@@ -75,7 +75,7 @@ _FLOATS_LE = struct.Struct("<2f")
 # --- 数据结构 -------------------------------------------------------------
 @dataclass
 class Wrench:
-    """六轴力/力矩测量值。
+    """六轴力/力矩测量值
 
     力(fx/fy/fz) 与 力矩(mx/my/mz) 的物理单位取决于传感器出厂配置：
     手册基本规格表标注“默认数据输出单位 kg, kgm”。若上位机需要 N / N·m，
@@ -106,11 +106,10 @@ class Wrench:
 
 # --- 指令构造（上位机 -> 传感器）------------------------------------------
 def build_realtime_command(period_ms: int) -> bytes:
-    """构造“获取实时数据”指令。
+    """构造“获取实时数据”指令
 
-    period_ms: 连续上传的时间间隔(ms)，范围 0~65535。
-               0 表示停止上传。
-    返回：CAN 数据域字节（发往 CAN_ID_CMD）。
+    period_ms: 连续上传的时间间隔(ms)，范围 0~65535；0 表示停止上传
+    返回：CAN 数据域字节（发往 CAN_ID_CMD）
     """
     if not 0 <= period_ms <= 0xFFFF:
         raise ValueError(f"period_ms 必须在 0~65535 之间，收到 {period_ms}")
@@ -118,15 +117,14 @@ def build_realtime_command(period_ms: int) -> bytes:
 
 
 def build_stop_command() -> bytes:
-    """构造“停止上传”指令（周期=0）。"""
+    """构造“停止上传”指令（周期=0）"""
     return build_realtime_command(0)
 
 
 def build_sample_rate_command(rate_hz: int) -> bytes:
-    """构造“设置系统采样率”指令。
+    """构造“设置系统采样率”指令
 
-    rate_hz: 必须为 SAMPLE_RATE_TABLE 中的合法档位
-             (100/200/400/500/600/1000)。
+    rate_hz: 必须为 SAMPLE_RATE_TABLE 中的合法档位 (100/200/400/500/600/1000)
     """
     if rate_hz not in SAMPLE_RATE_TABLE:
         allowed = "/".join(str(r) for r in sorted(SAMPLE_RATE_TABLE))
@@ -135,12 +133,12 @@ def build_sample_rate_command(rate_hz: int) -> bytes:
 
 
 def build_modify_id_command(host_id: int, sensor_id: int) -> bytes:
-    """构造“修改 ID”指令。
+    """构造“修改 ID”指令
 
-    host_id:   新的上位机(接收)ID，2 字节。
-    sensor_id: 新的下位机(发送)ID，2 字节。
+    host_id:   新的上位机(接收)ID，2 字节
+    sensor_id: 新的下位机(发送)ID，2 字节
 
-    警告：该操作会持久化修改传感器 ID，改动后需同步更新上位机配置。
+    警告：该操作会持久化修改传感器 ID，改动后需同步更新上位机配置
     """
     for name, value in (("host_id", host_id), ("sensor_id", sensor_id)):
         if not 0 <= value <= 0xFFFF:
@@ -154,15 +152,15 @@ def build_modify_id_command(host_id: int, sensor_id: int) -> bytes:
 
 
 def build_factory_reset_id_command() -> bytes:
-    """构造“恢复出厂 ID”指令（出厂：接收 0x10 / 发送 0x15）。
+    """构造“恢复出厂 ID”指令（出厂：接收 0x10 / 发送 0x15）
 
-    注意：手册要求该指令在 CAN ID 0x000 下发送，见 CAN_ID_FACTORY_RESET。
+    注意：手册要求该指令在 CAN ID 0x000 下发送，见 CAN_ID_FACTORY_RESET
     """
     return bytes([CMD_MODIFY_ID, 0xDE, 0xDE, 0x0D, 0x0A])
 
 
 def data_ids_from_base(base_id: int) -> Tuple[int, int, int]:
-    """根据下位机发送起始 ID 构造三帧数据 ID。"""
+    """根据下位机发送起始 ID 构造三帧数据 ID"""
     if not 0 <= base_id <= 0x7FD:
         raise ValueError(f"base_id 必须在 0~0x7FD 之间，收到 0x{base_id:X}")
     return (base_id, base_id + 1, base_id + 2)
@@ -170,10 +168,9 @@ def data_ids_from_base(base_id: int) -> Tuple[int, int, int]:
 
 # --- 数据解码（传感器 -> 上位机）------------------------------------------
 def decode_data_frame(data: bytes) -> Tuple[float, float]:
-    """把一帧 8 字节数据域解码为该帧承载的两个 float。
+    """把一帧 8 字节数据域解码为该帧承载的两个 float
 
-    调用方需自行根据 CAN ID 判断这两个值对应哪两个通道
-    （见 DATA_IDS 说明）。
+    调用方需自行根据 CAN ID 判断这两个值对应哪两个通道（见 DATA_IDS 说明）
     """
     if len(data) < 8:
         raise ValueError(f"数据帧需 8 字节，收到 {len(data)}")
@@ -182,7 +179,7 @@ def decode_data_frame(data: bytes) -> Tuple[float, float]:
 
 
 class WrenchAssembler:
-    """把 0x15 / 0x16 / 0x17 三帧组装成一个完整 Wrench。
+    """把 三帧（默认 0x15 / 0x16 / 0x17）组装成一个完整 Wrench
 
     传感器每个采样点发送三帧，本类按 CAN ID 缓存各通道值，
     当集齐三帧后输出一个 Wrench 并清空状态，等待下一采样点。
@@ -208,9 +205,9 @@ class WrenchAssembler:
         self.dropped_sequences = 0
 
     def push(self, can_id: int, data: bytes) -> Optional[Wrench]:
-        """喂入一帧数据。若刚好集齐三帧则返回 Wrench，否则返回 None。
+        """喂入一帧数据。若刚好集齐三帧则返回 Wrench，否则返回 None
 
-        非数据帧（其它 CAN ID）会被忽略并返回 None。
+        非数据帧（其它 CAN ID）会被忽略并返回 None
         """
         pos = self._id_to_pos.get(can_id)
         if pos is None:
@@ -222,8 +219,7 @@ class WrenchAssembler:
             return None
 
         if pos != self._expected_index:
-            # 乱序：只允许在起始帧(0x15)处重新同步，其余帧一律丢弃当前半包，
-            # 避免用不同采样周期的 0x16/0x17 拼出跨采样点的假数据。
+            # 乱序：只允许在起始帧(0x15)处重新同步，其余帧一律丢弃当前半包，避免用不同采样周期的 0x16/0x17 拼出跨采样点的假数据
             if pos != 0:
                 self.dropped_sequences += 1
                 self._expected_index = 0
@@ -231,9 +227,8 @@ class WrenchAssembler:
             if self._expected_index != 0:
                 self.dropped_sequences += 1
 
-        # 内联解码：len 已在上方校验，直接 unpack_from 省去 decode_data_frame
-        # 的函数调用与重复长度检查。合并上述改动后微基准 push 每帧约 -16% CPU；
-        # 但真实链路受 CAN/USB I/O 与 ≤1kHz 上传速率限制，端到端吞吐基本不变。
+        # 内联解码：len 已在上方校验，直接 unpack_from 省去 decode_data_frame 的函数调用与重复长度检查
+        # 合并上述改动后微基准 push 每帧约 -16% CPU；但真实链路受 CAN/USB I/O 与 ≤1kHz 上传速率限制（而不是CPU）
         vals = self._vals
         base = pos * 2
         vals[base], vals[base + 1] = _FLOATS_LE.unpack_from(data, 0)
@@ -244,7 +239,7 @@ class WrenchAssembler:
         return None
 
     def reset(self, count_drop: bool = False) -> None:
-        """丢弃已缓存的半个采样点。"""
+        """丢弃已缓存的半个采样点"""
         if count_drop and self._expected_index != 0:
             self.dropped_sequences += 1
         self._expected_index = 0
