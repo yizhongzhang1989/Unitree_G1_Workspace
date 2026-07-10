@@ -1,0 +1,6 @@
+# python-can 抽象了 USB-CAN 适配器，几乎支持所有主流模块
+python-can>=4.0
+
+# CANalyst-II 后端依赖；libusb-package 为 PyUSB 提供 libusb 后端库
+canalystii>=0.1
+libusb-package>=1.0.30

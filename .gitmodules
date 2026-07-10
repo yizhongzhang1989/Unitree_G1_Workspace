@@ -1,0 +1,3 @@
+[submodule "src/Gloria-M-SDK"]
+	path = src/Gloria-M-SDK
+	url = https://github.com/Synria-Robotics/Gloria-M-SDK.git
