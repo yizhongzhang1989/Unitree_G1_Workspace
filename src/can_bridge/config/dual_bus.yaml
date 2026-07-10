@@ -1,0 +1,12 @@
+# 双总线：CANalyst-II 同时用 CAN1+CAN2（通道 0、1）。
+# 一个 bridge 进程独占该 USB 设备、同时桥接两条总线（两个独立 Bus 会 Resource busy）。
+# 通道 0 -> /can0/*，通道 1 -> /can1/*。
+/**:
+  ros__parameters:
+    interface: canalystii
+    channel: "0,1"          # 一个 Bus 同时开两通道
+    bitrate: 1000000
+    channel_ids: [0, 1]     # msg.channel 值（与 bus_names 平行）
+    bus_names: ["can0", "can1"]
+    rx_queue_depth: 1000
+    receive_own_messages: false

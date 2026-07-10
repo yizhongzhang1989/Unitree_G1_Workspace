@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robot_bringup</name>
+  <version>0.1.0</version>
+  <description>Bringup (launch + config) composing can_bridge + KWR57 force sensors + Gloria grippers for single-bus or dual-bus (per-arm) wiring.</description>
+
+  <maintainer email="unitree@example.com">unitree</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>can_bridge</exec_depend>
+  <exec_depend>kwr57_ros</exec_depend>
+  <exec_depend>gloria_ros</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

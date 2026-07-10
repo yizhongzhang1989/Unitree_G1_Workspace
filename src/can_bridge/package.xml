@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>can_bridge</name>
+  <version>0.1.0</version>
+  <description>Generic ROS 2 CAN bus bridge: one node owns a python-can bus and bridges all frames to/from can_msgs/Frame. Device-agnostic; reusable by any CAN device node.</description>
+
+  <maintainer email="unitree@example.com">unitree</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>can_msgs</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+  <!-- python-can (+ canalystii/libusb-package for CANalyst-II) is pip-installed
+       into the ROS 2 Python; see README. -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>gloria_ros</name>
+  <version>0.1.0</version>
+  <description>ROS 2 device node for the Gloria-M gripper (bridge mode; reuses gloria_m_sdk MIT protocol). One gripper = one node, sharing a CAN bus via can_bridge.</description>
+
+  <maintainer email="unitree@example.com">unitree</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>can_msgs</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+  <!-- gloria_m_sdk（协议层）由本包在运行时按 submodule 路径导入；见 gripper_node.py。 -->
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
