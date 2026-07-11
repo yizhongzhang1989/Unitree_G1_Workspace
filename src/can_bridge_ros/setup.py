@@ -16,9 +16,9 @@ setup(
     ],
     install_requires=["setuptools"],
     zip_safe=True,
-    maintainer="unitree",
-    maintainer_email="unitree@example.com",
-    description="Generic ROS 2 CAN bus bridge (python-can <-> can_msgs/Frame).",
+    maintainer="madderscientist",
+    maintainer_email="liruigang20131115@126.com",
+    description="Generic ROS2 CAN bus bridge (python-can <-> can_msgs/Frame).",
     license="MIT",
     tests_require=["pytest"],
     entry_points={

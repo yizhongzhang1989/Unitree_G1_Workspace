@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Bringup composing can_bridge_ros, KWR57 force sensors and Gloria grippers for single- or dual-bus wiring.</description>
 
-  <maintainer email="unitree@example.com">unitree</maintainer>
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
   <license>MIT</license>
 
   <exec_depend>can_bridge_ros</exec_depend>

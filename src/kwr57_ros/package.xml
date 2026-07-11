@@ -3,9 +3,9 @@
 <package format="3">
   <name>kwr57_ros</name>
   <version>0.1.0</version>
-  <description>ROS 2 driver for the KWR57 6-axis force/torque sensor (CAN, bridge mode). Thin rclpy wrapper that imports the standalone KWR57-SDK (kwr57_sensor) Python library.</description>
+  <description>ROS2 driver for the KWR57 6-axis force/torque sensor (CAN, bridge mode). Thin rclpy wrapper that imports the standalone KWR57-SDK (kwr57_sensor) Python library.</description>
 
-  <maintainer email="unitree@example.com">unitree</maintainer>
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
   <license>MIT</license>
 
   <exec_depend>rclpy</exec_depend>

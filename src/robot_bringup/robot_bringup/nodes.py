@@ -35,7 +35,10 @@ def ft_sensor(name: str, bus: str, cmd_id: int, data_base_id: int,
 
 
 def gripper(name: str, bus: str, command_id: int, feedback_id: int,
-            joint_name: str) -> Node:
+            joint_name: str, *, control_mode: str = "mit",
+            safe_position_min: float = 0.0,
+            safe_position_max: float = 2.77,
+            enable_on_start: bool = False) -> Node:
     """一个 Gloria-M 夹爪设备节点，挂在 bus（如 can0）上。"""
     return Node(
         package="gloria_ros", executable="gripper_node",
@@ -46,4 +49,8 @@ def gripper(name: str, bus: str, command_id: int, feedback_id: int,
             "command_id": command_id,
             "feedback_id": feedback_id,
             "joint_name": joint_name,
+            "control_mode": control_mode,
+            "safe_position_min": safe_position_min,
+            "safe_position_max": safe_position_max,
+            "enable_on_start": enable_on_start,
         }])

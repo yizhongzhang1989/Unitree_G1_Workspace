@@ -5,22 +5,30 @@
   <version>0.1.0</version>
   <description>ROS 2 Gloria-M gripper node sharing a CAN bus through can_bridge_ros.</description>
 
-  <maintainer email="unitree@example.com">unitree</maintainer>
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
   <license>MIT</license>
 
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
   <!-- 上游 ROS 2 can_msgs 包提供 can_msgs/msg/Frame；Foxy 二进制包：ros-foxy-can-msgs。 -->
   <exec_depend>can_msgs</exec_depend>
   <exec_depend>ros2launch</exec_depend>
-  <!-- gloria_m_sdk（协议层）由本包在运行时按 submodule 路径导入；见 gripper_node.py。 -->
+  <!-- gloria_m_sdk 由 scripts/env.sh 从 submodule 源码目录提供。 -->
 
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
 
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

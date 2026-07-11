@@ -37,7 +37,7 @@ end_effector_ros/                 一个 colcon workspace
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
     |
     ├── Gloria-M-SDK/             git submodule（云犀夹爪 SDK）
-    ├── gloria_ros/               夹爪 ROS 设备节点（复用 gloria_m_sdk 的 MIT 协议）
+    ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
     |
     └── robot_bringup/            单/双总线 launch + config
 ```
@@ -45,7 +45,9 @@ end_effector_ros/                 一个 colcon workspace
 - SDK 保留：`CAN-SDK`（模块 `can_sdk`）、`KWR57-SDK`（模块 `kwr57_sensor`）和 `gloria_m_sdk` 均可脱离 ROS 使用；ROS 封装只复用基础 I/O 和设备协议，不重复实现。
 - 三个 SDK 均不作为 ROS 包，且不由 colcon 构建；`scripts/env.sh` 统一把它们的源码目录加入 `PYTHONPATH`。ROS 节点不需要先安装本地 SDK，也不在节点代码中修改 `sys.path`。
 - `can_sdk` 刻意不提供多订阅：直连 SDK 的 `recv()` 是单消费者语义；ROS 多设备系统由 `can_bridge_ros` 成为物理总线的唯一接收者并通过话题分发。
-- 夹爪 SDK 整体要求 Python≥3.11，但其 `protocol_mit`/`types` 兼容 3.8，故 `gloria_ros` 只 import 这部分（运行时按 submodule 路径加载），绕开版本限制、无需 SDK 的串口传输层。
+- 夹爪 SDK 整体声明 Python≥3.11；本项目只使用其 `protocol_mit`/`types` 逻辑并已做
+    Python 3.8 静态语法检查，不打开 SDK 的串口转 CAN 传输层。由于 Python 导入包子模块时仍会
+    执行上游 `gloria_m_sdk/__init__.py`，运行环境当前仍需提供上游依赖 `pyserial`。
 
 
 ## 环境与安装
@@ -98,9 +100,15 @@ ros2 launch robot_bringup dual_bus.launch.py
 - 单总线下同一条总线各设备 **CAN ID 必须不同**（力传感器用 `src/KWR57-SDK/examples/set_id.py` 改）。
 - 双总线下两臂在不同总线，**CAN ID 可相同**，无需改。
 - 换接线**只改用哪个 launch**，设备节点代码不动。
+- 两个 1 kHz KWR57 会产生约 6000 CAN 数据帧/秒；生产环境优先使用双总线，单总线时建议
+    降低 KWR57 上传频率并监控丢帧。
 
 话题：`/ft_left/wrench_raw`、`/grip_left/joint_states` 等。BEST_EFFORT，`ros2 topic echo` 加
 `--qos-reliability best_effort` 或用 `ros2 run kwr57_ros wrench_echo`。
+
+Gloria 节点默认不自动使能。其 `~/enable` 服务会先设置并确认 MIT/PV 控制模式，再使能并
+等待状态反馈；未使能、模式未确认或反馈过期时默认拒绝运动命令。完整接口与安全参数见
+`src/gloria_ros/README.md`。
 
 各包细节见各自 README：`src/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、`src/kwr57_ros/README.md`。
 

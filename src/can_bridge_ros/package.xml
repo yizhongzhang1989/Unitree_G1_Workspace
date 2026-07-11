@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Generic ROS 2 CAN bridge using the shared ROS-independent can_sdk backend.</description>
 
-  <maintainer email="unitree@example.com">unitree</maintainer>
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
