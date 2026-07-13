@@ -1,0 +1,11 @@
+# 单总线：CANalyst-II 只用 CAN1（通道 0）。所有设备都在 /can0。
+/**:
+  ros__parameters:
+    interface: canalystii
+    channel: "0"
+    bitrate: 1000000
+    channel_ids: [0]
+    bus_names: ["can0"]
+    rx_queue_depth: 128
+    receive_own_messages: false
+    # 设备 CAN ID 路由由 robot_bringup 在启动时注入

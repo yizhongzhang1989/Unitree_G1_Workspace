@@ -1,0 +1,3 @@
+# 从 KWR57-SDK 目录执行 pip install -r requirements.txt
+# 共享 CAN-SDK 统一提供 python-can 与 CANalyst-II/libusb 依赖
+-e ../CAN-SDK[canalystii]
