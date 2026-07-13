@@ -1,29 +1,39 @@
 # gloria_ros
-Gloria-M 夹爪的 ROS 2 设备节点。节点不打开 Gloria SDK 自带的串口转 CAN
-适配器，而是通过 `can_bridge_ros` 使用项目统一管理的 CAN 设备；可与 KWR57
-节点共享总线。本包使用 `ament_cmake_python`，同时包含 Python 节点和 MIT/PV
-强类型消息，不需要单独的接口包。
-
-硬件接口、尺寸、CAN 协议、寄存器、标定与安全边界见
-[`HARDWARE.md`](HARDWARE.md)。
+Gloria-M 夹爪的 ROS2 设备包，通过 `can_bridge_ros` 共享项目统一管理的 CAN 设备，仅复用 Gloria-M-SDK 的 MIT 协议与量程定义，不打开 SDK 串口适配器；硬件接口、CAN 协议、寄存器和标定方法见 [`HARDWARE.md`](HARDWARE.md)。
 
 ## 功能
-- MIT 阻抗/扭矩模式与 PV 位置速度模式。
-- 使能前设置控制模式，并等待设备寄存器回读确认。
-- 使能、归零和状态刷新等待真实反馈，超时返回失败。
-- 机械安全位置限幅、反馈超时保护、非有限值检查。
-- 发布 `JointState` 和 `/diagnostics`。
-- 节点退出时自动发送失能命令。
-- 兼容设备使用反馈 CAN ID、命令 CAN ID 或 CAN ID 0 回传状态的固件。
+- 支持 MIT 阻抗/扭矩命令与 PV 位置速度命令，不实现缺少完整公开帧定义的 VEL 和 TORQUE_POS 模式。
+- 使能前写入并回读控制模式，可选校验固件 PMAX、VMAX、TMAX，避免主机与设备缩放不一致。
+- 校验非有限值、增益、速度和力矩，按 `safe_position_min/max` 限制目标位置，并在反馈超时或节点退出时请求失能。
+- 发布 `sensor_msgs/JointState` 和 `/diagnostics`，兼容状态反馈使用 `feedback_id`、`command_id` 或 CAN ID `0x000` 的固件。
+- 提供独立 Web 调试台，覆盖 MIT/PV 命令、设备服务、状态、诊断和自动 PV 往返测试。
+
+## 架构
+```mermaid
+flowchart LR
+  App[ROS 应用或 Web 后端] -->|命令与服务| Gripper[gloria_ros]
+  Gripper -->|can_msgs/Frame| Bridge[can_bridge_ros]
+  Bridge <--> Adapter[CANalyst-II]
+  Adapter <--> Hardware[Gloria-M]
+  Gripper -->|JointState 与 diagnostics| App
+```
+
+`gloria_ros` 负责协议、状态机与安全校验，`can_bridge_ros` 独占物理适配器并完成 CAN 收发；完整系统应由 bringup 为每台夹爪配置专属 RX 路由，避免夹爪节点处理无关的高频总线帧。
+
+## 安全约束
+- MIT 与 PV 是互斥模式，模式切换固定采用“停止命令 -> 失能 -> 选择模式 -> 写入并回读模式/量程 -> 使能并等待反馈 -> 发送新命令”的顺序；节点在主机状态为已使能时拒绝 `~/set_mode` 和 `~/configure`。
+- 运动命令默认要求模式已确认、使能成功且反馈新鲜；软件限位、超时失能和退出失能不能替代机械限位、驱动器保护、急停与碰撞检测。
+- `~/set_zero` 会改变绝对位置语义，默认由 `allow_set_zero=false` 禁用，启用后也只允许在失能状态调用。
+- 当前反馈解码只发布位置、速度和力矩，尚未发布设备 `ERR`、`T_MOS`、`T_Rotor`；`enabled_requested` 是主机请求状态，因此 `/diagnostics` 不能替代硬件故障码和温度监控。
+- 寄存器回包缺少可用于共享 ID 分流的设备号，多夹爪共总线时必须使用非零且唯一的 `feedback_id`，并保证 `command_id` 低 4 位非零且唯一。
 
 ## 前置条件
-先启动 `can_bridge_ros`。运行终端需要执行：
+先启动独占物理适配器的 `can_bridge_ros`，并在运行终端加载工作区环境：
 ```bash
 source scripts/env.sh
 ```
 
-该脚本把 Gloria-M-SDK submodule 的源码目录加入 `PYTHONPATH`。上游包入口会
-导入其串口适配器，因此运行环境仍需安装上游声明的 `pyserial`，但本节点不会打开或使用该串口适配器。
+该脚本会把 Gloria-M-SDK submodule 加入 `PYTHONPATH`；上游包入口会导入串口适配器，因此环境仍需安装其声明的 `pyserial`，但本节点不会打开串口。
 
 ## 启动
 ```bash
@@ -34,31 +44,46 @@ ros2 launch gloria_ros gripper.launch.py \
 
 # PV 模式
 ros2 launch gloria_ros gripper.launch.py \
-  control_mode:=pos_vel pv_velocity:=0.5
+  control_mode:=pos_vel
 ```
 
-单独启动 `gloria_ros` 时默认订阅通用 `/can0/rx`，适合单设备调试。完整系统建议使用
-`robot_bringup`：bringup 会把每台夹爪声明为 `GloriaDevice`，并把 `feedback_id`、兼容的
-`command_id` 和共享 `0x000` 作为 bridge 的启动路由参数。每台夹爪因此订阅自己的专属
-RX 话题，不会处理 KWR57 的高频帧或另一台夹爪的普通反馈。
-
-部分固件在 CAN ID `0x000` 返回状态，该 ID 无法只靠仲裁 ID 区分设备。bridge 会将它扇出
-到同总线所有夹爪专属话题，各夹爪节点再根据 `Data[0]` 低 4 位设备号过滤；这是协议兼容
-所需的唯一共享接收路径。同通道夹爪的 `command_id & 0x0F` 因此必须唯一。
-
-寄存器回包的 payload 不包含可用于共享 ID 分流的设备号。为防止另一台夹爪的模式或量程
-回包被误认，`robot_bringup` 要求 `feedback_id` 非零且唯一，节点不会用 CAN ID `0x000`
-完成模式或参数确认，也不会把任何 `0x33/0x55` 寄存器形状帧降级成状态反馈。
-`command_id` 低 4 位必须非零且唯一；固定请求 ID `0x7FF` 由 bringup 保留，不允许设备
-活动 ID 占用。
+单独启动时节点默认订阅 `/can0/rx`，适合单设备调试；完整系统建议使用 `robot_bringup` 为每台夹爪生成专属 RX 话题与 `feedback_id`、`command_id`、共享 `0x000` 路由，节点会再按 `Data[0]` 低 4 位过滤共享状态帧。
 
 生产环境建议保持 `enable_on_start:=false`，在确认 bridge、供电和机械环境安全后调用：
 ```bash
 ros2 service call /gloria_gripper/enable std_srvs/srv/Trigger '{}'
 ```
 
-服务会先设置并确认控制模式，然后使能并确认状态反馈。未确认模式、未使能或反馈
-过期时，运动命令默认被拒绝。
+`~/enable` 会先配置并确认模式和量程，再使能并等待状态反馈；未确认模式、未使能或反馈过期时，运动命令默认被拒绝。
+
+## Web 调试台
+一条 launch 命令启动 CAN0 bridge、单个 Gloria-M 夹爪节点和 Web 控制端：
+```bash
+source scripts/env.sh
+ros2 launch gloria_ros web_gripper.launch.py
+```
+
+该 launch 只打开 CANalyst-II 通道 0，创建 `/grip_left` 及其 `0x101/0x01/0x000` 接收路由，不启动 CAN1 或 KWR57；若其他进程已占用适配器，必须先停止该进程。
+
+浏览器默认访问 `http://<机器人 IP>:8766`。页面可选择 MIT/PV、配置和使能设备、发送命令、查看状态与诊断；切换模式前必须先失能，“一键往返”会自动执行“失能 -> 选择 PV -> 配置 -> 使能”，随后持续在两个端点间运动，直到中止、异常或 Web 节点退出，并在结束时请求失能。
+
+修改节点名或实物 CAN ID 时：
+```bash
+ros2 launch gloria_ros web_gripper.launch.py \
+  node_name:=grip_left command_id:=0x01 feedback_id:=0x101
+```
+
+Web 默认监听 `0.0.0.0` 且没有身份认证，只能用于可信隔离网络；需要通过 SSH 访问时应绑定回环地址：
+```bash
+ros2 launch gloria_ros web_gripper.launch.py web_host:=127.0.0.1
+ssh -L 8766:127.0.0.1:8766 user@robot
+```
+
+也可只启动 Web 后端并连接已经运行的夹爪节点：
+```bash
+ros2 run gloria_ros web_gripper --ros-args \
+  -p target_node:=/gloria_gripper -p port:=8766
+```
 
 ## ROS 接口
 
@@ -66,7 +91,6 @@ ros2 service call /gloria_gripper/enable std_srvs/srv/Trigger '{}'
 
 | 名称 | 类型 | 说明 |
 |---|---|---|
-| `~/command` | `std_msgs/Float64` | 兼容位置接口；MIT 使用固定 kp/kd，PV 使用固定速度 |
 | `~/mit_command` | `gloria_ros/msg/MitCommand` | `q/dq/kp/kd/tau` 阻抗和扭矩前馈命令 |
 | `~/pv_command` | `gloria_ros/msg/PvCommand` | `position/velocity` 位置速度命令 |
 | 配置的 `rx_topic` | `can_msgs/Frame` | bridge 接收帧 |
@@ -83,6 +107,7 @@ ros2 service call /gloria_gripper/enable std_srvs/srv/Trigger '{}'
 
 | 名称 | 说明 |
 |---|---|
+| `~/set_mode` | 失能状态下选择待配置模式；`false=MIT`，`true=POS_VEL` |
 | `~/configure` | 写入并确认控制模式，同时读取校验 PMAX/VMAX/TMAX |
 | `~/enable` | 配置模式、校验量程、使能并等待反馈 |
 | `~/disable` | 下发失能；固件没有独立确认响应 |
@@ -96,8 +121,6 @@ ros2 service call /gloria_gripper/enable std_srvs/srv/Trigger '{}'
 | `control_mode` | `mit` | `mit` 或 `pos_vel` |
 | `pmax/vmax/tmax` | `3.14/10/12` | 必须与设备寄存器中的 MIT 编解码量程一致 |
 | `safe_position_min/max` | `0/2.77` | 独立机械安全范围；应按实际夹爪型号校准 |
-| `kp/kd` | `10/1` | 兼容位置接口在 MIT 模式下使用的增益 |
-| `pv_velocity` | `1.0` | 兼容位置接口在 PV 模式下使用的速度 |
 | `enable_on_start` | `false` | 延时启动后是否自动配置和使能 |
 | `feedback_timeout_s` | `0.5` | 超过该时间认为反馈过期 |
 | `response_timeout_s` | `0.5` | 服务等待设备确认的超时 |
@@ -108,3 +131,6 @@ ros2 service call /gloria_gripper/enable std_srvs/srv/Trigger '{}'
 | `require_enabled_for_command` | `true` | 未经成功使能时拒绝命令 |
 | `require_fresh_feedback` | `true` | 反馈过期时拒绝命令 |
 | `disable_on_shutdown` | `true` | 正常退出时发送失能 |
+
+## SDK 参数能力边界
+节点只读取并核验 PMAX、VMAX、TMAX，不暴露 SDK 的通用寄存器写入、`save()` 或 `apply_limits()`；这些操作可能改变 CAN ID、控制环、保护阈值、通信配置或写入 Flash，应仅在受控环境中通过独立本机维护工具执行。

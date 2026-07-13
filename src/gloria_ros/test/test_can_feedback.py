@@ -7,6 +7,7 @@ from gloria_ros.can_feedback import (
 )
 
 
+# 纯协议测试不依赖 ROS executor，用于快速验证共享总线分流边界
 class CanFeedbackRoutingTest(unittest.TestCase):
     def test_state_matches_low_nibble_with_enabled_status(self) -> None:
         data = bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
@@ -31,6 +32,10 @@ class CanFeedbackRoutingTest(unittest.TestCase):
     def test_register_reply_shape(self) -> None:
         self.assertTrue(is_register_reply(bytes([0, 0, 0x33, 10, 0, 0, 0, 0])))
         self.assertTrue(is_register_reply(bytes([0, 0, 0x55, 10, 0, 0, 0, 0])))
+        self.assertTrue(is_register_reply(
+            bytes([1, 0, 0x55, 10, 1, 0, 0, 0]), command_id=0x01))
+        self.assertFalse(is_register_reply(
+            bytes([2, 0, 0x55, 10, 1, 0, 0, 0]), command_id=0x01))
         self.assertFalse(is_register_reply(bytes([0, 0, 0xCC, 0, 0, 0, 0, 0])))
 
     def test_state_with_register_opcode_in_position_byte_is_not_reply(self) -> None:

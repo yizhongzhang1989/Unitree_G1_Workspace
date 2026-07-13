@@ -1,0 +1,1168 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Gloria-M 调试台</title>
+	<style>
+		:root {
+			color-scheme: light;
+			--ink: #172022;
+			--muted: #657174;
+			--line: #cbd2d1;
+			--line-strong: #9ba7a5;
+			--paper: #f5f4ef;
+			--panel: #fffef9;
+			--accent: #006d77;
+			--accent-dark: #004f57;
+			--signal: #f0a202;
+			--danger: #b42318;
+			--danger-dark: #8f1710;
+			--ok: #16815d;
+			--warn: #a56000;
+			--shadow: 0 12px 34px rgba(23, 32, 34, 0.09);
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		html {
+			min-width: 320px;
+		}
+
+		body {
+			min-height: 100vh;
+			margin: 0;
+			color: var(--ink);
+			background:
+				linear-gradient(rgba(23, 32, 34, 0.035) 1px, transparent 1px),
+				linear-gradient(90deg, rgba(23, 32, 34, 0.035) 1px, transparent 1px),
+				var(--paper);
+			background-size: 24px 24px;
+			font-family: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+			letter-spacing: 0;
+		}
+
+		button,
+		input {
+			font: inherit;
+			letter-spacing: 0;
+		}
+
+		button:focus-visible,
+		input:focus-visible {
+			outline: 3px solid rgba(0, 109, 119, 0.24);
+			outline-offset: 2px;
+		}
+
+		.shell {
+			width: min(1440px, 100%);
+			margin: 0 auto;
+			padding: 20px clamp(14px, 2.4vw, 34px) 36px;
+		}
+
+		.topbar {
+			display: flex;
+			min-height: 72px;
+			align-items: center;
+			justify-content: space-between;
+			gap: 20px;
+			border-bottom: 2px solid var(--ink);
+		}
+
+		.brand {
+			display: flex;
+			align-items: baseline;
+			gap: 12px;
+			min-width: 0;
+		}
+
+		.brand h1 {
+			margin: 0;
+			font-family: "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
+			font-size: clamp(1.45rem, 3vw, 2.15rem);
+			line-height: 1;
+			font-weight: 800;
+		}
+
+		.brand span {
+			color: var(--muted);
+			font-size: 0.78rem;
+			font-weight: 700;
+			text-transform: uppercase;
+		}
+
+		.connection {
+			display: inline-flex;
+			align-items: center;
+			gap: 9px;
+			white-space: nowrap;
+			font-size: 0.85rem;
+			font-weight: 700;
+		}
+
+		.dot {
+			width: 10px;
+			height: 10px;
+			border-radius: 50%;
+			background: var(--warn);
+			box-shadow: 0 0 0 4px rgba(165, 96, 0, 0.13);
+		}
+
+		.connection.online .dot {
+			background: var(--ok);
+			box-shadow: 0 0 0 4px rgba(22, 129, 93, 0.14);
+		}
+
+		.status-band {
+			display: grid;
+			grid-template-columns: minmax(210px, 1.3fr) repeat(3, minmax(120px, 0.7fr));
+			min-height: 154px;
+			margin-top: 18px;
+			overflow: hidden;
+			border: 1px solid var(--line-strong);
+			background: var(--panel);
+			box-shadow: var(--shadow);
+		}
+
+		.status-main,
+		.metric {
+			display: flex;
+			flex-direction: column;
+			justify-content: space-between;
+			min-width: 0;
+			padding: 20px;
+			border-right: 1px solid var(--line);
+		}
+
+		.metric:last-child {
+			border-right: 0;
+		}
+
+		.eyebrow {
+			margin: 0;
+			color: var(--muted);
+			font-size: 0.72rem;
+			font-weight: 800;
+			text-transform: uppercase;
+		}
+
+		.state-line {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			margin-top: 12px;
+		}
+
+		.state-text {
+			overflow-wrap: anywhere;
+			font-size: 1.05rem;
+			font-weight: 800;
+		}
+
+		.state-mark {
+			width: 5px;
+			height: 34px;
+			flex: 0 0 auto;
+			background: var(--warn);
+		}
+
+		.state-mark.ok {
+			background: var(--ok);
+		}
+
+		.state-mark.error {
+			background: var(--danger);
+		}
+
+		.target {
+			margin-top: 9px;
+			overflow: hidden;
+			color: var(--muted);
+			font-family: "DejaVu Sans Mono", monospace;
+			font-size: 0.73rem;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.metric-value {
+			margin-top: 12px;
+			font-family: "DejaVu Sans Mono", monospace;
+			font-size: clamp(1.3rem, 2.8vw, 2.05rem);
+			font-variant-numeric: tabular-nums;
+			font-weight: 700;
+			line-height: 1;
+		}
+
+		.metric-unit {
+			margin-left: 4px;
+			color: var(--muted);
+			font-family: "Noto Sans CJK SC", sans-serif;
+			font-size: 0.68rem;
+			font-weight: 700;
+		}
+
+		.workspace {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) minmax(290px, 360px);
+			gap: 18px;
+			margin-top: 18px;
+			align-items: start;
+		}
+
+		.controls,
+		.telemetry {
+			border: 1px solid var(--line-strong);
+			background: rgba(255, 254, 249, 0.96);
+			box-shadow: var(--shadow);
+		}
+
+		.section-head {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 16px;
+			min-height: 57px;
+			padding: 12px 16px;
+			border-bottom: 1px solid var(--line);
+		}
+
+		.section-head h2 {
+			margin: 0;
+			font-family: "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
+			font-size: 1rem;
+		}
+
+		.tabs {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			width: min(390px, 100%);
+			border: 1px solid var(--line-strong);
+		}
+
+		.tab {
+			min-height: 34px;
+			padding: 5px 10px;
+			border: 0;
+			border-right: 1px solid var(--line-strong);
+			color: var(--muted);
+			background: transparent;
+			cursor: pointer;
+			font-size: 0.78rem;
+			font-weight: 800;
+		}
+
+		.tab:last-child {
+			border-right: 0;
+		}
+
+		.tab[aria-selected="true"] {
+			color: #fff;
+			background: var(--accent);
+		}
+
+		.command-form {
+			display: none;
+			padding: 18px 16px 20px;
+		}
+
+		.command-form.active {
+			display: block;
+		}
+
+		.form-grid {
+			display: grid;
+			grid-template-columns: repeat(5, minmax(92px, 1fr));
+			gap: 12px;
+		}
+
+		.form-grid.two {
+			grid-template-columns: repeat(2, minmax(130px, 1fr));
+		}
+
+		.form-grid.six {
+			grid-template-columns: repeat(3, minmax(110px, 1fr));
+		}
+
+		label {
+			display: block;
+			color: var(--muted);
+			font-size: 0.72rem;
+			font-weight: 800;
+		}
+
+		.field {
+			position: relative;
+			margin-top: 7px;
+		}
+
+		input[type="number"] {
+			width: 100%;
+			min-height: 44px;
+			padding: 8px 38px 8px 10px;
+			border: 1px solid var(--line-strong);
+			border-radius: 0;
+			color: var(--ink);
+			background: #fff;
+			font-family: "DejaVu Sans Mono", monospace;
+			font-size: 0.9rem;
+			font-variant-numeric: tabular-nums;
+			font-weight: 700;
+		}
+
+		.suffix {
+			position: absolute;
+			top: 50%;
+			right: 9px;
+			color: var(--muted);
+			transform: translateY(-50%);
+			pointer-events: none;
+			font-size: 0.66rem;
+			font-weight: 700;
+		}
+
+		.form-foot {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 14px;
+			margin-top: 18px;
+			padding-top: 14px;
+			border-top: 1px solid var(--line);
+		}
+
+		.form-note {
+			min-width: 0;
+			color: var(--muted);
+			font-size: 0.73rem;
+			line-height: 1.45;
+		}
+
+		.button {
+			min-height: 40px;
+			padding: 8px 15px;
+			border: 1px solid var(--accent-dark);
+			border-radius: 2px;
+			color: #fff;
+			background: var(--accent);
+			cursor: pointer;
+			font-size: 0.8rem;
+			font-weight: 800;
+			white-space: nowrap;
+		}
+
+		.button:hover {
+			background: var(--accent-dark);
+		}
+
+		.button:disabled {
+			cursor: not-allowed;
+			opacity: 0.45;
+		}
+
+		.button.secondary {
+			border-color: var(--line-strong);
+			color: var(--ink);
+			background: #fff;
+		}
+
+		.button.secondary:hover {
+			background: #eef0ec;
+		}
+
+		.button.danger {
+			border-color: var(--danger-dark);
+			background: var(--danger);
+		}
+
+		.button.danger:hover {
+			background: var(--danger-dark);
+		}
+
+		.services {
+			display: grid;
+			grid-template-columns: repeat(5, minmax(110px, 1fr));
+			gap: 10px;
+			padding: 16px;
+			border-top: 1px solid var(--line);
+		}
+
+		.service {
+			position: relative;
+			min-height: 47px;
+			padding-left: 28px;
+		}
+
+		.service::before {
+			position: absolute;
+			left: 12px;
+			top: 50%;
+			width: 7px;
+			height: 7px;
+			border-radius: 50%;
+			background: var(--line-strong);
+			content: "";
+			transform: translateY(-50%);
+		}
+
+		.service.ready::before {
+			background: var(--ok);
+		}
+
+		.roundtrip {
+			padding: 16px;
+			border-top: 1px solid var(--line);
+			background: #eef0ec;
+		}
+
+		.roundtrip-head {
+			display: flex;
+			align-items: baseline;
+			justify-content: space-between;
+			gap: 12px;
+			margin-bottom: 14px;
+		}
+
+		.roundtrip-head h3 {
+			margin: 0;
+			font-size: 0.9rem;
+		}
+
+		.roundtrip-status {
+			color: var(--muted);
+			font-size: 0.72rem;
+			font-weight: 800;
+		}
+
+		.roundtrip-actions {
+			display: flex;
+			gap: 10px;
+		}
+
+		.help-band {
+			margin-top: 18px;
+			border: 1px solid var(--line-strong);
+			background: rgba(255, 254, 249, 0.96);
+			box-shadow: var(--shadow);
+		}
+
+		.help-grid {
+			display: grid;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+
+		.help-item {
+			min-width: 0;
+			padding: 15px 16px;
+			border-right: 1px solid var(--line);
+			border-bottom: 1px solid var(--line);
+		}
+
+		.help-item:nth-child(3n) {
+			border-right: 0;
+		}
+
+		.help-item strong {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 0.76rem;
+		}
+
+		.help-item p {
+			margin: 0;
+			color: var(--muted);
+			font-size: 0.72rem;
+			line-height: 1.55;
+		}
+
+		.telemetry-body {
+			padding: 4px 16px 14px;
+		}
+
+		.readout {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+			gap: 10px;
+			align-items: baseline;
+			min-height: 42px;
+			padding: 11px 0 8px;
+			border-bottom: 1px solid var(--line);
+		}
+
+		.readout dt {
+			min-width: 0;
+			overflow: hidden;
+			color: var(--muted);
+			font-size: 0.72rem;
+			font-weight: 800;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.readout dd {
+			margin: 0;
+			max-width: 180px;
+			overflow-wrap: anywhere;
+			text-align: right;
+			font-family: "DejaVu Sans Mono", monospace;
+			font-size: 0.76rem;
+			font-variant-numeric: tabular-nums;
+			font-weight: 700;
+		}
+
+		.log {
+			min-height: 82px;
+			margin: 0;
+			padding: 14px 16px;
+			border-top: 1px solid var(--line);
+			color: var(--muted);
+			background: #eef0ec;
+			font-family: "DejaVu Sans Mono", monospace;
+			font-size: 0.73rem;
+			line-height: 1.5;
+			overflow-wrap: anywhere;
+		}
+
+		.log.ok {
+			color: var(--ok);
+		}
+
+		.log.error {
+			color: var(--danger);
+		}
+
+		.modal {
+			width: min(430px, calc(100% - 28px));
+			padding: 0;
+			border: 1px solid var(--ink);
+			border-radius: 2px;
+			color: var(--ink);
+			background: var(--panel);
+			box-shadow: 0 22px 70px rgba(23, 32, 34, 0.28);
+		}
+
+		.modal::backdrop {
+			background: rgba(23, 32, 34, 0.56);
+		}
+
+		.modal-body {
+			padding: 22px;
+		}
+
+		.modal h2 {
+			margin: 0 0 10px;
+			font-size: 1.05rem;
+		}
+
+		.modal p {
+			margin: 0;
+			color: var(--muted);
+			font-size: 0.83rem;
+			line-height: 1.6;
+		}
+
+		.modal-actions {
+			display: flex;
+			justify-content: flex-end;
+			gap: 10px;
+			padding: 14px 22px;
+			border-top: 1px solid var(--line);
+		}
+
+		@media (max-width: 920px) {
+			.status-band {
+				grid-template-columns: repeat(3, 1fr);
+			}
+
+			.status-main {
+				grid-column: 1 / -1;
+				border-right: 0;
+				border-bottom: 1px solid var(--line);
+			}
+
+			.workspace {
+				grid-template-columns: 1fr;
+			}
+
+			.telemetry {
+				order: -1;
+			}
+
+			.form-grid {
+				grid-template-columns: repeat(3, minmax(100px, 1fr));
+			}
+
+			.help-grid {
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+			}
+
+			.help-item:nth-child(3n) {
+				border-right: 1px solid var(--line);
+			}
+
+			.help-item:nth-child(2n) {
+				border-right: 0;
+			}
+		}
+
+		@media (max-width: 640px) {
+			.shell {
+				padding-top: 10px;
+			}
+
+			.topbar {
+				min-height: 60px;
+			}
+
+			.brand {
+				display: block;
+			}
+
+			.brand span {
+				display: block;
+				margin-top: 5px;
+			}
+
+			.connection span:last-child {
+				display: none;
+			}
+
+			.status-band {
+				grid-template-columns: 1fr;
+			}
+
+			.metric {
+				min-height: 102px;
+				border-right: 0;
+				border-bottom: 1px solid var(--line);
+			}
+
+			.metric:last-child {
+				border-bottom: 0;
+			}
+
+			.section-head {
+				display: block;
+			}
+
+			.tabs {
+				width: 100%;
+				margin-top: 12px;
+			}
+
+			.form-grid,
+			.form-grid.two,
+			.form-grid.six {
+				grid-template-columns: 1fr;
+			}
+
+			.form-foot {
+				align-items: stretch;
+				flex-direction: column;
+			}
+
+			.button {
+				width: 100%;
+				white-space: normal;
+			}
+
+			.services {
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+			}
+
+			.service:last-child {
+				grid-column: 1 / -1;
+			}
+
+			.roundtrip-head,
+			.roundtrip-actions {
+				align-items: stretch;
+				flex-direction: column;
+			}
+
+			.help-grid {
+				grid-template-columns: 1fr;
+			}
+
+			.help-item {
+				border-right: 0;
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<main class="shell">
+		<header class="topbar">
+			<div class="brand">
+				<h1>Gloria-M</h1>
+				<span>夹爪调试台</span>
+			</div>
+			<div class="connection" id="connection">
+				<span class="dot" aria-hidden="true"></span>
+				<span id="connectionText">等待反馈</span>
+			</div>
+		</header>
+
+		<section class="status-band" aria-label="实时状态">
+			<div class="status-main">
+				<p class="eyebrow">设备状态</p>
+				<div>
+					<div class="state-line">
+						<span class="state-mark" id="stateMark" aria-hidden="true"></span>
+						<span class="state-text" id="stateText">等待诊断信息</span>
+					</div>
+					<div class="target" id="targetNode">/gloria_gripper</div>
+				</div>
+			</div>
+			<div class="metric">
+				<p class="eyebrow">位置</p>
+				<div class="metric-value"><span id="positionValue">--</span><span class="metric-unit">rad</span></div>
+			</div>
+			<div class="metric">
+				<p class="eyebrow">速度</p>
+				<div class="metric-value"><span id="velocityValue">--</span><span class="metric-unit">rad/s</span></div>
+			</div>
+			<div class="metric">
+				<p class="eyebrow">扭矩</p>
+				<div class="metric-value"><span id="torqueValue">--</span><span class="metric-unit">N·m</span></div>
+			</div>
+		</section>
+
+		<div class="workspace">
+			<section class="controls">
+				<div class="section-head">
+					<h2>运动命令</h2>
+					<div class="tabs" role="tablist" aria-label="命令类型">
+						<button class="tab" type="button" role="tab" aria-selected="true" data-tab="mit"
+							data-mode="mit">MIT</button>
+						<button class="tab" type="button" role="tab" aria-selected="false" data-tab="pv"
+							data-mode="pos_vel">PV</button>
+					</div>
+				</div>
+
+				<form class="command-form active" id="mitForm" data-panel="mit">
+					<div class="form-grid">
+						<label>q
+							<span class="field"><input type="number" name="q" value="0" step="0.01" required><span
+									class="suffix">rad</span></span>
+						</label>
+						<label>dq
+							<span class="field"><input type="number" name="dq" value="0" step="0.01" required><span
+									class="suffix">rad/s</span></span>
+						</label>
+						<label>kp
+							<span class="field"><input type="number" name="kp" value="10" min="0" max="500" step="0.1"
+									required></span>
+						</label>
+						<label>kd
+							<span class="field"><input type="number" name="kd" value="1" min="0" max="5" step="0.1"
+									required></span>
+						</label>
+						<label>tau
+							<span class="field"><input type="number" name="tau" value="0" step="0.01" required><span
+									class="suffix">N·m</span></span>
+						</label>
+					</div>
+					<div class="form-foot">
+						<span class="form-note">仅在目标节点确认 MIT 模式后执行，服务端仍会应用安全限幅。</span>
+						<button class="button" type="submit">发送 MIT</button>
+					</div>
+				</form>
+
+				<form class="command-form" id="pvForm" data-panel="pv">
+					<div class="form-grid two">
+						<label>目标位置
+							<span class="field"><input type="number" name="position" value="0" step="0.01"
+									required><span class="suffix">rad</span></span>
+						</label>
+						<label>速度
+							<span class="field"><input type="number" name="velocity" value="0.5" min="0" step="0.01"
+									required><span class="suffix">rad/s</span></span>
+						</label>
+					</div>
+					<div class="form-foot">
+						<span class="form-note">切换到此页会选择 PV 模式；夹爪须先失能，再配置并使能。速度必须在设备量程内。</span>
+						<button class="button" type="submit">发送 PV</button>
+					</div>
+				</form>
+
+				<div class="services" aria-label="设备操作">
+					<button class="button secondary service" type="button" data-service="configure">配置模式</button>
+					<button class="button service" type="button" data-service="enable"
+						data-confirm="使能后夹爪可以立即响应运动命令。确认机械环境安全并继续？">使能</button>
+					<button class="button danger service" type="button" data-service="disable">失能</button>
+					<button class="button secondary service" type="button" data-service="refresh">刷新状态</button>
+					<button class="button danger service" type="button" data-service="set_zero"
+						data-confirm="归零会永久改变机械零点，且目标节点必须显式允许此操作。确认继续？">机械归零</button>
+				</div>
+
+				<form class="roundtrip" id="roundtripForm">
+					<div class="roundtrip-head">
+						<h3>一键往返</h3>
+						<span class="roundtrip-status" id="roundtripStatus">未运行</span>
+					</div>
+					<div class="form-grid six">
+						<label>端点 A
+							<span class="field"><input type="number" name="position_a" value="0.00" min="0" max="2.77"
+									step="0.01" required><span class="suffix">rad</span></span>
+						</label>
+						<label>端点 B
+							<span class="field"><input type="number" name="position_b" value="2.50" min="0" max="2.77"
+									step="0.01" required><span class="suffix">rad</span></span>
+						</label>
+						<label>运动速度
+							<span class="field"><input type="number" name="velocity" value="1.00" min="0.01" max="10"
+									step="0.01" required><span class="suffix">rad/s</span></span>
+						</label>
+						<label>发送频率
+							<span class="field"><input type="number" name="rate_hz" value="100" min="1" max="100"
+									step="1" required><span class="suffix">Hz</span></span>
+						</label>
+						<label>到位阈值
+							<span class="field"><input type="number" name="settle_threshold" value="0.10" min="0.001"
+									step="0.001" required><span class="suffix">rad</span></span>
+						</label>
+						<label>分段超时
+							<span class="field"><input type="number" name="segment_timeout_s" value="8" min="0.5"
+									step="0.5" required><span class="suffix">s</span></span>
+						</label>
+						<input type="hidden" name="settle_time_s" value="0.30">
+					</div>
+					<div class="form-foot">
+						<span class="form-note">自动选择并配置 PV、使能后持续发送 A/B 目标；每个端点到位保持 0.3 s，中止或异常后自动失能。</span>
+						<div class="roundtrip-actions">
+							<button class="button danger" type="button" id="roundtripStop" disabled>中止并失能</button>
+							<button class="button" type="submit" id="roundtripStart"
+								data-confirm="夹爪将自动切换到 PV 模式，并在两个端点间持续运动。确认机械范围安全并继续？">开始往返</button>
+						</div>
+					</div>
+				</form>
+			</section>
+
+			<aside class="telemetry">
+				<div class="section-head">
+					<h2>诊断遥测</h2>
+				</div>
+				<dl class="telemetry-body">
+					<div class="readout">
+						<dt>期望模式</dt>
+						<dd id="desiredMode">--</dd>
+					</div>
+					<div class="readout">
+						<dt>确认模式</dt>
+						<dd id="confirmedMode">--</dd>
+					</div>
+					<div class="readout">
+						<dt>请求使能</dt>
+						<dd id="enabledRequested">--</dd>
+					</div>
+					<div class="readout">
+						<dt>反馈年龄</dt>
+						<dd id="feedbackAge">--</dd>
+					</div>
+					<div class="readout">
+						<dt>关节状态年龄</dt>
+						<dd id="jointAge">--</dd>
+					</div>
+					<div class="readout">
+						<dt>硬件标识</dt>
+						<dd id="hardwareId">--</dd>
+					</div>
+				</dl>
+				<p class="log" id="actionLog" role="status">控制端已就绪，等待 ROS 状态。</p>
+			</aside>
+		</div>
+
+		<section class="help-band" aria-label="控制说明">
+			<div class="section-head">
+				<h2>按钮说明</h2>
+			</div>
+			<div class="help-grid">
+				<div class="help-item"><strong>配置模式</strong>
+					<p>夹爪失能时写入页面选择的 MIT 或 PV 模式，并回读确认模式及 PMAX、VMAX、TMAX；已使能时会拒绝配置。</p>
+				</div>
+				<div class="help-item"><strong>使能 / 失能</strong>
+					<p>使能会先完成模式与量程校验，再允许运动；失能立即停止驱动，也会中止正在运行的往返任务。</p>
+				</div>
+				<div class="help-item"><strong>刷新状态</strong>
+					<p>主动请求一帧反馈，用于确认 CAN 链路以及当前位置、速度和扭矩，不会产生运动。</p>
+				</div>
+				<div class="help-item"><strong>MIT / PV</strong>
+					<p>切换页签会选择对应的待配置模式，但只在失能状态生效；随后点击配置模式或使能，将模式写入硬件。</p>
+				</div>
+				<div class="help-item"><strong>一键往返</strong>
+					<p>参考 SDK quicktest，自动切换到 PV 并持续在 A/B 端点间交替；根据反馈到位或超时换向，点击中止后自动失能。</p>
+				</div>
+				<div class="help-item"><strong>机械归零</strong>
+					<p>把当前位置写为零点，可能永久改变机械坐标；默认被节点参数禁止，且只能在失能状态执行。</p>
+				</div>
+			</div>
+		</section>
+	</main>
+
+	<dialog class="modal" id="confirmDialog">
+		<div class="modal-body">
+			<h2>确认设备操作</h2>
+			<p id="confirmMessage"></p>
+		</div>
+		<div class="modal-actions">
+			<button class="button secondary" type="button" id="confirmCancel">取消</button>
+			<button class="button danger" type="button" id="confirmAccept">确认执行</button>
+		</div>
+	</dialog>
+
+	<script>
+		"use strict";
+
+		const elements = {
+			connection: document.getElementById("connection"),
+			connectionText: document.getElementById("connectionText"),
+			stateMark: document.getElementById("stateMark"),
+			stateText: document.getElementById("stateText"),
+			targetNode: document.getElementById("targetNode"),
+			position: document.getElementById("positionValue"),
+			velocity: document.getElementById("velocityValue"),
+			torque: document.getElementById("torqueValue"),
+			desiredMode: document.getElementById("desiredMode"),
+			confirmedMode: document.getElementById("confirmedMode"),
+			enabledRequested: document.getElementById("enabledRequested"),
+			feedbackAge: document.getElementById("feedbackAge"),
+			jointAge: document.getElementById("jointAge"),
+			hardwareId: document.getElementById("hardwareId"),
+			actionLog: document.getElementById("actionLog"),
+			dialog: document.getElementById("confirmDialog"),
+			confirmMessage: document.getElementById("confirmMessage"),
+			confirmCancel: document.getElementById("confirmCancel"),
+			confirmAccept: document.getElementById("confirmAccept"),
+			roundtripForm: document.getElementById("roundtripForm"),
+			roundtripStart: document.getElementById("roundtripStart"),
+			roundtripStop: document.getElementById("roundtripStop"),
+			roundtripStatus: document.getElementById("roundtripStatus"),
+			commandButtons: document.querySelectorAll(".command-form button, [data-service]"),
+			serviceButtons: document.querySelectorAll("[data-service]"),
+			tabs: document.querySelectorAll(".tab"),
+			tabPanels: document.querySelectorAll(".command-form")
+		};
+
+		let lastActionTime = 0;
+		let pendingConfirmation = null;
+		let stateRequestActive = false;
+
+		function finiteValue(value, digits = 4) {
+			const number = Number(value);
+			return Number.isFinite(number) ? number.toFixed(digits) : "--";
+		}
+
+		function firstValue(values) {
+			return Array.isArray(values) && values.length ? values[0] : null;
+		}
+
+		function setLog(message, ok = null) {
+			elements.actionLog.textContent = message;
+			elements.actionLog.classList.toggle("ok", ok === true);
+			elements.actionLog.classList.toggle("error", ok === false);
+		}
+
+		function updateState(data) {
+			elements.targetNode.textContent = data.target_node || "--";
+			elements.connection.classList.toggle("online", Boolean(data.connected));
+			elements.connectionText.textContent = data.connected ? "反馈在线" : "反馈离线";
+			elements.position.textContent = finiteValue(firstValue(data.joint_state?.position));
+			elements.velocity.textContent = finiteValue(firstValue(data.joint_state?.velocity));
+			elements.torque.textContent = finiteValue(firstValue(data.joint_state?.effort));
+			elements.jointAge.textContent = data.joint_age_s == null ? "--" : `${finiteValue(data.joint_age_s, 3)} s`;
+
+			const diagnostic = data.diagnostic;
+			const values = diagnostic?.values || {};
+			elements.stateText.textContent = diagnostic?.message || "等待诊断信息";
+			elements.stateMark.className = "state-mark";
+			if (diagnostic?.level_name === "ok") elements.stateMark.classList.add("ok");
+			if (diagnostic && ["error", "stale"].includes(diagnostic.level_name)) elements.stateMark.classList.add("error");
+			elements.desiredMode.textContent = values.desired_mode || "--";
+			elements.confirmedMode.textContent = values.confirmed_mode || "--";
+			elements.enabledRequested.textContent = values.enabled_requested || "--";
+			elements.feedbackAge.textContent = values.feedback_age_s ? `${values.feedback_age_s} s` : "--";
+			elements.hardwareId.textContent = diagnostic?.hardware_id || "--";
+
+			const roundtrip = data.roundtrip || {};
+			elements.roundtripStatus.textContent = roundtrip.message || "未运行";
+			elements.roundtripStart.disabled = Boolean(roundtrip.running);
+			elements.roundtripStop.disabled = !roundtrip.running;
+			elements.commandButtons.forEach((button) => {
+				const isEmergencyControl = button.dataset.service === "disable";
+				button.disabled = Boolean(roundtrip.running) && !isEmergencyControl;
+			});
+
+			elements.serviceButtons.forEach((button) => {
+				const ready = Boolean(data.services?.[button.dataset.service]);
+				button.classList.toggle("ready", ready);
+				button.title = ready ? "服务可用" : "服务当前不可用";
+			});
+
+			if (data.last_action && data.last_action.time > lastActionTime) {
+				lastActionTime = data.last_action.time;
+				setLog(data.last_action.message, data.last_action.ok);
+			}
+		}
+
+		async function pollState() {
+			if (stateRequestActive) return;
+			stateRequestActive = true;
+			try {
+				const response = await fetch("/api/state", { cache: "no-store" });
+				if (!response.ok) throw new Error(`状态请求失败 (${response.status})`);
+				updateState(await response.json());
+			} catch (error) {
+				elements.connection.classList.remove("online");
+				elements.connectionText.textContent = "控制端离线";
+				setLog(error.message, false);
+			} finally {
+				stateRequestActive = false;
+			}
+		}
+
+		async function postJson(path, payload = {}) {
+			const response = await fetch(path, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Gloria-Control": "1"
+				},
+				body: JSON.stringify(payload)
+			});
+			let result;
+			try {
+				result = await response.json();
+			} catch (_error) {
+				throw new Error(`控制端返回无效响应 (${response.status})`);
+			}
+			if (!response.ok || !result.ok) throw new Error(result.message || `操作失败 (${response.status})`);
+			return result;
+		}
+
+		function formPayload(form) {
+			const payload = {};
+			new FormData(form).forEach((value, name) => {
+				const number = Number(value);
+				if (!Number.isFinite(number)) throw new Error(`${name} 必须是有限数`);
+				payload[name] = number;
+			});
+			return payload;
+		}
+
+		async function submitCommand(form, endpoint) {
+			const button = form.querySelector("button[type='submit']");
+			button.disabled = true;
+			setLog("正在发送命令…");
+			try {
+				const result = await postJson(`/api/command/${endpoint}`, formPayload(form));
+				setLog(result.message, true);
+			} catch (error) {
+				setLog(error.message, false);
+			} finally {
+				button.disabled = false;
+			}
+		}
+
+		async function callService(name, button) {
+			button.disabled = true;
+			setLog(`正在调用 ${name}…`);
+			try {
+				const result = await postJson(`/api/service/${name}`);
+				setLog(result.message, true);
+			} catch (error) {
+				setLog(error.message, false);
+			} finally {
+				button.disabled = false;
+				pollState();
+			}
+		}
+
+		async function startRoundtrip() {
+			elements.roundtripStart.disabled = true;
+			setLog("正在启动往返任务…");
+			try {
+				const result = await postJson("/api/roundtrip/start", formPayload(elements.roundtripForm));
+				setLog(result.message, true);
+			} catch (error) {
+				setLog(error.message, false);
+				elements.roundtripStart.disabled = false;
+			}
+		}
+
+		elements.tabs.forEach((tab) => {
+			tab.addEventListener("click", async () => {
+				if (tab.dataset.mode) {
+					tab.disabled = true;
+					setLog(`正在选择 ${tab.textContent.trim()} 模式…`);
+					try {
+						const result = await postJson("/api/mode", { mode: tab.dataset.mode });
+						setLog(result.message, true);
+					} catch (error) {
+						setLog(error.message, false);
+						tab.disabled = false;
+						return;
+					}
+					tab.disabled = false;
+				}
+				elements.tabs.forEach((item) => item.setAttribute("aria-selected", String(item === tab)));
+				elements.tabPanels.forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab.dataset.tab));
+			});
+		});
+
+		document.getElementById("mitForm").addEventListener("submit", (event) => {
+			event.preventDefault();
+			submitCommand(event.currentTarget, "mit");
+		});
+		document.getElementById("pvForm").addEventListener("submit", (event) => {
+			event.preventDefault();
+			submitCommand(event.currentTarget, "pv");
+		});
+		elements.roundtripForm.addEventListener("submit", (event) => {
+			event.preventDefault();
+			pendingConfirmation = startRoundtrip;
+			elements.confirmMessage.textContent = elements.roundtripStart.dataset.confirm;
+			elements.dialog.showModal();
+		});
+		elements.roundtripStop.addEventListener("click", async () => {
+			elements.roundtripStop.disabled = true;
+			try {
+				const result = await postJson("/api/roundtrip/stop");
+				setLog(result.message, true);
+			} catch (error) {
+				setLog(error.message, false);
+			}
+		});
+
+		elements.serviceButtons.forEach((button) => {
+			button.addEventListener("click", () => {
+				if (button.dataset.confirm) {
+					pendingConfirmation = () => callService(button.dataset.service, button);
+					elements.confirmMessage.textContent = button.dataset.confirm;
+					elements.dialog.showModal();
+				} else {
+					callService(button.dataset.service, button);
+				}
+			});
+		});
+
+		elements.confirmCancel.addEventListener("click", () => {
+			pendingConfirmation = null;
+			elements.dialog.close();
+		});
+		elements.confirmAccept.addEventListener("click", () => {
+			const action = pendingConfirmation;
+			pendingConfirmation = null;
+			elements.dialog.close();
+			if (action) action();
+		});
+
+		pollState();
+		window.setInterval(pollState, 250);
+	</script>
+</body>
+
+</html>
