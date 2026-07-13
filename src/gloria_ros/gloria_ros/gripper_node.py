@@ -682,7 +682,8 @@ class GloriaGripperNode(Node):
             torque = self._last_torque
 
         status = DiagnosticStatus()
-        status.name = f"{self.get_fully_qualified_name()}: Gloria-M"
+        namespace = self.get_namespace().rstrip("/")
+        status.name = f"{namespace}/{self.get_name()}: Gloria-M"
         status.hardware_id = (
             f"can:0x{self._command_id:X}/0x{self._feedback_id:X}")
         if not got_feedback:

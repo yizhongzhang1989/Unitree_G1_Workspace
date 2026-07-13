@@ -4,7 +4,6 @@ project(gloria_ros)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-ament_get_python_install_dir(PYTHON_INSTALL_DIR)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MitCommand.msg"

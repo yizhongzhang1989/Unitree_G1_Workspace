@@ -1,0 +1,20 @@
+{
+    "python.defaultInterpreterPath": "/usr/bin/python3",
+    "python.analysis.extraPaths": [
+        "/opt/ros/foxy/lib/python3.8/site-packages",
+
+        "${workspaceFolder}/src/can_bridge_ros",
+        "${workspaceFolder}/src/gloria_ros",
+        "${workspaceFolder}/src/kwr57_ros",
+        "${workspaceFolder}/src/robot_bringup",
+
+        "${workspaceFolder}/sdk/CAN-SDK",
+        "${workspaceFolder}/sdk/KWR57-SDK",
+        "${workspaceFolder}/sdk/Gloria-M-SDK/src",
+
+        "${workspaceFolder}/install/can_bridge_ros/lib/python3.8/site-packages",
+        "${workspaceFolder}/install/gloria_ros/lib/python3.8/site-packages",
+        "${workspaceFolder}/install/kwr57_ros/lib/python3.8/site-packages",
+        "${workspaceFolder}/install/robot_bringup/lib/python3.8/site-packages",
+    ]
+}

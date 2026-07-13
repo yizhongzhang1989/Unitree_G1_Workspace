@@ -4,8 +4,7 @@ Unitree G1 项目的 ROS 2 工作区。
 
 ## 末端执行器
 
-末端执行器（力传感器 + 夹爪）的 ROS 2 集成工作区，采用 **"CAN 总线作为共享资源"** 的分层架构：
-一个通用 `can_bridge_ros` 独占物理 CAN 总线，各设备是独立 ROS 节点。bridge 可按 CAN ID 把高频帧分流到设备专属 RX 话题，未路由帧走默认 `/canX/rx`。**一设备一节点**，同一条总线可挂多个同构/异构设备；路由由 `robot_bringup` 在启动时根据完整设备清单生成，换接线只换启动配置。
+末端执行器（力传感器 + 夹爪）的 ROS 2 集成工作区采用“CAN 总线作为共享资源”的分层架构。`can_bridge_ros` 独占物理 CAN；KWR57 作为 bridge 进程中的独立 ROS node 处理高频原始帧，Gloria-M 作为独立进程订阅专属 ROS Frame 话题，所有配置都由 `robot_bringup` 的设备清单生成。
 
 设备：2 个力传感器（KWR57）+ 2 个夹爪（Gloria-M）。支持两种接线：
 - **单总线**：所有设备都在 CANalyst-II 的统一 CAN 上（`/can0` 或者 `/can1`）。
@@ -13,13 +12,12 @@ Unitree G1 项目的 ROS 2 工作区。
 
 ```
 第1层 can_sdk        : 无 ROS 的 python-can 后端、CANalyst-II 准备和单消费者基础 I/O
-第2层 can_bridge_ros : 独占一个 USB-CAN 设备、桥接多通道并按可选 CAN ID 路由 RX
-第3层 设备节点        : kwr57_ros / gloria_ros 各自订阅 bringup 分配的专属 RX
-第4层 bringup        : robot_bringup 用一份设备清单生成 bridge 路由和设备节点参数
+第2层 can_bridge_ros : 独占 USB-CAN，桥接多通道，提供路由和通用 handler 注册点
+第3层 设备节点        : kwr57_ros 进程内处理；gloria_ros 订阅专属 RX
+第4层 bringup         : 一份设备清单生成 handler、路由及节点参数
 ```
 
-消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。
-它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；Foxy 对应系统包为 `ros-foxy-can-msgs`。日后换 SocketCAN 硬件可直接换官方桥。
+消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；Foxy 对应系统包为 `ros-foxy-can-msgs`。
 
 
 ## 目录
@@ -69,8 +67,7 @@ source scripts/env.sh
 
 CANalyst-II 需 udev 权限（VID:PID 04d8:0053），见 `src/can_bridge_ros/README.md`。
 
-`scripts/env.sh` 会将 `CAN-SDK`、`KWR57-SDK` 与 Gloria submodule 的源码目录加入
-`PYTHONPATH`，随后加载 ROS 和工作区环境。若要在仓库外独立使用 SDK，可选择安装：
+`scripts/env.sh` 会将 `CAN-SDK`、`KWR57-SDK` 与 Gloria submodule 的源码目录加入 `PYTHONPATH`，随后加载 ROS 和工作区环境。若要在仓库外独立使用 SDK，可选择安装：
 
 ```bash
 python3 -m pip install -e './sdk/CAN-SDK[canalystii]'
@@ -96,13 +93,11 @@ ros2 launch robot_bringup dual_bus.launch.py
 - 单总线下各设备的非共享活动 CAN ID 必须互不冲突；Gloria-M 状态兼容 ID `0x000` 可按协议共享，但各夹爪 `command_id` 的低 4 位设备号必须不同。
 - 双总线下两臂在不同总线，**CAN ID 可相同**，无需改。
 - 换接线**只改用哪个 launch**，设备节点代码不动。
-- 自定义设备 ID、总线或专属 RX 话题时，只修改对应 bringup launch 中的 `CanBus`/`Kwr57Device`/`GloriaDevice` 清单；bridge 路由和设备节点参数会从同一份数据生成。
+- 自定义设备 ID、总线、Wrench 输出或夹爪专属 RX 话题时，只修改对应 bringup launch 中的 `CanBus`、`Kwr57Device`、`GloriaDevice` 清单；handler、路由和节点参数会从同一份数据生成。
 - 两个 1 kHz KWR57 会产生 6000 个 8-byte 标准 CAN 数据帧/秒。在 1 Mbps 下，无位填充时约占 666 kbit/s，按最坏位填充估算约 810 kbit/s；两个低频 Gloria-M 可以共存，但余量有限，必须保证终端匹配并在实机监控丢帧和实际发布频率。
 
-话题：`/ft_left/wrench_raw`、`/grip_left/joint_states` 等。BEST_EFFORT，`ros2 topic echo` 加
-`--qos-reliability best_effort` 或用 `ros2 run kwr57_ros wrench_echo`。
+话题：`/ft_left/wrench_raw`、`/grip_left/joint_states` 等。BEST_EFFORT 话题使用 `ros2 topic echo --qos-reliability best_effort`，KWR57 也可使用 `ros2 run kwr57_ros wrench_echo`。
 
 Gloria 节点默认不自动使能。其 `~/enable` 服务会先设置并确认 MIT/PV 控制模式，再使能并等待状态反馈；未使能、模式未确认或反馈过期时默认拒绝运动命令。完整接口与安全参数见 `src/gloria_ros/README.md`。
 
-各包细节见各自 README：`sdk/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、
-`src/kwr57_ros/README.md`、`src/robot_bringup/README.md`。
+各包细节见 `sdk/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、`src/kwr57_ros/README.md` 和 `src/robot_bringup/README.md`。

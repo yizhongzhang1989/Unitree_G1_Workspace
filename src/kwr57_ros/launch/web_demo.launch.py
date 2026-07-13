@@ -7,9 +7,13 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from kwr57_ros.bridge_handler import build_frame_handler_spec
 
 
 def _launch_nodes(context):
+    use_frame_handler = (
+        LaunchConfiguration("use_frame_handler").perform(context).lower()
+        in ("true", "1", "yes"))
     cmd_id = int(LaunchConfiguration("cmd_id").perform(context), 0)
     data_base_id = int(LaunchConfiguration("data_base_id").perform(context), 0)
     if not 0 <= cmd_id <= 0x7FF:
@@ -28,17 +32,51 @@ def _launch_nodes(context):
     rx_topic = f"/{bus_name}/kwr57_web/rx"
     tx_topic = f"/{bus_name}/tx"
     wrench_topic = LaunchConfiguration("wrench_topic").perform(context)
+    frame_id = LaunchConfiguration("frame_id").perform(context)
+    period_ms = int(LaunchConfiguration("period_ms").perform(context))
+    sample_rate_hz = int(
+        LaunchConfiguration("sample_rate_hz").perform(context))
+    publish_rate = float(LaunchConfiguration("publish_rate").perform(context))
+    use_si = LaunchConfiguration("use_si").perform(context).lower() in (
+        "true", "1", "yes")
+    tare_on_start = (
+        LaunchConfiguration("tare_on_start").perform(context).lower()
+        in ("true", "1", "yes"))
     bridge_config = LaunchConfiguration("bridge_config").perform(context)
     config_path = os.path.join(
         get_package_share_directory("can_bridge_ros"),
         "config",
         bridge_config,
     )
+    handler_parameters = {
+        "cmd_id": cmd_id,
+        "data_base_id": data_base_id,
+        "topic": wrench_topic,
+        "frame_id": frame_id,
+        "period_ms": period_ms,
+        "sample_rate_hz": sample_rate_hz,
+        "publish_rate": publish_rate,
+        "use_si": use_si,
+        "autostart": True,
+        "tare_on_start": tare_on_start,
+    }
+    sensor_parameters = {
+        "rx_topic": rx_topic,
+        "tx_topic": tx_topic,
+        **handler_parameters,
+    }
 
     routes = [
         f"{channel_id}:0x{can_id:X}:{rx_topic}"
         for can_id in range(data_base_id, data_base_id + 3)
     ]
+    handler_specs = [""]
+    if use_frame_handler:
+        handler_specs = [build_frame_handler_spec({
+            "channel_id": channel_id,
+            "node_name": "kwr57_ft_sensor",
+            **handler_parameters,
+        })]
     bridge = Node(
         package="can_bridge_ros",
         executable="bridge_node",
@@ -49,34 +87,20 @@ def _launch_nodes(context):
             "channel_ids": [channel_id],
             "bus_names": [bus_name],
             "rx_routes": routes,
+            "frame_handler_specs": handler_specs,
         }],
     )
 
-    sensor = Node(
-        package="kwr57_ros",
-        executable="ft_sensor_node",
-        name="kwr57_ft_sensor",
-        output="screen",
-        emulate_tty=True,
-        parameters=[{
-            "rx_topic": rx_topic,
-            "tx_topic": tx_topic,
-            "cmd_id": cmd_id,
-            "data_base_id": data_base_id,
-            "topic": wrench_topic,
-            "frame_id": LaunchConfiguration("frame_id").perform(context),
-            "period_ms": int(LaunchConfiguration("period_ms").perform(context)),
-            "sample_rate_hz": int(
-                LaunchConfiguration("sample_rate_hz").perform(context)),
-            "publish_rate": float(
-                LaunchConfiguration("publish_rate").perform(context)),
-            "use_si": LaunchConfiguration("use_si").perform(context).lower()
-            in ("true", "1", "yes"),
-            "autostart": True,
-            "tare_on_start": LaunchConfiguration(
-                "tare_on_start").perform(context).lower() in ("true", "1", "yes"),
-        }],
-    )
+    sensor = None
+    if not use_frame_handler:
+        sensor = Node(
+            package="kwr57_ros",
+            executable="ft_sensor_node",
+            name="kwr57_ft_sensor",
+            output="screen",
+            emulate_tty=True,
+            parameters=[sensor_parameters],
+        )
 
     web = Node(
         package="kwr57_ros",
@@ -92,9 +116,10 @@ def _launch_nodes(context):
                 LaunchConfiguration("force_scale").perform(context)),
             "torque_scale": float(
                 LaunchConfiguration("torque_scale").perform(context)),
+            "ui_rate": float(LaunchConfiguration("ui_rate").perform(context)),
         }],
     )
-    return [bridge, sensor, web]
+    return [bridge, web] if sensor is None else [bridge, sensor, web]
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -103,6 +128,11 @@ def generate_launch_description() -> LaunchDescription:
             "bridge_config",
             default_value="single_bus.yaml",
             description="can_bridge_ros config file for the physical CAN adapter",
+        ),
+        DeclareLaunchArgument(
+            "use_frame_handler",
+            default_value="true",
+            description="Assemble KWR57 frames in-process; false restores ROS Frame routing",
         ),
         DeclareLaunchArgument("channel_id", default_value="0"),
         DeclareLaunchArgument("bus_name", default_value="can0"),
@@ -120,5 +150,6 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("web_port", default_value="8765"),
         DeclareLaunchArgument("force_scale", default_value="10.0"),
         DeclareLaunchArgument("torque_scale", default_value="0.25"),
+        DeclareLaunchArgument("ui_rate", default_value="20.0"),
     ]
     return LaunchDescription([*arguments, OpaqueFunction(function=_launch_nodes)])

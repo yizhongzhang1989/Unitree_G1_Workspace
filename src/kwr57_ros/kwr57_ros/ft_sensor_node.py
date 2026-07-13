@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import List, Optional
+from typing import Any, Callable, List, Optional, Union
 
 import rclpy
 # ROS 2 包 can_msgs 提供的标准 CAN 帧消息；Foxy: apt install ros-foxy-can-msgs
@@ -47,7 +47,9 @@ import rclpy
 from can_msgs.msg import Frame
 from geometry_msgs.msg import WrenchStamped
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.logging import get_logger
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -60,8 +62,22 @@ _CMD_SETTLE_S = 0.1
 
 
 class KWR57DeviceNode(Node):
-    def __init__(self) -> None:
-        super().__init__("kwr57_ft_sensor")
+    def __init__(
+            self,
+            *,
+            node_name: str = "kwr57_ft_sensor",
+            context: Any = None,
+            parameter_overrides: Optional[List[Parameter]] = None,
+            use_global_arguments: bool = True,
+            direct_rx: bool = False,
+            direct_tx: Optional[Callable[[int, bytes], bool]] = None,
+            defer_autostart: bool = False) -> None:
+        super().__init__(
+            node_name,
+            context=context,
+            parameter_overrides=parameter_overrides or [],
+            use_global_arguments=use_global_arguments,
+        )
 
         self.declare_parameter("rx_topic", "/can0/rx")
         self.declare_parameter("tx_topic", "/can0/tx")
@@ -77,38 +93,43 @@ class KWR57DeviceNode(Node):
         self.declare_parameter("tare_on_start", False)
 
         gp = self.get_parameter
-        rx_topic = str(gp("rx_topic").value)
-        tx_topic = str(gp("tx_topic").value)
-        self._cmd_id = int(gp("cmd_id").value)
-        data_base_id = int(gp("data_base_id").value)
-        topic = str(gp("topic").value)
-        frame_id = str(gp("frame_id").value)
-        self._period_ms = int(gp("period_ms").value)
-        self._sample_rate_hz = int(gp("sample_rate_hz").value)
-        self._publish_rate = float(gp("publish_rate").value)
-        self._use_si = bool(gp("use_si").value)
-        autostart = bool(gp("autostart").value)
-        tare_on_start = bool(gp("tare_on_start").value)
+        rx_topic = gp("rx_topic").get_parameter_value().string_value
+        tx_topic = gp("tx_topic").get_parameter_value().string_value
+        self._cmd_id = gp("cmd_id").get_parameter_value().integer_value
+        data_base_id = gp("data_base_id").get_parameter_value().integer_value
+        topic = gp("topic").get_parameter_value().string_value
+        frame_id = gp("frame_id").get_parameter_value().string_value
+        self._period_ms = gp("period_ms").get_parameter_value().integer_value
+        self._sample_rate_hz = gp("sample_rate_hz").get_parameter_value().integer_value
+        self._publish_rate = gp("publish_rate").get_parameter_value().double_value
+        self._use_si = gp("use_si").get_parameter_value().bool_value
+        self._autostart = gp("autostart").get_parameter_value().bool_value
+        self._tare_on_start = gp("tare_on_start").get_parameter_value().bool_value
+        self._direct_tx = direct_tx
 
         self._data_ids = protocol.data_ids_from_base(data_base_id)
         self._assembler = WrenchAssembler(self._data_ids)
 
         # --- ROS interface ------------------------------------------------
-        rx_qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST, depth=128)
-        tx_qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST, depth=100)
         wrench_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST, depth=32)
 
         self._pub = self.create_publisher(WrenchStamped, topic, wrench_qos)
-        self._tx_pub = self.create_publisher(Frame, tx_topic, tx_qos)
-        self._rx_sub = self.create_subscription(
-            Frame, rx_topic, self._on_frame, rx_qos)
+        self._tx_pub = None
+        if direct_tx is None:
+            tx_qos = QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                history=HistoryPolicy.KEEP_LAST, depth=100)
+            self._tx_pub = self.create_publisher(Frame, tx_topic, tx_qos)
+        self._rx_sub = None
+        if not direct_rx:
+            rx_qos = QoSProfile(
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                history=HistoryPolicy.KEEP_LAST, depth=128)
+            self._rx_sub = self.create_subscription(
+                Frame, rx_topic, self._on_frame, rx_qos)
         self._cmd_sub = self.create_subscription(
             String, "~/command", self._on_command, 10)
         self._srv_start = self.create_service(Trigger, "~/start", self._srv_start_cb)
@@ -133,21 +154,37 @@ class KWR57DeviceNode(Node):
         self.get_logger().info(
             f"KWR57 device [bridge]: cmd_id=0x{self._cmd_id:X} "
             f"data_ids={'/'.join(f'0x{c:X}' for c in self._data_ids)}  "
-            f"rx='{rx_topic}' tx='{tx_topic}' -> {topic} (si={self._use_si})")
+            f"rx={'in-process' if direct_rx else repr(rx_topic)} "
+            f"tx={'in-process' if direct_tx is not None else repr(tx_topic)} "
+            f"-> {topic} (si={self._use_si})")
 
-        if autostart:
-            self._start_async(tare=tare_on_start)
+        if not defer_autostart:
+            self.activate()
+
+    def activate(self) -> None:
+        if self._autostart:
+            self._start_async(tare=self._tare_on_start)
         else:
             self.get_logger().info("waiting for start command")
 
+    def stop_device(self) -> None:
+        self._do_stop()
+
     # --- command frame helpers -------------------------------------------
     def _send_cmd(self, cmd_id: int, data: bytes) -> None:
+        if self._direct_tx is not None:
+            if not self._direct_tx(cmd_id, data):
+                self.get_logger().error(
+                    f"failed to enqueue CAN command for ID 0x{cmd_id:X}")
+            return
         f = Frame()
         f.header.stamp = self.get_clock().now().to_msg()
         f.id = int(cmd_id)
         f.is_extended = False
         f.dlc = len(data)
         f.data = list(bytes(data).ljust(8, b"\x00"))
+        if self._tx_pub is None:
+            raise RuntimeError("KWR57 TX publisher is not available")
         self._tx_pub.publish(f)
 
     def _start_async(self, tare: bool) -> None:
@@ -259,15 +296,38 @@ class KWR57DeviceNode(Node):
 
     # --- data path (rx callback) -----------------------------------------
     def _on_frame(self, frame: Frame) -> None:
-        can_id = int(frame.id)
+        self.handle_can_frame(
+            int(frame.id),
+            bytes(frame.data),
+            is_extended=bool(frame.is_extended),
+            is_rtr=bool(frame.is_rtr),
+            is_error=bool(frame.is_error),
+            dlc=int(frame.dlc),
+        )
+
+    def handle_can_frame(
+            self,
+            can_id: int,
+            data: Union[bytes, bytearray],
+            *,
+            is_extended: bool = False,
+            is_rtr: bool = False,
+            is_error: bool = False,
+            dlc: Optional[int] = None) -> bool:
+        """Process one CAN frame; return whether it belongs to this device."""
         if can_id not in self._data_ids:
-            return
-        if frame.is_extended or frame.is_rtr or frame.is_error or int(frame.dlc) != 8:
-            return
+            return False
+        frame_dlc = len(data) if dlc is None else dlc
+        if is_extended or is_rtr or is_error or frame_dlc != 8 or len(data) < 8:
+            return False
         self._frames_seen += 1
-        wrench = self._assembler.push(can_id, bytes(frame.data))
+        wrench = self._assembler.push(can_id, data)
         if wrench is None:
-            return
+            return True
+        self._handle_wrench(wrench)
+        return True
+
+    def _handle_wrench(self, wrench: Wrench) -> None:
         if self._use_si:
             wrench = wrench.to_si()
         if self._tare_pending:
@@ -312,7 +372,7 @@ def main() -> None:
     try:
         node = KWR57DeviceNode()
     except Exception as exc:  # noqa: BLE001
-        rclpy.logging.get_logger("kwr57_ft_sensor").fatal(str(exc))
+        get_logger("kwr57_ft_sensor").fatal(str(exc))
         if rclpy.ok():
             rclpy.shutdown()
         return
