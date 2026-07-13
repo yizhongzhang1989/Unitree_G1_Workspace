@@ -92,8 +92,9 @@ class WebWrenchNode(Node):
         )
         self._sub = self.create_subscription(WrenchStamped, topic, self._on_wrench, qos)
 
-        self._count = 0
-        self._t0 = 0.0
+        self._window_count = 0
+        self._window_start = time.monotonic()
+        self._hz = 0.0
 
         handler = self._ui.make_handler(self._state)
         self._httpd = ThreadingHTTPServer((host, port), handler)
@@ -106,15 +107,17 @@ class WebWrenchNode(Node):
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
         now = time.monotonic()
-        if self._count == 0:
-            self._t0 = now
-        self._count += 1
-        elapsed = now - self._t0
-        hz = self._count / elapsed if elapsed > 0 else 0.0
+        self._window_count += 1
+        elapsed = now - self._window_start
+        if elapsed >= 1.0:
+            self._hz = self._window_count / elapsed
+            self._window_count = 0
+            self._window_start = now
         f = msg.wrench.force
         t = msg.wrench.torque
         wrench = Wrench(f.x, f.y, f.z, t.x, t.y, t.z)
-        self._ui.update_payload(self._state, wrench, hz, f"ros {hz:5.1f} Hz")
+        self._ui.update_payload(
+            self._state, wrench, self._hz, f"ros {self._hz:5.1f} Hz")
 
     def destroy_node(self) -> bool:
         try:

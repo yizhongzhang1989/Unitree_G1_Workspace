@@ -185,6 +185,55 @@ ros2 run kwr57_ros wrench_echo --ros-args -p topic:=/ft_right/wrench_raw
 - **`read_kwr57`**：非 ROS 控制台读取（**直接开总线**，不经 bridge，用于台架调试）：
   `ros2 run kwr57_ros read_kwr57 --interface canalystii --channel 0`。
 
+### 6.1 单独启动 KWR57 Web 联调
+
+下面一条命令同时启动 `can_bridge_ros`、KWR57 设备节点和 Web 可视化：
+
+```bash
+source scripts/env.sh
+ros2 launch kwr57_ros web_demo.launch.py
+```
+
+浏览器打开 `http://127.0.0.1:8765`；从局域网其他机器访问时，将 `127.0.0.1`
+替换为运行 ROS 的主机 IP。默认使用 CANalyst-II 通道 0、1 Mbps、命令 ID `0x10`、
+数据起始 ID `0x15`，页面订阅 `/kwr57_ft_sensor/wrench_raw`。
+
+与 `robot_bringup` 一样，launch 根据同一组 CAN ID 同时生成 bridge 路由和设备节点参数。
+三条数据帧只进入专属 `/can0/kwr57_web/rx`，不会再发布到通用 `/can0/rx`。
+
+页面中的 `Hz` 是 Web 节点最近 1 秒实际收到的 `WrenchStamped` 消息率，不是传感器内部
+采样率。`sample_rate_hz:=1000` 只配置传感器采样；每个样本仍需经过三帧 CAN、bridge 的
+三次 ROS 发布/订阅以及一次 wrench 发布/订阅。Python ROS 2 链路 CPU 饱和或 BEST_EFFORT
+丢帧时，页面频率会低于 1000 Hz，即使直接使用 SDK 读取可达到 1000 Hz。
+
+常用参数覆盖示例：
+
+```bash
+ros2 launch kwr57_ros web_demo.launch.py \
+  channel_id:=0 bus_name:=can0 cmd_id:=0x10 data_base_id:=0x15 \
+  use_si:=true tare_on_start:=true web_port:=8080
+```
+
+使用其他 bridge 物理配置时传入 `bridge_config`；Web 坐标量程可用 `force_scale` 和
+`torque_scale` 调整。启动前应停止其他占用同一 CANalyst-II 的 bridge 或 SDK 程序。
+
+关闭时在运行 launch 的终端按 `Ctrl-C`，会同时停止 Web、KWR57 设备节点和 bridge，
+并释放 HTTP 端口及 CANalyst-II。若启动终端已经丢失，可执行：
+
+```bash
+pkill -INT -f 'ros2 launch kwr57_ros web_demo.launch.py'
+```
+
+确认相关节点与 Web 服务均已关闭：
+
+```bash
+ros2 node list
+curl --max-time 1 http://127.0.0.1:8765/
+```
+
+此时节点列表中不应再出现 `can_bridge_ros`、`kwr57_ft_sensor`、`kwr57_web_wrench`，
+且 `curl` 应连接失败。
+
 ---
 
 ## 7. 常见问题
