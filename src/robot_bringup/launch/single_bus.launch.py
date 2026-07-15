@@ -12,7 +12,7 @@
 
 from launch import LaunchDescription
 
-from robot_bringup.nodes import bridge, ft_sensor, gripper
+from robot_bringup.nodes import bringup_actions
 from robot_bringup.topology import CanBus, GloriaDevice, Kwr57Device
 
 
@@ -21,11 +21,9 @@ def generate_launch_description() -> LaunchDescription:
     kwr57_devices = [
         Kwr57Device(
             name="ft_left", bus=can0, cmd_id=0x10, data_base_id=0x15,
-            rx_topic="/can0/ft_left/rx",
             wrench_topic="/ft_left/wrench_raw", frame_id="ft_left_link"),
         Kwr57Device(
             name="ft_right", bus=can0, cmd_id=0x11, data_base_id=0x18,
-            rx_topic="/can0/ft_right/rx",
             wrench_topic="/ft_right/wrench_raw", frame_id="ft_right_link"),
     ]
     gloria_devices = [
@@ -39,9 +37,5 @@ def generate_launch_description() -> LaunchDescription:
             joint_name="grip_right"),
     ]
 
-    actions = [
-        bridge("single_bus.yaml", [can0], kwr57_devices, gloria_devices),
-        *(ft_sensor(device) for device in kwr57_devices),
-        *(gripper(device) for device in gloria_devices),
-    ]
-    return LaunchDescription(actions)
+    return LaunchDescription(bringup_actions(
+        "single_bus.yaml", [can0], kwr57_devices, gloria_devices))

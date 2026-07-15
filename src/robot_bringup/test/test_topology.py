@@ -1,4 +1,5 @@
 import unittest
+from typing import List, cast
 
 from robot_bringup.topology import (
     CanBus,
@@ -8,14 +9,13 @@ from robot_bringup.topology import (
 )
 
 
-def _sensor(name: str, bus: CanBus, cmd_id: int, data_base_id: int,
-            rx_topic: str) -> Kwr57Device:
+def _sensor(name: str, bus: CanBus, cmd_id: int,
+            data_base_id: int) -> Kwr57Device:
     return Kwr57Device(
         name=name,
         bus=bus,
         cmd_id=cmd_id,
         data_base_id=data_base_id,
-        rx_topic=rx_topic,
         wrench_topic=f"/{name}/wrench_raw",
         frame_id=f"{name}_link",
     )
@@ -34,26 +34,29 @@ def _gripper(name: str, bus: CanBus, command_id: int, feedback_id: int,
 
 
 class BuildBridgeParametersTest(unittest.TestCase):
-    def test_builds_routes_from_device_inventory(self) -> None:
+    def test_kwr57_inventory_uses_handlers_without_frame_routes(self) -> None:
         can0 = CanBus("can0", 0)
         can1 = CanBus("can1", 1)
         devices = [
-            _sensor("left", can0, 0x10, 0x15, "/can0/left/rx"),
-            _sensor("right", can1, 0x10, 0x15, "/can1/right/rx"),
+            _sensor("left", can0, 0x10, 0x15),
+            _sensor("right", can1, 0x10, 0x15),
         ]
 
         parameters = build_bridge_parameters([can0, can1], devices)
 
         self.assertEqual(parameters["channel_ids"], [0, 1])
         self.assertEqual(parameters["bus_names"], ["can0", "can1"])
-        self.assertEqual(parameters["rx_routes"], [
-            "0:0x15:/can0/left/rx",
-            "0:0x16:/can0/left/rx",
-            "0:0x17:/can0/left/rx",
-            "1:0x15:/can1/right/rx",
-            "1:0x16:/can1/right/rx",
-            "1:0x17:/can1/right/rx",
-        ])
+        self.assertEqual(parameters["rx_routes"], [""])
+
+    def test_kwr57_handler_config_contains_runtime_parameters(self) -> None:
+        device = _sensor("left", CanBus("can0", 0), 0x10, 0x15)
+
+        self.assertEqual(device.handler_config["channel_id"], 0)
+        self.assertEqual(device.handler_config["node_name"], "left")
+        self.assertEqual(device.handler_config["sample_rate_hz"], 1000)
+        self.assertEqual(device.handler_config["period_ms"], 1)
+        self.assertNotIn("rx_topic", device.handler_config)
+        self.assertNotIn("tx_topic", device.handler_config)
 
     def test_uses_typed_placeholder_for_empty_routes(self) -> None:
         parameters = build_bridge_parameters([CanBus("can0", 0)], [])
@@ -80,26 +83,28 @@ class BuildBridgeParametersTest(unittest.TestCase):
     def test_builds_complete_single_bus_inventory(self) -> None:
         can0 = CanBus("can0", 0)
         sensors = [
-            _sensor("ft_left", can0, 0x10, 0x15, "/can0/ft_left/rx"),
-            _sensor("ft_right", can0, 0x11, 0x18, "/can0/ft_right/rx"),
+            _sensor("ft_left", can0, 0x10, 0x15),
+            _sensor("ft_right", can0, 0x11, 0x18),
         ]
         grippers = [
             _gripper("grip_left", can0, 0x01, 0x101, "/can0/grip_left/rx"),
             _gripper("grip_right", can0, 0x02, 0x102, "/can0/grip_right/rx"),
         ]
 
-        routes = build_bridge_parameters(
-            [can0], sensors, grippers)["rx_routes"]
+        routes = cast(
+            List[str],
+            build_bridge_parameters([can0], sensors, grippers)["rx_routes"],
+        )
 
-        self.assertEqual(len(routes), 12)
+        self.assertEqual(len(routes), 6)
         self.assertEqual(routes.count("0:0x0:/can0/grip_left/rx"), 1)
         self.assertEqual(routes.count("0:0x0:/can0/grip_right/rx"), 1)
 
     def test_rejects_overlapping_data_ids_on_same_channel(self) -> None:
         can0 = CanBus("can0", 0)
         devices = [
-            _sensor("left", can0, 0x10, 0x15, "/can0/left/rx"),
-            _sensor("right", can0, 0x11, 0x17, "/can0/right/rx"),
+            _sensor("left", can0, 0x10, 0x15),
+            _sensor("right", can0, 0x11, 0x17),
         ]
         with self.assertRaisesRegex(ValueError, "共用数据 ID"):
             build_bridge_parameters([can0], devices)
@@ -107,8 +112,8 @@ class BuildBridgeParametersTest(unittest.TestCase):
     def test_rejects_duplicate_command_id_on_same_channel(self) -> None:
         can0 = CanBus("can0", 0)
         devices = [
-            _sensor("left", can0, 0x10, 0x15, "/can0/left/rx"),
-            _sensor("right", can0, 0x10, 0x18, "/can0/right/rx"),
+            _sensor("left", can0, 0x10, 0x15),
+            _sensor("right", can0, 0x10, 0x18),
         ]
         with self.assertRaisesRegex(ValueError, "共用 cmd_id"):
             build_bridge_parameters([can0], devices)
@@ -116,8 +121,8 @@ class BuildBridgeParametersTest(unittest.TestCase):
     def test_rejects_command_and_data_id_collision(self) -> None:
         can0 = CanBus("can0", 0)
         devices = [
-            _sensor("left", can0, 0x10, 0x15, "/can0/left/rx"),
-            _sensor("right", can0, 0x16, 0x18, "/can0/right/rx"),
+            _sensor("left", can0, 0x10, 0x15),
+            _sensor("right", can0, 0x16, 0x18),
         ]
         with self.assertRaisesRegex(ValueError, "数据 ID 冲突"):
             build_bridge_parameters([can0], devices)
@@ -126,30 +131,42 @@ class BuildBridgeParametersTest(unittest.TestCase):
         can0 = CanBus("can0", 0)
         can1 = CanBus("can1", 1)
         devices = [
-            _sensor("left", can0, 0x10, 0x15, "/can0/left/rx"),
-            _sensor("right", can1, 0x10, 0x15, "/can1/right/rx"),
+            _sensor("left", can0, 0x10, 0x15),
+            _sensor("right", can1, 0x10, 0x15),
         ]
         build_bridge_parameters([can0, can1], devices)
 
-    def test_rejects_duplicate_dedicated_topic(self) -> None:
+    def test_rejects_duplicate_wrench_topic(self) -> None:
         can0 = CanBus("can0", 0)
         devices = [
-            _sensor("left", can0, 0x10, 0x15, "/can0/ft/rx"),
-            _sensor("right", can0, 0x11, 0x18, "/can0/ft/rx"),
+            _sensor("left", can0, 0x10, 0x15),
+            Kwr57Device(
+                name="right", bus=can0, cmd_id=0x11, data_base_id=0x18,
+                wrench_topic="/left/wrench_raw", frame_id="right_link"),
         ]
-        with self.assertRaisesRegex(ValueError, "专属 RX 话题重复"):
+        with self.assertRaisesRegex(ValueError, "Wrench 话题重复"):
             build_bridge_parameters([can0], devices)
+
+    def test_rejects_wrench_and_frame_topic_collision(self) -> None:
+        can0 = CanBus("can0", 0)
+        sensor = Kwr57Device(
+            name="ft", bus=can0, cmd_id=0x10, data_base_id=0x15,
+            wrench_topic="/can0/grip/rx", frame_id="ft_link")
+        gripper = _gripper(
+            "grip", can0, 0x01, 0x101, "/can0/grip/rx")
+        with self.assertRaisesRegex(ValueError, "话题冲突"):
+            build_bridge_parameters([can0], [sensor], [gripper])
 
     def test_rejects_unconfigured_bus(self) -> None:
         configured_bus = CanBus("can0", 0)
         wrong_bus = CanBus("can0", 1)
-        device = _sensor("left", wrong_bus, 0x10, 0x15, "/can0/left/rx")
+        device = _sensor("left", wrong_bus, 0x10, 0x15)
         with self.assertRaisesRegex(ValueError, "未配置的总线"):
             build_bridge_parameters([configured_bus], [device])
 
     def test_rejects_gripper_id_colliding_with_kwr57_data(self) -> None:
         can0 = CanBus("can0", 0)
-        sensor = _sensor("ft", can0, 0x10, 0x15, "/can0/ft/rx")
+        sensor = _sensor("ft", can0, 0x10, 0x15)
         gripper = _gripper("grip", can0, 0x01, 0x16, "/can0/grip/rx")
         with self.assertRaisesRegex(ValueError, "KWR57.*数据 ID 冲突"):
             build_bridge_parameters([can0], [sensor], [gripper])
@@ -189,7 +206,7 @@ class BuildBridgeParametersTest(unittest.TestCase):
 
     def test_rejects_kwr57_using_gloria_broadcast_id(self) -> None:
         can0 = CanBus("can0", 0)
-        sensor = _sensor("ft", can0, 0x10, 0x7FD, "/can0/ft/rx")
+        sensor = _sensor("ft", can0, 0x10, 0x7FD)
         gripper = _gripper("grip", can0, 0x01, 0x101, "/can0/grip/rx")
         with self.assertRaisesRegex(ValueError, "固定请求 ID 0x7FF"):
             build_bridge_parameters([can0], [sensor], [gripper])
@@ -202,15 +219,18 @@ class BuildBridgeParametersTest(unittest.TestCase):
             _gripper("right", can1, 0x01, 0x101, "/can1/grip/rx"),
         ]
 
-        routes = build_bridge_parameters(
-            [can0, can1], [], grippers)["rx_routes"]
+        routes = cast(
+            List[str],
+            build_bridge_parameters(
+                [can0, can1], [], grippers)["rx_routes"],
+        )
 
         self.assertIn("0:0x0:/can0/grip/rx", routes)
         self.assertIn("1:0x0:/can1/grip/rx", routes)
 
     def test_rejects_shared_zero_colliding_with_kwr57_data(self) -> None:
         can0 = CanBus("can0", 0)
-        sensor = _sensor("ft", can0, 0x10, 0x00, "/can0/ft/rx")
+        sensor = _sensor("ft", can0, 0x10, 0x00)
         gripper = _gripper("grip", can0, 0x03, 0x103, "/can0/grip/rx")
         with self.assertRaisesRegex(ValueError, "共享反馈 ID"):
             build_bridge_parameters([can0], [sensor], [gripper])

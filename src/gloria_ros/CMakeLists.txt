@@ -4,7 +4,6 @@ project(gloria_ros)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-ament_get_python_install_dir(PYTHON_INSTALL_DIR)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MitCommand.msg"
@@ -23,6 +22,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/gripper_node
+  scripts/web_gripper
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -34,6 +34,8 @@ install(DIRECTORY
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_can_feedback test/test_can_feedback.py)
+  ament_add_pytest_test(test_gripper_state test/test_gripper_state.py)
+  ament_add_pytest_test(test_web_gripper test/test_web_gripper.py)
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

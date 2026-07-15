@@ -34,9 +34,14 @@ class Kwr57Device:
     bus: CanBus
     cmd_id: int
     data_base_id: int
-    rx_topic: str
     wrench_topic: str
     frame_id: str
+    period_ms: int = 1
+    sample_rate_hz: int = 1000
+    publish_rate: float = 0.0
+    use_si: bool = False
+    autostart: bool = True
+    tare_on_start: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -46,17 +51,38 @@ class Kwr57Device:
         if not 0 <= self.data_base_id <= 0x7FD:
             raise ValueError(
                 f"data_base_id 必须在 0~0x7FD 之间，收到 0x{self.data_base_id:X}")
-        for label, topic in (("rx_topic", self.rx_topic),
-                             ("wrench_topic", self.wrench_topic)):
-            if not topic.startswith("/") or topic == "/":
-                raise ValueError(f"{label} 必须是绝对 ROS 话题，收到 {topic!r}")
+        if not self.wrench_topic.startswith("/") or self.wrench_topic == "/":
+            raise ValueError(
+                f"wrench_topic 必须是绝对 ROS 话题，收到 {self.wrench_topic!r}")
         if not self.frame_id:
             raise ValueError("frame_id 不能为空")
+        if self.period_ms < 0:
+            raise ValueError("period_ms 不能小于 0")
+        if self.publish_rate < 0.0:
+            raise ValueError("publish_rate 不能小于 0")
 
     @property
     def data_ids(self) -> Tuple[int, int, int]:
         return (self.data_base_id, self.data_base_id + 1,
                 self.data_base_id + 2)
+
+    @property
+    def handler_config(self) -> Dict[str, object]:
+        """Return the in-process handler config derived from this device."""
+        return {
+            "channel_id": self.bus.channel_id,
+            "node_name": self.name,
+            "cmd_id": self.cmd_id,
+            "data_base_id": self.data_base_id,
+            "topic": self.wrench_topic,
+            "frame_id": self.frame_id,
+            "period_ms": self.period_ms,
+            "sample_rate_hz": self.sample_rate_hz,
+            "publish_rate": self.publish_rate,
+            "use_si": self.use_si,
+            "autostart": self.autostart,
+            "tare_on_start": self.tare_on_start,
+        }
 
 
 @dataclass(frozen=True)
@@ -136,9 +162,10 @@ def build_bridge_parameters(
         channels[bus.channel_id] = bus
 
     routes: List[str] = []
-    route_owners: Dict[Tuple[int, int], str] = {}
+    kwr57_data_owners: Dict[Tuple[int, int], str] = {}
     command_owners: Dict[Tuple[int, int], str] = {}
     device_names = set()
+    wrench_topics = set()
     rx_topics = set()
     for device in kwr57_devices:
         configured_bus = buses_by_name.get(device.bus.name)
@@ -147,10 +174,18 @@ def build_bridge_parameters(
                 f"设备 {device.name!r} 使用了未配置的总线 {device.bus!r}")
         if device.name in device_names:
             raise ValueError(f"KWR57 节点名重复: {device.name!r}")
-        if device.rx_topic in rx_topics:
-            raise ValueError(f"KWR57 专属 RX 话题重复: {device.rx_topic!r}")
+        if device.wrench_topic in wrench_topics:
+            raise ValueError(
+                f"KWR57 Wrench 话题重复: {device.wrench_topic!r}")
+        if device.wrench_topic in {
+                topic
+                for bus in buses
+                for topic in (bus.rx_topic, bus.tx_topic)}:
+            raise ValueError(
+                f"KWR57 Wrench 话题与 CAN 总线话题冲突: "
+                f"{device.wrench_topic!r}")
         device_names.add(device.name)
-        rx_topics.add(device.rx_topic)
+        wrench_topics.add(device.wrench_topic)
 
         command_key = (device.bus.channel_id, device.cmd_id)
         previous_command_owner = command_owners.get(command_key)
@@ -158,7 +193,7 @@ def build_bridge_parameters(
             raise ValueError(
                 f"KWR57 {previous_command_owner!r} 与 {device.name!r} "
                 f"在通道 {device.bus.channel_id} 上共用 cmd_id=0x{device.cmd_id:X}")
-        previous_data_owner = route_owners.get(command_key)
+        previous_data_owner = kwr57_data_owners.get(command_key)
         if previous_data_owner is not None:
             raise ValueError(
                 f"KWR57 {device.name!r} 的 cmd_id=0x{device.cmd_id:X} 与 "
@@ -172,14 +207,12 @@ def build_bridge_parameters(
                 raise ValueError(
                     f"KWR57 {device.name!r} 的数据 ID 0x{can_id:X} 与 "
                     f"{previous_command_owner!r} 的 cmd_id 冲突")
-            previous_route_owner = route_owners.get(route_key)
-            if previous_route_owner is not None:
+            previous_data_owner = kwr57_data_owners.get(route_key)
+            if previous_data_owner is not None:
                 raise ValueError(
-                    f"KWR57 {previous_route_owner!r} 与 {device.name!r} "
+                    f"KWR57 {previous_data_owner!r} 与 {device.name!r} "
                     f"在通道 {device.bus.channel_id} 上共用数据 ID 0x{can_id:X}")
-            route_owners[route_key] = device.name
-            routes.append(
-                f"{device.bus.channel_id}:0x{can_id:X}:{device.rx_topic}")
+            kwr57_data_owners[route_key] = device.name
 
     gloria_active_owners: Dict[Tuple[int, int], str] = {}
     gloria_payload_id_owners: Dict[Tuple[int, int], str] = {}
@@ -192,11 +225,15 @@ def build_bridge_parameters(
             raise ValueError(f"设备节点名重复: {device.name!r}")
         if device.rx_topic in rx_topics:
             raise ValueError(f"设备专属 RX 话题重复: {device.rx_topic!r}")
+        if device.rx_topic in wrench_topics:
+            raise ValueError(
+                f"设备 RX 话题与 KWR57 Wrench 话题冲突: "
+                f"{device.rx_topic!r}")
         device_names.add(device.name)
         rx_topics.add(device.rx_topic)
 
         broadcast_key = (device.bus.channel_id, 0x7FF)
-        reserved_owner = (route_owners.get(broadcast_key)
+        reserved_owner = (kwr57_data_owners.get(broadcast_key)
                           or command_owners.get(broadcast_key))
         if reserved_owner is not None:
             raise ValueError(
@@ -214,7 +251,7 @@ def build_bridge_parameters(
 
         for can_id in device.active_ids:
             key = (device.bus.channel_id, can_id)
-            kwr57_data_owner = route_owners.get(key)
+            kwr57_data_owner = kwr57_data_owners.get(key)
             if kwr57_data_owner is not None:
                 raise ValueError(
                     f"Gloria-M {device.name!r} 的活动 ID 0x{can_id:X} 与 "
@@ -234,7 +271,8 @@ def build_bridge_parameters(
         for can_id in device.rx_ids:
             key = (device.bus.channel_id, can_id)
             if can_id == 0x00:
-                kwr57_owner = route_owners.get(key) or command_owners.get(key)
+                kwr57_owner = (kwr57_data_owners.get(key)
+                               or command_owners.get(key))
                 if kwr57_owner is not None:
                     raise ValueError(f"Gloria-M 共享反馈 ID 0x0 与 KWR57 {kwr57_owner!r} 的活动 ID 冲突")
             routes.append(

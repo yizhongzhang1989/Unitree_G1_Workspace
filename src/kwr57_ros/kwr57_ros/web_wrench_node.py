@@ -29,6 +29,7 @@ from typing import Optional
 
 import rclpy
 from geometry_msgs.msg import WrenchStamped
+from rclpy.logging import get_logger
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 
@@ -49,8 +50,9 @@ def _load_web_wrench_module() -> ModuleType:
             f"could not find web viewer at {web_path}. Install the library "
             "editable: pip install -e <kwr57_can_sensor repo> (see ros2 README).")
     spec = importlib.util.spec_from_file_location("kwr57_web_wrench_ui", web_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load web viewer module from {web_path}")
     module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     # Register before exec: Python 3.8 @dataclass resolves field types via
     # sys.modules[cls.__module__], which is None for an unregistered module.
     sys.modules[spec.name] = module
@@ -67,12 +69,22 @@ class WebWrenchNode(Node):
         self.declare_parameter("port", 8765)
         self.declare_parameter("force_scale", 10.0)
         self.declare_parameter("torque_scale", 0.25)
+        self.declare_parameter("ui_rate", 20.0)
 
-        topic = str(self.get_parameter("topic").value)
-        host = str(self.get_parameter("host").value)
-        port = int(self.get_parameter("port").value)
-        force_scale = float(self.get_parameter("force_scale").value)
-        torque_scale = float(self.get_parameter("torque_scale").value)
+        topic = self.get_parameter(
+            "topic").get_parameter_value().string_value
+        host = self.get_parameter(
+            "host").get_parameter_value().string_value
+        port = self.get_parameter(
+            "port").get_parameter_value().integer_value
+        force_scale = self.get_parameter(
+            "force_scale").get_parameter_value().double_value
+        torque_scale = self.get_parameter(
+            "torque_scale").get_parameter_value().double_value
+        ui_rate = self.get_parameter(
+            "ui_rate").get_parameter_value().double_value
+        if ui_rate <= 0.0:
+            raise ValueError("ui_rate must be greater than zero")
 
         self._ui = _load_web_wrench_module()
         self._state = self._ui.SharedState(
@@ -92,8 +104,11 @@ class WebWrenchNode(Node):
         )
         self._sub = self.create_subscription(WrenchStamped, topic, self._on_wrench, qos)
 
-        self._count = 0
-        self._t0 = 0.0
+        self._window_count = 0
+        self._window_start = time.monotonic()
+        self._hz = 0.0
+        self._latest: Optional[WrenchStamped] = None
+        self._ui_timer = self.create_timer(1.0 / ui_rate, self._update_ui)
 
         handler = self._ui.make_handler(self._state)
         self._httpd = ThreadingHTTPServer((host, port), handler)
@@ -106,15 +121,23 @@ class WebWrenchNode(Node):
 
     def _on_wrench(self, msg: WrenchStamped) -> None:
         now = time.monotonic()
-        if self._count == 0:
-            self._t0 = now
-        self._count += 1
-        elapsed = now - self._t0
-        hz = self._count / elapsed if elapsed > 0 else 0.0
+        self._window_count += 1
+        self._latest = msg
+        elapsed = now - self._window_start
+        if elapsed >= 1.0:
+            self._hz = self._window_count / elapsed
+            self._window_count = 0
+            self._window_start = now
+
+    def _update_ui(self) -> None:
+        msg = self._latest
+        if msg is None:
+            return
         f = msg.wrench.force
         t = msg.wrench.torque
         wrench = Wrench(f.x, f.y, f.z, t.x, t.y, t.z)
-        self._ui.update_payload(self._state, wrench, hz, f"ros {hz:5.1f} Hz")
+        self._ui.update_payload(
+            self._state, wrench, self._hz, f"ros {self._hz:5.1f} Hz")
 
     def destroy_node(self) -> bool:
         try:
@@ -131,7 +154,7 @@ def main() -> None:
     try:
         node = WebWrenchNode()
     except Exception as exc:  # noqa: BLE001
-        rclpy.logging.get_logger("kwr57_web_wrench").fatal(str(exc))
+        get_logger("kwr57_web_wrench").fatal(str(exc))
         if rclpy.ok():
             rclpy.shutdown()
         return

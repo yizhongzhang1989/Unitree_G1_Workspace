@@ -3,7 +3,7 @@
 <package format="3">
   <name>robot_bringup</name>
   <version>0.1.0</version>
-  <description>Bringup composing can_bridge_ros, KWR57 force sensors and Gloria grippers for single- or dual-bus wiring.</description>
+  <description>Bringup for the CAN bridge, KWR57 sensors, Gloria grippers and left/right IP cameras.</description>
 
   <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
   <license>MIT</license>
@@ -11,8 +11,13 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <exec_depend>can_bridge_ros</exec_depend>
+  <exec_depend>camera_node</exec_depend>
   <exec_depend>kwr57_ros</exec_depend>
   <exec_depend>gloria_ros</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <test_depend>python3-pytest</test_depend>

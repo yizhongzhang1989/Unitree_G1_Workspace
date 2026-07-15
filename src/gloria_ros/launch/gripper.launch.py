@@ -1,4 +1,4 @@
-"""Launch one Gloria-M gripper device node (bridge mode)
+"""启动单个 Gloria-M 夹爪设备节点（共享 bridge 模式）
 
 需要先启动 can_bridge_ros（独占物理总线）
 
@@ -15,6 +15,7 @@ from launch_ros.descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
+    # launch 参数保持显式声明，便于命令行覆盖设备 ID 与安全边界
     args = [
         DeclareLaunchArgument("rx_topic", default_value="/can0/rx"),
         DeclareLaunchArgument("tx_topic", default_value="/can0/tx"),
@@ -23,15 +24,12 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("feedback_id", default_value="257",
                               description="CAN ID for feedback (decimal; 257 = 0x101)"),
         DeclareLaunchArgument("control_mode", default_value="mit",
-                      description="mit or pos_vel"),
+                              description="mit or pos_vel"),
         DeclareLaunchArgument("pmax", default_value="3.14"),
         DeclareLaunchArgument("vmax", default_value="10.0"),
         DeclareLaunchArgument("tmax", default_value="12.0"),
         DeclareLaunchArgument("safe_position_min", default_value="0.0"),
         DeclareLaunchArgument("safe_position_max", default_value="2.77"),
-        DeclareLaunchArgument("kp", default_value="10.0"),
-        DeclareLaunchArgument("kd", default_value="1.0"),
-        DeclareLaunchArgument("pv_velocity", default_value="1.0"),
         DeclareLaunchArgument("enable_on_start", default_value="false"),
         DeclareLaunchArgument("verify_limits_on_configure", default_value="true"),
         DeclareLaunchArgument("allow_set_zero", default_value="false"),
@@ -43,6 +41,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("node_name", default_value="gloria_gripper"),
         DeclareLaunchArgument("namespace", default_value=""),
     ]
+    # ParameterValue 固定字符串与数值类型，避免 launch 字符串被错误推断
     node = Node(
         package="gloria_ros",
         executable="gripper_node",
@@ -64,10 +63,6 @@ def generate_launch_description() -> LaunchDescription:
                 LaunchConfiguration("safe_position_min"), value_type=float),
             "safe_position_max": ParameterValue(
                 LaunchConfiguration("safe_position_max"), value_type=float),
-            "kp": ParameterValue(LaunchConfiguration("kp"), value_type=float),
-            "kd": ParameterValue(LaunchConfiguration("kd"), value_type=float),
-            "pv_velocity": ParameterValue(
-                LaunchConfiguration("pv_velocity"), value_type=float),
             "enable_on_start": ParameterValue(
                 LaunchConfiguration("enable_on_start"), value_type=bool),
             "verify_limits_on_configure": ParameterValue(

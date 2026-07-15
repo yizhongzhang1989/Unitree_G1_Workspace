@@ -3,5 +3,6 @@
 from gloria_ros.gripper_node import main
 
 
+# 入口脚本保持最薄，只把 ROS 可执行名转发到节点 main
 if __name__ == "__main__":
     main()

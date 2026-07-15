@@ -1,121 +1,143 @@
-# robot_bringup
+# `robot_bringup`
 
-`robot_bringup` 是末端设备系统的部署编排包。它不实现 CAN 协议或设备驱动，而是把
-`can_bridge_ros`、`kwr57_ros` 和 `gloria_ros` 按实际接线组合成一套可启动系统。
+`robot_bringup` 只负责最终硬件拓扑和启动编排，不实现 CAN、设备协议或视频处理。生产 KWR57 固定使用进程内 handler；Gloria-M 使用专属 `can_msgs/Frame` 话题；左右 IP 相机分别由独立的 `camera_node` 进程处理。物理适配器参数来自 `can_bridge_ros/config/*.yaml`，CAN 设备 ID、输出和路由来自 launch 中的声明式清单，相机部署参数集中在 `robot_bringup/nodes.py`。
 
-## 作用
+## 生产结构
 
-- 声明 CAN 通道与 ROS 总线名的对应关系。
-- 用一份设备清单声明每台 KWR57 和 Gloria-M 的总线、CAN ID、专属 RX 话题及节点参数。
-- 根据设备清单生成 `can_bridge_ros` 的启动参数 `rx_routes`。
-- 使用同一批设备对象创建 KWR57 和 Gloria-M 节点，避免 bridge 路由与节点参数分别维护。
-- 在启动前检查重复节点名、重复专属话题，以及同一通道上的关键 CAN ID 冲突。
+`dual_bus.launch.py`（也是 `web_demo.launch.py` 使用的设备拓扑）的实际数据流如下：
 
-物理适配器参数仍由 `can_bridge_ros/config/single_bus.yaml` 和 `dual_bus.yaml` 提供。这两份
-YAML 只保存适配器、通道、波特率和队列深度，不包含机器人设备名称或 CAN ID。
+```mermaid
+flowchart LR
+  subgraph HW["物理硬件"]
+    CAN["物理适配器<br/>CANalyst-II<br/>CAN0 / CAN1"]
+    KF1["物理设备<br/>KWR57 左"]
+    KF2["物理设备<br/>KWR57 右"]
+    GM1["物理设备<br/>Gloria-M 左"]
+    GM2["物理设备<br/>Gloria-M 右"]
+    CL["物理设备<br/>左手 IP 相机<br/>192.168.123.97"]
+    CR["物理设备<br/>右手 IP 相机<br/>192.168.123.98"]
+    CAN <-->|"CAN0"| KF1
+    CAN <-->|"CAN1"| KF2
+    CAN <-->|"CAN0"| GM1
+    CAN <-->|"CAN1"| GM2
+  end
 
-## 路由模型
+  subgraph BP["bridge 进程"]
+    B["ROS 节点<br/>/can_bridge_ros<br/>can_bridge_ros/bridge_node"]
+    K1["ROS 节点<br/>/ft_arm0<br/>kwr57_ros/KWR57DeviceNode"]
+    K2["ROS 节点<br/>/ft_arm1<br/>kwr57_ros/KWR57DeviceNode"]
+    B <-->|"进程内 CAN 帧 / 命令"| K1
+    B <-->|"进程内 CAN 帧 / 命令"| K2
+  end
 
-bringup 在 launch 文件执行时构造：
+  subgraph GP["独立 Gloria ROS 节点"]
+    G1["ROS 节点<br/>/grip_arm0<br/>gloria_ros/gripper_node"]
+    G2["ROS 节点<br/>/grip_arm1<br/>gloria_ros/gripper_node"]
+  end
 
-- `CanBus`：ROS 总线名和 python-can 通道编号；
-- `Kwr57Device`：命令 ID、连续三个数据 ID、专属 RX 话题和 wrench 输出；
-- `GloriaDevice`：命令 ID、反馈 ID、专属 RX 话题和夹爪节点参数。
+  CAN <-->|"python-can"| B
+  B -->|"/can0/grip_arm0/rx<br/>can_msgs/Frame"| G1
+  B -->|"/can1/grip_arm1/rx<br/>can_msgs/Frame"| G2
+  G1 -->|"/can0/tx<br/>can_msgs/Frame"| B
+  G2 -->|"/can1/tx<br/>can_msgs/Frame"| B
 
-`build_bridge_parameters()` 将清单转换成 bridge 参数：
+  WEB["ROS 节点<br/>/robot_web_dashboard<br/>robot_bringup/web_dashboard"]
+  K1 -->|"/arm0/wrench_raw<br/>geometry_msgs/WrenchStamped"| WEB
+  K2 -->|"/arm1/wrench_raw<br/>geometry_msgs/WrenchStamped"| WEB
+  G1 -->|"/grip_arm0/joint_states<br/>sensor_msgs/JointState"| WEB
+  G2 -->|"/grip_arm1/joint_states<br/>sensor_msgs/JointState"| WEB
 
-```text
-channel_id:can_id:dedicated_rx_topic
+  CN1["ROS 节点<br/>/camera_left<br/>camera_node/camera_node"]
+  CN2["ROS 节点<br/>/camera_right<br/>camera_node/camera_node"]
+  CL -->|"RTSP"| CN1
+  CR -->|"RTSP"| CN2
+  CN1 -->|"MJPEG / status"| WEB
+  CN2 -->|"MJPEG / status"| WEB
 ```
 
-这些参数在 `can_bridge_ros` 节点启动时解析一次，系统运行期间保持不变。这里的“运行时
-路由支持”是指 bridge 在接收循环中按照启动时建立的路由表转发帧，并不是节点运行后动态
-增删路由。
+图中每个写有“ROS 节点”的方框都对应一个实际 ROS 2 node。`/can_bridge_ros`、`/ft_arm0` 和 `/ft_arm1` 是同一 bridge 进程中的三个节点；两个 KWR57 节点通过进程内 handler 直接收发 CAN 帧。`/grip_arm0` 和 `/grip_arm1` 是独立的 Gloria 节点，bridge 将命中的 CAN 帧改发到各自的专属 RX 话题，节点完成协议解码后再分别发布 `JointState`。连线文字表示传输方式或 ROS 话题，不表示节点。
 
-命中路由的普通 CAN 数据帧只发布到专属话题，不再进入默认 `/canX/rx`；未命中的帧仍发布
-到默认话题。相同的 `channel + CAN ID` 可以配置多个不同目标，用于协议要求的扇出。
-Gloria-M 兼容 CAN ID `0x000` 返回状态，因此同总线多个夹爪都会接收这一个共享 ID，再按
-payload `Data[0]` 的低 4 位设备号过滤。寄存器回包不携带可用于共享 ID 分流的设备号，
-因此生产 bringup 要求每台夹爪使用非零专属 `feedback_id`；CAN ID `0x000` 只作为状态
-反馈兼容路径。`command_id` 的低 4 位也不能为 `0`，该值为共享反馈协议保留。其他专属
-ID 不会在夹爪之间广播。
+每个 `Kwr57Device` 生成一个 handler JSON、三个 `(channel, CAN ID)` 注册、Wrench 输出参数和 ROS 服务；每个 `GloriaDevice` 生成专属 RX 路由和夹爪节点参数。启动前会检查总线、节点名、Wrench 话题以及同通道 CAN ID 冲突。
 
-## 性能
+## 最终硬件清单
 
-没有专属路由时，每个设备节点都会接收并过滤整条总线的所有 ROS CAN 消息。两个 1 kHz
-KWR57 会产生约 6000 frame/s，这会让每个 Python 节点承担大量无关 DDS 回调和数据复制。
+`single_bus.launch.py` 描述 CAN0 上的最终四设备拓扑：
 
-启用 bringup 路由后：
-
-- 每台 KWR57 只接收自己的三个数据 ID；
-- 每台 Gloria-M 只接收自己的反馈 ID、兼容命令 ID 和共享 `0x000`；
-- 未归属设备的帧保留在默认 `/canX/rx`；
-- bridge 热路径仍是一次字典查询，仅在协议确实需要扇出时多做目标发布。
-
-因此专属路由通常会明显降低 Python/DDS 负载，尤其能防止 KWR57 高频数据持续唤醒夹爪
-节点。路由来源是 YAML、launch 还是其他启动参数不会改变查询性能。
-
-## 当前拓扑
-
-### 单总线
-
-`single_bus.launch.py` 将四个设备放在 CANalyst-II 通道 0：
-
-| 设备 | 命令 ID | 接收/数据 ID | 专属 RX |
+| 设备 | 命令 ID | 数据/反馈 ID | 输出或 RX |
 |---|---:|---|---|
-| `ft_left` | `0x10` | `0x15/0x16/0x17` | `/can0/ft_left/rx` |
-| `ft_right` | `0x11` | `0x18/0x19/0x1A` | `/can0/ft_right/rx` |
+| `ft_left` | `0x10` | `0x15/0x16/0x17` | `/ft_left/wrench_raw` |
+| `ft_right` | `0x11` | `0x18/0x19/0x1A` | `/ft_right/wrench_raw` |
 | `grip_left` | `0x01` | `0x101/0x01/0x000` | `/can0/grip_left/rx` |
 | `grip_right` | `0x02` | `0x102/0x02/0x000` | `/can0/grip_right/rx` |
 
-同一总线上的设备活动 ID 必须与实物配置一致且不能产生非预期冲突。
-Gloria-M 的 `command_id & 0x0F` 必须非零且唯一，固定请求 ID `0x7FF` 不能被任何同通道
-设备占用。
+网络相机不占用 CAN，总线接线模式变化时仍启动同一组相机：
 
-### 双总线
+| 设备 | IP | Web 端口 | ROS 图像话题 |
+|---|---|---:|---|
+| `camera_left` | `192.168.123.97` | `8010` | `/camera_left/image_raw` |
+| `camera_right` | `192.168.123.98` | `8011` | `/camera_right/image_raw` |
 
-`dual_bus.launch.py` 每条总线放一台 KWR57 和一台 Gloria-M：
+两台相机当前均使用 `rtsp://admin:123456@<IP>/stream0`，详细接口和排障方式见 [`camera_node/README.zh.md`](../camera_node/README.zh.md)。
 
-| 总线 | 设备 | 命令 ID | 接收/数据 ID | 专属 RX |
-|---|---|---:|---|---|
-| `can0` / 通道 0 | `ft_arm0` | `0x10` | `0x15/0x16/0x17` | `/can0/ft_arm0/rx` |
-| `can0` / 通道 0 | `grip_arm0` | `0x01` | `0x101/0x01/0x000` | `/can0/grip_arm0/rx` |
-| `can1` / 通道 1 | `ft_arm1` | `0x10` | `0x15/0x16/0x17` | `/can1/ft_arm1/rx` |
-| `can1` / 通道 1 | `grip_arm1` | `0x01` | `0x101/0x01/0x000` | `/can1/grip_arm1/rx` |
+`dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
 
-不同物理 CAN 通道可以复用相同 CAN ID。
+当前联调台架使用 `dual_bus.launch.py` 的完整四设备拓扑：CAN0 和 CAN1 各接一台 KWR57 与一台 Gloria-M。默认 1 kHz 力传感器流、100 Hz 夹爪往返运动的总线占用与实测见 [`CAN_BUS_LOAD.md`](CAN_BUS_LOAD.md)。
 
 ## 启动
 
 ```bash
 source scripts/env.sh
-
-ros2 launch robot_bringup single_bus.launch.py
-ros2 launch robot_bringup dual_bus.launch.py
-```
-
-也可以使用工作区脚本：
-
-```bash
 bash scripts/run.sh single
 bash scripts/run.sh dual
 ```
 
-## 修改部署
+以上两个入口都会同时启动左右相机。浏览器通过 `http://<机器人 IP>:8010` 和 `http://<机器人 IP>:8011` 查看视频；左右相机均位于 `192.168.123.0/24`，相机主机必须具备到该子网的路由。
 
-1. 在对应 launch 文件中修改或新增 `CanBus`、`Kwr57Device`、`GloriaDevice`。
-2. 确保清单中的 CAN ID 与实物一致；Gloria-M 使用非零 `feedback_id`，同通道低 4 位
-	设备号唯一，并保留固定请求 ID `0x7FF`。
-3. 不要把设备路由写入 `can_bridge_ros/config/*.yaml`。
-4. 重新启动 bringup；不支持系统运行中动态切换路由。
+## 双手 Web 联调
 
-因为 bridge 参数和设备节点参数来自同一对象，修改 `data_base_id`、`feedback_id` 或
-`rx_topic` 后无需在其他文件重复维护映射。
+从干净环境一次启动双总线四设备和统一网页：
 
-## 文件
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup web_demo.launch.py
+```
 
-- `launch/single_bus.launch.py`：单总线设备清单。
-- `launch/dual_bus.launch.py`：双总线设备清单。
-- `robot_bringup/topology.py`：设备模型、路由生成和冲突检查。
-- `robot_bringup/nodes.py`：把设备模型转换为 ROS 2 launch Node。
-- `test/test_topology.py`：无 ROS 依赖的拓扑单元测试。
+Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅接收原有两路 `WrenchStamped`，高频回调只保存最新序列化样本并计数，HTTP 快照时才反序列化。页面显示 3 秒平均接收频率；最大负载实测左右均约 1 kHz，且没有修改 KWR57 话题或消息。该平均值不代表每个样本都满足 1 ms deadline。
+
+### ROS 夹爪消息发布
+
+双总线生产拓扑中的 `/grip_arm0` 和 `/grip_arm1` 默认使用 MIT 模式。往返控制在反馈位置进入目标 ±0.10 rad 时立即换向，否则最迟 3 秒换向。夹爪节点不会自动重发上一次运动命令，停止发布后仍须显式调用对应的 `disable` 服务。消息、服务和安全参数见 [`gloria_ros/README.md`](../gloria_ros/README.md)。
+
+浏览器打开 `http://<机器人 IP>:8770`。页面固定为 CAN0 左手、CAN1 右手两栏，每栏同时显示手部相机画面、KWR57 六轴数据、Gloria-M 位置/速度/力矩以及设备在线状态。夹爪只开放 MIT 单次目标和 MIT 往返；往返会先调用设备现有的 `enable` 服务，停止时自动调用 `disable`。
+
+网页节点通过同源 URL `/api/cameras/<left|right>/video_feed` 代理两台相机的 MJPEG，因此远程访问只需转发 `8770`。网页后台独立探测相机 `/status`；相机未连接、启动失败或中途断流时，对应栏显示离线占位，KWR57、夹爪及另一台相机不受影响。`camera_node` 默认每 5 秒在后台尝试恢复期望运行的 RTSP 流，相机后接入或网络恢复后页面会自动重新加载画面；通过相机 Web 的“停止”操作主动停流时不会自动拉起。
+
+如果 `dual_bus.launch.py` 或四个设备节点已经启动，只追加网页节点，不要再次启动 bridge：
+
+```bash
+ros2 run robot_bringup web_dashboard
+```
+
+单独启动网页节点时，默认仍连接本机 `8010/8011`。相机服务在其他主机或端口时可设置 `left_camera_url`、`right_camera_url`；`web_demo.launch.py` 还暴露 `camera_timeout_s` 和 `camera_poll_period_s`。
+
+远程机器可使用 SSH 端口转发：
+
+```bash
+ssh -L 8770:127.0.0.1:8770 user@robot
+```
+
+双总线四设备接线下，页面左右两栏都应在线；单侧离线时按页面显示的总线和设备节点检查对应通道。
+
+`robot_bringup` 不提供 KWR57 ROS Frame 回退开关。兼容结构只保留在 `kwr57_ros/web_demo.launch.py use_frame_handler:=false` 和 `kwr57_ros/ft_sensor.launch.py`，原因与 PC2 性能数据见 [`kwr57_ros/README.md`](../kwr57_ros/README.md)。
+
+## 修改拓扑
+
+CAN 拓扑只修改 `launch/single_bus.launch.py` 或 `launch/dual_bus.launch.py` 中的 `CanBus`、`Kwr57Device` 和 `GloriaDevice` 清单。不要把设备 ID 写入 bridge 的物理 YAML，也不要为生产 KWR57 增加 `rx_routes`；同一份清单会生成 handler、Gloria 路由和节点参数。左右相机的 IP、RTSP URL、Web 端口和图像话题由 `robot_bringup/nodes.py` 中的两个 `camera(...)` 调用定义。
+
+| 文件 | 职责 |
+|---|---|
+| `robot_bringup/topology.py` | 设备模型、参数生成和冲突检查 |
+| `robot_bringup/nodes.py` | 生成 bridge、Gloria 与左右相机 launch actions |
+| `launch/*.launch.py` | 最终硬件清单 |
+| `test/test_topology.py` | 无硬件拓扑回归测试 |
+| `test/test_camera_bringup.py` | 左右相机节点参数与 bringup 清单回归测试 |
