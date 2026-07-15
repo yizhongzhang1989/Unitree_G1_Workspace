@@ -62,6 +62,28 @@ def gripper(device: GloriaDevice) -> Node:
         }])
 
 
+def camera(side: str, ip_address: str, server_port: int) -> Node:
+    """由左右手部署参数构造一个 IP 相机节点。"""
+    camera_name = f"camera_{side}"
+    return Node(
+        package="camera_node", executable="camera_node",
+        name=camera_name, output="screen", emulate_tty=True,
+        parameters=[{
+            "camera_name": camera_name,
+            "rtsp_url_main": (
+                f"rtsp://admin:123456@{ip_address}/stream0"),
+            "camera_ip": ip_address,
+            "server_port": server_port,
+            "stream_fps": 25,
+            "jpeg_quality": 75,
+            "max_width": 800,
+            "publish_ros_image": True,
+            "ros_topic_name": f"/{camera_name}/image_raw",
+            "auto_reconnect": True,
+            "reconnect_interval_s": 5.0,
+        }])
+
+
 def bringup_actions(
         config: str,
         buses: Sequence[CanBus],
@@ -71,4 +93,6 @@ def bringup_actions(
     return [
         bridge(config, buses, kwr57_devices, gloria_devices),
         *(gripper(device) for device in gloria_devices),
+        camera("left", "192.168.123.97", 8010),
+        camera("right", "192.168.123.98", 8011),
     ]

@@ -130,7 +130,7 @@
 
     .stream-strip {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       margin-top: 14px;
       border: 1px solid var(--line-strong);
       background: rgba(255, 254, 248, 0.94);
@@ -225,7 +225,7 @@
 
     .hand-health {
       display: grid;
-      grid-template-columns: repeat(2, minmax(72px, 1fr));
+      grid-template-columns: repeat(3, minmax(72px, 1fr));
       gap: 7px;
     }
 
@@ -261,6 +261,54 @@
 
     .device-section {
       border-top: 1px solid var(--line);
+    }
+
+    .camera-stage {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      overflow: hidden;
+      background: #151a1b;
+    }
+
+    .camera-feed {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .camera-placeholder {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-content: center;
+      gap: 7px;
+      padding: 20px;
+      color: #e7ece9;
+      background:
+        linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+        #151a1b;
+      background-size: 22px 22px;
+      text-align: center;
+    }
+
+    .camera-placeholder[hidden] {
+      display: none;
+    }
+
+    .camera-placeholder strong {
+      font-size: 0.82rem;
+    }
+
+    .camera-placeholder span {
+      max-width: 420px;
+      color: #aeb9b7;
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.64rem;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
     }
 
     .section-head {
@@ -617,6 +665,18 @@
     }
 
     @media (max-width: 1120px) {
+      .stream-strip {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .stream-item:nth-child(3) {
+        border-right: 0;
+      }
+
+      .stream-item:nth-child(n + 4) {
+        border-top: 1px solid var(--line);
+      }
+
       .field-grid {
         grid-template-columns: repeat(3, minmax(82px, 1fr));
       }
@@ -647,12 +707,16 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
-      .stream-item:nth-child(2) {
+      .stream-item:nth-child(2n) {
         border-right: 0;
       }
 
       .stream-item:nth-child(n + 3) {
         border-top: 1px solid var(--line);
+      }
+
+      .stream-item:nth-child(3) {
+        border-right: 1px solid var(--line);
       }
     }
 
@@ -683,7 +747,8 @@
       }
 
       .stream-item,
-      .stream-item:nth-child(2) {
+      .stream-item:nth-child(2),
+      .stream-item:nth-child(3) {
         border-right: 0;
         border-top: 1px solid var(--line);
       }
@@ -729,7 +794,12 @@
       </div>
     </header>
 
-    <section class="stream-strip" aria-label="四路数据状态">
+    <section class="stream-strip" aria-label="六路设备状态">
+      <div class="stream-item" data-stream="left-camera">
+        <i class="dot offline" aria-hidden="true"></i>
+        <span class="stream-name">左手 · 相机</span>
+        <span class="stream-rate">离线</span>
+      </div>
       <div class="stream-item" data-stream="left-sensor">
         <i class="dot offline" aria-hidden="true"></i>
         <span class="stream-name">左手 · 力传感器</span>
@@ -739,6 +809,11 @@
         <i class="dot offline" aria-hidden="true"></i>
         <span class="stream-name">左手 · 夹爪反馈</span>
         <span class="stream-rate">-- Hz</span>
+      </div>
+      <div class="stream-item" data-stream="right-camera">
+        <i class="dot offline" aria-hidden="true"></i>
+        <span class="stream-name">右手 · 相机</span>
+        <span class="stream-rate">离线</span>
       </div>
       <div class="stream-item" data-stream="right-sensor">
         <i class="dot offline" aria-hidden="true"></i>
@@ -763,6 +838,10 @@
           <p><span data-role="bus">can0</span> · <span data-role="mapping">LEFT</span></p>
         </div>
         <div class="hand-health">
+          <div class="health-cell offline" data-health="camera">
+            <span>相机</span>
+            <strong data-role="camera-health">离线</strong>
+          </div>
           <div class="health-cell offline" data-health="sensor">
             <span>传感器</span>
             <strong data-role="sensor-rate">-- Hz</strong>
@@ -773,6 +852,23 @@
           </div>
         </div>
       </header>
+
+      <section class="device-section camera-section">
+        <div class="section-head">
+          <div class="section-title">
+            <h3>手部相机</h3>
+            <span class="endpoint" data-role="camera-endpoint">等待相机服务</span>
+          </div>
+          <span class="status-label"><i class="dot offline" data-dot="camera"></i><span data-role="camera-status">未连接</span></span>
+        </div>
+        <div class="camera-stage">
+          <img class="camera-feed" data-role="camera-feed" alt="手部相机实时画面">
+          <div class="camera-placeholder" data-role="camera-placeholder">
+            <strong>相机未连接</strong>
+            <span data-role="camera-message">等待相机服务；其他设备控制不受影响</span>
+          </div>
+        </div>
+      </section>
 
       <section class="device-section">
         <div class="section-head">
@@ -869,6 +965,7 @@
     };
     const panels = {};
     const pending = new Set();
+    const cameraRetryAt = { left: 0, right: 0 };
     const WRENCH_SCALES = { force: 10, torque: 0.25 };
     const WRENCH_AXES = {
       fx: "force", fy: "force", fz: "force",
@@ -936,7 +1033,19 @@
         panels[hand] = panel;
         host.appendChild(panel);
         bindControls(hand, panel);
+        bindCamera(hand, panel);
       }
+    }
+
+    function bindCamera(hand, panel) {
+      const image = one(panel, '[data-role="camera-feed"]');
+      image.addEventListener("error", () => {
+        image.removeAttribute("src");
+        cameraRetryAt[hand] = Date.now() + 3000;
+        const placeholder = one(panel, '[data-role="camera-placeholder"]');
+        placeholder.hidden = false;
+        text(panel, "camera-message", "视频连接中断，正在重试；其他设备控制不受影响");
+      });
     }
 
     function inputNumber(panel, field) {
@@ -1038,6 +1147,40 @@
       one(item, ".stream-rate").textContent = rate(stream);
     }
 
+    function setCameraStrip(hand, camera) {
+      const item = document.querySelector(`[data-stream="${hand}-camera"]`);
+      setOnline(one(item, ".dot"), camera.connected);
+      one(item, ".stream-rate").textContent = camera.connected ? "在线" : "离线";
+    }
+
+    function updateCamera(hand, panel, camera) {
+      const connected = Boolean(camera && camera.connected);
+      const image = one(panel, '[data-role="camera-feed"]');
+      const placeholder = one(panel, '[data-role="camera-placeholder"]');
+      const videoUrl = camera && camera.video_url;
+
+      text(panel, "camera-health", connected ? "在线" : "离线");
+      text(panel, "camera-status", connected ? "画面在线" : "相机离线");
+      text(panel, "camera-endpoint", videoUrl || "等待相机服务");
+      setOnline(one(panel, '[data-health="camera"]'), connected);
+      setOnline(one(panel, '[data-dot="camera"]'), connected);
+      setCameraStrip(hand, camera || { connected: false });
+
+      if (!connected || !videoUrl) {
+        image.removeAttribute("src");
+        placeholder.hidden = false;
+        text(panel, "camera-message", camera && camera.message
+          ? camera.message
+          : "等待相机服务；其他设备控制不受影响");
+        return;
+      }
+
+      if (!image.getAttribute("src") && Date.now() >= cameraRetryAt[hand]) {
+        placeholder.hidden = true;
+        image.src = `${videoUrl}?retry=${Date.now()}`;
+      }
+    }
+
     function updateServices(panel, selector, services, running = false) {
       for (const button of panel.querySelectorAll(selector)) {
         const action = button.dataset.sensor || button.dataset.gripper;
@@ -1050,6 +1193,7 @@
       const panel = panels[hand];
       const sensor = state.sensor;
       const gripper = state.gripper;
+      const camera = state.camera || { connected: false };
       const trip = state.roundtrip || {};
 
       text(panel, "bus", state.bus || HANDS[hand].bus);
@@ -1061,6 +1205,7 @@
       text(panel, "gripper-age", age(gripper));
       text(panel, "sensor-endpoint", `${sensor.target_node} · ${sensor.topic}`);
       text(panel, "gripper-endpoint", `${gripper.target_node} · ${gripper.topic}`);
+      updateCamera(hand, panel, camera);
 
       setOnline(one(panel, '[data-health="sensor"]'), sensor.connected);
       setOnline(one(panel, '[data-health="gripper"]'), gripper.connected);

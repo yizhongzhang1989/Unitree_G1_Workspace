@@ -11,6 +11,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, build_opener
 
 import rclpy
 from geometry_msgs.msg import WrenchStamped
@@ -28,6 +29,7 @@ _MAX_REQUEST_BYTES = 64 * 1024
 _HANDS = ("left", "right")
 _SENSOR_ACTIONS = ("start", "stop", "tare", "reset_tare")
 _GRIPPER_SERVICES = ("enable", "disable", "refresh")
+_CAMERA_PATH_PREFIX = "/api/cameras/"
 
 
 def _target_name(value: str) -> str:
@@ -133,6 +135,21 @@ def _make_handler(node: Any):
             if path == "/api/state":
                 self._send_json(200, node.snapshot())
                 return
+            if (path.startswith(_CAMERA_PATH_PREFIX)
+                    and path.endswith("/video_feed")):
+                hand = path[len(_CAMERA_PATH_PREFIX): -len("/video_feed")]
+                if hand not in _HANDS:
+                    self._send_json(
+                        404, {"ok": False, "message": "camera not found"})
+                    return
+                try:
+                    node.proxy_camera_stream(hand, self)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    node.get_logger().debug(
+                        f"camera stream proxy ended for {hand}: {exc}")
+                return
             if path == "/favicon.ico":
                 self._send_bytes(204, "image/x-icon", b"")
                 return
@@ -215,6 +232,10 @@ class RobotWebDashboard(Node):
         self.declare_parameter("right_sensor_node", "/ft_arm1")
         self.declare_parameter("right_wrench_topic", "/arm1/wrench_raw")
         self.declare_parameter("right_gripper_node", "/grip_arm1")
+        self.declare_parameter("left_camera_url", "http://127.0.0.1:8010")
+        self.declare_parameter("right_camera_url", "http://127.0.0.1:8011")
+        self.declare_parameter("camera_timeout_s", 1.0)
+        self.declare_parameter("camera_poll_period_s", 2.0)
         self.declare_parameter("html_path", "")
 
         gp = self.get_parameter
@@ -232,6 +253,10 @@ class RobotWebDashboard(Node):
             "mit_velocity_limit").get_parameter_value().double_value
         self._torque_limit = gp(
             "mit_torque_limit").get_parameter_value().double_value
+        self._camera_timeout = gp(
+            "camera_timeout_s").get_parameter_value().double_value
+        self._camera_poll_period = gp(
+            "camera_poll_period_s").get_parameter_value().double_value
         html_override = gp(
             "html_path").get_parameter_value().string_value.strip()
         self._validate_configuration(port)
@@ -247,6 +272,9 @@ class RobotWebDashboard(Node):
                 "gripper_node": _target_name(
                     gp("left_gripper_node")
                     .get_parameter_value().string_value),
+                "camera_url": gp(
+                    "left_camera_url").get_parameter_value()
+                .string_value.rstrip("/"),
             },
             "right": {
                 "label": "右手",
@@ -259,6 +287,9 @@ class RobotWebDashboard(Node):
                 "gripper_node": _target_name(
                     gp("right_gripper_node")
                     .get_parameter_value().string_value),
+                "camera_url": gp(
+                    "right_camera_url").get_parameter_value()
+                .string_value.rstrip("/"),
             },
         }
         for hand, config in self._config.items():
@@ -267,6 +298,11 @@ class RobotWebDashboard(Node):
             if not config["wrench_topic"].startswith("/"):
                 raise ValueError(
                     f"{hand}_wrench_topic must be an absolute topic")
+            camera_url = urlsplit(config["camera_url"])
+            if (camera_url.scheme not in ("http", "https")
+                    or not camera_url.netloc):
+                raise ValueError(
+                    f"{hand}_camera_url must be an absolute HTTP URL")
 
         html_path = (
             Path(html_override).expanduser()
@@ -284,6 +320,11 @@ class RobotWebDashboard(Node):
             hand: {
                 "sensor": self._new_stream_state(now),
                 "gripper": self._new_stream_state(now),
+                "camera": {
+                    "connected": False,
+                    "message": "not checked",
+                    "checked_at": None,
+                },
                 "last_action": None,
                 "roundtrip": {
                     "running": False,
@@ -295,6 +336,14 @@ class RobotWebDashboard(Node):
             }
             for hand in _HANDS
         }
+        self._camera_opener = build_opener(ProxyHandler({}))
+        self._camera_stop = threading.Event()
+        self._camera_thread = threading.Thread(
+            target=self._poll_cameras,
+            daemon=True,
+            name="robot-web-cameras",
+        )
+        self._camera_thread.start()
 
         best_effort_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -388,6 +437,8 @@ class RobotWebDashboard(Node):
             ("state_stale_s", self._state_stale),
             ("mit_velocity_limit", self._velocity_limit),
             ("mit_torque_limit", self._torque_limit),
+            ("camera_timeout_s", self._camera_timeout),
+            ("camera_poll_period_s", self._camera_poll_period),
         )
         for name, value in positive:
             if not math.isfinite(value) or value <= 0.0:
@@ -502,6 +553,11 @@ class RobotWebDashboard(Node):
                         "rate_hz": gripper["rate_hz"],
                         "joint_state": gripper["sample"],
                     },
+                    "camera": {
+                        **self._state[hand]["camera"],
+                        "video_url": (
+                            f"/api/cameras/{hand}/video_feed"),
+                    },
                     "last_action": self._state[hand]["last_action"],
                     "roundtrip": dict(self._state[hand]["roundtrip"]),
                 }
@@ -519,6 +575,61 @@ class RobotWebDashboard(Node):
             "safe_position": {"min": self._safe_min, "max": self._safe_max},
             "server_time": time.time(),
         }
+
+    def _poll_cameras(self) -> None:
+        while not self._camera_stop.is_set():
+            for hand in _HANDS:
+                if self._camera_stop.is_set():
+                    return
+                camera_url = self._config[hand]["camera_url"]
+                connected = False
+                message = "camera unavailable"
+                try:
+                    with self._camera_opener.open(
+                            camera_url + "/status",
+                            timeout=self._camera_timeout) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    connected = bool(payload.get("is_running"))
+                    message = str(payload.get("message", "camera online"))
+                except Exception as exc:  # noqa: BLE001
+                    message = f"camera service unavailable: {exc}"
+                with self._state_lock:
+                    self._state[hand]["camera"].update({
+                        "connected": connected,
+                        "message": message,
+                        "checked_at": time.time(),
+                    })
+            self._camera_stop.wait(self._camera_poll_period)
+
+    def proxy_camera_stream(
+            self, hand: str, downstream: BaseHTTPRequestHandler) -> None:
+        if hand not in _HANDS:
+            raise ValueError("unknown hand")
+        camera_url = self._config[hand]["camera_url"]
+        try:
+            upstream = self._camera_opener.open(
+                camera_url + "/video_feed", timeout=self._camera_timeout)
+        except Exception as exc:  # noqa: BLE001
+            downstream._send_json(  # type: ignore[attr-defined]
+                503, {"ok": False, "message": f"camera unavailable: {exc}"})
+            return
+        with upstream:
+            downstream.send_response(200)
+            downstream.send_header(
+                "Content-Type",
+                upstream.headers.get(
+                    "Content-Type",
+                    "multipart/x-mixed-replace; boundary=frame"),
+            )
+            downstream.send_header("Cache-Control", "no-store")
+            downstream.send_header("X-Content-Type-Options", "nosniff")
+            downstream.end_headers()
+            while not self._camera_stop.is_set():
+                chunk = upstream.read(64 * 1024)
+                if not chunk:
+                    return
+                downstream.wfile.write(chunk)
+                downstream.wfile.flush()
 
     def _call_trigger(
             self, hand: str, category: str, action: str,
@@ -757,6 +868,9 @@ class RobotWebDashboard(Node):
         for thread in self._roundtrip_threads.values():
             if thread is not None and thread.is_alive():
                 thread.join(timeout=self._request_timeout + 1.0)
+        self._camera_stop.set()
+        if self._camera_thread.is_alive():
+            self._camera_thread.join(timeout=self._camera_timeout + 1.0)
         try:
             self._httpd.shutdown()
             self._httpd.server_close()

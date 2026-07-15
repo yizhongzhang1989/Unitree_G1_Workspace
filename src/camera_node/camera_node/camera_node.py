@@ -246,7 +246,7 @@ class RTSPStream:
         last_frame_id = -1  # Track frame changes to avoid re-encoding same frame
         
         try:
-            while True:
+            while self.running:
                 if not self.available:
                     # Generate error image for unavailable stream
                     error_img = np.zeros((240, 320, 3), dtype=np.uint8)
@@ -392,7 +392,8 @@ class RTSPStream:
             return
             
         self.running = False
-        if self.available and self.proc:
+        self.available = False
+        if self.proc:
             try:
                 self.proc.kill()
                 self.proc.wait(timeout=3)  # Wait up to 3 seconds for process to terminate
@@ -457,17 +458,30 @@ class CameraNode(Node):
         self.declare_parameter('ros_topic_name', '/camera/image_raw')
         self.ros_topic_name = self.get_parameter('ros_topic_name').value
         self.get_logger().info(f"ros_topic_name from param = {self.ros_topic_name}")
+
+        self.declare_parameter('auto_reconnect', True)
+        self.auto_reconnect = self.get_parameter('auto_reconnect').value
+        self.declare_parameter('reconnect_interval_s', 5.0)
+        self.reconnect_interval_s = self.get_parameter(
+            'reconnect_interval_s').value
+        if self.reconnect_interval_s <= 0.0:
+            raise ValueError('reconnect_interval_s must be greater than zero')
         
         # Setup RTSP URL - use only main stream
         self.rtsp_url = self.rtsp_url_main
         
         # latest snapshot path
         self.latest_snapshot = None
+
+        self._stream_state_lock = threading.Lock()
+        self._stream_shutdown = threading.Event()
+        self._stream_wake = threading.Event()
+        self._stream_expected = True
+        self._stream_generation = 0
         
         # Initialize RTSP stream
         self.stream = None
         self.get_logger().info(f"Starting camera stream: {self.rtsp_url}")
-        self.stream = RTSPStream(self.camera_name, self.rtsp_url, self)
         
         # Create ROS2 Image Publisher for camera (only if enabled)
         if self.publish_ros_image:
@@ -488,9 +502,6 @@ class CameraNode(Node):
             
             # CV Bridge for converting between OpenCV and ROS image formats
             self.bridge = CvBridge()
-            
-            # Enable event-driven ROS publishing instead of timer-based
-            self.stream.enable_ros_publishing(self.camera_image_publisher, self.bridge)
             
             self.get_logger().info("ROS2 event-driven image publishing enabled")
             self.get_logger().info(f"ROS2 image topic: {self.ros_topic_name}")
@@ -523,6 +534,14 @@ class CameraNode(Node):
             daemon=True
         )
         self.flask_thread.start()
+
+        self._stream_monitor_thread = threading.Thread(
+            target=self._monitor_stream,
+            daemon=True,
+            name=f'{self.camera_name}-stream-monitor'
+        )
+        self._stream_monitor_thread.start()
+        self._stream_wake.set()
         
         self.get_logger().info("Generic Camera Node initialized successfully")
         self.get_logger().info(f"Web interface available at http://localhost:{self.server_port}")
@@ -530,6 +549,77 @@ class CameraNode(Node):
             self.get_logger().info(f"ROS2 image topic: {self.ros_topic_name}")
         self.get_logger().info(f"Snapshot service: /{self.camera_name.lower()}/take_snapshot")
         self.get_logger().info(f"Restart service: /restart_{self.camera_name.lower()}_node")
+
+    def _monitor_stream(self):
+        """Reconnect an expected stream without blocking the ROS executor."""
+        while not self._stream_shutdown.is_set():
+            requested = self._stream_wake.wait(self.reconnect_interval_s)
+            self._stream_wake.clear()
+            if self._stream_shutdown.is_set():
+                return
+            with self._stream_state_lock:
+                expected = self._stream_expected
+                stream = self.stream
+            if not expected or (not requested and not self.auto_reconnect):
+                continue
+            if stream is not None and stream.is_running():
+                continue
+            self.get_logger().warn(
+                f'Camera stream unavailable; reconnecting {self.camera_name}')
+            self._replace_stream()
+
+    def _replace_stream(self):
+        with self._stream_state_lock:
+            if self._stream_shutdown.is_set() or not self._stream_expected:
+                return
+            generation = self._stream_generation
+            previous = self.stream
+            self.stream = None
+        if previous is not None:
+            previous.stop()
+
+        try:
+            replacement = RTSPStream(
+                self.camera_name, self.rtsp_url, self)
+            if (self.publish_ros_image
+                    and self.camera_image_publisher is not None
+                    and self.bridge is not None):
+                replacement.enable_ros_publishing(
+                    self.camera_image_publisher, self.bridge)
+        except Exception as error:
+            self.get_logger().error(
+                f'Failed to recreate camera stream: {error}')
+            return
+
+        with self._stream_state_lock:
+            keep = (
+                not self._stream_shutdown.is_set()
+                and self._stream_expected
+                and generation == self._stream_generation
+            )
+            if keep:
+                self.stream = replacement
+        if not keep:
+            replacement.stop()
+
+    def _request_stream_restart(self):
+        with self._stream_state_lock:
+            self._stream_expected = True
+            self._stream_generation += 1
+            previous = self.stream
+            self.stream = None
+        if previous is not None:
+            previous.stop()
+        self._stream_wake.set()
+
+    def _stop_stream(self):
+        with self._stream_state_lock:
+            self._stream_expected = False
+            self._stream_generation += 1
+            previous = self.stream
+            self.stream = None
+        if previous is not None:
+            previous.stop()
 
     def take_snapshot_callback(self, request, response):
         """ROS2 service callback for taking snapshots"""
@@ -584,21 +674,16 @@ class CameraNode(Node):
         
         # Schedule restart in a separate thread to allow response to be sent
         def delayed_restart():
-            import time
             time.sleep(1)  # Give time for response to be sent
             self.get_logger().info("Executing camera node restart...")
             try:
-                # Restart the camera stream
-                if self.stream:
-                    self.stream.restart()
-                    self.get_logger().info("Camera stream restarted successfully")
-                else:
-                    self.get_logger().warn("No camera stream to restart")
+                self._request_stream_restart()
+                self.get_logger().info("Camera stream restart requested")
             except Exception as e:
                 self.get_logger().error(f"Error during restart: {e}")
         
-        import threading
-        restart_thread = threading.Thread(target=delayed_restart)
+        restart_thread = threading.Thread(
+            target=delayed_restart, daemon=True)
         restart_thread.start()
         
         return response
@@ -879,7 +964,7 @@ class CameraNode(Node):
                 _, buffer = cv2.imencode('.jpg', error_img)
                 
                 def generate_error():
-                    while True:
+                    while self._stream_expected and not self._stream_shutdown.is_set():
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                         time.sleep(1)
@@ -891,17 +976,11 @@ class CameraNode(Node):
             try:
                 if self.stream and self.stream.is_running():
                     return jsonify({'status': 'success', 'message': 'Camera is already running'})
-                
-                # Restart stream if not running
-                if self.stream:
-                    self.stream.restart()
-                else:
-                    self.stream = RTSPStream(self.camera_name, self.rtsp_url, self)
-                
-                if self.stream.is_running():
-                    return jsonify({'status': 'success', 'message': 'Camera started successfully'})
-                else:
-                    return jsonify({'status': 'error', 'message': 'Failed to start camera'})
+                self._request_stream_restart()
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Camera start requested'
+                })
                     
             except Exception as e:
                 self.get_logger().error(f"Error starting camera: {e}")
@@ -910,11 +989,11 @@ class CameraNode(Node):
         @self.flask_app.route('/stop', methods=['POST'])
         def stop_camera():
             try:
-                if self.stream:
-                    self.stream.stop()
-                    return jsonify({'status': 'success', 'message': 'Camera stopped successfully'})
-                else:
-                    return jsonify({'status': 'success', 'message': 'Camera was not running'})
+                self._stop_stream()
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Camera stopped successfully'
+                })
                     
             except Exception as e:
                 self.get_logger().error(f"Error stopping camera: {e}")
@@ -924,26 +1003,11 @@ class CameraNode(Node):
         def restart_camera():
             try:
                 self.get_logger().info("Manual restart request received from web interface")
-                
-                if self.stream:
-                    self.stream.restart()
-                    
-                    # Wait a moment and check if restart was successful
-                    import time
-                    time.sleep(1)
-                    
-                    if self.stream.is_running():
-                        return jsonify({'status': 'success', 'message': 'Camera restarted successfully'})
-                    else:
-                        return jsonify({'status': 'error', 'message': 'Failed to restart camera stream'})
-                else:
-                    # If no stream exists, create a new one
-                    self.stream = RTSPStream(self.camera_name, self.rtsp_url, self)
-                    
-                    if self.stream.is_running():
-                        return jsonify({'status': 'success', 'message': 'Camera started successfully'})
-                    else:
-                        return jsonify({'status': 'error', 'message': 'Failed to start camera'})
+                self._request_stream_restart()
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Camera restart requested'
+                })
                     
             except Exception as e:
                 self.get_logger().error(f"Error restarting camera: {e}")
@@ -952,7 +1016,12 @@ class CameraNode(Node):
         @self.flask_app.route('/status')
         def get_camera_status():
             if not self.stream:
-                return jsonify({'is_running': False, 'message': 'Camera stream not initialized'})
+                with self._stream_state_lock:
+                    expected = self._stream_expected
+                message = (
+                    'Camera is reconnecting'
+                    if expected else 'Camera is stopped')
+                return jsonify({'is_running': False, 'message': message})
             
             is_running = self.stream.is_running()
             
@@ -1116,10 +1185,12 @@ class CameraNode(Node):
     def destroy_node(self):
         """Clean up resources when shutting down"""
         self.get_logger().info("Shutting down Generic Camera Node...")
-        
-        # Stop the camera stream
-        if self.stream:
-            self.stream.stop()
+
+        self._stream_shutdown.set()
+        self._stream_wake.set()
+        self._stop_stream()
+        if self._stream_monitor_thread.is_alive():
+            self._stream_monitor_thread.join(timeout=2.0)
         
         # Call parent destroy_node
         super().destroy_node()

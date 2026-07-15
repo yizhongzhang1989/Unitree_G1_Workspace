@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键启动整套末端执行器（单/双总线）。Ctrl-C 退出时清理所有节点、释放 CAN 设备。
+# 一键启动末端执行器与左右相机。Ctrl-C 退出时清理所有节点、释放 CAN 设备。
 #   bash scripts/run.sh            # 单总线（默认）
 #   bash scripts/run.sh single
 #   bash scripts/run.sh dual       # 双总线（每臂一条总线）
@@ -16,7 +16,7 @@ esac
 source "$(cd "$(dirname "$0")" && pwd)/env.sh"
 
 # 已安装节点可执行文件路径片段，用于兜底清理（避免误杀其它进程）
-NODES='can_bridge_ros/lib/can_bridge_ros/bridge_node|kwr57_ros/lib/kwr57_ros/ft_sensor_node|gloria_ros/lib/gloria_ros/gripper_node'
+NODES='can_bridge_ros/lib/can_bridge_ros/bridge_node|kwr57_ros/lib/kwr57_ros/ft_sensor_node|gloria_ros/lib/gloria_ros/gripper_node|camera_node/lib/camera_node/camera_node'
 
 cleanup() {
   trap - EXIT INT TERM

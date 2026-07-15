@@ -38,6 +38,13 @@ def generate_launch_description() -> LaunchDescription:
             "right_sensor_node": "/ft_arm1",
             "right_wrench_topic": "/arm1/wrench_raw",
             "right_gripper_node": "/grip_arm1",
+            "left_camera_url": LaunchConfiguration("left_camera_url"),
+            "right_camera_url": LaunchConfiguration("right_camera_url"),
+            "camera_timeout_s": ParameterValue(
+                LaunchConfiguration("camera_timeout_s"), value_type=float),
+            "camera_poll_period_s": ParameterValue(
+                LaunchConfiguration("camera_poll_period_s"),
+                value_type=float),
         }],
     )
     return LaunchDescription([
@@ -45,6 +52,12 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("web_port", default_value="8770"),
         DeclareLaunchArgument("request_timeout_s", default_value="3.0"),
         DeclareLaunchArgument("state_stale_s", default_value="1.0"),
+        DeclareLaunchArgument(
+            "left_camera_url", default_value="http://127.0.0.1:8010"),
+        DeclareLaunchArgument(
+            "right_camera_url", default_value="http://127.0.0.1:8011"),
+        DeclareLaunchArgument("camera_timeout_s", default_value="1.0"),
+        DeclareLaunchArgument("camera_poll_period_s", default_value="2.0"),
         devices,
         dashboard,
     ])

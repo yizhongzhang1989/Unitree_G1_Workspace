@@ -18,7 +18,7 @@ setup(
     zip_safe=True,
     maintainer='madderscientist',
     maintainer_email='liruigang20131115@126.com',
-    description='Bringup for CAN bridge + KWR57 force sensors + Gloria grippers.',
+    description='Bringup for CAN devices and left/right IP cameras.',
     license='MIT',
     tests_require=['pytest'],
     entry_points={

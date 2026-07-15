@@ -2,19 +2,19 @@
 
 Unitree G1 项目的 ROS 2 工作区。
 
-## 末端执行器
+## 末端执行器与相机
 
-末端执行器（力传感器 + 夹爪）的 ROS 2 集成工作区采用“CAN 总线作为共享资源”的分层架构。`can_bridge_ros` 独占物理 CAN；KWR57 作为 bridge 进程中的独立 ROS node 处理高频原始帧，Gloria-M 作为独立进程订阅专属 ROS Frame 话题，所有配置都由 `robot_bringup` 的设备清单生成。
+末端执行器（力传感器 + 夹爪）的 ROS 2 集成采用“CAN 总线作为共享资源”的分层架构。`can_bridge_ros` 独占物理 CAN；KWR57 作为 bridge 进程中的独立 ROS node 处理高频原始帧，Gloria-M 作为独立进程订阅专属 ROS Frame 话题。左右 IP 相机各由一个 `camera_node` 进程读取 RTSP 并发布图像，整套系统由 `robot_bringup` 统一启动。
 
-设备：2 个力传感器（KWR57）+ 2 个夹爪（Gloria-M）。支持两种接线：
+设备：2 个力传感器（KWR57）+ 2 个夹爪（Gloria-M）+ 2 个 IP 相机（左手 `192.168.123.97`、右手 `192.168.123.98`）。CAN 设备支持两种接线：
 - **单总线**：所有设备都在 CANalyst-II 的统一 CAN 上（`/can0` 或者 `/can1`）。
 - **双总线**：一个力传感器 + 一个夹爪为一组（一个手臂），分别接两条总线（`/can0`、`/can1`）。
 
 ```
 第1层 can_sdk        : 无 ROS 的 python-can 后端、CANalyst-II 准备和单消费者基础 I/O
 第2层 can_bridge_ros : 独占 USB-CAN，桥接多通道，提供路由和通用 handler 注册点
-第3层 设备节点        : kwr57_ros 进程内处理；gloria_ros 订阅专属 RX
-第4层 bringup         : 一份设备清单生成 handler、路由及节点参数
+第3层 设备节点        : kwr57_ros 进程内处理；gloria_ros 订阅专属 RX；camera_node 读取 RTSP
+第4层 bringup         : 生成 CAN handler、路由、设备节点及左右相机节点
 ```
 
 消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；Foxy 对应系统包为 `ros-foxy-can-msgs`。
@@ -34,6 +34,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
 |   └── Gloria-M-SDK/             git submodule（云犀夹爪 SDK）
 └── src/                          colcon 扫描的 ROS 2 包
     ├── can_bridge_ros/           通用 ROS 2 CAN bridge（多通道）
+    ├── camera_node/              左右 IP 相机 RTSP、ROS 图像与 Web 预览
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
     └── robot_bringup/            单/双总线 launch + 声明式设备拓扑
@@ -50,9 +51,12 @@ Unitree_G1_Workspace/             一个 colcon workspace
 ROS 2 节点跑在 **foxy 系统 `python3`(3.8)**；运行用 **CycloneDDS**（默认 FastRTPS 会刷 `std::bad_alloc`）。
 
 ```bash
-# 一次性依赖；ros-foxy-can-msgs 提供 Python 导入 can_msgs.msg.Frame
-sudo apt-get install -y ros-foxy-can-msgs
+# ROS/Python 图像栈统一使用 Ubuntu 软件包，避免与 Foxy cv_bridge 产生 ABI 冲突；
+# ffprobe 和 ffplay 均由 ffmpeg 软件包提供。
+sudo apt-get install -y ros-foxy-can-msgs \
+    ros-foxy-cv-bridge ffmpeg python3-flask python3-opencv python3-numpy
 source /opt/ros/foxy/setup.bash
+# pip 安装 CAN SDK 运行依赖
 python3 -m pip install --user 'python-can>=4.0' canalystii 'libusb-package>=1.0.30' pyserial
 
 # 拉取含 submodule 的仓库
@@ -68,7 +72,6 @@ source scripts/env.sh
 CANalyst-II 需 udev 权限（VID:PID 04d8:0053），见 `src/can_bridge_ros/README.md`。
 
 `scripts/env.sh` 会将 `CAN-SDK`、`KWR57-SDK` 与 Gloria submodule 的源码目录加入 `PYTHONPATH`，随后加载 ROS 和工作区环境。若要在仓库外独立使用 SDK，可选择安装：
-
 ```bash
 python3 -m pip install -e './sdk/CAN-SDK[canalystii]'
 python3 -m pip install -e ./sdk/KWR57-SDK
@@ -78,7 +81,6 @@ python3 -m pip install -e ./sdk/KWR57-SDK
 ## 运行
 
 每个手动运行 ROS 命令的终端先 source `scripts/env.sh`；一键脚本会自动处理。
-
 ```bash
 # 一键（推荐）：脚本 source 好环境、起整套、Ctrl-C 自动清理
 bash scripts/run.sh single      # 单总线
@@ -90,6 +92,8 @@ ros2 launch robot_bringup single_bus.launch.py
 ros2 launch robot_bringup dual_bus.launch.py
 ```
 
+以上入口都会启动左右两个相机。Web 地址分别为 `http://<机器人 IP>:8010` 和 `http://<机器人 IP>:8011`，ROS 图像话题为 `/camera_left/image_raw` 和 `/camera_right/image_raw`。
+
 - 单总线下各设备的非共享活动 CAN ID 必须互不冲突；Gloria-M 状态兼容 ID `0x000` 可按协议共享，但各夹爪 `command_id` 的低 4 位设备号必须不同。
 - 双总线下两臂在不同总线，**CAN ID 可相同**，无需改。
 - 换接线**只改用哪个 launch**，设备节点代码不动。
@@ -100,4 +104,4 @@ ros2 launch robot_bringup dual_bus.launch.py
 
 Gloria 节点默认不自动使能。其 `~/enable` 服务会先设置并确认 MIT/PV 控制模式，再使能并等待状态反馈；未使能、模式未确认或反馈过期时默认拒绝运动命令。完整接口与安全参数见 `src/gloria_ros/README.md`。
 
-各包细节见 `sdk/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、`src/kwr57_ros/README.md` 和 `src/robot_bringup/README.md`。
+各包细节见 `sdk/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、`src/camera_node/README.zh.md`、`src/kwr57_ros/README.md` 和 `src/robot_bringup/README.md`。

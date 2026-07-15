@@ -31,6 +31,7 @@ class _FakeDashboard:
     def __init__(self) -> None:
         self.calls = []
         self.logger = _Logger()
+        self.camera_available = True
 
     def get_logger(self):
         return self.logger
@@ -57,6 +58,14 @@ class _FakeDashboard:
     def stop_roundtrip(self, hand):
         self.calls.append(("roundtrip_stop", hand))
         return {"ok": True, "message": "roundtrip stopped"}
+
+    def proxy_camera_stream(self, hand, handler):
+        self.calls.append(("camera", hand))
+        if self.camera_available:
+            handler._send_bytes(200, "image/jpeg", b"camera-frame")
+        else:
+            handler._send_json(
+                503, {"ok": False, "message": "camera unavailable"})
 
 
 class HelpersTest(unittest.TestCase):
@@ -149,6 +158,28 @@ class HandlerTest(unittest.TestCase):
                 self.assertTrue(result["ok"])
                 self.assertEqual(self.node.calls[-1], expected)
 
+    def test_proxies_camera_without_affecting_dashboard(self) -> None:
+        with self.opener.open(
+                self.base_url + "/api/cameras/left/video_feed",
+                timeout=2.0) as response:
+            self.assertEqual(response.headers.get_content_type(), "image/jpeg")
+            self.assertEqual(response.read(), b"camera-frame")
+        self.assertEqual(self.node.calls[-1], ("camera", "left"))
+
+        self.node.camera_available = False
+        with self.assertRaises(HTTPError) as raised:
+            self.opener.open(
+                self.base_url + "/api/cameras/right/video_feed",
+                timeout=2.0)
+        self.assertEqual(raised.exception.code, 503)
+
+    def test_rejects_unknown_camera(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            self.opener.open(
+                self.base_url + "/api/cameras/center/video_feed",
+                timeout=2.0)
+        self.assertEqual(raised.exception.code, 404)
+
     def test_rejects_requests_without_control_header(self) -> None:
         with self.assertRaises(HTTPError) as raised:
             self._post("/api/hands/left/sensor/stop", include_header=False)
@@ -163,15 +194,15 @@ class HandlerTest(unittest.TestCase):
 
 
 class HtmlContractTest(unittest.TestCase):
-    def test_page_exposes_four_streams_and_mit_controls(self) -> None:
+    def test_page_exposes_six_streams_camera_and_mit_controls(self) -> None:
         html_path = (
             Path(__file__).parents[1]
             / "robot_bringup"
             / "web_dashboard.html")
         html = " ".join(html_path.read_text(encoding="utf-8").split())
         for stream in (
-                "left-sensor", "left-gripper",
-                "right-sensor", "right-gripper"):
+            "left-camera", "left-sensor", "left-gripper",
+            "right-camera", "right-sensor", "right-gripper"):
             with self.subTest(stream=stream):
                 self.assertIn(f'data-stream="{stream}"', html)
         self.assertIn("CAN0 左手 / CAN1 右手", html)
@@ -179,6 +210,10 @@ class HtmlContractTest(unittest.TestCase):
         self.assertIn('data-roundtrip="stop"', html)
         self.assertIn('data-command="mit"', html)
         self.assertIn('data-gripper="refresh"', html)
+        self.assertIn('data-role="camera-feed"', html)
+        self.assertIn('data-role="camera-placeholder"', html)
+        self.assertIn("function updateCamera(hand, panel, camera)", html)
+        self.assertIn("cameraRetryAt", html)
         for axis in ("fx", "fy", "fz", "mx", "my", "mz"):
             with self.subTest(axis=axis):
                 self.assertIn(f'data-axis="{axis}"', html)
