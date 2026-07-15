@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml', 'README.md']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
+    package_data={package_name: ['web_dashboard.html']},
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='madderscientist',
@@ -20,4 +21,9 @@ setup(
     description='Bringup for CAN bridge + KWR57 force sensors + Gloria grippers.',
     license='MIT',
     tests_require=['pytest'],
+    entry_points={
+        'console_scripts': [
+            'web_dashboard = robot_bringup.web_dashboard_node:main',
+        ],
+    },
 )

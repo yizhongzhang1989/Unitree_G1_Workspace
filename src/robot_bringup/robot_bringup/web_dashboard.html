@@ -1,0 +1,1127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>双手联调台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172326;
+      --muted: #657175;
+      --line: #c8cfcd;
+      --line-strong: #8d9997;
+      --paper: #eef0eb;
+      --panel: #fffef8;
+      --ok: #17785b;
+      --warn: #a76000;
+      --danger: #b42318;
+      --danger-dark: #861910;
+      --fx: #d94f45;
+      --fy: #2f8f6b;
+      --fz: #2f6fb4;
+      --mx: #d98d2b;
+      --my: #7c5ab8;
+      --mz: #4e8f9f;
+      --shadow: 0 14px 34px rgba(23, 35, 38, 0.09);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 320px;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(23, 35, 38, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23, 35, 38, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 24px 24px;
+      font-family: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+
+    button,
+    input {
+      font: inherit;
+      letter-spacing: 0;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid rgba(11, 114, 133, 0.22);
+      outline-offset: 2px;
+    }
+
+    .shell {
+      width: min(1540px, 100%);
+      margin: 0 auto;
+      padding: 18px 24px 34px;
+    }
+
+    .topbar {
+      display: flex;
+      min-height: 68px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      border-bottom: 2px solid var(--ink);
+    }
+
+    .brand {
+      display: flex;
+      min-width: 0;
+      align-items: baseline;
+      gap: 13px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-family: "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
+      font-size: 1.85rem;
+      line-height: 1;
+      font-weight: 800;
+    }
+
+    .brand span {
+      color: var(--muted);
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.72rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .server-state {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--warn);
+      box-shadow: 0 0 0 4px rgba(167, 96, 0, 0.13);
+    }
+
+    .online .dot,
+    .dot.online {
+      background: var(--ok);
+      box-shadow: 0 0 0 4px rgba(23, 120, 91, 0.13);
+    }
+
+    .dot.offline {
+      background: var(--danger);
+      box-shadow: 0 0 0 4px rgba(180, 35, 24, 0.12);
+    }
+
+    .stream-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-top: 14px;
+      border: 1px solid var(--line-strong);
+      background: rgba(255, 254, 248, 0.94);
+      box-shadow: var(--shadow);
+    }
+
+    .stream-item {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      min-width: 0;
+      align-items: center;
+      gap: 9px;
+      min-height: 54px;
+      padding: 10px 13px;
+      border-right: 1px solid var(--line);
+    }
+
+    .stream-item:last-child {
+      border-right: 0;
+    }
+
+    .stream-name {
+      min-width: 0;
+      overflow: hidden;
+      font-size: 0.76rem;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .stream-rate {
+      color: var(--muted);
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.72rem;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .hands {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+      align-items: start;
+    }
+
+    .hand {
+      --hand: #0b7285;
+      --hand-soft: #e7f2f1;
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-top: 5px solid var(--hand);
+      border-radius: 4px;
+      background: rgba(255, 254, 248, 0.97);
+      box-shadow: var(--shadow);
+    }
+
+    .hand[data-hand="right"] {
+      --hand: #b64b30;
+      --hand-soft: #f6ebe6;
+    }
+
+    .hand-head {
+      display: flex;
+      min-height: 72px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      background: var(--hand-soft);
+    }
+
+    .hand-title {
+      min-width: 0;
+    }
+
+    .hand-title h2 {
+      margin: 0;
+      font-family: "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
+      font-size: 1.3rem;
+      line-height: 1.15;
+    }
+
+    .hand-title p {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.7rem;
+      font-weight: 700;
+    }
+
+    .hand-health {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(72px, 1fr));
+      gap: 7px;
+    }
+
+    .health-cell {
+      min-width: 72px;
+      padding: 7px 9px;
+      border-left: 3px solid var(--line-strong);
+      background: rgba(255, 255, 255, 0.74);
+    }
+
+    .health-cell.online {
+      border-left-color: var(--ok);
+    }
+
+    .health-cell.offline {
+      border-left-color: var(--danger);
+    }
+
+    .health-cell span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.62rem;
+      font-weight: 800;
+    }
+
+    .health-cell strong {
+      display: block;
+      margin-top: 3px;
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.74rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .device-section {
+      border-top: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: flex;
+      min-height: 52px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-title {
+      min-width: 0;
+    }
+
+    .section-title h3 {
+      margin: 0;
+      font-size: 0.88rem;
+    }
+
+    .endpoint {
+      display: block;
+      max-width: 290px;
+      margin-top: 4px;
+      overflow: hidden;
+      color: var(--muted);
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.62rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .status-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .wrench-visual {
+      padding: 14px 16px;
+    }
+
+    .axis-bars {
+      display: grid;
+      gap: 9px;
+      align-content: center;
+      min-width: 0;
+    }
+
+    .axis-row {
+      display: grid;
+      grid-template-columns: 26px minmax(80px, 1fr) 84px;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .axis-name {
+      color: var(--muted);
+      font-size: 0.67rem;
+      font-weight: 900;
+    }
+
+    .axis-track {
+      position: relative;
+      height: 15px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 2px;
+      background: #edf0eb;
+    }
+
+    .axis-track::before {
+      position: absolute;
+      z-index: 2;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 1px;
+      background: var(--line-strong);
+      content: "";
+    }
+
+    .axis-fill {
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      left: 50%;
+      width: 0;
+      border-radius: 1px;
+      transition: left 80ms linear, width 80ms linear;
+    }
+
+    .axis-row[data-axis="fx"] .axis-fill { background: var(--fx); }
+    .axis-row[data-axis="fy"] .axis-fill { background: var(--fy); }
+    .axis-row[data-axis="fz"] .axis-fill { background: var(--fz); }
+    .axis-row[data-axis="mx"] .axis-fill { background: var(--mx); }
+    .axis-row[data-axis="my"] .axis-fill { background: var(--my); }
+    .axis-row[data-axis="mz"] .axis-fill { background: var(--mz); }
+
+    .axis-value {
+      overflow: hidden;
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.7rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 800;
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .telemetry-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      padding: 0 16px;
+    }
+
+    .telemetry-grid.gripper-values {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .reading {
+      min-width: 0;
+      padding: 13px 8px 12px;
+      border-right: 1px solid var(--line);
+    }
+
+    .reading:first-child {
+      padding-left: 0;
+    }
+
+    .reading:last-child {
+      padding-right: 0;
+      border-right: 0;
+    }
+
+    .reading dt {
+      color: var(--muted);
+      font-size: 0.64rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .reading dd {
+      margin: 8px 0 0;
+      overflow: hidden;
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 1rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .reading small {
+      display: block;
+      min-height: 1em;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 0.58rem;
+      font-weight: 700;
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--line);
+      background: rgba(238, 240, 235, 0.72);
+    }
+
+    .button-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .button {
+      min-height: 37px;
+      padding: 7px 13px;
+      border: 1px solid var(--hand);
+      border-radius: 3px;
+      color: #fff;
+      background: var(--hand);
+      cursor: pointer;
+      font-size: 0.74rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .button:hover {
+      filter: brightness(0.9);
+    }
+
+    .button.secondary {
+      border-color: var(--line-strong);
+      color: var(--ink);
+      background: #fff;
+    }
+
+    .button.danger {
+      border-color: var(--danger-dark);
+      background: var(--danger);
+    }
+
+    .button:disabled {
+      cursor: not-allowed;
+      filter: none;
+      opacity: 0.4;
+    }
+
+    .age {
+      color: var(--muted);
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.65rem;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .roundtrip {
+      padding: 15px 16px 16px;
+      border-top: 1px solid var(--line);
+      background: var(--hand-soft);
+    }
+
+    .roundtrip-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .roundtrip-head h4 {
+      margin: 0;
+      font-size: 0.83rem;
+    }
+
+    .roundtrip-state {
+      max-width: 62%;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 0.67rem;
+      font-weight: 800;
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(70px, 1fr));
+      gap: 9px;
+    }
+
+    label {
+      display: block;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 0.62rem;
+      font-weight: 800;
+    }
+
+    .field {
+      position: relative;
+      margin-top: 5px;
+    }
+
+    input[type="number"] {
+      width: 100%;
+      min-width: 0;
+      min-height: 39px;
+      padding: 7px 30px 7px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      color: var(--ink);
+      background: #fff;
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.75rem;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+
+    .suffix {
+      position: absolute;
+      top: 50%;
+      right: 7px;
+      color: var(--muted);
+      transform: translateY(-50%);
+      pointer-events: none;
+      font-size: 0.55rem;
+      font-weight: 700;
+    }
+
+    .roundtrip-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    details.manual {
+      border-top: 1px solid var(--line);
+    }
+
+    details.manual summary {
+      min-height: 44px;
+      padding: 13px 16px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.72rem;
+      font-weight: 800;
+      user-select: none;
+    }
+
+    .manual-body {
+      padding: 0 16px 14px;
+    }
+
+    .manual-body .field-grid {
+      grid-template-columns: repeat(3, minmax(90px, 1fr));
+    }
+
+    .manual-foot {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 10px;
+    }
+
+    .action-line {
+      min-height: 42px;
+      padding: 11px 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-family: "DejaVu Sans Mono", monospace;
+      font-size: 0.66rem;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .action-line.ok {
+      color: var(--ok);
+    }
+
+    .action-line.error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 1120px) {
+      .field-grid {
+        grid-template-columns: repeat(3, minmax(82px, 1fr));
+      }
+
+      .telemetry-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .telemetry-grid .reading:nth-child(3) {
+        border-right: 0;
+      }
+
+      .telemetry-grid .reading:nth-child(n + 4) {
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 860px) {
+      .shell {
+        padding: 14px 14px 28px;
+      }
+
+      .hands {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .stream-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .stream-item:nth-child(2) {
+        border-right: 0;
+      }
+
+      .stream-item:nth-child(n + 3) {
+        border-top: 1px solid var(--line);
+      }
+    }
+
+    @media (max-width: 520px) {
+      .topbar,
+      .hand-head,
+      .control-row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .brand {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .brand h1 {
+        font-size: 1.55rem;
+      }
+
+      .hand-health {
+        width: 100%;
+      }
+
+      .stream-strip {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .stream-item,
+      .stream-item:nth-child(2) {
+        border-right: 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .stream-item:first-child {
+        border-top: 0;
+      }
+
+      .telemetry-grid,
+      .telemetry-grid.gripper-values {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .telemetry-grid .reading:nth-child(2n) {
+        border-right: 0;
+      }
+
+      .telemetry-grid .reading:nth-child(n + 3) {
+        border-top: 1px solid var(--line);
+      }
+
+      .field-grid,
+      .manual-body .field-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .roundtrip-state {
+        max-width: 52%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1>双手联调台</h1>
+        <span>CAN0 左手 / CAN1 右手</span>
+      </div>
+      <div class="server-state" id="server-state">
+        <i class="dot" aria-hidden="true"></i>
+        <span id="server-text">正在连接</span>
+      </div>
+    </header>
+
+    <section class="stream-strip" aria-label="四路数据状态">
+      <div class="stream-item" data-stream="left-sensor">
+        <i class="dot offline" aria-hidden="true"></i>
+        <span class="stream-name">左手 · 力传感器</span>
+        <span class="stream-rate">-- Hz</span>
+      </div>
+      <div class="stream-item" data-stream="left-gripper">
+        <i class="dot offline" aria-hidden="true"></i>
+        <span class="stream-name">左手 · 夹爪反馈</span>
+        <span class="stream-rate">-- Hz</span>
+      </div>
+      <div class="stream-item" data-stream="right-sensor">
+        <i class="dot offline" aria-hidden="true"></i>
+        <span class="stream-name">右手 · 力传感器</span>
+        <span class="stream-rate">-- Hz</span>
+      </div>
+      <div class="stream-item" data-stream="right-gripper">
+        <i class="dot offline" aria-hidden="true"></i>
+        <span class="stream-name">右手 · 夹爪反馈</span>
+        <span class="stream-rate">-- Hz</span>
+      </div>
+    </section>
+
+    <main class="hands" id="hands"></main>
+  </div>
+
+  <template id="hand-template">
+    <article class="hand">
+      <header class="hand-head">
+        <div class="hand-title">
+          <h2 data-role="label">左手</h2>
+          <p><span data-role="bus">can0</span> · <span data-role="mapping">LEFT</span></p>
+        </div>
+        <div class="hand-health">
+          <div class="health-cell offline" data-health="sensor">
+            <span>传感器</span>
+            <strong data-role="sensor-rate">-- Hz</strong>
+          </div>
+          <div class="health-cell offline" data-health="gripper">
+            <span>夹爪</span>
+            <strong data-role="gripper-rate">-- Hz</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="device-section">
+        <div class="section-head">
+          <div class="section-title">
+            <h3>KWR57 六轴力传感器</h3>
+            <span class="endpoint" data-role="sensor-endpoint">等待 ROS 接口</span>
+          </div>
+          <span class="status-label"><i class="dot offline" data-dot="sensor"></i><span data-role="sensor-status">未连接</span></span>
+        </div>
+        <div class="wrench-visual">
+          <div class="axis-bars" aria-label="六轴实时数值与量程">
+            <div class="axis-row" data-axis="fx"><span class="axis-name">Fx</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="fx">--</output></div>
+            <div class="axis-row" data-axis="fy"><span class="axis-name">Fy</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="fy">--</output></div>
+            <div class="axis-row" data-axis="fz"><span class="axis-name">Fz</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="fz">--</output></div>
+            <div class="axis-row" data-axis="mx"><span class="axis-name">Mx</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="mx">--</output></div>
+            <div class="axis-row" data-axis="my"><span class="axis-name">My</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="my">--</output></div>
+            <div class="axis-row" data-axis="mz"><span class="axis-name">Mz</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="mz">--</output></div>
+          </div>
+        </div>
+        <div class="control-row">
+          <div class="button-group">
+            <button class="button" type="button" data-sensor="start">启动</button>
+            <button class="button secondary" type="button" data-sensor="stop">停止</button>
+            <button class="button secondary" type="button" data-sensor="tare">置零</button>
+          </div>
+          <span class="age" data-role="sensor-age">age --</span>
+        </div>
+      </section>
+
+      <section class="device-section">
+        <div class="section-head">
+          <div class="section-title">
+            <h3>Gloria-M 夹爪 · MIT</h3>
+            <span class="endpoint" data-role="gripper-endpoint">等待 ROS 接口</span>
+          </div>
+          <span class="status-label"><i class="dot offline" data-dot="gripper"></i><span data-role="gripper-status">未连接</span></span>
+        </div>
+        <dl class="telemetry-grid gripper-values">
+          <div class="reading"><dt>位置</dt><dd data-value="position">--</dd><small>rad</small></div>
+          <div class="reading"><dt>速度</dt><dd data-value="velocity">--</dd><small>rad/s</small></div>
+          <div class="reading"><dt>力矩</dt><dd data-value="effort">--</dd><small>N·m</small></div>
+        </dl>
+        <div class="control-row">
+          <div class="button-group">
+            <button class="button" type="button" data-gripper="enable">使能</button>
+            <button class="button secondary" type="button" data-gripper="refresh">刷新反馈</button>
+            <button class="button danger" type="button" data-gripper="disable">失能</button>
+          </div>
+          <span class="age" data-role="gripper-age">age --</span>
+        </div>
+
+        <div class="roundtrip">
+          <div class="roundtrip-head">
+            <h4>MIT 往返</h4>
+            <span class="roundtrip-state" data-role="roundtrip-state">未启动</span>
+          </div>
+          <div class="field-grid">
+            <label>A 端点<div class="field"><input type="number" data-field="position-a" value="0.00" min="0" max="2.77" step="0.01"><span class="suffix">rad</span></div></label>
+            <label>B 端点<div class="field"><input type="number" data-field="position-b" value="2.50" min="0" max="2.77" step="0.01"><span class="suffix">rad</span></div></label>
+            <label>Kp<div class="field"><input type="number" data-field="roundtrip-kp" value="10" min="0" max="500" step="1"></div></label>
+            <label>Kd<div class="field"><input type="number" data-field="roundtrip-kd" value="1" min="0" max="5" step="0.1"></div></label>
+            <label>频率<div class="field"><input type="number" data-field="rate-hz" value="100" min="1" max="100" step="1"><span class="suffix">Hz</span></div></label>
+            <label>换向周期<div class="field"><input type="number" data-field="switch-period" value="8" min="0.2" step="0.5"><span class="suffix">s</span></div></label>
+          </div>
+          <div class="roundtrip-actions">
+            <button class="button danger" type="button" data-roundtrip="stop" disabled>停止并失能</button>
+            <button class="button" type="button" data-roundtrip="start">开始往返</button>
+          </div>
+        </div>
+
+        <details class="manual">
+          <summary>单次 MIT 目标</summary>
+          <div class="manual-body">
+            <div class="field-grid">
+              <label>目标位置<div class="field"><input type="number" data-field="manual-q" value="0.50" min="0" max="2.77" step="0.01"><span class="suffix">rad</span></div></label>
+              <label>Kp<div class="field"><input type="number" data-field="manual-kp" value="10" min="0" max="500" step="1"></div></label>
+              <label>Kd<div class="field"><input type="number" data-field="manual-kd" value="1" min="0" max="5" step="0.1"></div></label>
+            </div>
+            <div class="manual-foot"><button class="button" type="button" data-command="mit">发送 MIT</button></div>
+          </div>
+        </details>
+      </section>
+
+      <div class="action-line" data-role="action">等待操作</div>
+    </article>
+  </template>
+
+  <script>
+    "use strict";
+
+    const HANDS = {
+      left: { label: "左手", bus: "can0", mapping: "LEFT" },
+      right: { label: "右手", bus: "can1", mapping: "RIGHT" },
+    };
+    const panels = {};
+    const pending = new Set();
+    const WRENCH_SCALES = { force: 10, torque: 0.25 };
+    const WRENCH_AXES = {
+      fx: "force", fy: "force", fz: "force",
+      mx: "torque", my: "torque", mz: "torque",
+    };
+
+    function one(panel, selector) {
+      return panel.querySelector(selector);
+    }
+
+    function text(panel, role, value) {
+      one(panel, `[data-role="${role}"]`).textContent = value;
+    }
+
+    function number(value, digits = 3) {
+      return typeof value === "number" && Number.isFinite(value)
+        ? value.toFixed(digits)
+        : "--";
+    }
+
+    function signedNumber(value, digits = 4) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "--";
+      const rendered = value.toFixed(digits);
+      return value >= 0 ? `+${rendered}` : rendered;
+    }
+
+    function updateWrenchVisual(panel, values) {
+      for (const [axis, mode] of Object.entries(WRENCH_AXES)) {
+        const value = values[axis];
+        const numeric = typeof value === "number" && Number.isFinite(value)
+          ? value : 0;
+        const ratio = Math.max(-1, Math.min(1, numeric / WRENCH_SCALES[mode]));
+        const row = one(panel, `[data-axis="${axis}"]`);
+        const fill = one(row, ".axis-fill");
+        fill.style.left = `${ratio >= 0 ? 50 : 50 + ratio * 50}%`;
+        fill.style.width = `${Math.abs(ratio) * 50}%`;
+        one(row, ".axis-value").textContent = signedNumber(value);
+      }
+    }
+
+    function rate(stream) {
+      return stream && stream.connected ? `${number(stream.rate_hz, 1)} Hz` : "-- Hz";
+    }
+
+    function age(stream) {
+      return stream && typeof stream.age_s === "number"
+        ? `age ${number(stream.age_s, 2)} s`
+        : "age --";
+    }
+
+    function setOnline(element, connected) {
+      element.classList.toggle("online", Boolean(connected));
+      element.classList.toggle("offline", !connected);
+    }
+
+    function createPanels() {
+      const template = document.getElementById("hand-template");
+      const host = document.getElementById("hands");
+      for (const [hand, meta] of Object.entries(HANDS)) {
+        const panel = template.content.firstElementChild.cloneNode(true);
+        panel.dataset.hand = hand;
+        text(panel, "label", meta.label);
+        text(panel, "bus", meta.bus);
+        text(panel, "mapping", meta.mapping);
+        panels[hand] = panel;
+        host.appendChild(panel);
+        bindControls(hand, panel);
+      }
+    }
+
+    function inputNumber(panel, field) {
+      const value = Number(one(panel, `[data-field="${field}"]`).value);
+      if (!Number.isFinite(value)) {
+        throw new Error(`${field} 不是有效数字`);
+      }
+      return value;
+    }
+
+    function setAction(panel, message, ok = null) {
+      const line = one(panel, '[data-role="action"]');
+      line.textContent = message;
+      line.classList.toggle("ok", ok === true);
+      line.classList.toggle("error", ok === false);
+    }
+
+    async function postControl(hand, endpoint, payload = {}) {
+      const response = await fetch(`/api/hands/${hand}/${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Robot-Control": "1",
+        },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({ message: `HTTP ${response.status}` }));
+      if (!response.ok) {
+        throw new Error(result.message || `HTTP ${response.status}`);
+      }
+      return result;
+    }
+
+    async function runAction(hand, key, endpoint, payload = {}) {
+      if (pending.has(key)) return;
+      pending.add(key);
+      const panel = panels[hand];
+      setAction(panel, "请求处理中");
+      try {
+        const result = await postControl(hand, endpoint, payload);
+        setAction(panel, result.message || "操作完成", result.ok !== false);
+      } catch (error) {
+        setAction(panel, error.message || String(error), false);
+      } finally {
+        pending.delete(key);
+      }
+    }
+
+    function bindControls(hand, panel) {
+      for (const button of panel.querySelectorAll("[data-sensor]")) {
+        button.addEventListener("click", () => {
+          const action = button.dataset.sensor;
+          runAction(hand, `${hand}-sensor-${action}`, `sensor/${action}`);
+        });
+      }
+      for (const button of panel.querySelectorAll("[data-gripper]")) {
+        button.addEventListener("click", () => {
+          const action = button.dataset.gripper;
+          runAction(hand, `${hand}-gripper-${action}`, `gripper/service/${action}`);
+        });
+      }
+      one(panel, '[data-roundtrip="start"]').addEventListener("click", () => {
+        try {
+          const payload = {
+            position_a: inputNumber(panel, "position-a"),
+            position_b: inputNumber(panel, "position-b"),
+            kp: inputNumber(panel, "roundtrip-kp"),
+            kd: inputNumber(panel, "roundtrip-kd"),
+            rate_hz: inputNumber(panel, "rate-hz"),
+            switch_period_s: inputNumber(panel, "switch-period"),
+          };
+          runAction(hand, `${hand}-roundtrip-start`, "gripper/roundtrip/start", payload);
+        } catch (error) {
+          setAction(panel, error.message || String(error), false);
+        }
+      });
+      one(panel, '[data-roundtrip="stop"]').addEventListener("click", () => {
+        runAction(hand, `${hand}-roundtrip-stop`, "gripper/roundtrip/stop");
+      });
+      one(panel, '[data-command="mit"]').addEventListener("click", () => {
+        try {
+          const payload = {
+            q: inputNumber(panel, "manual-q"),
+            dq: 0,
+            kp: inputNumber(panel, "manual-kp"),
+            kd: inputNumber(panel, "manual-kd"),
+            tau: 0,
+          };
+          runAction(hand, `${hand}-mit`, "gripper/command/mit", payload);
+        } catch (error) {
+          setAction(panel, error.message || String(error), false);
+        }
+      });
+    }
+
+    function setStreamStrip(hand, name, stream) {
+      const item = document.querySelector(`[data-stream="${hand}-${name}"]`);
+      setOnline(one(item, ".dot"), stream.connected);
+      one(item, ".stream-rate").textContent = rate(stream);
+    }
+
+    function updateServices(panel, selector, services, running = false) {
+      for (const button of panel.querySelectorAll(selector)) {
+        const action = button.dataset.sensor || button.dataset.gripper;
+        const available = services && services[action] === true;
+        button.disabled = !available || (running && action !== "disable");
+      }
+    }
+
+    function updateHand(hand, state) {
+      const panel = panels[hand];
+      const sensor = state.sensor;
+      const gripper = state.gripper;
+      const trip = state.roundtrip || {};
+
+      text(panel, "bus", state.bus || HANDS[hand].bus);
+      text(panel, "sensor-rate", rate(sensor));
+      text(panel, "gripper-rate", rate(gripper));
+      text(panel, "sensor-status", sensor.connected ? "数据在线" : "无新数据");
+      text(panel, "gripper-status", gripper.connected ? "反馈在线" : "无新反馈");
+      text(panel, "sensor-age", age(sensor));
+      text(panel, "gripper-age", age(gripper));
+      text(panel, "sensor-endpoint", `${sensor.target_node} · ${sensor.topic}`);
+      text(panel, "gripper-endpoint", `${gripper.target_node} · ${gripper.topic}`);
+
+      setOnline(one(panel, '[data-health="sensor"]'), sensor.connected);
+      setOnline(one(panel, '[data-health="gripper"]'), gripper.connected);
+      setOnline(one(panel, '[data-dot="sensor"]'), sensor.connected);
+      setOnline(one(panel, '[data-dot="gripper"]'), gripper.connected);
+      setStreamStrip(hand, "sensor", sensor);
+      setStreamStrip(hand, "gripper", gripper);
+
+      const wrench = sensor.wrench;
+      const values = {
+        fx: wrench && wrench.force ? wrench.force.x : null,
+        fy: wrench && wrench.force ? wrench.force.y : null,
+        fz: wrench && wrench.force ? wrench.force.z : null,
+        mx: wrench && wrench.torque ? wrench.torque.x : null,
+        my: wrench && wrench.torque ? wrench.torque.y : null,
+        mz: wrench && wrench.torque ? wrench.torque.z : null,
+      };
+      updateWrenchVisual(panel, values);
+
+      const joint = gripper.joint_state;
+      one(panel, '[data-value="position"]').textContent = number(joint && joint.position ? joint.position[0] : null);
+      one(panel, '[data-value="velocity"]').textContent = number(joint && joint.velocity ? joint.velocity[0] : null);
+      one(panel, '[data-value="effort"]').textContent = number(joint && joint.effort ? joint.effort[0] : null);
+
+      updateServices(panel, "[data-sensor]", sensor.services, false);
+      updateServices(panel, "[data-gripper]", gripper.services, Boolean(trip.running));
+      one(panel, '[data-roundtrip="start"]').disabled = Boolean(trip.running) || !(gripper.services && gripper.services.enable);
+      one(panel, '[data-roundtrip="stop"]').disabled = !trip.running;
+      one(panel, '[data-command="mit"]').disabled = Boolean(trip.running);
+
+      const target = typeof trip.target === "number" ? ` · ${number(trip.target)} rad` : "";
+      text(panel, "roundtrip-state", `${trip.message || trip.phase || "未启动"}${target}`);
+      if (state.last_action) {
+        setAction(panel, state.last_action.message, state.last_action.ok);
+      }
+    }
+
+    function setServerOnline(online, message) {
+      const state = document.getElementById("server-state");
+      state.classList.toggle("online", online);
+      document.getElementById("server-text").textContent = message;
+    }
+
+    async function pollState() {
+      try {
+        const response = await fetch("/api/state", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const state = await response.json();
+        for (const hand of Object.keys(HANDS)) {
+          if (state.hands && state.hands[hand]) updateHand(hand, state.hands[hand]);
+        }
+        setServerOnline(true, "网页节点在线");
+      } catch (error) {
+        setServerOnline(false, "网页节点断开");
+      } finally {
+        window.setTimeout(pollState, 250);
+      }
+    }
+
+    createPanels();
+    pollState();
+  </script>
+</body>
+</html>

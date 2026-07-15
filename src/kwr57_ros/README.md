@@ -44,16 +44,13 @@ flowchart LR
 ## 启动
 
 ```bash
+# 安装
 cd ~/Unitree_G1_Workspace
 colcon build --symlink-install
-source scripts/env.sh
 
+source scripts/env.sh
 # 当前台架：CAN0 上一个 KWR57 + Web，默认使用方案 B
 ros2 launch kwr57_ros web_demo.launch.py
-
-# 最终机器人拓扑：始终使用方案 B
-bash scripts/run.sh single
-bash scripts/run.sh dual
 ```
 
 方案 A 只用于兼容和诊断：

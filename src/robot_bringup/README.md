@@ -32,7 +32,7 @@ flowchart LR
 
 `dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
 
-当前台架没有安装夹爪，并且 CAN0 只连接一台 KWR57。这个临时接线只影响验证方法，不改变上述最终硬件清单；当前实机使用 `ros2 launch kwr57_ros web_demo.launch.py`，完整 bringup 只做构建、launch 生成和拓扑测试，避免向不存在的设备发送命令。
+当前联调台架只接入 CAN0 左手设备，CAN1 右手暂未连接。这个临时接线不改变上述最终硬件清单；实测 Web demo 时只要求左栏的 KWR57 和 Gloria-M 数据在线，右栏无数据或服务调用失败可以忽略。
 
 ## 启动
 
@@ -41,6 +41,31 @@ source scripts/env.sh
 bash scripts/run.sh single
 bash scripts/run.sh dual
 ```
+
+## 双手 Web 联调
+
+从干净环境一次启动双总线四设备和统一网页：
+
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup web_demo.launch.py
+```
+
+浏览器打开 `http://<机器人 IP>:8770`。页面固定为 CAN0 左手、CAN1 右手两栏，每栏同时显示 KWR57 六轴数据、Gloria-M 位置/速度/力矩以及两条消息频率。夹爪只开放 MIT 单次目标和 MIT 往返；往返会先调用设备现有的 `enable` 服务，停止时自动调用 `disable`。
+
+如果 `dual_bus.launch.py` 或四个设备节点已经启动，只追加网页节点，不要再次启动 bridge：
+
+```bash
+ros2 run robot_bringup web_dashboard
+```
+
+远程机器可使用 SSH 端口转发：
+
+```bash
+ssh -L 8770:127.0.0.1:8770 user@robot
+```
+
+当前只接 CAN0 时，页面右栏保持离线是预期状态，不影响左侧发送夹爪控制并同时观察力传感器与夹爪反馈。
 
 `robot_bringup` 不提供 KWR57 ROS Frame 回退开关。兼容结构只保留在 `kwr57_ros/web_demo.launch.py use_frame_handler:=false` 和 `kwr57_ros/ft_sensor.launch.py`，原因与 PC2 性能数据见 [`kwr57_ros/README.md`](../kwr57_ros/README.md)。
 
