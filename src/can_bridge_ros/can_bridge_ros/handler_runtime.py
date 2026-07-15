@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from can_bridge_ros.handler_api import (
@@ -22,6 +23,7 @@ class _HandlerState:
     consecutive_failures: int = 0
     enabled: bool = True
     last_error_log: float = 0.0
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _load_factory(path: str):
@@ -151,11 +153,13 @@ class FrameHandlerRuntime:
         for state in reversed(self._states):
             if state.registration.stop is None:
                 continue
-            try:
-                state.registration.stop()
-            except Exception as exc:  # noqa: BLE001
-                self._logger.error(
-                    f"frame handler {state.registration.name!r} stop failed: {exc}")
+            with state.lock:
+                try:
+                    state.registration.stop()
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.error(
+                        f"frame handler {state.registration.name!r} "
+                        f"stop failed: {exc}")
 
     def destroy_auxiliary_nodes(self) -> None:
         self._destroy_nodes(self.registrations)
@@ -168,28 +172,32 @@ class FrameHandlerRuntime:
         if state is None or not state.enabled:
             return FrameDisposition.FORWARD
 
-        try:
-            disposition = state.registration.callback(channel_id, message)
-            if not isinstance(disposition, FrameDisposition):
-                raise TypeError(
-                    f"callback returned {disposition!r}, expected FrameDisposition")
-        except Exception as exc:  # noqa: BLE001
-            state.consecutive_failures += 1
-            now = time.monotonic()
-            if now - state.last_error_log >= 1.0:
-                state.last_error_log = now
-                self._logger.error(
-                    f"frame handler {state.registration.name!r} failed "
-                    f"({state.consecutive_failures}/{self._failure_limit}): {exc}")
-            if state.consecutive_failures >= self._failure_limit:
-                state.enabled = False
-                self._logger.error(
-                    f"frame handler {state.registration.name!r} disabled; "
-                    "matching frames will use normal ROS routing")
-            return FrameDisposition.FORWARD
+        with state.lock:
+            if not self._active or not state.enabled:
+                return FrameDisposition.FORWARD
+            try:
+                disposition = state.registration.callback(channel_id, message)
+                if not isinstance(disposition, FrameDisposition):
+                    raise TypeError(
+                        f"callback returned {disposition!r}, "
+                        "expected FrameDisposition")
+            except Exception as exc:  # noqa: BLE001
+                state.consecutive_failures += 1
+                now = time.monotonic()
+                if now - state.last_error_log >= 1.0:
+                    state.last_error_log = now
+                    self._logger.error(
+                        f"frame handler {state.registration.name!r} failed "
+                        f"({state.consecutive_failures}/{self._failure_limit}): {exc}")
+                if state.consecutive_failures >= self._failure_limit:
+                    state.enabled = False
+                    self._logger.error(
+                        f"frame handler {state.registration.name!r} disabled; "
+                        "matching frames will use normal ROS routing")
+                return FrameDisposition.FORWARD
 
-        state.consecutive_failures = 0
-        return disposition
+            state.consecutive_failures = 0
+            return disposition
 
     @staticmethod
     def _destroy_nodes(registrations: Sequence[FrameHandlerRegistration]) -> None:

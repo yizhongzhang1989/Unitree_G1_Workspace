@@ -17,10 +17,11 @@ import rclpy
 from geometry_msgs.msg import WrenchStamped
 from gloria_ros.msg import MitCommand
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.logging import get_logger
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
@@ -30,6 +31,9 @@ _HANDS = ("left", "right")
 _SENSOR_ACTIONS = ("start", "stop", "tare", "reset_tare")
 _GRIPPER_SERVICES = ("enable", "disable", "refresh")
 _CAMERA_PATH_PREFIX = "/api/cameras/"
+_STREAM_RATE_WINDOW_S = 3.0
+_ROUNDTRIP_TARGET_TOLERANCE_RAD = 0.10
+_ROUNDTRIP_MAX_SWITCH_PERIOD_S = 3.0
 
 
 def _target_name(value: str) -> str:
@@ -59,13 +63,81 @@ def _finite_fields(payload: object, names: Iterable[str]) -> Dict[str, float]:
     return result
 
 
+def _roundtrip_should_switch(
+        position: Optional[float], target: float,
+        elapsed: float, timeout: float) -> bool:
+    return (
+        elapsed >= timeout
+        or position is not None
+        and abs(position - target) <= _ROUNDTRIP_TARGET_TOLERANCE_RAD
+    )
+
+
 def _child_name(target: str, child: str) -> str:
     return f"{target}/{child.strip('/')}"
+
+
+def _request_path(raw_path: object) -> str:
+    if isinstance(raw_path, bytes):
+        return raw_path.decode("utf-8", errors="surrogatepass")
+    return str(raw_path)
 
 
 def _json_number(value: float) -> Optional[float]:
     number = float(value)
     return number if math.isfinite(number) else None
+
+
+def _wrench_payload(
+        message: Optional[WrenchStamped], received_at: Optional[float]) -> Optional[dict]:
+    if message is None or received_at is None:
+        return None
+    force = message.wrench.force
+    torque = message.wrench.torque
+    return {
+        "stamp": {
+            "sec": int(message.header.stamp.sec),
+            "nanosec": int(message.header.stamp.nanosec),
+        },
+        "frame_id": message.header.frame_id,
+        "force": {
+            "x": _json_number(force.x),
+            "y": _json_number(force.y),
+            "z": _json_number(force.z),
+        },
+        "torque": {
+            "x": _json_number(torque.x),
+            "y": _json_number(torque.y),
+            "z": _json_number(torque.z),
+        },
+        "received_at": received_at,
+    }
+
+
+def _serialized_wrench_payload(
+        serialized_message: Optional[bytes],
+        received_at: Optional[float]) -> Optional[dict]:
+    if serialized_message is None or received_at is None:
+        return None
+    message = deserialize_message(serialized_message, WrenchStamped)
+    return _wrench_payload(message, received_at)
+
+
+def _joint_state_payload(
+        message: Optional[JointState], received_at: Optional[float]) -> Optional[dict]:
+    if message is None or received_at is None:
+        return None
+    return {
+        "stamp": {
+            "sec": int(message.header.stamp.sec),
+            "nanosec": int(message.header.stamp.nanosec),
+        },
+        "name": list(message.name),
+        "position": [_json_number(value) for value in message.position],
+        "velocity": [_json_number(value) for value in message.velocity],
+        "effort": [_json_number(value) for value in message.effort],
+        "received_at": received_at,
+    }
 
 
 def _control_route(path: str) -> Tuple[str, str, str]:
@@ -128,7 +200,7 @@ def _make_handler(node: Any):
                     "request body must be valid UTF-8 JSON") from exc
 
         def do_GET(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
+            path = urlsplit(_request_path(self.path)).path
             if path == "/":
                 self._send_bytes(200, "text/html; charset=utf-8", node.html)
                 return
@@ -156,7 +228,7 @@ def _make_handler(node: Any):
             self._send_json(404, {"ok": False, "message": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
+            path = urlsplit(_request_path(self.path)).path
             if self.headers.get("X-Robot-Control") != "1":
                 self._send_json(
                     403, {
@@ -209,6 +281,13 @@ class RobotWebDashboard(Node):
         super().__init__("robot_web_dashboard")
         self._cb_group = ReentrantCallbackGroup()
         self._state_lock = threading.Lock()
+        self._stream_locks = {
+            hand: {
+                "sensor": threading.Lock(),
+                "gripper": threading.Lock(),
+            }
+            for hand in _HANDS
+        }
         self._service_locks = {hand: threading.Lock() for hand in _HANDS}
         self._roundtrip_locks = {hand: threading.Lock() for hand in _HANDS}
         self._roundtrip_stops = {hand: threading.Event() for hand in _HANDS}
@@ -345,10 +424,15 @@ class RobotWebDashboard(Node):
         )
         self._camera_thread.start()
 
-        best_effort_qos = QoSProfile(
+        wrench_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=20,
+            depth=64,
+        )
+        latest_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
         )
         command_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -366,8 +450,9 @@ class RobotWebDashboard(Node):
                 config["wrench_topic"],
                 lambda message, selected=hand: self._on_wrench(
                     selected, message),
-                best_effort_qos,
+                wrench_qos,
                 callback_group=self._cb_group,
+                raw=True,
             ))
             joint_topic = _child_name(config["gripper_node"], "joint_states")
             self._joint_subscriptions.append(self.create_subscription(
@@ -375,7 +460,7 @@ class RobotWebDashboard(Node):
                 joint_topic,
                 lambda message, selected=hand: self._on_joint_state(
                     selected, message),
-                best_effort_qos,
+                latest_qos,
                 callback_group=self._cb_group,
             ))
             self._mit_publishers[hand] = self.create_publisher(
@@ -450,53 +535,35 @@ class RobotWebDashboard(Node):
                 "safe_position_min must be less than safe_position_max")
 
     def _record_stream_sample(
-            self, hand: str, stream_name: str, sample: dict) -> None:
+            self, hand: str, stream_name: str, sample: object) -> None:
         now = time.monotonic()
-        with self._state_lock:
+        with self._stream_locks[hand][stream_name]:
             stream = self._state[hand][stream_name]
             stream["sample"] = sample
             stream["received_monotonic"] = now
             stream["window_count"] += 1
             elapsed = now - stream["window_started"]
-            if elapsed >= 1.0:
+            if elapsed >= _STREAM_RATE_WINDOW_S:
                 stream["rate_hz"] = stream["window_count"] / elapsed
                 stream["window_count"] = 0
                 stream["window_started"] = now
 
-    def _on_wrench(self, hand: str, message: WrenchStamped) -> None:
-        force = message.wrench.force
-        torque = message.wrench.torque
-        self._record_stream_sample(hand, "sensor", {
-            "stamp": {
-                "sec": int(message.header.stamp.sec),
-                "nanosec": int(message.header.stamp.nanosec),
-            },
-            "frame_id": message.header.frame_id,
-            "force": {
-                "x": _json_number(force.x),
-                "y": _json_number(force.y),
-                "z": _json_number(force.z),
-            },
-            "torque": {
-                "x": _json_number(torque.x),
-                "y": _json_number(torque.y),
-                "z": _json_number(torque.z),
-            },
-            "received_at": time.time(),
-        })
+    def _on_wrench(self, hand: str, serialized_message: Any) -> None:
+        self._record_stream_sample(hand, "sensor", serialized_message)
 
-    def _on_joint_state(self, hand: str, message: JointState) -> None:
-        self._record_stream_sample(hand, "gripper", {
-            "stamp": {
-                "sec": int(message.header.stamp.sec),
-                "nanosec": int(message.header.stamp.nanosec),
-            },
-            "name": list(message.name),
-            "position": [_json_number(value) for value in message.position],
-            "velocity": [_json_number(value) for value in message.velocity],
-            "effort": [_json_number(value) for value in message.effort],
-            "received_at": time.time(),
-        })
+    def _on_joint_state(self, hand: str, message: Any) -> None:
+        self._record_stream_sample(hand, "gripper", message)
+
+    def _latest_gripper_position(self, hand: str) -> Optional[float]:
+        with self._stream_locks[hand]["gripper"]:
+            stream = self._state[hand]["gripper"]
+            message = stream["sample"]
+            received = stream["received_monotonic"]
+            if (message is None or not message.position
+                    or time.monotonic() - received > self._state_stale):
+                return None
+            position = float(message.position[0])
+        return position if math.isfinite(position) else None
 
     def _record_action(
             self, hand: str, category: str, action: str,
@@ -516,18 +583,32 @@ class RobotWebDashboard(Node):
 
     def snapshot(self) -> dict:
         now = time.monotonic()
+        wall_now = time.time()
+        stream_snapshots = {}
+        for hand in _HANDS:
+            for stream_name in ("sensor", "gripper"):
+                with self._stream_locks[hand][stream_name]:
+                    stream = self._state[hand][stream_name]
+                    stream_snapshots[(hand, stream_name)] = (
+                        stream["sample"],
+                        stream["received_monotonic"],
+                        stream["rate_hz"],
+                    )
+
         hands = {}
         with self._state_lock:
             for hand, config in self._config.items():
-                sensor = self._state[hand]["sensor"]
-                gripper = self._state[hand]["gripper"]
+                sensor_sample, sensor_received, sensor_rate = (
+                    stream_snapshots[(hand, "sensor")])
+                gripper_sample, gripper_received, gripper_rate = (
+                    stream_snapshots[(hand, "gripper")])
                 sensor_age = (
-                    now - sensor["received_monotonic"]
-                    if sensor["received_monotonic"] > 0.0 else None
+                    now - sensor_received
+                    if sensor_received > 0.0 else None
                 )
                 gripper_age = (
-                    now - gripper["received_monotonic"]
-                    if gripper["received_monotonic"] > 0.0 else None
+                    now - gripper_received
+                    if gripper_received > 0.0 else None
                 )
                 hands[hand] = {
                     "label": config["label"],
@@ -539,8 +620,11 @@ class RobotWebDashboard(Node):
                             sensor_age is not None
                             and sensor_age <= self._state_stale),
                         "age_s": sensor_age,
-                        "rate_hz": sensor["rate_hz"],
-                        "wrench": sensor["sample"],
+                        "rate_hz": sensor_rate,
+                        "wrench": _serialized_wrench_payload(
+                            sensor_sample,
+                            wall_now - sensor_age
+                            if sensor_age is not None else None),
                     },
                     "gripper": {
                         "target_node": config["gripper_node"],
@@ -550,8 +634,11 @@ class RobotWebDashboard(Node):
                             gripper_age is not None
                             and gripper_age <= self._state_stale),
                         "age_s": gripper_age,
-                        "rate_hz": gripper["rate_hz"],
-                        "joint_state": gripper["sample"],
+                        "rate_hz": gripper_rate,
+                        "joint_state": _joint_state_payload(
+                            gripper_sample,
+                            wall_now - gripper_age
+                            if gripper_age is not None else None),
                     },
                     "camera": {
                         **self._state[hand]["camera"],
@@ -573,7 +660,7 @@ class RobotWebDashboard(Node):
         return {
             "hands": hands,
             "safe_position": {"min": self._safe_min, "max": self._safe_max},
-            "server_time": time.time(),
+            "server_time": wall_now,
         }
 
     def _poll_cameras(self) -> None:
@@ -742,8 +829,8 @@ class RobotWebDashboard(Node):
             raise ValueError("kd must be within [0, 5]")
         if not 0.0 < values["rate_hz"] <= 100.0:
             raise ValueError("rate_hz must be within (0, 100]")
-        if values["switch_period_s"] < 0.2:
-            raise ValueError("switch_period_s must be at least 0.2")
+        if not 0.2 <= values["switch_period_s"] <= _ROUNDTRIP_MAX_SWITCH_PERIOD_S:
+            raise ValueError("switch_period_s must be within [0.2, 3.0]")
 
         with self._roundtrip_locks[hand]:
             with self._state_lock:
@@ -823,11 +910,14 @@ class RobotWebDashboard(Node):
         try:
             while not stop_event.is_set():
                 now = time.monotonic()
-                if now - target_started >= values["switch_period_s"]:
+                target = targets[target_index]
+                if _roundtrip_should_switch(
+                        self._latest_gripper_position(hand), target,
+                        now - target_started, values["switch_period_s"]):
                     target_index = 1 - target_index
                     completed_segments += 1
                     target_started = now
-                target = targets[target_index]
+                    target = targets[target_index]
                 self._set_roundtrip(
                     hand,
                     running=True,
@@ -891,7 +981,7 @@ def main() -> None:
             rclpy.shutdown()
         return
 
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()

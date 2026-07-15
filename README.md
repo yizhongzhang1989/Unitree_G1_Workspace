@@ -98,9 +98,9 @@ ros2 launch robot_bringup dual_bus.launch.py
 - 双总线下两臂在不同总线，**CAN ID 可相同**，无需改。
 - 换接线**只改用哪个 launch**，设备节点代码不动。
 - 自定义设备 ID、总线、Wrench 输出或夹爪专属 RX 话题时，只修改对应 bringup launch 中的 `CanBus`、`Kwr57Device`、`GloriaDevice` 清单；handler、路由和节点参数会从同一份数据生成。
-- 两个 1 kHz KWR57 会产生 6000 个 8-byte 标准 CAN 数据帧/秒。在 1 Mbps 下，无位填充时约占 666 kbit/s，按最坏位填充估算约 810 kbit/s；两个低频 Gloria-M 可以共存，但余量有限，必须保证终端匹配并在实机监控丢帧和实际发布频率。
+- 每个 1 kHz KWR57 会在所属物理 CAN 上产生 3000 个 8-byte 标准帧/s；加一台 100 Hz Gloria-M 往返后，每条 1 Mbps 总线预计占用约 35.742% 至 43.470%。CAN0/CAN1 是独立物理总线，优化后的 bridge 已在完整四设备负载下验证双路 1 kHz。
 
-话题：`/ft_left/wrench_raw`、`/grip_left/joint_states` 等。BEST_EFFORT 话题使用 `ros2 topic echo --qos-reliability best_effort`，KWR57 也可使用 `ros2 run kwr57_ros wrench_echo`。
+话题：`/ft_left/wrench_raw`、`/grip_left/joint_states` 等。BEST_EFFORT 话题使用 `ros2 topic echo --qos-reliability best_effort`，KWR57 也可使用 `ros2 run kwr57_ros wrench_echo`。Dashboard 使用 raw `WrenchStamped` 和 `KEEP_LAST(64)` 展示 3 秒平均接收频率；1 kHz 控制订阅建议采用 `rclcpp`、BEST_EFFORT 和 `KEEP_LAST(64)`。
 
 Gloria 节点默认不自动使能。其 `~/enable` 服务会先设置并确认 MIT/PV 控制模式，再使能并等待状态反馈；未使能、模式未确认或反馈过期时默认拒绝运动命令。完整接口与安全参数见 `src/gloria_ros/README.md`。
 

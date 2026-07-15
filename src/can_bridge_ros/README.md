@@ -41,6 +41,9 @@ sudo apt-get install -y ros-foxy-can-msgs
 | `receive_own_messages` | `false` | 是否回显发送帧 |
 | `rx_routes` | `[""]` | `channel:can_id:topic` 字符串数组；支持十进制或 `0x` ID |
 | `frame_handler_specs` | `[""]` | 受信任的进程内 handler JSON 字符串数组；默认禁用 |
+| `rx_processing_queue_depth` | `2048` | 每通道处理缓冲深度；满时丢弃最旧帧 |
+| `rx_processing_batch_size` | `128` | 每个处理线程单次取出的最大帧数 |
+| `tx_batch_size` | `64` | USB I/O 每轮最多发送的帧数，避免 RX 饥饿 |
 
 `rx_routes` 在启动时解析，运行期间不动态修改。命中时采用转发而非镜像：帧只发布到专属话题；未命中时发布到 `/<bus_name>/rx`。例如：
 ```yaml
@@ -78,7 +81,9 @@ frame_handler_specs:
 
 bridge 在启动时检查空注册、非法/重复 CAN ID 和多个 handler 抢占同一 key。运行时使用字典按 `(channel_id, can_id)` 做 O(1) 查找。`FORWARD` 继续原有 `rx_routes`/默认 RX 发布，`CONSUME` 跳过该帧的 ROS `can_msgs/Frame` 发布。回调连续失败 3 次会被禁用，后续帧恢复原话题路由；正常关闭时先停止分发和设备流，再排空 TX 队列并释放总线。
 
-handler 回调运行在 CAN 接收线程，必须同步、非阻塞，不能执行文件/网络 I/O、`sleep` 或等待其他线程。bridge 不为每帧创建超时线程，因为线程调度本身会破坏高频路径；运行期隔离依靠严格工厂注册、设备包测试和异常熔断。
+bridge 使用一个 USB I/O 线程持续收发 CAN，并为每个物理通道创建一个处理线程。USB I/O 只执行有限批量 TX、`recv()` 和入队；handler、协议组包及普通 ROS RX 路由在对应通道的处理线程中执行。因此一个通道的 Python 回调不会阻塞另一个通道的 USB 接收轮询。相同 handler 注册实例由独立锁保持串行语义，不同 handler 可以并行。
+
+每通道处理缓冲为有界 oldest-drop 队列；过载时保留最新帧，不会让延迟无限增长。handler 回调仍必须同步、非阻塞，不能执行文件/网络 I/O、`sleep` 或等待其他线程。bridge 不为每帧创建超时线程；运行期隔离依靠独立通道线程、严格工厂注册和异常熔断。
 
 Web demo 为兼容方案 A 保留 KWR57 专属路由；生产 bringup 不创建 KWR57 专属路由。handler 拒绝帧或被熔断后，帧会落到默认 `/canX/rx`；bridge 不会动态创建独立设备进程。通用 bridge launch 默认不加载 handler，生产 `robot_bringup` 始终为所有 KWR57 生成 handler specs。
 

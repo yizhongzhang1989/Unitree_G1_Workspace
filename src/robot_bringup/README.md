@@ -81,7 +81,7 @@ flowchart LR
 
 `dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
 
-当前联调台架只接入 CAN0 左手设备，CAN1 右手暂未连接。这个临时接线不改变上述最终硬件清单；实测 Web demo 时只要求左栏的 KWR57 和 Gloria-M 数据在线，右栏无数据或服务调用失败可以忽略。
+当前联调台架使用 `dual_bus.launch.py` 的完整四设备拓扑：CAN0 和 CAN1 各接一台 KWR57 与一台 Gloria-M。默认 1 kHz 力传感器流、100 Hz 夹爪往返运动的总线占用与实测见 [`CAN_BUS_LOAD.md`](CAN_BUS_LOAD.md)。
 
 ## 启动
 
@@ -102,6 +102,12 @@ source scripts/env.sh
 ros2 launch robot_bringup web_demo.launch.py
 ```
 
+Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅接收原有两路 `WrenchStamped`，高频回调只保存最新序列化样本并计数，HTTP 快照时才反序列化。页面显示 3 秒平均接收频率；最大负载实测左右均约 1 kHz，且没有修改 KWR57 话题或消息。该平均值不代表每个样本都满足 1 ms deadline。
+
+### ROS 夹爪消息发布
+
+双总线生产拓扑中的 `/grip_arm0` 和 `/grip_arm1` 默认使用 MIT 模式。往返控制在反馈位置进入目标 ±0.10 rad 时立即换向，否则最迟 3 秒换向。夹爪节点不会自动重发上一次运动命令，停止发布后仍须显式调用对应的 `disable` 服务。消息、服务和安全参数见 [`gloria_ros/README.md`](../gloria_ros/README.md)。
+
 浏览器打开 `http://<机器人 IP>:8770`。页面固定为 CAN0 左手、CAN1 右手两栏，每栏同时显示手部相机画面、KWR57 六轴数据、Gloria-M 位置/速度/力矩以及设备在线状态。夹爪只开放 MIT 单次目标和 MIT 往返；往返会先调用设备现有的 `enable` 服务，停止时自动调用 `disable`。
 
 网页节点通过同源 URL `/api/cameras/<left|right>/video_feed` 代理两台相机的 MJPEG，因此远程访问只需转发 `8770`。网页后台独立探测相机 `/status`；相机未连接、启动失败或中途断流时，对应栏显示离线占位，KWR57、夹爪及另一台相机不受影响。`camera_node` 默认每 5 秒在后台尝试恢复期望运行的 RTSP 流，相机后接入或网络恢复后页面会自动重新加载画面；通过相机 Web 的“停止”操作主动停流时不会自动拉起。
@@ -120,7 +126,7 @@ ros2 run robot_bringup web_dashboard
 ssh -L 8770:127.0.0.1:8770 user@robot
 ```
 
-当前只接 CAN0 时，页面右栏保持离线是预期状态，不影响左侧发送夹爪控制并同时观察力传感器与夹爪反馈。
+双总线四设备接线下，页面左右两栏都应在线；单侧离线时按页面显示的总线和设备节点检查对应通道。
 
 `robot_bringup` 不提供 KWR57 ROS Frame 回退开关。兼容结构只保留在 `kwr57_ros/web_demo.launch.py use_frame_handler:=false` 和 `kwr57_ros/ft_sensor.launch.py`，原因与 PC2 性能数据见 [`kwr57_ros/README.md`](../kwr57_ros/README.md)。
 

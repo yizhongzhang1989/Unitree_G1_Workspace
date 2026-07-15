@@ -21,12 +21,12 @@ flowchart LR
 flowchart LR
   CAN["CANalyst-II"] --> B
   subgraph P["bridge 进程"]
-    B["can_bridge_ros"] -->|"Python callback"| K["KWR57 ROS node<br/>三帧组包"]
+    B["can_bridge_ros<br/>USB I/O 线程"] -->|"每通道处理线程"| K["KWR57 ROS node<br/>三帧组包"]
   end
   K -->|"WrenchStamped<br/>DDS"| C["控制器 / Web<br/>独立进程"]
 ```
 
-增加方案 B 是因为 KWR57 每个样本由三帧 CAN 组成，设为 1 kHz 时 bridge 与设备进程之间需要处理约 3000 条 ROS Frame/s；序列化、内存复制、DDS 调度和两个 Python 进程的执行器开销使 Unitree G1 PC2 上的方案 A 只能得到约 500 Hz。方案 B 让通用 bridge 按 `(channel, CAN ID)` O(1) 查找 handler，再用普通 Python 调用把原始帧交给 KWR57，组包后只发布一次 `WrenchStamped`，同机可达到设定的 1 kHz。
+增加方案 B 是因为 KWR57 每个样本由三帧 CAN 组成，设为 1 kHz 时 bridge 与设备进程之间需要处理约 3000 条 ROS Frame/s；序列化、内存复制、DDS 调度和两个 Python 进程的执行器开销使 Unitree G1 PC2 上的方案 A 只能得到约 500 Hz。方案 B 让通用 bridge 按 `(channel, CAN ID)` O(1) 查找 handler，再用普通 Python 调用把原始帧交给 KWR57，组包后只发布一次 `WrenchStamped`。当前 bridge 还将 USB I/O 与每通道 handler 处理解耦，因此双通道可同时达到设定的 1 kHz。
 
 方案 B 没有把设备协议写进 bridge：bridge 只加载 `module:function` 工厂并验证注册结果，KWR57 的协议、参数、ROS node、话题和服务仍归 `kwr57_ros` 所有。CAN 命令直接进入 bridge 的 TX 队列；有效 KWR57 帧不会创建或发布中间 `can_msgs/Frame`。
 
@@ -49,7 +49,7 @@ cd ~/Unitree_G1_Workspace
 colcon build --symlink-install
 
 source scripts/env.sh
-# 当前台架：CAN0 上一个 KWR57 + Web，默认使用方案 B
+# 单 KWR57 Web 调试入口，默认使用方案 B
 ros2 launch kwr57_ros web_demo.launch.py
 ```
 
@@ -91,7 +91,7 @@ ros2 launch kwr57_ros ft_sensor.launch.py rx_topic:=/can0/rx tx_topic:=/can0/tx
 
 ## 部署约束
 
-最终 `robot_bringup` 的设备清单仍描述两台 KWR57 和两台 Gloria-M。当前台架只有 CAN0 上的一台 KWR57，不能据此删减最终硬件清单；实机验证当前使用 `web_demo.launch.py`，完整 bringup 通过构建、参数生成和拓扑测试验证。
+`robot_bringup` 的双总线设备清单描述两台 KWR57 和两台 Gloria-M；本包的单设备 launch 仅用于调试，不代表生产拓扑。
 
 同一条 CAN 上的 KWR57 必须使用不同的命令 ID 和数据 ID。修改硬件 ID 时一次只连接一个传感器：
 

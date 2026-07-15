@@ -138,6 +138,9 @@ ros2 service call /restart_camera_left_node std_srvs/srv/Trigger '{}'
 
 ## Web 接口
 
+> [!INFO]
+> 每个 `camera_node` 实例启动时都会自动启动一个内置 Flask Web 服务，不需要另行启动网页节点。访问该实例的 `server_port` 根路径即可打开相机控制页；当前 `robot_bringup` 中左、右相机分别使用 `8010` 和 `8011`。`web_demo.launch.py` 启动的 `8770` 统一联调面板是另一个 Web 服务，它通过相机内置服务的 `/status` 和 `/video_feed` 接口获取状态和代理视频。
+
 | 路径 | 方法 | 说明 |
 |---|---|---|
 | `/` | GET | 控制页面 |

@@ -6,10 +6,15 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from geometry_msgs.msg import WrenchStamped
+from rclpy.serialization import serialize_message
+
 from robot_bringup.web_dashboard_node import (
     _control_route,
     _finite_fields,
     _make_handler,
+    _roundtrip_should_switch,
+    _serialized_wrench_payload,
     _target_name,
 )
 
@@ -80,6 +85,12 @@ class HelpersTest(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 _finite_fields(payload, ("q",))
 
+    def test_roundtrip_switches_on_target_or_timeout(self) -> None:
+        self.assertTrue(_roundtrip_should_switch(0.09, 0.0, 0.1, 3.0))
+        self.assertFalse(_roundtrip_should_switch(0.11, 0.0, 2.9, 3.0))
+        self.assertFalse(_roundtrip_should_switch(None, 0.0, 2.9, 3.0))
+        self.assertTrue(_roundtrip_should_switch(None, 0.0, 3.0, 3.0))
+
     def test_routes_only_known_hands_and_actions(self) -> None:
         self.assertEqual(
             _control_route("/api/hands/left/sensor/tare"),
@@ -97,6 +108,30 @@ class HelpersTest(unittest.TestCase):
             _control_route("/api/hands/center/sensor/start")
         with self.assertRaises(KeyError):
             _control_route("/api/hands/left/sensor/reboot")
+
+    def test_serialized_wrench_payload_preserves_message_fields(self) -> None:
+        message = WrenchStamped()
+        message.header.stamp.sec = 123
+        message.header.stamp.nanosec = 456
+        message.header.frame_id = "arm0_ft_link"
+        message.wrench.force.x = 1.25
+        message.wrench.force.y = -2.5
+        message.wrench.force.z = 3.75
+        message.wrench.torque.x = -0.1
+        message.wrench.torque.y = 0.2
+        message.wrench.torque.z = -0.3
+
+        payload = _serialized_wrench_payload(
+            serialize_message(message), 1000.5)
+
+        self.assertEqual(payload["stamp"], {"sec": 123, "nanosec": 456})
+        self.assertEqual(payload["frame_id"], "arm0_ft_link")
+        self.assertEqual(payload["force"], {
+            "x": 1.25, "y": -2.5, "z": 3.75})
+        self.assertAlmostEqual(payload["torque"]["x"], -0.1)
+        self.assertAlmostEqual(payload["torque"]["y"], 0.2)
+        self.assertAlmostEqual(payload["torque"]["z"], -0.3)
+        self.assertEqual(payload["received_at"], 1000.5)
 
 
 class HandlerTest(unittest.TestCase):
@@ -229,7 +264,7 @@ class HtmlContractTest(unittest.TestCase):
             'data-field="roundtrip-kp" value="10"',
             'data-field="roundtrip-kd" value="1"',
             'data-field="rate-hz" value="100"',
-            'data-field="switch-period" value="8"',
+            'data-field="switch-period" value="3" min="0.2" max="3"',
         )
         for default in roundtrip_defaults:
             with self.subTest(roundtrip_default=default):
