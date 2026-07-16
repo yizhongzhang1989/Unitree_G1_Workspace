@@ -1,12 +1,12 @@
 import unittest
 from unittest.mock import call, patch
 
-from robot_bringup.nodes import bringup_actions, camera
+from robot_bringup.end_effectors.nodes import end_effector_actions, camera
 
 
-class CameraBringupTest(unittest.TestCase):
+class EndEffectorsNodesTest(unittest.TestCase):
     def test_camera_builds_side_specific_node(self) -> None:
-        with patch("robot_bringup.nodes.Node") as node_type:
+        with patch("robot_bringup.end_effectors.nodes.Node") as node_type:
             action = camera("left", "192.168.123.97", 8010)
 
         self.assertIs(action, node_type.return_value)
@@ -29,10 +29,13 @@ class CameraBringupTest(unittest.TestCase):
             }])
 
     def test_bringup_adds_left_and_right_cameras(self) -> None:
-        with patch("robot_bringup.nodes.bridge", return_value="bridge"), \
-                patch("robot_bringup.nodes.camera", side_effect=[
+        with patch(
+                "robot_bringup.end_effectors.nodes.bridge",
+                return_value="bridge"), \
+                patch(
+                    "robot_bringup.end_effectors.nodes.camera", side_effect=[
                     "left_camera", "right_camera"]) as camera_factory:
-            actions = bringup_actions("unused.yaml", [], [], [])
+            actions = end_effector_actions("unused.yaml", [], [], [])
 
         self.assertEqual(actions, ["bridge", "left_camera", "right_camera"])
         self.assertEqual(camera_factory.call_args_list, [

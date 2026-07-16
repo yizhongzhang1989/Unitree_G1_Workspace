@@ -1,4 +1,4 @@
-"""Launch the dual-bus four-device bringup and its unified web dashboard."""
+"""Launch the dual-bus end effectors and their unified dashboard."""
 
 import os
 
@@ -14,11 +14,13 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description() -> LaunchDescription:
     bringup_share = get_package_share_directory("robot_bringup")
     devices = IncludeLaunchDescription(PythonLaunchDescriptionSource(
-        os.path.join(bringup_share, "launch", "dual_bus.launch.py")))
+        os.path.join(
+            bringup_share, "launch",
+            "end_effectors_dual_bus.launch.py")))
     dashboard = Node(
         package="robot_bringup",
-        executable="web_dashboard",
-        name="robot_web_dashboard",
+        executable="end_effectors_dashboard",
+        name="end_effectors_dashboard",
         output="screen",
         emulate_tty=True,
         parameters=[{

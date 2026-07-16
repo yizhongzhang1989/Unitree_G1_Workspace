@@ -1,4 +1,4 @@
-"""构造 can_bridge_ros / 力传感器 / 夹爪 launch 节点的辅助函数。"""
+"""构造末端设备 CAN bridge、力传感器、夹爪和相机节点。"""
 
 import os
 from typing import Sequence
@@ -7,7 +7,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch_ros.actions import Node
 from kwr57_ros.bridge_handler import build_frame_handler_spec
 
-from robot_bringup.topology import (
+from robot_bringup.end_effectors.topology import (
     CanBus,
     GloriaDevice,
     Kwr57Device,
@@ -84,12 +84,12 @@ def camera(side: str, ip_address: str, server_port: int) -> Node:
         }])
 
 
-def bringup_actions(
+def end_effector_actions(
         config: str,
         buses: Sequence[CanBus],
         kwr57_devices: Sequence[Kwr57Device],
         gloria_devices: Sequence[GloriaDevice]):
-    """Build one system with all KWR57 devices in the bridge process."""
+    """Build all end-effector actions with KWR57 in the bridge process."""
     return [
         bridge(config, buses, kwr57_devices, gloria_devices),
         *(gripper(device) for device in gloria_devices),

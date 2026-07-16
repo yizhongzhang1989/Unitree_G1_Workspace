@@ -4,7 +4,7 @@ Unitree G1 项目的 ROS 2 工作区。
 
 ## 末端执行器与相机
 
-末端执行器（力传感器 + 夹爪）的 ROS 2 集成采用“CAN 总线作为共享资源”的分层架构。`can_bridge_ros` 独占物理 CAN；KWR57 作为 bridge 进程中的独立 ROS node 处理高频原始帧，Gloria-M 作为独立进程订阅专属 ROS Frame 话题。左右 IP 相机各由一个 `camera_node` 进程读取 RTSP 并发布图像，整套系统由 `robot_bringup` 统一启动。
+末端执行器（力传感器 + 夹爪）的 ROS 2 集成采用“CAN 总线作为共享资源”的分层架构。`can_bridge_ros` 独占物理 CAN；KWR57 作为 bridge 进程中的独立 ROS node 处理高频原始帧，Gloria-M 作为独立进程订阅专属 ROS Frame 话题。左右 IP 相机各由一个 `camera_node` 进程读取 RTSP 并发布图像。末端子系统由 `robot_bringup` 的 `end_effectors_*` 入口统一启动，与全身控制入口分开。
 
 设备：2 个力传感器（KWR57）+ 2 个夹爪（Gloria-M）+ 2 个 IP 相机（左手 `192.168.123.97`、右手 `192.168.123.98`）。CAN 设备支持两种接线：
 - **单总线**：所有设备都在 CANalyst-II 的统一 CAN 上（`/can0` 或者 `/can1`）。
@@ -14,7 +14,7 @@ Unitree G1 项目的 ROS 2 工作区。
 第1层 can_sdk        : 无 ROS 的 python-can 后端、CANalyst-II 准备和单消费者基础 I/O
 第2层 can_bridge_ros : 独占 USB-CAN，桥接多通道，提供路由和通用 handler 注册点
 第3层 设备节点        : kwr57_ros 进程内处理；gloria_ros 订阅专属 RX；camera_node 读取 RTSP
-第4层 bringup         : 生成 CAN handler、路由、设备节点及左右相机节点
+第4层 end effectors   : 生成 CAN handler、路由、设备节点及左右相机节点
 ```
 
 消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；Foxy 对应系统包为 `ros-foxy-can-msgs`。
@@ -29,6 +29,8 @@ Unitree G1 项目的 ROS 2 工作区。
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
+`robot_test_dashboard` 为已经运行的 `ros2_control` 全身控制栈提供控制器发现、切换和安全点动界面。`robot_bringup/whole_body_dashboard.launch.py` 只启动该面板；机器人侧仍须先提供 `/robot_description`、`/joint_states`、TF 和 `/controller_manager`。该入口不会运行官方 `g1_dual_arm_example`，也不会主动接管 `/lowcmd`。
+
 
 ## 目录
 
@@ -37,7 +39,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
 ├── README.md
 ├── .gitignore
 ├── .gitmodules
-├── scripts/                      env.sh（环境）/ run.sh（一键单/双总线，含清理）
+├── scripts/                      env.sh（环境）/ run_end_effectors.sh（末端设备一键启动）
 ├── sdk/                          纯 Python SDK（不参与 colcon 构建）
 |   ├── CAN-SDK/                  通用 CAN 基础库（无 ROS、无设备协议）
 |   ├── KWR57-SDK/                力传感器 SDK（纯Python，pip 安装；非ROS可用）
@@ -47,7 +49,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── camera_node/              左右 IP 相机 RTSP、ROS 图像与 Web 预览
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
-    ├── robot_bringup/            单/双总线 launch + 声明式设备拓扑
+    ├── robot_bringup/            全身控制与末端设备的分层 launch 编排
     ├── robot_test_dashboard/     git submodule（机器人测试 Dashboard）
     └── unitree_ros2/             git submodule（仅构建 unitree_api、unitree_hg）
 ```
@@ -127,16 +129,17 @@ python3 -m pip install -e ./sdk/KWR57-SDK
 
 ## 运行
 
+### 末端设备
 每个手动运行 ROS 命令的终端先 source `scripts/env.sh`；一键脚本会自动处理。
 ```bash
 # 一键（推荐）：脚本 source 好环境、起整套、Ctrl-C 自动清理
-bash scripts/run.sh single      # 单总线
-bash scripts/run.sh dual        # 双总线
+bash scripts/run_end_effectors.sh single      # 单总线
+bash scripts/run_end_effectors.sh dual        # 双总线
 
 # 或手动（先 source scripts/env.sh 配置环境）
 source scripts/env.sh
-ros2 launch robot_bringup single_bus.launch.py
-ros2 launch robot_bringup dual_bus.launch.py
+ros2 launch robot_bringup end_effectors_single_bus.launch.py
+ros2 launch robot_bringup end_effectors_dual_bus.launch.py
 ```
 
 以上入口都会启动左右两个相机。Web 地址分别为 `http://<机器人 IP>:8010` 和 `http://<机器人 IP>:8011`，ROS 图像话题为 `/camera_left/image_raw` 和 `/camera_right/image_raw`。
@@ -150,5 +153,14 @@ ros2 launch robot_bringup dual_bus.launch.py
 话题：`/ft_left/wrench_raw`、`/grip_left/joint_states` 等。BEST_EFFORT 话题使用 `ros2 topic echo --qos-reliability best_effort`，KWR57 也可使用 `ros2 run kwr57_ros wrench_echo`。Dashboard 使用 raw `WrenchStamped` 和 `KEEP_LAST(64)` 展示 3 秒平均接收频率；1 kHz 控制订阅建议采用 `rclcpp`、BEST_EFFORT 和 `KEEP_LAST(64)`。
 
 Gloria 节点默认不自动使能。其 `~/enable` 服务会先设置并确认 MIT/PV 控制模式，再使能并等待状态反馈；未使能、模式未确认或反馈过期时默认拒绝运动命令。完整接口与安全参数见 `src/gloria_ros/README.md`。
+
+### 全身控制测试面板
+先启动机器人的 `ros2_control` 全身控制栈，再运行：
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup whole_body_dashboard.launch.py
+```
+
+浏览器打开 `http://<机器人 IP>:8200`。该入口只包装 `robot_test_dashboard`，不会启动硬件接口、控制器管理器或底层 G1 控制；缺少 `/controller_manager` 等前置接口时，页面会保持等待状态。参数和安全约束见 `src/robot_test_dashboard/README.md`。
 
 各包细节见 `sdk/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、`src/camera_node/README.zh.md`、`src/kwr57_ros/README.md` 和 `src/robot_bringup/README.md`。

@@ -1,4 +1,4 @@
-"""Unified HTTP API for the dual-hand robot bringup dashboard."""
+"""Unified HTTP API for the dual-hand end-effector dashboard."""
 
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ def _control_route(path: str) -> Tuple[str, str, str]:
 
 def _make_handler(node: Any):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "RobotBringupWeb/1.0"
+        server_version = "EndEffectorsDashboard/1.0"
 
         def _send_bytes(
                 self, status: int, content_type: str, body: bytes) -> None:
@@ -274,11 +274,11 @@ def _make_handler(node: Any):
     return Handler
 
 
-class RobotWebDashboard(Node):
+class EndEffectorsDashboard(Node):
     """Expose the dual-hand ROS interfaces through one local web UI."""
 
     def __init__(self) -> None:
-        super().__init__("robot_web_dashboard")
+        super().__init__("end_effectors_dashboard")
         self._cb_group = ReentrantCallbackGroup()
         self._state_lock = threading.Lock()
         self._stream_locks = {
@@ -386,7 +386,7 @@ class RobotWebDashboard(Node):
         html_path = (
             Path(html_override).expanduser()
             if html_override
-            else Path(__file__).with_name("web_dashboard.html")
+            else Path(__file__).with_name("dashboard.html")
         )
         try:
             self._html = html_path.read_bytes()
@@ -972,11 +972,11 @@ class RobotWebDashboard(Node):
 
 def main() -> None:
     rclpy.init()
-    node: Optional[RobotWebDashboard] = None
+    node: Optional[EndEffectorsDashboard] = None
     try:
-        node = RobotWebDashboard()
+        node = EndEffectorsDashboard()
     except Exception as exc:  # noqa: BLE001
-        get_logger("robot_web_dashboard").fatal(str(exc))
+        get_logger("end_effectors_dashboard").fatal(str(exc))
         if rclpy.ok():
             rclpy.shutdown()
         return

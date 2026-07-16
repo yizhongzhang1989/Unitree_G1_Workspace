@@ -1,5 +1,5 @@
 # 双总线 CAN 占用与 KWR57 频率
-当前 `dual_bus.launch.py` 在 CAN0、CAN1 各连接一台 KWR57 和一台 Gloria-M。两个 CAN 通道均为 1 Mbps，并分别承载一套设备，因此两条总线的占用不能相加为单条总线利用率。
+当前 `end_effectors_dual_bus.launch.py` 在 CAN0、CAN1 各连接一台 KWR57 和一台 Gloria-M。两个 CAN 通道均为 1 Mbps，并分别承载一套设备，因此两条总线的占用不能相加为单条总线利用率。
 
 ## CAN 占用
 KWR57 在 1 kHz 下每个样本使用 3 个 8-byte 标准 CAN 帧，即每台产生 3000 frame/s。标准帧计入帧间隔后按 111 bit 计算，考虑最坏位填充时按 135 bit 计算：

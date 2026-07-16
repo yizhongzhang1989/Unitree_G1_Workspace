@@ -9,7 +9,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from geometry_msgs.msg import WrenchStamped
 from rclpy.serialization import serialize_message
 
-from robot_bringup.web_dashboard_node import (
+from robot_bringup.end_effectors.dashboard_node import (
     _control_route,
     _finite_fields,
     _make_handler,
@@ -233,7 +233,8 @@ class HtmlContractTest(unittest.TestCase):
         html_path = (
             Path(__file__).parents[1]
             / "robot_bringup"
-            / "web_dashboard.html")
+            / "end_effectors"
+            / "dashboard.html")
         html = " ".join(html_path.read_text(encoding="utf-8").split())
         for stream in (
             "left-camera", "left-sensor", "left-gripper",

@@ -1,10 +1,19 @@
 # `robot_bringup`
 
-`robot_bringup` 只负责最终硬件拓扑和启动编排，不实现 CAN、设备协议或视频处理。生产 KWR57 固定使用进程内 handler；Gloria-M 使用专属 `can_msgs/Frame` 话题；左右 IP 相机分别由独立的 `camera_node` 进程处理。物理适配器参数来自 `can_bridge_ros/config/*.yaml`，CAN 设备 ID、输出和路由来自 launch 中的声明式清单，相机部署参数集中在 `robot_bringup/nodes.py`。
+`robot_bringup` 是整机启动编排包，不实现控制器、CAN、设备协议或视频处理。包内明确分为两个控制域：
 
-## 生产结构
+| 入口 | 职责 |
+|---|---|
+| `end_effectors_single_bus.launch.py` | 单 CAN 总线上的夹爪、力传感器和左右相机 |
+| `end_effectors_dual_bus.launch.py` | 双 CAN 总线上的夹爪、力传感器和左右相机 |
+| `end_effectors_dashboard.launch.py` | 双总线末端设备及其 `8770` 联调面板 |
+| `whole_body_dashboard.launch.py` | 已运行的 `ros2_control` 全身控制栈的 `8200` 测试面板 |
 
-`dual_bus.launch.py`（也是 `web_demo.launch.py` 使用的设备拓扑）的实际数据流如下：
+末端设备实现集中在 `robot_bringup/end_effectors/`。全身控制面板要求机器人侧已经提供 `/robot_description`、`/joint_states`、TF 和 `/controller_manager`；它不启动控制器管理器，不运行官方 `g1_dual_arm_example`，也不会接管 `/lowcmd`。
+
+## 末端设备结构
+
+`end_effectors_dual_bus.launch.py`（也是 `end_effectors_dashboard.launch.py` 使用的设备拓扑）的实际数据流如下：
 
 ```mermaid
 flowchart LR
@@ -41,7 +50,7 @@ flowchart LR
   G1 -->|"/can0/tx<br/>can_msgs/Frame"| B
   G2 -->|"/can1/tx<br/>can_msgs/Frame"| B
 
-  WEB["ROS 节点<br/>/robot_web_dashboard<br/>robot_bringup/web_dashboard"]
+  WEB["ROS 节点<br/>/end_effectors_dashboard<br/>robot_bringup/end_effectors_dashboard"]
   K1 -->|"/arm0/wrench_raw<br/>geometry_msgs/WrenchStamped"| WEB
   K2 -->|"/arm1/wrench_raw<br/>geometry_msgs/WrenchStamped"| WEB
   G1 -->|"/grip_arm0/joint_states<br/>sensor_msgs/JointState"| WEB
@@ -59,9 +68,9 @@ flowchart LR
 
 每个 `Kwr57Device` 生成一个 handler JSON、三个 `(channel, CAN ID)` 注册、Wrench 输出参数和 ROS 服务；每个 `GloriaDevice` 生成专属 RX 路由和夹爪节点参数。启动前会检查总线、节点名、Wrench 话题以及同通道 CAN ID 冲突。
 
-## 最终硬件清单
+## 末端设备清单
 
-`single_bus.launch.py` 描述 CAN0 上的最终四设备拓扑：
+`end_effectors_single_bus.launch.py` 描述 CAN0 上的最终四设备拓扑：
 
 | 设备 | 命令 ID | 数据/反馈 ID | 输出或 RX |
 |---|---:|---|---|
@@ -79,16 +88,15 @@ flowchart LR
 
 两台相机当前均使用 `rtsp://admin:123456@<IP>/stream0`，详细接口和排障方式见 [`camera_node/README.zh.md`](../camera_node/README.zh.md)。
 
-`dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
+`end_effectors_dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
 
-当前联调台架使用 `dual_bus.launch.py` 的完整四设备拓扑：CAN0 和 CAN1 各接一台 KWR57 与一台 Gloria-M。默认 1 kHz 力传感器流、100 Hz 夹爪往返运动的总线占用与实测见 [`CAN_BUS_LOAD.md`](CAN_BUS_LOAD.md)。
+当前联调台架使用 `end_effectors_dual_bus.launch.py` 的完整四设备拓扑：CAN0 和 CAN1 各接一台 KWR57 与一台 Gloria-M。默认 1 kHz 力传感器流、100 Hz 夹爪往返运动的总线占用与实测见 [`CAN_BUS_LOAD.md`](CAN_BUS_LOAD.md)。
 
-## 启动
-
+## 末端设备启动
 ```bash
 source scripts/env.sh
-bash scripts/run.sh single
-bash scripts/run.sh dual
+bash scripts/run_end_effectors.sh single
+bash scripts/run_end_effectors.sh dual
 ```
 
 以上两个入口都会同时启动左右相机。浏览器通过 `http://<机器人 IP>:8010` 和 `http://<机器人 IP>:8011` 查看视频；左右相机均位于 `192.168.123.0/24`，相机主机必须具备到该子网的路由。
@@ -99,7 +107,7 @@ bash scripts/run.sh dual
 
 ```bash
 source scripts/env.sh
-ros2 launch robot_bringup web_demo.launch.py
+ros2 launch robot_bringup end_effectors_dashboard.launch.py
 ```
 
 Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅接收原有两路 `WrenchStamped`，高频回调只保存最新序列化样本并计数，HTTP 快照时才反序列化。页面显示 3 秒平均接收频率；最大负载实测左右均约 1 kHz，且没有修改 KWR57 话题或消息。该平均值不代表每个样本都满足 1 ms deadline。
@@ -112,13 +120,13 @@ Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅接收原有两路 `Wrench
 
 网页节点通过同源 URL `/api/cameras/<left|right>/video_feed` 代理两台相机的 MJPEG，因此远程访问只需转发 `8770`。网页后台独立探测相机 `/status`；相机未连接、启动失败或中途断流时，对应栏显示离线占位，KWR57、夹爪及另一台相机不受影响。`camera_node` 默认每 5 秒在后台尝试恢复期望运行的 RTSP 流，相机后接入或网络恢复后页面会自动重新加载画面；通过相机 Web 的“停止”操作主动停流时不会自动拉起。
 
-如果 `dual_bus.launch.py` 或四个设备节点已经启动，只追加网页节点，不要再次启动 bridge：
+如果 `end_effectors_dual_bus.launch.py` 或四个设备节点已经启动，只追加网页节点，不要再次启动 bridge：
 
 ```bash
-ros2 run robot_bringup web_dashboard
+ros2 run robot_bringup end_effectors_dashboard
 ```
 
-单独启动网页节点时，默认仍连接本机 `8010/8011`。相机服务在其他主机或端口时可设置 `left_camera_url`、`right_camera_url`；`web_demo.launch.py` 还暴露 `camera_timeout_s` 和 `camera_poll_period_s`。
+单独启动网页节点时，默认仍连接本机 `8010/8011`。相机服务在其他主机或端口时可设置 `left_camera_url`、`right_camera_url`；`end_effectors_dashboard.launch.py` 还暴露 `camera_timeout_s` 和 `camera_poll_period_s`。
 
 远程机器可使用 SSH 端口转发：
 
@@ -130,14 +138,26 @@ ssh -L 8770:127.0.0.1:8770 user@robot
 
 `robot_bringup` 不提供 KWR57 ROS Frame 回退开关。兼容结构只保留在 `kwr57_ros/web_demo.launch.py use_frame_handler:=false` 和 `kwr57_ros/ft_sensor.launch.py`，原因与 PC2 性能数据见 [`kwr57_ros/README.md`](../kwr57_ros/README.md)。
 
+## 全身控制测试面板
+
+先启动机器人本体的 `ros2_control` 硬件接口和控制器管理器，再运行：
+
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup whole_body_dashboard.launch.py
+```
+
+浏览器打开 `http://<机器人 IP>:8200`。该 launch 将参数透传给 `robot_test_dashboard/dashboard.launch.py`，可通过 `controller_manager`、`robot_description_topic`、`joint_states_topic`、`base_frame`、`tip_frame`、`max_joint_speed` 和 `send_rate` 覆盖默认值。控制器切换和运动安全说明见 [`robot_test_dashboard/README.md`](../robot_test_dashboard/README.md)。
+
 ## 修改拓扑
 
-CAN 拓扑只修改 `launch/single_bus.launch.py` 或 `launch/dual_bus.launch.py` 中的 `CanBus`、`Kwr57Device` 和 `GloriaDevice` 清单。不要把设备 ID 写入 bridge 的物理 YAML，也不要为生产 KWR57 增加 `rx_routes`；同一份清单会生成 handler、Gloria 路由和节点参数。左右相机的 IP、RTSP URL、Web 端口和图像话题由 `robot_bringup/nodes.py` 中的两个 `camera(...)` 调用定义。
+CAN 拓扑只修改 `launch/end_effectors_single_bus.launch.py` 或 `launch/end_effectors_dual_bus.launch.py` 中的 `CanBus`、`Kwr57Device` 和 `GloriaDevice` 清单。不要把设备 ID 写入 bridge 的物理 YAML，也不要为生产 KWR57 增加 `rx_routes`；同一份清单会生成 handler、Gloria 路由和节点参数。左右相机的 IP、RTSP URL、Web 端口和图像话题由 `robot_bringup/end_effectors/nodes.py` 中的两个 `camera(...)` 调用定义。
 
 | 文件 | 职责 |
 |---|---|
-| `robot_bringup/topology.py` | 设备模型、参数生成和冲突检查 |
-| `robot_bringup/nodes.py` | 生成 bridge、Gloria 与左右相机 launch actions |
-| `launch/*.launch.py` | 最终硬件清单 |
-| `test/test_topology.py` | 无硬件拓扑回归测试 |
-| `test/test_camera_bringup.py` | 左右相机节点参数与 bringup 清单回归测试 |
+| `robot_bringup/end_effectors/topology.py` | 末端设备模型、参数生成和冲突检查 |
+| `robot_bringup/end_effectors/nodes.py` | 生成 bridge、Gloria 与左右相机 launch actions |
+| `robot_bringup/end_effectors/dashboard_node.py` | 双手末端设备 HTTP/ROS 联调节点 |
+| `launch/end_effectors_*.launch.py` | 末端设备硬件清单与面板入口 |
+| `launch/whole_body_dashboard.launch.py` | 全身控制测试面板包装入口 |
+| `test/test_end_effectors_*.py` | 末端设备无硬件回归测试 |

@@ -7,13 +7,17 @@
   - 夹爪用其上位机/手册改（grip_left 0x01/0x101、grip_right 0x02/0x102）。
         夹爪可共享状态兼容 ID 0x000，但 command_id 低 4 位必须不同；0x7FF 为固定请求 ID。
 
-  ros2 launch robot_bringup single_bus.launch.py
+    ros2 launch robot_bringup end_effectors_single_bus.launch.py
 """
 
 from launch import LaunchDescription
 
-from robot_bringup.nodes import bringup_actions
-from robot_bringup.topology import CanBus, GloriaDevice, Kwr57Device
+from robot_bringup.end_effectors.nodes import end_effector_actions
+from robot_bringup.end_effectors.topology import (
+    CanBus,
+    GloriaDevice,
+    Kwr57Device,
+)
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -37,5 +41,5 @@ def generate_launch_description() -> LaunchDescription:
             joint_name="grip_right"),
     ]
 
-    return LaunchDescription(bringup_actions(
+    return LaunchDescription(end_effector_actions(
         "single_bus.yaml", [can0], kwr57_devices, gloria_devices))
