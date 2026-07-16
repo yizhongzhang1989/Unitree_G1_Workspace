@@ -20,6 +20,16 @@ Unitree G1 项目的 ROS 2 工作区。
 消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；Foxy 对应系统包为 `ros-foxy-can-msgs`。
 
 
+## 宇树 G1
+
+机器人本体使用官方 [`unitree_ros2`](https://github.com/unitreerobotics/unitree_ros2) 消息定义。G1 只需要以下两个包：
+
+- `unitree_api`：机器人服务请求/响应消息。
+- `unitree_hg`：G1/H1 系列的状态与控制消息。
+
+本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
+
+
 ## 目录
 
 ```
@@ -37,7 +47,9 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── camera_node/              左右 IP 相机 RTSP、ROS 图像与 Web 预览
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
-    └── robot_bringup/            单/双总线 launch + 声明式设备拓扑
+    ├── robot_bringup/            单/双总线 launch + 声明式设备拓扑
+    ├── robot_test_dashboard/     git submodule（机器人测试 Dashboard）
+    └── unitree_ros2/             git submodule（仅构建 unitree_api、unitree_hg）
 ```
 
 - SDK 保留：`CAN-SDK`（模块 `can_sdk`）、`KWR57-SDK`（模块 `kwr57_sensor`）和 `gloria_m_sdk` 均可脱离 ROS 使用；ROS 封装只复用基础 I/O 和设备协议，不重复实现。
@@ -47,14 +59,15 @@ Unitree_G1_Workspace/             一个 colcon workspace
 
 
 ## 环境与安装
-
-ROS 2 节点跑在 **foxy 系统 `python3`(3.8)**；运行用 **CycloneDDS**（默认 FastRTPS 会刷 `std::bad_alloc`）。
+ROS 2 节点跑在 **Foxy 系统 `python3`（3.8）**；运行用 **CycloneDDS**（默认 FastRTPS 会刷 `std::bad_alloc`）。机器人出厂环境已在 `~/cyclonedds_ws` 安装兼容版本，项目继续复用该环境；仓库内的 `src/unitree_ros2/cyclonedds_ws` 只用于构建 Unitree 消息包。
 
 ```bash
 # ROS/Python 图像栈统一使用 Ubuntu 软件包，避免与 Foxy cv_bridge 产生 ABI 冲突；
 # ffprobe 和 ffplay 均由 ffmpeg 软件包提供。
 sudo apt-get install -y ros-foxy-can-msgs \
-    ros-foxy-cv-bridge ffmpeg python3-flask python3-opencv python3-numpy
+    ros-foxy-cv-bridge ros-foxy-rmw-cyclonedds-cpp \
+    ros-foxy-rosidl-generator-dds-idl \
+    ffmpeg libyaml-cpp-dev python3-flask python3-opencv python3-numpy
 source /opt/ros/foxy/setup.bash
 # pip 安装 CAN SDK 运行依赖
 python3 -m pip install --user 'python-can>=4.0' canalystii 'libusb-package>=1.0.30' pyserial
@@ -62,16 +75,50 @@ python3 -m pip install --user 'python-can>=4.0' canalystii 'libusb-package>=1.0.
 # 拉取含 submodule 的仓库
 git clone --recurse-submodules https://github.com/yizhongzhang1989/Unitree_G1_Workspace.git ~/Unitree_G1_Workspace
 # 已克隆则： git submodule update --init --recursive
+```
 
-# SDK 位于根目录 sdk/，不在 colcon 默认扫描的 src/ 下；只构建 ROS 包。
+### CycloneDDS
+先确认出厂自带的 CycloneDDS 环境存在：
+```bash
+test -f ~/cyclonedds_ws/install/setup.bash && echo "CycloneDDS 已安装"
+```
+
+若文件存在，无需重复安装。检查 `~/cyclonedds_ws/cyclonedds.xml`，将其中的 `NetworkInterface name` 设置为连接 G1 的有线网卡名称（可用 `ip link` 查看）。
+
+若 `~/cyclonedds_ws` 尚未安装，则按照 `unitree_ros2` 的 Foxy 安装方式，在一个**未 source ROS 2** 的新终端中编译官方要求的 CycloneDDS 0.10.x：
+```bash
+mkdir -p ~/cyclonedds_ws/src
+cd ~/cyclonedds_ws/src
+git clone -b foxy https://github.com/ros2/rmw_cyclonedds.git
+git clone -b releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds.git
+cd ~/cyclonedds_ws
+export LD_LIBRARY_PATH="/opt/ros/foxy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+colcon build --packages-select cyclonedds
+
+# env.sh 从该文件读取 G1 网卡配置；复制后修改 NetworkInterface name
+cp ~/Unitree_G1_Workspace/src/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml \
+    ~/cyclonedds_ws/cyclonedds.xml
+```
+
+完整上游说明见 [`src/unitree_ros2/README.md`](src/unitree_ros2/README.md)。若 CycloneDDS 安装在其他位置，可在 source 环境前设置 `UNITREE_CYCLONEDDS_WS=/实际路径`。
+
+### 构建项目
+SDK 位于根目录 `sdk/`，不参与 colcon 构建。必须保留 `--packages-select`，否则 colcon 还会发现不需要的 `unitree_go` 和官方示例。
+
+```bash
 cd ~/Unitree_G1_Workspace
-colcon build --symlink-install
+source /opt/ros/foxy/setup.bash
+source ~/cyclonedds_ws/install/setup.bash
+colcon build --symlink-install --packages-select \
+    unitree_api unitree_hg \
+    camera_node can_bridge_ros gloria_ros kwr57_ros robot_bringup \
+    robot_test_dashboard
 source scripts/env.sh
 ```
 
 CANalyst-II 需 udev 权限（VID:PID 04d8:0053），见 `src/can_bridge_ros/README.md`。
 
-`scripts/env.sh` 会将 `CAN-SDK`、`KWR57-SDK` 与 Gloria submodule 的源码目录加入 `PYTHONPATH`，随后加载 ROS 和工作区环境。若要在仓库外独立使用 SDK，可选择安装：
+`scripts/env.sh` 会依次加载 ROS 2 Foxy、`~/cyclonedds_ws` 和项目安装环境（其中包含 Unitree G1 消息），同时将 `CAN-SDK`、`KWR57-SDK` 与 Gloria submodule 的源码目录加入 `PYTHONPATH`。若要在仓库外独立使用 SDK，可选择安装：
 ```bash
 python3 -m pip install -e './sdk/CAN-SDK[canalystii]'
 python3 -m pip install -e ./sdk/KWR57-SDK
