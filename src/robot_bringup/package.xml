@@ -15,6 +15,7 @@
   <exec_depend>kwr57_ros</exec_depend>
   <exec_depend>gloria_ros</exec_depend>
   <exec_depend>robot_test_dashboard</exec_depend>
+  <exec_depend>unitree_g1_description</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

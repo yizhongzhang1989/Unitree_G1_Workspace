@@ -29,7 +29,7 @@ Unitree G1 项目的 ROS 2 工作区。
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
-`robot_test_dashboard` 为已经运行的 `ros2_control` 全身控制栈提供控制器发现、切换和安全点动界面。`robot_bringup/whole_body_dashboard.launch.py` 只启动该面板；机器人侧仍须先提供 `/robot_description`、`/joint_states`、TF 和 `/controller_manager`。该入口不会运行官方 `g1_dual_arm_example`，也不会主动接管 `/lowcmd`。
+`robot_test_dashboard` 为已经运行的 `ros2_control` 全身控制栈提供控制器发现、切换和安全点动界面。`unitree_g1_description` 封装整机 URDF submodule；`robot_bringup/whole_body_dashboard.launch.py` 默认同时发布 `/robot_description`，并根据外部 `/joint_states` 生成 TF。机器人侧仍须提供 `/joint_states` 和 `/controller_manager`。该入口不会运行官方 `g1_dual_arm_example`，也不会主动接管 `/lowcmd`。
 
 
 ## 目录
@@ -51,6 +51,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
     ├── robot_bringup/            全身控制与末端设备的分层 launch 编排
     ├── robot_test_dashboard/     git submodule（机器人测试 Dashboard）
+    ├── unitree_g1_description/   整机 description 包（model/ 为 URDF submodule）
     └── unitree_ros2/             git submodule（仅构建 unitree_api、unitree_hg）
 ```
 
@@ -69,6 +70,7 @@ ROS 2 节点跑在 **Foxy 系统 `python3`（3.8）**；运行用 **CycloneDDS**
 sudo apt-get install -y ros-foxy-can-msgs \
     ros-foxy-cv-bridge ros-foxy-rmw-cyclonedds-cpp \
     ros-foxy-rosidl-generator-dds-idl \
+    ros-foxy-robot-state-publisher ros-foxy-xacro \
     ffmpeg libyaml-cpp-dev python3-flask python3-opencv python3-numpy
 source /opt/ros/foxy/setup.bash
 # pip 安装 CAN SDK 运行依赖
@@ -114,7 +116,7 @@ source ~/cyclonedds_ws/install/setup.bash
 colcon build --symlink-install --packages-select \
     unitree_api unitree_hg \
     camera_node can_bridge_ros gloria_ros kwr57_ros robot_bringup \
-    robot_test_dashboard
+    robot_test_dashboard unitree_g1_description
 source scripts/env.sh
 ```
 
@@ -161,6 +163,14 @@ source scripts/env.sh
 ros2 launch robot_bringup whole_body_dashboard.launch.py
 ```
 
-浏览器打开 `http://<机器人 IP>:8200`。该入口只包装 `robot_test_dashboard`，不会启动硬件接口、控制器管理器或底层 G1 控制；缺少 `/controller_manager` 等前置接口时，页面会保持等待状态。参数和安全约束见 `src/robot_test_dashboard/README.md`。
+浏览器打开 `http://<机器人 IP>:8200`。该入口默认从 `unitree_g1_description` 发布 `/robot_description`，并启动 `robot_state_publisher`；模型根帧为 `pelvis`，默认 TCP 为 `right_gripper_base`。它不会启动硬件接口、控制器管理器或底层 G1 控制；缺少 `/joint_states` 时动态 TF 不会更新，缺少 `/controller_manager` 时页面会保持等待状态。
+
+如果已有控制栈正在发布 `/robot_description` 和 TF，可避免重复发布：
+```bash
+ros2 launch robot_bringup whole_body_dashboard.launch.py \
+    publish_robot_description:=false
+```
+
+参数和安全约束见 `src/robot_test_dashboard/README.md`。
 
 各包细节见 `sdk/CAN-SDK/README.md`、`src/can_bridge_ros/README.md`、`src/camera_node/README.zh.md`、`src/kwr57_ros/README.md` 和 `src/robot_bringup/README.md`。

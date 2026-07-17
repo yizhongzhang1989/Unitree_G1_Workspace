@@ -9,7 +9,7 @@
 | `end_effectors_dashboard.launch.py` | 双总线末端设备及其 `8770` 联调面板 |
 | `whole_body_dashboard.launch.py` | 已运行的 `ros2_control` 全身控制栈的 `8200` 测试面板 |
 
-末端设备实现集中在 `robot_bringup/end_effectors/`。全身控制面板要求机器人侧已经提供 `/robot_description`、`/joint_states`、TF 和 `/controller_manager`；它不启动控制器管理器，不运行官方 `g1_dual_arm_example`，也不会接管 `/lowcmd`。
+末端设备实现集中在 `robot_bringup/end_effectors/`。全身控制面板默认从 `unitree_g1_description` 发布 `/robot_description`，并通过 `robot_state_publisher` 根据外部 `/joint_states` 生成 TF；机器人侧仍须提供 `/joint_states` 和 `/controller_manager`。它不启动控制器管理器，不运行官方 `g1_dual_arm_example`，也不会接管 `/lowcmd`。
 
 ## 末端设备结构
 
@@ -148,6 +148,8 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 ```
 
 浏览器打开 `http://<机器人 IP>:8200`。该 launch 将参数透传给 `robot_test_dashboard/dashboard.launch.py`，可通过 `controller_manager`、`robot_description_topic`、`joint_states_topic`、`base_frame`、`tip_frame`、`max_joint_speed` 和 `send_rate` 覆盖默认值。控制器切换和运动安全说明见 [`robot_test_dashboard/README.md`](../robot_test_dashboard/README.md)。
+
+默认模型根帧为 `pelvis`，TCP 为 `right_gripper_base`。若现有控制栈已经发布 `/robot_description` 和 TF，使用 `publish_robot_description:=false` 关闭内置发布器；仿真时可设置 `use_sim_time:=true`。没有 `/joint_states` 时模型仍可加载，但动态关节 TF 和 TCP 位姿不会更新。
 
 ## 修改拓扑
 
