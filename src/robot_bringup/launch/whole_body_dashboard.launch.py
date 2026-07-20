@@ -1,10 +1,7 @@
-"""Launch the G1 description publisher and whole-body control dashboard.
+"""Launch the G1 MIT position adapter and controller test dashboard.
 
-The robot control stack must provide /joint_states and /controller_manager.
-This wrapper publishes /robot_description and starts robot_state_publisher, but
-does not start or take over G1 low-level control.
-
-  ros2 launch robot_bringup whole_body_dashboard.launch.py
+Start unitree_g1_description/g1_data.launch.py first. The MIT adapter remains
+inactive until its controller is engaged from the dashboard.
 """
 
 import os
@@ -15,9 +12,10 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
-_DASHBOARD_DEFAULTS = {
+_DEFAULTS = {
     "dashboard_port": "8200",
     "controller_manager": "/controller_manager",
     "robot_description_topic": "/robot_description",
@@ -28,40 +26,93 @@ _DASHBOARD_DEFAULTS = {
     "send_rate": "100.0",
 }
 
-_PUBLISHER_DEFAULTS = {
-    "publish_robot_description": "true",
-    "use_sim_time": "false",
+_CONTROL_DEFAULTS = {
+    "use_mit_controller": "true",
+    "controller_name": "whole_body_controller",
+    "lowstate_topic": "/lowstate",
+    "lowcmd_topic": "/lowcmd",
+    "left_gripper_command_topic": "/grip_arm0/mit_command",
+    "right_gripper_command_topic": "/grip_arm1/mit_command",
+    "g1_command_rate_hz": "500.0",
+    "gripper_command_rate_hz": "100.0",
+    "command_timeout_s": "0.25",
+    "state_timeout_s": "0.25",
+    "max_initial_position_error": "0.2",
+    "max_command_step": "0.1",
+    "require_pr_mode": "true",
+    "gripper_kp": "10.0",
+    "gripper_kd": "5.0",
+    "manage_motion_mode": "true",
+    "restore_motion_mode": "true",
+    "fallback_motion_mode": "ai",
+    "motion_switch_timeout_s": "1.0",
+    "motion_select_timeout_s": "10.0",
+    "motion_release_attempts": "3",
+    "motion_release_retry_s": "0.2",
+    "lowcmd_quiet_period_s": "0.1",
+    "lowcmd_quiet_timeout_s": "2.0",
 }
 
 
 def generate_launch_description() -> LaunchDescription:
-    dashboard_share = get_package_share_directory("robot_test_dashboard")
     description_share = get_package_share_directory("unitree_g1_description")
     arguments = [
         DeclareLaunchArgument(name, default_value=value)
-        for name, value in {
-            **_DASHBOARD_DEFAULTS,
-            **_PUBLISHER_DEFAULTS,
-        }.items()
+        for name, value in {**_DEFAULTS, **_CONTROL_DEFAULTS}.items()
     ]
-    description = IncludeLaunchDescription(
+    controller = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
-            description_share, "launch", "description.launch.py")),
-        condition=IfCondition(LaunchConfiguration(
-            "publish_robot_description")),
+            description_share, "launch", "mit_control.launch.py")),
+        condition=IfCondition(LaunchConfiguration("use_mit_controller")),
         launch_arguments={
+            "controller_manager": LaunchConfiguration("controller_manager"),
+            "controller_name": LaunchConfiguration("controller_name"),
+            "lowstate_topic": LaunchConfiguration("lowstate_topic"),
+            "lowcmd_topic": LaunchConfiguration("lowcmd_topic"),
             "joint_states_topic": LaunchConfiguration("joint_states_topic"),
-            "robot_description_topic": LaunchConfiguration(
-                "robot_description_topic"),
-            "use_sim_time": LaunchConfiguration("use_sim_time"),
+            "left_gripper_command_topic": LaunchConfiguration(
+                "left_gripper_command_topic"),
+            "right_gripper_command_topic": LaunchConfiguration(
+                "right_gripper_command_topic"),
+            "g1_command_rate_hz": LaunchConfiguration(
+                "g1_command_rate_hz"),
+            "gripper_command_rate_hz": LaunchConfiguration(
+                "gripper_command_rate_hz"),
+            "command_timeout_s": LaunchConfiguration("command_timeout_s"),
+            "state_timeout_s": LaunchConfiguration("state_timeout_s"),
+            "max_initial_position_error": LaunchConfiguration(
+                "max_initial_position_error"),
+            "max_command_step": LaunchConfiguration("max_command_step"),
+            "require_pr_mode": LaunchConfiguration("require_pr_mode"),
+            "gripper_kp": LaunchConfiguration("gripper_kp"),
+            "gripper_kd": LaunchConfiguration("gripper_kd"),
+            "manage_motion_mode": LaunchConfiguration("manage_motion_mode"),
+            "restore_motion_mode": LaunchConfiguration(
+                "restore_motion_mode"),
+            "fallback_motion_mode": LaunchConfiguration(
+                "fallback_motion_mode"),
+            "motion_switch_timeout_s": LaunchConfiguration(
+                "motion_switch_timeout_s"),
+            "motion_select_timeout_s": LaunchConfiguration(
+                "motion_select_timeout_s"),
+            "motion_release_attempts": LaunchConfiguration(
+                "motion_release_attempts"),
+            "motion_release_retry_s": LaunchConfiguration(
+                "motion_release_retry_s"),
+            "lowcmd_quiet_period_s": LaunchConfiguration(
+                "lowcmd_quiet_period_s"),
+            "lowcmd_quiet_timeout_s": LaunchConfiguration(
+                "lowcmd_quiet_timeout_s"),
         }.items(),
     )
-    dashboard = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(
-            dashboard_share, "launch", "dashboard.launch.py")),
-        launch_arguments={
+    dashboard = Node(
+        package="robot_bringup",
+        executable="whole_body_dashboard",
+        name="robot_test_dashboard",
+        output="screen",
+        parameters=[{
             name: LaunchConfiguration(name)
-            for name in _DASHBOARD_DEFAULTS
-        }.items(),
+            for name in _DEFAULTS
+        }],
     )
-    return LaunchDescription([*arguments, description, dashboard])
+    return LaunchDescription([*arguments, controller, dashboard])

@@ -12,6 +12,7 @@
 
   <exec_depend>can_bridge_ros</exec_depend>
   <exec_depend>camera_node</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>kwr57_ros</exec_depend>
   <exec_depend>gloria_ros</exec_depend>
   <exec_depend>robot_test_dashboard</exec_depend>

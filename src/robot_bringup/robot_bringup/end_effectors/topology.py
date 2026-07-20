@@ -98,7 +98,6 @@ class GloriaDevice:
     control_mode: str = "mit"
     safe_position_min: float = 0.0
     safe_position_max: float = 2.77
-    enable_on_start: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:

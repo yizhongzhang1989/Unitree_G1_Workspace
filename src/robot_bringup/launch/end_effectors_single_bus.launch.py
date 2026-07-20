@@ -11,6 +11,8 @@
 """
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 
 from robot_bringup.end_effectors.nodes import end_effector_actions
 from robot_bringup.end_effectors.topology import (
@@ -41,5 +43,14 @@ def generate_launch_description() -> LaunchDescription:
             joint_name="grip_right"),
     ]
 
-    return LaunchDescription(end_effector_actions(
-        "single_bus.yaml", [can0], kwr57_devices, gloria_devices))
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            "enable_grippers_on_start", default_value="true"),
+        *end_effector_actions(
+            "single_bus.yaml",
+            [can0],
+            kwr57_devices,
+            gloria_devices,
+            LaunchConfiguration("enable_grippers_on_start"),
+        ),
+    ])

@@ -27,15 +27,20 @@ flowchart LR
 - 当前反馈解码只发布位置、速度和力矩，尚未发布设备 `ERR`、`T_MOS`、`T_Rotor`；`enabled_requested` 是主机请求状态，因此 `/diagnostics` 不能替代硬件故障码和温度监控。
 - 寄存器回包缺少可用于共享 ID 分流的设备号，多夹爪共总线时必须使用非零且唯一的 `feedback_id`，并保证 `command_id` 低 4 位非零且唯一。
 
-## 前置条件
-先启动独占物理适配器的 `can_bridge_ros`，并在运行终端加载工作区环境：
+## 启动入口
+
+- 生产整机使用 `robot_bringup/all_data.launch.py`，不要单独启动本包的 bridge。
+- `gripper_debug.launch.py` 自己启动 bridge 并独占 CANalyst-II，只用于一只夹爪的隔离硬件调试。
+- `gripper.launch.py` 只启动夹爪节点；使用它之前，外部 bridge 必须已启动并配置好该设备的 RX 路由。
+
+运行终端先加载工作区环境：
 ```bash
 source scripts/env.sh
 ```
 
 该脚本会把 Gloria-M-SDK submodule 加入 `PYTHONPATH`；上游包入口会导入串口适配器，因此环境仍需安装其声明的 `pyserial`，但本节点不会打开串口。
 
-## 启动
+### 已有外部 bridge
 ```bash
 # MIT 模式，默认不自动使能
 ros2 launch gloria_ros gripper.launch.py \
@@ -47,7 +52,7 @@ ros2 launch gloria_ros gripper.launch.py \
   control_mode:=pos_vel
 ```
 
-单独启动时节点默认订阅 `/can0/rx`，适合单设备调试；完整系统建议使用 `robot_bringup` 为每台夹爪生成专属 RX 话题与 `feedback_id`、`command_id`、共享 `0x000` 路由，节点会再按 `Data[0]` 低 4 位过滤共享状态帧。
+节点默认订阅 `/can0/rx`，但不会创建该话题或打开 CAN 设备。完整系统由 `robot_bringup` 为每台夹爪生成专属 RX 话题与 `feedback_id`、`command_id`、共享 `0x000` 路由，节点会再按 `Data[0]` 低 4 位过滤共享状态帧。
 
 生产环境建议保持 `enable_on_start:=false`，在确认 bridge、供电和机械环境安全后调用：
 ```bash
@@ -57,20 +62,22 @@ ros2 service call /gloria_gripper/enable std_srvs/srv/Trigger '{}'
 `~/enable` 会先配置并确认模式和量程，再使能并等待状态反馈；未确认模式、未使能或反馈过期时，运动命令默认被拒绝。
 
 ## Web 调试台
-一条 launch 命令启动 CAN0 bridge、单个 Gloria-M 夹爪节点和 Web 控制端：
+数据与 Web 分两步启动：
 ```bash
 source scripts/env.sh
+ros2 launch gloria_ros gripper_debug.launch.py
 ros2 launch gloria_ros web_gripper.launch.py
 ```
 
-该 launch 只打开 CANalyst-II 通道 0，创建 `/grip_left` 及其 `0x101/0x01/0x000` 接收路由，不启动 CAN1 或 KWR57；若其他进程已占用适配器，必须先停止该进程。
+`gripper_debug.launch.py` 独占 CANalyst-II 通道 0，创建 `/grip_left` 及其 `0x101/0x01/0x000` 接收路由，再复用 `gripper.launch.py` 启动设备节点；它不启动 CAN1 或 KWR57，只适合单设备隔离调试。`web_gripper.launch.py` 只连接已有 `/grip_left` 节点并提供端口 8766，不打开 CAN 或创建夹爪设备节点。
 
 浏览器默认访问 `http://<机器人 IP>:8766`。页面可选择 MIT/PV、配置和使能设备、发送命令、查看状态与诊断；切换模式前必须先失能，“一键往返”会自动执行“失能 -> 选择 PV -> 配置 -> 使能”，随后持续在两个端点间运动，直到中止、异常或 Web 节点退出，并在结束时请求失能。
 
-修改节点名或实物 CAN ID 时：
+修改节点名或实物 CAN ID 时，先配置数据入口，再让 Web 指向同一个节点：
 ```bash
-ros2 launch gloria_ros web_gripper.launch.py \
+ros2 launch gloria_ros gripper_debug.launch.py \
   node_name:=grip_left command_id:=0x01 feedback_id:=0x101
+ros2 launch gloria_ros web_gripper.launch.py target_node:=/grip_left
 ```
 
 Web 默认监听 `0.0.0.0` 且没有身份认证，只能用于可信隔离网络；需要通过 SSH 访问时应绑定回环地址：

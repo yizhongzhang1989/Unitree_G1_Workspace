@@ -124,6 +124,8 @@ class HelpersTest(unittest.TestCase):
         payload = _serialized_wrench_payload(
             serialize_message(message), 1000.5)
 
+        self.assertIsNotNone(payload)
+        assert payload is not None
         self.assertEqual(payload["stamp"], {"sec": 123, "nanosec": 456})
         self.assertEqual(payload["frame_id"], "arm0_ft_link")
         self.assertEqual(payload["force"], {
@@ -241,7 +243,7 @@ class HtmlContractTest(unittest.TestCase):
             "right-camera", "right-sensor", "right-gripper"):
             with self.subTest(stream=stream):
                 self.assertIn(f'data-stream="{stream}"', html)
-        self.assertIn("CAN0 左手 / CAN1 右手", html)
+        self.assertIn("左右手末端联调", html)
         self.assertIn('data-roundtrip="start"', html)
         self.assertIn('data-roundtrip="stop"', html)
         self.assertIn('data-command="mit"', html)

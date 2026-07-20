@@ -497,8 +497,7 @@ class EndEffectorsDashboard(Node):
         self._http_thread.start()
         actual_port = int(self._httpd.server_address[1])
         self.get_logger().info(
-            f"dual-hand web dashboard on http://{host}:{actual_port}; "
-            "can0=left, can1=right")
+            f"end-effector web dashboard on http://{host}:{actual_port}")
 
     @property
     def html(self) -> bytes:

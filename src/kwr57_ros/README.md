@@ -13,7 +13,7 @@ flowchart LR
   K -->|"WrenchStamped<br/>DDS"| C["控制器 / Web<br/>进程 C"]
 ```
 
-方案 A 使用标准 `can_msgs/Frame` 连接 bridge 与独立设备进程，模块边界直观，也便于替换 bridge、检查原始 CAN 话题和单独调试设备节点，因此仍由 `web_demo.launch.py use_frame_handler:=false` 与 `ft_sensor.launch.py` 保留；生产 `robot_bringup` 不使用该路径。
+方案 A 使用标准 `can_msgs/Frame` 连接 bridge 与独立设备进程，模块边界直观，也便于替换 bridge、检查原始 CAN 话题和单独调试设备节点，因此仍由 `ft_sensor_debug.launch.py use_frame_handler:=false` 与 `ft_sensor.launch.py` 保留；生产 `robot_bringup` 不使用该路径。
 
 ### 方案 B：进程内组包
 
@@ -49,19 +49,26 @@ cd ~/Unitree_G1_Workspace
 colcon build --symlink-install
 
 source scripts/env.sh
-# 单 KWR57 Web 调试入口，默认使用方案 B
+# 单只 KWR57 隔离硬件调试；自带 bridge，默认使用方案 B
+ros2 launch kwr57_ros ft_sensor_debug.launch.py
+
+# 阶段二：按需手动启动 Web，只订阅已有 Wrench
 ros2 launch kwr57_ros web_demo.launch.py
 ```
 
 方案 A 只用于兼容和诊断：
 
 ```bash
-# bridge + 独立 KWR57 + Web
-ros2 launch kwr57_ros web_demo.launch.py use_frame_handler:=false
+# 自带 bridge + 独立 KWR57，无 Web
+ros2 launch kwr57_ros ft_sensor_debug.launch.py use_frame_handler:=false
 
 # 连接一个已经运行的 bridge
 ros2 launch kwr57_ros ft_sensor.launch.py rx_topic:=/can0/rx tx_topic:=/can0/tx
 ```
+
+`web_demo.launch.py` 不打开 CAN、不创建传感器节点，只启动默认端口 8765 的 `web_wrench` 订阅端。
+
+`ft_sensor_debug.launch.py` 会独占 CANalyst-II，只用于单设备调试，不能与 `robot_bringup/all_data.launch.py` 或其他 bridge 同时运行。`ft_sensor.launch.py` 本身不打开 CAN，必须连接已配置 KWR57 RX 路由的外部 bridge。生产整机统一使用 `robot_bringup/all_data.launch.py`。
 
 ## ROS 接口
 

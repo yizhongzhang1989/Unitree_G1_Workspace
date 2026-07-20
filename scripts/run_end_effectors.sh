@@ -7,8 +7,7 @@ set -e
 
 MODE="${1:-single}"
 case "$MODE" in
-  single) LAUNCH=end_effectors_single_bus.launch.py ;;
-  dual)   LAUNCH=end_effectors_dual_bus.launch.py ;;
+  single|dual) ;;
   *) echo "用法: run_end_effectors.sh [single|dual]"; exit 1 ;;
 esac
 
@@ -27,5 +26,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "启动末端设备 $LAUNCH （Ctrl-C 退出并清理）..."
-ros2 launch robot_bringup "$LAUNCH"
+echo "启动末端数据节点（topology=$MODE，Ctrl-C 退出并清理）..."
+ros2 launch robot_bringup all_data.launch.py \
+  scope:=end_effectors topology:="$MODE"

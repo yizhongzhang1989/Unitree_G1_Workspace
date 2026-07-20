@@ -37,6 +37,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("response_timeout_s", default_value="0.5"),
         DeclareLaunchArgument("state_poll_period_s", default_value="0.1"),
         DeclareLaunchArgument("disable_on_feedback_timeout", default_value="true"),
+        DeclareLaunchArgument("diagnostic_period_s", default_value="0.0"),
         DeclareLaunchArgument("joint_name", default_value="gripper"),
         DeclareLaunchArgument("node_name", default_value="gloria_gripper"),
         DeclareLaunchArgument("namespace", default_value=""),
@@ -77,6 +78,8 @@ def generate_launch_description() -> LaunchDescription:
                 LaunchConfiguration("state_poll_period_s"), value_type=float),
             "disable_on_feedback_timeout": ParameterValue(
                 LaunchConfiguration("disable_on_feedback_timeout"), value_type=bool),
+            "diagnostic_period_s": ParameterValue(
+                LaunchConfiguration("diagnostic_period_s"), value_type=float),
             "joint_name": ParameterValue(LaunchConfiguration("joint_name"), value_type=str),
         }],
     )

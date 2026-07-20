@@ -28,6 +28,8 @@ setup(
         'console_scripts': [
             'end_effectors_dashboard = '
             'robot_bringup.end_effectors.dashboard_node:main',
+            'whole_body_dashboard = '
+            'robot_bringup.dashboard_compat_node:main',
         ],
     },
 )

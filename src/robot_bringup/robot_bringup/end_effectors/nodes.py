@@ -1,9 +1,12 @@
 """构造末端设备 CAN bridge、力传感器、夹爪和相机节点。"""
 
 import os
-from typing import Sequence
+from typing import Sequence, Union
 
 from ament_index_python.packages import get_package_share_directory
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitution import Substitution
 from launch_ros.actions import Node
 from kwr57_ros.bridge_handler import build_frame_handler_spec
 
@@ -31,7 +34,7 @@ def build_bridge_node_parameters(
 
 def bridge(config: str, buses: Sequence[CanBus],
            kwr57_devices: Sequence[Kwr57Device],
-        gloria_devices: Sequence[GloriaDevice]) -> Node:
+              gloria_devices: Sequence[GloriaDevice]) -> Node:
     """启动 bridge；物理参数来自 YAML，设备路由由本次 bringup 生成。"""
     config_path = os.path.join(
         get_package_share_directory("can_bridge_ros"),
@@ -44,22 +47,31 @@ def bridge(config: str, buses: Sequence[CanBus],
     )
 
 
-def gripper(device: GloriaDevice) -> Node:
-    """由部署清单构造一个 Gloria-M 夹爪设备节点。"""
-    return Node(
-        package="gloria_ros", executable="gripper_node",
-        name=device.name, output="screen", emulate_tty=True,
-        parameters=[{
+def gripper(
+    device: GloriaDevice,
+    enable_on_start: Union[str, Substitution]
+    ) -> IncludeLaunchDescription:
+    """将部署清单参数传给 gloria_ros 的单节点 launch。"""
+    launch_path = os.path.join(
+        get_package_share_directory("gloria_ros"),
+        "launch",
+        "gripper.launch.py",
+    )
+    return IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(launch_path),
+        launch_arguments={
             "rx_topic": device.rx_topic,
             "tx_topic": device.bus.tx_topic,
-            "command_id": device.command_id,
-            "feedback_id": device.feedback_id,
+            "command_id": str(device.command_id),
+            "feedback_id": str(device.feedback_id),
             "joint_name": device.joint_name,
             "control_mode": device.control_mode,
-            "safe_position_min": device.safe_position_min,
-            "safe_position_max": device.safe_position_max,
-            "enable_on_start": device.enable_on_start,
-        }])
+            "safe_position_min": str(device.safe_position_min),
+            "safe_position_max": str(device.safe_position_max),
+            "enable_on_start": enable_on_start,
+            "node_name": device.name,
+        }.items(),
+    )
 
 
 def camera(side: str, ip_address: str, server_port: int) -> Node:
@@ -88,11 +100,13 @@ def end_effector_actions(
         config: str,
         buses: Sequence[CanBus],
         kwr57_devices: Sequence[Kwr57Device],
-        gloria_devices: Sequence[GloriaDevice]):
+    gloria_devices: Sequence[GloriaDevice],
+    enable_grippers_on_start: Union[str, Substitution]):
     """Build all end-effector actions with KWR57 in the bridge process."""
     return [
         bridge(config, buses, kwr57_devices, gloria_devices),
-        *(gripper(device) for device in gloria_devices),
+                *(gripper(device, enable_grippers_on_start)
+                    for device in gloria_devices),
         camera("left", "192.168.123.97", 8010),
         camera("right", "192.168.123.98", 8011),
     ]
