@@ -1,7 +1,7 @@
 import unittest
 from typing import List, cast
 
-from robot_bringup.topology import (
+from robot_bringup.end_effectors.topology import (
     CanBus,
     GloriaDevice,
     Kwr57Device,

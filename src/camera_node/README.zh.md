@@ -49,7 +49,7 @@ source scripts/env.sh
 
 ## 通过 bringup 启动
 
-`robot_bringup` 固定启动左右两个相机。单总线、双总线以及包含双总线启动的 Web demo 均使用同一份配置：
+`robot_bringup` 的末端设备入口固定启动左右两个相机。单总线、双总线以及末端设备 Dashboard 均使用同一份配置：
 
 | 侧别 | ROS 节点 / `camera_name` | IP | RTSP URL | Web | 图像话题 |
 |---|---|---|---|---:|---|
@@ -58,16 +58,16 @@ source scripts/env.sh
 
 ```bash
 source scripts/env.sh
-ros2 launch robot_bringup single_bus.launch.py
+ros2 launch robot_bringup end_effectors_single_bus.launch.py
 # 或
-ros2 launch robot_bringup dual_bus.launch.py
+ros2 launch robot_bringup end_effectors_dual_bus.launch.py
 ```
 
 浏览器访问：
 - 左手：`http://<机器人 IP>:8010`
 - 右手：`http://<机器人 IP>:8011`
 
-部署值定义在 `robot_bringup/robot_bringup/nodes.py`。当前 RTSP 用户名、密码和路径沿用本包原有相机约定；若相机端配置变化，应同时更新对应 URL。
+部署值定义在 `robot_bringup/robot_bringup/end_effectors/nodes.py`。当前 RTSP 用户名、密码和路径沿用本包原有相机约定；若相机端配置变化，应同时更新对应 URL。
 
 ## 单独启动
 
@@ -139,7 +139,7 @@ ros2 service call /restart_camera_left_node std_srvs/srv/Trigger '{}'
 ## Web 接口
 
 > [!INFO]
-> 每个 `camera_node` 实例启动时都会自动启动一个内置 Flask Web 服务，不需要另行启动网页节点。访问该实例的 `server_port` 根路径即可打开相机控制页；当前 `robot_bringup` 中左、右相机分别使用 `8010` 和 `8011`。`web_demo.launch.py` 启动的 `8770` 统一联调面板是另一个 Web 服务，它通过相机内置服务的 `/status` 和 `/video_feed` 接口获取状态和代理视频。
+> 每个 `camera_node` 实例启动时都会自动启动一个内置 Flask Web 服务，不需要另行启动网页节点。访问该实例的 `server_port` 根路径即可打开相机控制页；当前 `robot_bringup` 中左、右相机分别使用 `8010` 和 `8011`。`end_effectors_dashboard.launch.py` 启动的 `8770` 统一联调面板是另一个 Web 服务，它通过相机内置服务的 `/status` 和 `/video_feed` 接口获取状态和代理视频。
 
 | 路径 | 方法 | 说明 |
 |---|---|---|

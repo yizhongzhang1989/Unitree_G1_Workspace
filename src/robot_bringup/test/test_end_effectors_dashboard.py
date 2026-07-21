@@ -9,7 +9,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from geometry_msgs.msg import WrenchStamped
 from rclpy.serialization import serialize_message
 
-from robot_bringup.web_dashboard_node import (
+from robot_bringup.end_effectors.dashboard_node import (
     _control_route,
     _finite_fields,
     _make_handler,
@@ -124,6 +124,8 @@ class HelpersTest(unittest.TestCase):
         payload = _serialized_wrench_payload(
             serialize_message(message), 1000.5)
 
+        self.assertIsNotNone(payload)
+        assert payload is not None
         self.assertEqual(payload["stamp"], {"sec": 123, "nanosec": 456})
         self.assertEqual(payload["frame_id"], "arm0_ft_link")
         self.assertEqual(payload["force"], {
@@ -233,14 +235,15 @@ class HtmlContractTest(unittest.TestCase):
         html_path = (
             Path(__file__).parents[1]
             / "robot_bringup"
-            / "web_dashboard.html")
+            / "end_effectors"
+            / "dashboard.html")
         html = " ".join(html_path.read_text(encoding="utf-8").split())
         for stream in (
             "left-camera", "left-sensor", "left-gripper",
             "right-camera", "right-sensor", "right-gripper"):
             with self.subTest(stream=stream):
                 self.assertIn(f'data-stream="{stream}"', html)
-        self.assertIn("CAN0 左手 / CAN1 右手", html)
+        self.assertIn("左右手末端联调", html)
         self.assertIn('data-roundtrip="start"', html)
         self.assertIn('data-roundtrip="stop"', html)
         self.assertIn('data-command="mit"', html)

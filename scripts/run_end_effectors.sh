@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # 一键启动末端执行器与左右相机。Ctrl-C 退出时清理所有节点、释放 CAN 设备。
-#   bash scripts/run.sh            # 单总线（默认）
-#   bash scripts/run.sh single
-#   bash scripts/run.sh dual       # 双总线（每臂一条总线）
+#   bash scripts/run_end_effectors.sh            # 单总线（默认）
+#   bash scripts/run_end_effectors.sh single
+#   bash scripts/run_end_effectors.sh dual       # 双总线（每臂一条总线）
 set -e
 
 MODE="${1:-single}"
 case "$MODE" in
-  single) LAUNCH=single_bus.launch.py ;;
-  dual)   LAUNCH=dual_bus.launch.py ;;
-  *) echo "用法: run.sh [single|dual]"; exit 1 ;;
+  single|dual) ;;
+  *) echo "用法: run_end_effectors.sh [single|dual]"; exit 1 ;;
 esac
 
 # shellcheck source=/dev/null
@@ -27,5 +26,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "启动 robot_bringup $LAUNCH （Ctrl-C 退出并清理）..."
-ros2 launch robot_bringup "$LAUNCH"
+echo "启动末端数据节点（topology=$MODE，Ctrl-C 退出并清理）..."
+ros2 launch robot_bringup all_data.launch.py \
+  scope:=end_effectors topology:="$MODE"

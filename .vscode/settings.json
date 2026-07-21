@@ -16,5 +16,7 @@
         "${workspaceFolder}/install/gloria_ros/lib/python3.8/site-packages",
         "${workspaceFolder}/install/kwr57_ros/lib/python3.8/site-packages",
         "${workspaceFolder}/install/robot_bringup/lib/python3.8/site-packages",
+        "${workspaceFolder}/install/unitree_api/lib/python3.8/site-packages",
+        "${workspaceFolder}/install/unitree_hg/lib/python3.8/site-packages",
     ]
 }

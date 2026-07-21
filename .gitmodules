@@ -1,3 +1,12 @@
 [submodule "sdk/Gloria-M-SDK"]
 	path = sdk/Gloria-M-SDK
 	url = https://github.com/Synria-Robotics/Gloria-M-SDK.git
+[submodule "src/unitree_ros2"]
+	path = src/unitree_ros2
+	url = https://github.com/unitreerobotics/unitree_ros2.git
+[submodule "src/robot_test_dashboard"]
+	path = src/robot_test_dashboard
+	url = https://github.com/yizhongzhang1989/robot_test_dashboard.git
+[submodule "src/unitree_g1_description/model"]
+	path = src/unitree_g1_description/model
+	url = https://github.com/madderscientist/my-UnitreeG1-urdf.git

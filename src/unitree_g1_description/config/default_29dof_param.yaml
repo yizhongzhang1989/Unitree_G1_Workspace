@@ -1,0 +1,97 @@
+# Unitree G1 29-DoF MIT gains.
+# Joint order must remain exactly the same as G1_JOINT_NAMES.
+
+joint_names:
+  - left_hip_pitch_joint
+  - left_hip_roll_joint
+  - left_hip_yaw_joint
+  - left_knee_joint
+  - left_ankle_pitch_joint
+  - left_ankle_roll_joint
+  - right_hip_pitch_joint
+  - right_hip_roll_joint
+  - right_hip_yaw_joint
+  - right_knee_joint
+  - right_ankle_pitch_joint
+  - right_ankle_roll_joint
+  - waist_yaw_joint
+  - waist_roll_joint
+  - waist_pitch_joint
+  - left_shoulder_pitch_joint
+  - left_shoulder_roll_joint
+  - left_shoulder_yaw_joint
+  - left_elbow_joint
+  - left_wrist_roll_joint
+  - left_wrist_pitch_joint
+  - left_wrist_yaw_joint
+  - right_shoulder_pitch_joint
+  - right_shoulder_roll_joint
+  - right_shoulder_yaw_joint
+  - right_elbow_joint
+  - right_wrist_roll_joint
+  - right_wrist_pitch_joint
+  - right_wrist_yaw_joint
+
+# MIT protocol kp: position stiffness, unit approximately N m/rad.
+stiffness:
+  - 40.2  # left_hip_pitch_joint
+  - 99.1  # left_hip_roll_joint
+  - 40.2  # left_hip_yaw_joint
+  - 99.1  # left_knee_joint
+  - 28.5  # left_ankle_pitch_joint
+  - 28.5  # left_ankle_roll_joint
+  - 40.2  # right_hip_pitch_joint
+  - 99.1  # right_hip_roll_joint
+  - 40.2  # right_hip_yaw_joint
+  - 99.1  # right_knee_joint
+  - 28.5  # right_ankle_pitch_joint
+  - 28.5  # right_ankle_roll_joint
+  - 40.2  # waist_yaw_joint
+  - 28.5  # waist_roll_joint
+  - 28.5  # waist_pitch_joint
+  - 14.3  # left_shoulder_pitch_joint
+  - 14.3  # left_shoulder_roll_joint
+  - 14.3  # left_shoulder_yaw_joint
+  - 14.3  # left_elbow_joint
+  - 14.3  # left_wrist_roll_joint
+  - 16.8  # left_wrist_pitch_joint
+  - 16.8  # left_wrist_yaw_joint
+  - 14.3  # right_shoulder_pitch_joint
+  - 14.3  # right_shoulder_roll_joint
+  - 14.3  # right_shoulder_yaw_joint
+  - 14.3  # right_elbow_joint
+  - 14.3  # right_wrist_roll_joint
+  - 16.8  # right_wrist_pitch_joint
+  - 16.8  # right_wrist_yaw_joint
+
+# MIT protocol kd: velocity damping, unit approximately N m s/rad.
+damping:
+  - 2.6   # left_hip_pitch_joint
+  - 6.3   # left_hip_roll_joint
+  - 2.6   # left_hip_yaw_joint
+  - 6.3   # left_knee_joint
+  - 1.8   # left_ankle_pitch_joint
+  - 1.8   # left_ankle_roll_joint
+  - 2.6   # right_hip_pitch_joint
+  - 6.3   # right_hip_roll_joint
+  - 2.6   # right_hip_yaw_joint
+  - 6.3   # right_knee_joint
+  - 1.8   # right_ankle_pitch_joint
+  - 1.8   # right_ankle_roll_joint
+  - 2.6   # waist_yaw_joint
+  - 1.8   # waist_roll_joint
+  - 1.8   # waist_pitch_joint
+  - 0.9   # left_shoulder_pitch_joint
+  - 0.9   # left_shoulder_roll_joint
+  - 0.9   # left_shoulder_yaw_joint
+  - 0.9   # left_elbow_joint
+  - 0.9   # left_wrist_roll_joint
+  - 1.1   # left_wrist_pitch_joint
+  - 1.1   # left_wrist_yaw_joint
+  - 0.9   # right_shoulder_pitch_joint
+  - 0.9   # right_shoulder_roll_joint
+  - 0.9   # right_shoulder_yaw_joint
+  - 0.9   # right_elbow_joint
+  - 0.9   # right_wrist_roll_joint
+  - 1.1   # right_wrist_pitch_joint
+  - 1.1   # right_wrist_yaw_joint

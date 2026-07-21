@@ -148,6 +148,7 @@ class GloriaGripperNode(Node):
         self._last_parameter_value: Optional[float] = None  # 最近一次参数读取回包值
         self._disable_generation = 0  # 失能请求代次，用于取消并发中的使能流程
         self._shutting_down = False  # 标记节点是否进入关闭流程
+        self._auto_enable_pending = enable_on_start  # 通信就绪后仍需执行启动自动使能
 
         rx_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -209,10 +210,10 @@ class GloriaGripperNode(Node):
         self._state_timer = self.create_timer(
             self._state_poll_period, self._poll_state,
             callback_group=self._cb_group)  # 使能期间周期请求状态并检查反馈超时
-        self._enable_timer = None  # 保存启动后自动使能使用的一次性定时器
+        self._enable_timer = None  # 保存等待通信就绪并自动使能的重试定时器
         if enable_on_start:
             self._enable_timer = self.create_timer(
-                1.0, self._enable_once, callback_group=self._cb_group)  # 节点启动后延时执行一次自动使能
+            1.0, self._auto_enable, callback_group=self._cb_group)  # 收到新鲜反馈后尝试使能，失败则保留重试
 
         self.get_logger().info(
             f"Gloria gripper: cmd_id=0x{self._command_id:X} "
@@ -383,13 +384,19 @@ class GloriaGripperNode(Node):
             self._enabled_requested = False
             self._send_ctrl(_CTRL_DISABLE)
 
-    def _enable(self) -> Tuple[bool, str]:
+    def _enable(
+            self, expected_generation: Optional[int] = None
+            ) -> Tuple[bool, str]:
         if not self._operation_lock.acquire(blocking=False):
             return False, "another device operation is active"
         try:
             with self._lock:
                 if self._shutting_down:
                     return False, "node is shutting down"
+                if (expected_generation is not None
+                        and (not self._auto_enable_pending
+                             or expected_generation != self._disable_generation)):
+                    return False, "automatic enable cancelled"
                 if self._enabled_requested:
                     if (self._confirmed_mode == self._desired_mode
                             and self._feedback_stamp_is_fresh(self._last_feedback_monotonic)):
@@ -430,14 +437,31 @@ class GloriaGripperNode(Node):
                 self._enable_in_progress = False
             self._operation_lock.release()
 
-    def _enable_once(self) -> None:
+    def _cancel_auto_enable(self) -> None:
+        with self._lock:
+            self._auto_enable_pending = False
         if self._enable_timer is not None:
             self._enable_timer.cancel()
-        success, message = self._enable()
+
+    def _auto_enable(self) -> None:
+        with self._lock:
+            # 新鲜反馈表示 bridge 和设备已经可通信；generation 则防止显式
+            # disable 与在途自动使能交错后，又把设备重新拉起。
+            if (self._shutting_down
+                    or not self._auto_enable_pending
+                    or not self._feedback_stamp_is_fresh(
+                        self._last_feedback_monotonic)):
+                return
+            generation = self._disable_generation
+        success, message = self._enable(expected_generation=generation)
         if success:
+            self._cancel_auto_enable()
             self.get_logger().info(f"enable_on_start: {message}")
-        else:
-            self.get_logger().error(f"enable_on_start: {message}")
+        elif message not in (
+                "another device operation is active",
+                "automatic enable cancelled"):
+            self.get_logger().warn(
+                f"enable_on_start retry pending: {message}")
 
     # --- 命令 -----------------------------------------------------------
     def _clamp_position(self, position: float) -> float:
@@ -524,10 +548,13 @@ class GloriaGripperNode(Node):
     # --- 服务 -----------------------------------------------------------
     def _srv_enable_cb(self, _request, response: Trigger.Response):
         response.success, response.message = self._enable()
+        if response.success:
+            self._cancel_auto_enable()
         return response
 
     def _srv_disable_cb(self, _request, response: Trigger.Response):
         # 失能不等待操作锁，确保它可以取消正在等待反馈的使能流程
+        self._cancel_auto_enable()
         self._request_disable()
         response.success = True
         response.message = "disable command sent (firmware has no acknowledgement)"
@@ -610,14 +637,13 @@ class GloriaGripperNode(Node):
         return response
 
     def _poll_state(self) -> None:
-        """使能期间周期请求状态，维持反馈健康度并检测掉线"""
+        """周期请求状态；使能期间同时检测反馈超时。"""
         timed_out = False
         with self._lock:
             if self._shutting_down:
                 return
-            if not self._enabled_requested:
-                return
-            if (self._disable_on_feedback_timeout
+            if (self._enabled_requested
+                    and self._disable_on_feedback_timeout
                     and not self._feedback_stamp_is_fresh(self._last_feedback_monotonic)):
                 # 超时判断和主机状态切换保持原子性，避免新反馈插入后仍误触发失能
                 self._disable_generation += 1
@@ -631,7 +657,7 @@ class GloriaGripperNode(Node):
         if self._operation_lock.acquire(blocking=False):
             try:
                 with self._lock:
-                    if self._shutting_down or not self._enabled_requested:
+                    if self._shutting_down:
                         return
                 self._request_state()
             finally:
@@ -750,6 +776,7 @@ class GloriaGripperNode(Node):
     def destroy_node(self) -> bool:
         with self._lock:
             self._shutting_down = True
+            self._auto_enable_pending = False
             should_disable = self._enabled_requested or self._enable_in_progress
         if self._enable_timer is not None:
             self._enable_timer.cancel()

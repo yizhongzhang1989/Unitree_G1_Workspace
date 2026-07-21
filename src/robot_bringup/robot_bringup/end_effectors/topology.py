@@ -1,4 +1,4 @@
-"""部署拓扑模型：由一份设备清单生成 bridge 参数和设备节点参数"""
+"""末端设备拓扑：由一份清单生成 bridge 参数和设备节点参数。"""
 
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
@@ -28,7 +28,7 @@ class CanBus:
 
 @dataclass(frozen=True)
 class Kwr57Device:
-    """bringup 中一台 KWR57 的完整部署参数"""
+    """末端设备 bringup 中一台 KWR57 的完整部署参数。"""
 
     name: str
     bus: CanBus
@@ -87,7 +87,7 @@ class Kwr57Device:
 
 @dataclass(frozen=True)
 class GloriaDevice:
-    """bringup 中一台 Gloria-M 夹爪的完整部署参数"""
+    """末端设备 bringup 中一台 Gloria-M 夹爪的完整部署参数。"""
 
     name: str
     bus: CanBus
@@ -98,7 +98,6 @@ class GloriaDevice:
     control_mode: str = "mit"
     safe_position_min: float = 0.0
     safe_position_max: float = 2.77
-    enable_on_start: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:

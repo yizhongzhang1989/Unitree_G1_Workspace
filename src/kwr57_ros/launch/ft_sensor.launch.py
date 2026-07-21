@@ -3,7 +3,7 @@
 Examples:
   ros2 launch kwr57_ros ft_sensor.launch.py
   ros2 launch kwr57_ros ft_sensor.launch.py rx_topic:=/can0/rx tx_topic:=/can0/tx
-  ros2 launch kwr57_ros ft_sensor.launch.py data_base_id:=24 cmd_id:=17 topic:=/right/wrench
+    ros2 launch kwr57_ros ft_sensor.launch.py data_base_id:=24 cmd_id:=17 topic:=/right/wrench
 """
 
 from launch import LaunchDescription
