@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import cast
 
@@ -5,7 +6,10 @@ from builtin_interfaces.msg import Time
 from sensor_msgs.msg import JointState
 from unitree_hg.msg import LowState
 
-from unitree_g1_description.joint_state_mapping import G1_JOINT_NAMES
+from unitree_g1_description.joint_state_mapping import (
+    G1_JOINT_NAMES,
+    load_gripper_model_spec,
+)
 from unitree_g1_description.lowstate_to_joint_states_node import (
     LowStateToJointStates,
 )
@@ -31,19 +35,38 @@ def _motor_states():
     ]
 
 
-def test_inputs_update_cache_and_timer_publishes_latest_unified_state():
-    publisher = _Publisher()
-    state_size = len(G1_JOINT_NAMES) + 2
-    node = SimpleNamespace(
-        _positions=[None] * state_size,
-        _velocities=[None] * state_size,
-        _efforts=[None] * state_size,
+def _state_node(publisher):
+    model_path = Path(__file__).parents[1] / "model" / "final.urdf"
+    gripper_models = {
+        prefix: load_gripper_model_spec(model_path, prefix)
+        for prefix in ("left_", "right_")
+    }
+    joint_state_order = (
+        *G1_JOINT_NAMES,
+        *(name for prefix in ("left_", "right_")
+          for name in gripper_models[prefix].joint_names),
+    )
+    return SimpleNamespace(
+        _positions=[None] * len(joint_state_order),
+        _velocities=[None] * len(joint_state_order),
+        _efforts=[None] * len(joint_state_order),
+        _gripper_models=gripper_models,
+        _gripper_state_offsets={
+            prefix: joint_state_order.index(gripper_models[prefix].source_name)
+            for prefix in ("left_", "right_")
+        },
+        _joint_state_order=joint_state_order,
         _require_pr_mode=True,
         _frame_id="",
         _publisher=publisher,
         _warn_invalid=lambda reason: None,
         get_clock=lambda: _Clock(),
     )
+
+
+def test_inputs_update_cache_and_timer_publishes_latest_unified_state():
+    publisher = _Publisher()
+    node = _state_node(publisher)
     node._update_cache = MethodType(
         LowStateToJointStates._update_cache, node)
     typed_node = cast(LowStateToJointStates, node)
@@ -69,12 +92,17 @@ def test_inputs_update_cache_and_timer_publishes_latest_unified_state():
 
     assert len(publisher.messages) == 1
     message = publisher.messages[0]
-    assert len(message.name) == len(G1_JOINT_NAMES) + 2
-    assert message.name[-2:] == [
-        "left_eccentric_joint", "right_eccentric_joint"]
-    assert list(message.position[-2:]) == [0.3, 0.6]
-    assert list(message.velocity[-2:]) == [0.4, 0.7]
-    assert list(message.effort[-2:]) == [0.5, 0.8]
+    positions = dict(zip(message.name, message.position))
+    velocities = dict(zip(message.name, message.velocity))
+    efforts = dict(zip(message.name, message.effort))
+    assert len(message.name) == len(G1_JOINT_NAMES) + 2 * 33
+    assert positions["left_eccentric_joint"] == 0.3
+    assert positions["right_eccentric_joint"] == 0.6
+    assert velocities["left_eccentric_joint"] == 0.4
+    assert velocities["right_eccentric_joint"] == 0.7
+    assert efforts["left_eccentric_joint"] == 0.5
+    assert efforts["right_eccentric_joint"] == 0.8
+    assert efforts["left_internal_left_slider_spline_00_joint"] == 0.0
     assert message.header.stamp == Time(sec=123, nanosec=456)
 
     left.position = [0.9]
@@ -83,20 +111,14 @@ def test_inputs_update_cache_and_timer_publishes_latest_unified_state():
 
     latest = publisher.messages[-1]
     assert list(latest.position[:29]) == list(message.position[:29])
-    assert list(latest.position[-2:]) == [0.9, 0.6]
+    latest_positions = dict(zip(latest.name, latest.position))
+    assert latest_positions["left_eccentric_joint"] == 0.9
+    assert latest_positions["right_eccentric_joint"] == 0.6
 
 
 def test_timer_does_not_publish_before_any_input_arrives():
     publisher = _Publisher()
-    state_size = len(G1_JOINT_NAMES) + 2
-    node = SimpleNamespace(
-        _positions=[None] * state_size,
-        _velocities=[None] * state_size,
-        _efforts=[None] * state_size,
-        _frame_id="",
-        _publisher=publisher,
-        get_clock=lambda: _Clock(),
-    )
+    node = _state_node(publisher)
 
     LowStateToJointStates._publish_cached_state(
         cast(LowStateToJointStates, node))

@@ -18,6 +18,8 @@ _DEFAULTS = {
     "joint_states_topic": "/joint_states",
     "left_gripper_command_topic": "/grip_arm0/mit_command",
     "right_gripper_command_topic": "/grip_arm1/mit_command",
+    "left_gripper_node": "/grip_arm0",
+    "right_gripper_node": "/grip_arm1",
     "g1_command_rate_hz": "500.0",
     "gripper_command_rate_hz": "100.0",
     "command_timeout_s": "0.25",
@@ -27,6 +29,7 @@ _DEFAULTS = {
     "require_pr_mode": "true",
     "gripper_kp": "10.0",
     "gripper_kd": "5.0",
+    "gripper_service_timeout_s": "3.0",
     "manage_motion_mode": "true",
     "restore_motion_mode": "true",
     "fallback_motion_mode": "ai",
@@ -68,6 +71,10 @@ def generate_launch_description() -> LaunchDescription:
             "right_gripper_command_topic": ParameterValue(
                 LaunchConfiguration("right_gripper_command_topic"),
                 value_type=str),
+            "left_gripper_node": ParameterValue(
+                LaunchConfiguration("left_gripper_node"), value_type=str),
+            "right_gripper_node": ParameterValue(
+                LaunchConfiguration("right_gripper_node"), value_type=str),
             "gain_file": os.path.join(
                 package_share, "config", "default_29dof_param.yaml"),
             "joint_limits_file": os.path.join(
@@ -92,6 +99,9 @@ def generate_launch_description() -> LaunchDescription:
                 LaunchConfiguration("gripper_kp"), value_type=float),
             "gripper_kd": ParameterValue(
                 LaunchConfiguration("gripper_kd"), value_type=float),
+            "gripper_service_timeout_s": ParameterValue(
+                LaunchConfiguration("gripper_service_timeout_s"),
+                value_type=float),
             "manage_motion_mode": ParameterValue(
                 LaunchConfiguration("manage_motion_mode"), value_type=bool),
             "restore_motion_mode": ParameterValue(

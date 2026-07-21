@@ -37,6 +37,11 @@ if(BUILD_TESTING)
     APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"
   )
   ament_add_pytest_test(
+    test_lowstate_to_joint_states_node
+    test/test_lowstate_to_joint_states_node.py
+    APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"
+  )
+  ament_add_pytest_test(
     test_mit_command
     test/test_mit_command.py
     APPEND_ENV "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}"

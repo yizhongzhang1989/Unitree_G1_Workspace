@@ -180,7 +180,7 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 # http://<机器人 IP>:8200
 ```
 
-该入口同时启动 `unitree_g1_description/mit_position_controller` 和 8200 页面。`robot_bringup` 的启动 wrapper 在进程内将 Dashboard 使用的新版本 controller-manager 字段映射到 Foxy 的 `start_controllers`、`stop_controllers`、`start_asap` 与 `claimed_interfaces`；`robot_test_dashboard` submodule 保持原状。页面 Engage `whole_body_controller` 后，统一节点在 controller start 服务内通过 Unitree MotionSwitcher 释放当前运动模式，等待旧 `/lowcmd` 流停止，成功后才从最新反馈姿态开始按固定顺序分发 31 个关节目标到 G1 与两只夹爪。Disengage 会先停止并排空本节点的命令流，再在默认 10 秒窗口内重试恢复 Engage 前的运动模式（当前机器通常为 `ai`），最终以 CheckMode 的实际状态为准；若无法确认恢复，低层输出保持停止，`/controller_manager/switch_controller` 返回失败，避免与迟到的 SelectMode 切换形成双发布。当前 Dashboard 的 Disengage 接口不会透传该失败；实机操作后需独立确认 controller 为 `inactive` 且 CheckMode 已恢复预期模式。未 Engage 时节点不发布运动命令。若使用外部 `ros2_control`，传入 `use_mit_controller:=false`。
+该入口同时启动 `unitree_g1_description/mit_position_controller` 和 8200 页面。`robot_bringup` 的启动 wrapper 在进程内将 Dashboard 使用的新版本 controller-manager 字段映射到 Foxy 的 `start_controllers`、`stop_controllers`、`start_asap` 与 `claimed_interfaces`，并把控制切换等待窗口扩展到 30 秒，以覆盖失败后的完整安全回滚；`robot_test_dashboard` submodule 保持原状。页面 Engage `whole_body_controller` 后，统一节点先通过 Unitree MotionSwitcher 释放当前运动模式并等待旧 `/lowcmd` 流停止，再并行调用左右 Gloria-M 的 `enable` 服务；两侧均成功后才从最新反馈姿态开始分发 31 个关节目标。状态预检、完整切换顺序、超时和各失败点回滚见 [`unitree_g1_description` 的 Engage 事务](src/unitree_g1_description/README.md#engage-事务)。Disengage 会先停止并排空本节点命令流，并行调用双夹爪 `disable`，再在默认 10 秒窗口内重试恢复 Engage 前的运动模式（当前机器通常为 `ai`），最终以 CheckMode 的实际状态为准；任一失能或恢复步骤失败时，低层输出保持停止且 `/controller_manager/switch_controller` 返回失败。当前 Dashboard 的 Disengage 接口不会透传该失败；实机操作后需独立确认 controller 为 `inactive`、两只夹爪已失能且 CheckMode 已恢复预期模式。未 Engage 时节点不发布运动命令。若使用外部 `ros2_control`，传入 `use_mit_controller:=false`。
 
 ### Launch 完整清单
 以下逐项列出源码树中的全部 launch。标记为“底层/调试”的入口不应替代 `all_data.launch.py` 作为生产启动方式。
@@ -245,7 +245,7 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 - 末端 Dashboard 的 `topology` 必须与 `all_data` 一致，否则会订阅错误的节点名和话题。
 - `LowState.motor_state[0:29]` 按官方 G1 29 轴索引映射到 mode15 URDF。LowState 与左右夹爪回调只更新各自缓存；定时器按 `joint_state_publish_rate_hz` 发布一条当前最新快照，并统一使用发布时刻，避免不同输入频率造成分体 TF。
 - 默认只接受 `LowState.mode_pr == 0`。仓库没有可信的 A/B→Pitch/Roll 逆解，不能把 AB 电机角直接发布为 URDF 脚踝关节角。
-- MIT 控制节点只在控制器已激活、`LowState` 与全部 31 个关节反馈新鲜、目标在 URDF 限位内且连续时发布。非法目标会被丢弃并继续保持；网页命令超过默认 0.25 秒未更新时改为保持最新反馈姿态。状态反馈丢失时退出低层控制并尝试恢复原运动模式。
+- MIT 控制节点只在控制器已激活、双夹爪 Enable 成功、`LowState` 与全部 31 个受控关节反馈新鲜、目标在 URDF 限位内且连续时发布。非法目标会被丢弃并继续保持；网页命令超过默认 0.25 秒未更新时改为保持最新反馈姿态。状态反馈丢失、Disengage 或节点正常退出时先停止命令流，再失能双夹爪并尝试恢复原运动模式。
 - G1 的 29 组 `kp/kd` 来自 `unitree_g1_description/config/default_29dof_param.yaml`。Gloria-M 默认 `kp=10`、`kd=5`；其 SDK 将 `kd` 固定映射到 `[0,5]` 的 12 bit 字段，因此 5 是协议允许的最大值。
 - `all_data.launch.py` 的生产拓扑默认自动使能两只 Gloria-M；需要上电保持失能时传入 `enable_grippers_on_start:=false`。独立 `gloria_ros` 调试入口仍默认不自动使能。
 - BEST_EFFORT 高频话题可使用 `ros2 topic echo --qos-reliability best_effort`；1 kHz 控制订阅建议采用 `rclcpp`、BEST_EFFORT 和 `KEEP_LAST(64)`。

@@ -2,10 +2,12 @@
 """Publish one latest-state JointState stream for the assembled G1 model."""
 
 import math
+from pathlib import Path
 import time
 from typing import List, Optional, Sequence, cast
 
 import rclpy
+from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -14,25 +16,13 @@ from unitree_hg.msg import LowState
 from unitree_g1_description.joint_state_mapping import (
     G1_JOINT_NAMES,
     MotorState,
-    gripper_joint_names,
-    gripper_state_to_joint_fields,
+    gripper_state_to_model_fields,
+    load_gripper_model_spec,
     motor_states_to_joint_fields,
 )
 
 
 _GRIPPER_PREFIXES = ("left_", "right_")
-_GRIPPER_JOINT_NAMES = {
-    prefix: tuple(gripper_joint_names(prefix))
-    for prefix in _GRIPPER_PREFIXES
-}
-_JOINT_STATE_ORDER = (
-    *G1_JOINT_NAMES,
-    *(name for names in _GRIPPER_JOINT_NAMES.values() for name in names),
-)
-_GRIPPER_STATE_OFFSETS = {
-    prefix: _JOINT_STATE_ORDER.index(names[0])
-    for prefix, names in _GRIPPER_JOINT_NAMES.items()
-}
 
 
 class LowStateToJointStates(Node):
@@ -40,6 +30,23 @@ class LowStateToJointStates(Node):
 
     def __init__(self) -> None:
         super().__init__("lowstate_to_joint_states")
+        package_share = Path(get_package_share_directory(
+            "unitree_g1_description"))
+        model_path = package_share / "model" / "final.urdf"
+        self._gripper_models = {
+            prefix: load_gripper_model_spec(model_path, prefix)
+            for prefix in _GRIPPER_PREFIXES
+        }
+        self._joint_state_order = (
+            *G1_JOINT_NAMES,
+            *(name for prefix in _GRIPPER_PREFIXES
+              for name in self._gripper_models[prefix].joint_names),
+        )
+        self._gripper_state_offsets = {
+            prefix: self._joint_state_order.index(
+                self._gripper_models[prefix].source_name)
+            for prefix in _GRIPPER_PREFIXES
+        }
         self.declare_parameter("lowstate_topic", "/lowstate")
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("frame_id", "")
@@ -84,7 +91,7 @@ class LowStateToJointStates(Node):
             JointState, joint_states_topic, joint_state_qos)
         # 关节集合固定，因此输入按预计算偏移覆盖数组即可，避免高频 LowState
         # 回调反复分配按名称索引的字典。默认互斥回调组保证更新和发布不并发。
-        state_size = len(_JOINT_STATE_ORDER)
+        state_size = len(self._joint_state_order)
         self._positions: List[Optional[float]] = [None] * state_size
         self._velocities: List[Optional[float]] = [None] * state_size
         self._efforts: List[Optional[float]] = [None] * state_size
@@ -111,7 +118,8 @@ class LowStateToJointStates(Node):
         self.get_logger().info(
             f"publishing latest {lowstate_topic} and gripper state to "
             f"{joint_states_topic} at {publish_rate_hz:g} Hz "
-            f"({len(_JOINT_STATE_ORDER)} assembled joints)")
+            f"({len(self._joint_state_order)} assembled joints, including "
+            "limit-clamped gripper linkage joints)")
 
     def _on_lowstate(self, lowstate: LowState) -> None:
         if self._require_pr_mode and lowstate.mode_pr != 0:
@@ -129,14 +137,19 @@ class LowStateToJointStates(Node):
     def _on_gripper_state(
             self, mapped_prefix: str, source: JointState) -> None:
         try:
-            positions, velocities, efforts = gripper_state_to_joint_fields(
-                source.position, source.velocity, source.effort)
+            positions, velocities, efforts = gripper_state_to_model_fields(
+                source.position,
+                source.velocity,
+                source.effort,
+                self._gripper_models[mapped_prefix],
+            )
         except ValueError as exc:
             self._warn_invalid(f"{mapped_prefix}gripper: {exc}")
             return
 
+        offset = self._gripper_state_offsets[mapped_prefix]
         self._update_cache(
-            _GRIPPER_STATE_OFFSETS[mapped_prefix],
+            offset,
             positions,
             velocities,
             efforts,
@@ -164,7 +177,7 @@ class LowStateToJointStates(Node):
         message = JointState()
         message.header.stamp = self.get_clock().now().to_msg()
         message.header.frame_id = self._frame_id
-        message.name = [_JOINT_STATE_ORDER[index] for index in active]
+        message.name = [self._joint_state_order[index] for index in active]
         message.position = [
             cast(float, self._positions[index]) for index in active]
         if all(self._velocities[index] is not None for index in active):

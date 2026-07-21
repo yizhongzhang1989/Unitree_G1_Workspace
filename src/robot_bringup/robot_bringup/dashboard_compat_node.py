@@ -2,6 +2,7 @@
 """Run robot_test_dashboard with ROS 2 controller-manager field aliases."""
 
 import importlib
+from functools import wraps
 from typing import Optional, Sequence
 
 from controller_manager_msgs.msg import ControllerState
@@ -47,8 +48,25 @@ def install_controller_manager_field_aliases() -> None:
         )
 
 
+def install_switch_timeout(timeout_s: float = 30.0) -> None:
+    """Allow the whole-body controller's hardware transition to finish."""
+    dashboard_type = importlib.import_module(
+        "robot_test_dashboard.dashboard_node").RobotTestDashboard
+    original = dashboard_type._switch
+    if getattr(original, "_robot_bringup_timeout", None) == timeout_s:
+        return
+
+    @wraps(original)
+    def _switch(self, activate, deactivate, timeout=timeout_s):
+        return original(self, activate, deactivate, timeout)
+
+    _switch._robot_bringup_timeout = timeout_s
+    dashboard_type._switch = _switch
+
+
 def main(args: Optional[Sequence[str]] = None) -> None:
     install_controller_manager_field_aliases()
+    install_switch_timeout()
     dashboard_main = importlib.import_module(
         "robot_test_dashboard.dashboard_node").main
     dashboard_main(args=args)

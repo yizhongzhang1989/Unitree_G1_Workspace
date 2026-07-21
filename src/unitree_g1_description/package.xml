@@ -21,6 +21,7 @@
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>unitree_api</exec_depend>
   <exec_depend>unitree_hg</exec_depend>
   <exec_depend>xacro</exec_depend>

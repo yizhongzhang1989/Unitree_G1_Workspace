@@ -7,7 +7,7 @@ import math
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, cast
+from typing import Dict, Optional, Sequence, Tuple, cast
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -20,6 +20,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+from std_srvs.srv import Trigger
 from unitree_hg.msg import LowCmd, LowState
 
 from unitree_g1_description.joint_state_mapping import G1_JOINT_NAMES
@@ -42,6 +43,7 @@ CONTROLLED_JOINT_NAMES: Tuple[str, ...] = (
     *GRIPPER_JOINT_NAMES,
 )
 _CONTROLLER_TYPE = "forward_command_controller/ForwardCommandController"
+_GRIPPER_SIDES = ("left", "right")
 
 
 class MitPositionController(Node):
@@ -60,6 +62,8 @@ class MitPositionController(Node):
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("left_gripper_command_topic", "/grip_arm0/mit_command")
         self.declare_parameter("right_gripper_command_topic", "/grip_arm1/mit_command")
+        self.declare_parameter("left_gripper_node", "/grip_arm0")
+        self.declare_parameter("right_gripper_node", "/grip_arm1")
         self.declare_parameter("gain_file", str(package_share / "config" / "default_29dof_param.yaml"))
         self.declare_parameter("joint_limits_file", str(package_share / "model" / "final.urdf"))
         self.declare_parameter("g1_command_rate_hz", 500.0)
@@ -71,6 +75,7 @@ class MitPositionController(Node):
         self.declare_parameter("require_pr_mode", True)
         self.declare_parameter("gripper_kp", 10.0)
         self.declare_parameter("gripper_kd", 5.0)
+        self.declare_parameter("gripper_service_timeout_s", 3.0)
         self.declare_parameter("manage_motion_mode", True)
         self.declare_parameter("restore_motion_mode", True)
         self.declare_parameter("fallback_motion_mode", "ai")
@@ -95,6 +100,8 @@ class MitPositionController(Node):
         self._require_pr_mode = gp("require_pr_mode").get_parameter_value().bool_value
         self._gripper_kp = gp("gripper_kp").get_parameter_value().double_value
         self._gripper_kd = gp("gripper_kd").get_parameter_value().double_value
+        self._gripper_service_timeout = self._positive_parameter(
+            "gripper_service_timeout_s")
         self._manage_motion_mode = gp("manage_motion_mode").get_parameter_value().bool_value
         self._restore_motion_mode = gp("restore_motion_mode").get_parameter_value().bool_value
         self._fallback_motion_mode = gp("fallback_motion_mode").get_parameter_value().string_value
@@ -108,6 +115,13 @@ class MitPositionController(Node):
         if not controller_manager or not self._controller_name:
             raise ValueError(
                 "controller_manager and controller_name must not be empty")
+        gripper_nodes = {
+            side: gp(f"{side}_gripper_node").get_parameter_value()
+            .string_value.rstrip("/")
+            for side in _GRIPPER_SIDES
+        }
+        if any(not name.startswith("/") or name == "" for name in gripper_nodes.values()):
+            raise ValueError("left_gripper_node and right_gripper_node must be absolute names")
         if not 0.0 <= self._gripper_kp <= 500.0:
             raise ValueError("gripper_kp must be within the SDK range [0, 500]")
         if not 0.0 <= self._gripper_kd <= 5.0:
@@ -147,6 +161,7 @@ class MitPositionController(Node):
         self._last_warning: Dict[str, float] = {}
         self._last_observed_lowcmd_at = 0.0
         self._previous_motion_mode = ""
+        self._g1_publisher_failed = False
         self._g1_message_key: Optional[
             Tuple[Tuple[float, ...], int]
         ] = None
@@ -216,6 +231,20 @@ class MitPositionController(Node):
             self._switch_controller,
             callback_group=self._callback_group,
         )
+        self._gripper_service_clients = {
+            side: {
+                action: (
+                    f"{node_name}/{action}",
+                    self.create_client(
+                        Trigger,
+                        f"{node_name}/{action}",
+                        callback_group=self._callback_group,
+                    ),
+                )
+                for action in ("enable", "disable")
+            }
+            for side, node_name in gripper_nodes.items()
+        }
         self._motion_switcher = MotionSwitcherClient(
             self, callback_group=self._callback_group)
 
@@ -245,6 +274,92 @@ class MitPositionController(Node):
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError(f"{name} must be finite and greater than zero")
         return value
+
+    def _call_gripper_service(
+            self, side: str, action: str) -> Tuple[bool, str]:
+        endpoint, client = self._gripper_service_clients[side][action]
+        deadline = time.monotonic() + self._gripper_service_timeout
+        try:
+            available = client.wait_for_service(
+                timeout_sec=self._gripper_service_timeout)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"service check failed: {endpoint}: {exc}"
+        if not available:
+            return False, f"service unavailable: {endpoint}"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False, f"service timed out: {endpoint}"
+        try:
+            future = client.call_async(Trigger.Request())
+        except Exception as exc:  # noqa: BLE001
+            return False, f"service call failed: {endpoint}: {exc}"
+        completed = threading.Event()
+        future.add_done_callback(lambda _future: completed.set())
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0 or not completed.wait(remaining):
+            future.cancel()
+            return False, f"service timed out: {endpoint}"
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"service call failed: {endpoint}: {exc}"
+        if response is None:
+            return False, f"service returned no response: {endpoint}"
+        if not response.success:
+            detail = response.message or "request rejected"
+            return False, f"{endpoint} failed: {detail}"
+        return True, response.message
+
+    def _call_gripper_services(self, action: str) -> Tuple[bool, str]:
+        results: Dict[str, Tuple[bool, str]] = {}
+        results_lock = threading.Lock()
+
+        def call(side: str) -> None:
+            try:
+                result = self._call_gripper_service(side, action)
+            except Exception as exc:  # noqa: BLE001
+                result = (
+                    False, f"unexpected {side} gripper service error: {exc}")
+            with results_lock:
+                results[side] = result
+
+        threads = [
+            threading.Thread(
+                target=call,
+                args=(side,),
+                name=f"gripper-{side}-{action}",
+            )
+            for side in _GRIPPER_SIDES
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        errors = [
+            results[side][1]
+            for side in _GRIPPER_SIDES
+            if not results[side][0]
+        ]
+        return not errors, "; ".join(errors)
+
+    def _enable_grippers(self) -> Tuple[bool, str]:
+        return self._call_gripper_services("enable")
+
+    def _disable_grippers(self) -> Tuple[bool, str]:
+        return self._call_gripper_services("disable")
+
+    def _disable_grippers_and_restore_mode(
+            self, restore_mode: bool) -> Tuple[bool, str]:
+        errors = []
+        ok, error = self._disable_grippers()
+        if not ok:
+            errors.append(error)
+        if restore_mode:
+            ok, error = self._restore_previous_mode()
+            if not ok:
+                errors.append(error)
+        return not errors, "; ".join(errors)
 
     def _on_lowstate(self, message: LowState) -> None:
         now = time.monotonic()
@@ -326,6 +441,8 @@ class MitPositionController(Node):
         return ""
 
     def _state_error_locked(self, now: float) -> str:
+        if self._g1_publisher_failed:
+            return "G1 command publisher has stopped"
         if now - self._lowstate_at > self._state_timeout:
             return "LowState is unavailable or stale"
         if now - self._joint_state_at > self._state_timeout:
@@ -370,10 +487,13 @@ class MitPositionController(Node):
         if fault:
             self._wait_for_command_publishers_idle()
             with self._switch_lock:
-                ok, error = self._restore_previous_mode()
+                with self._lock:
+                    if self._active:
+                        return None
+                ok, error = self._disable_grippers_and_restore_mode(True)
             if not ok:
                 self.get_logger().error(
-                    f"failed to restore motion mode after {fault}: {error}")
+                    f"failed to stop external control after {fault}: {error}")
         return None
 
     def _wait_for_lowcmd_quiet(self) -> bool:
@@ -521,12 +641,13 @@ class MitPositionController(Node):
         except Exception as exc:
             self.get_logger().error(f"G1 command publisher stopped: {exc}")
             with self._lock:
+                self._g1_publisher_failed = True
                 self._deactivate_locked("G1 command publisher failed")
             with self._switch_lock:
-                ok, error = self._restore_previous_mode()
+                ok, error = self._disable_grippers_and_restore_mode(True)
             if not ok:
                 self.get_logger().error(
-                    f"failed to restore motion mode after publisher failure: {error}")
+                    f"failed to stop external control after publisher failure: {error}")
 
     def _wait_for_command_publishers_idle(self) -> None:
         with self._command_publish_lock:
@@ -592,29 +713,28 @@ class MitPositionController(Node):
         if unknown and strict:
             response.ok = False
             return response
+        if self._controller_name in starts and self._controller_name in stops:
+            self.get_logger().error(
+                f"cannot start and stop {self._controller_name} "
+                "in the same request")
+            response.ok = False
+            return response
 
         with self._switch_lock:
             if self._controller_name in stops:
                 with self._lock:
                     active = self._active
+                    self._deactivate_locked(
+                        "dashboard disengaged controller")
                 if active:
-                    with self._lock:
-                        self._active = False
-                        self._g1_message = None
-                        self._g1_message_key = None
                     self._wait_for_command_publishers_idle()
-                    ok, error = self._restore_previous_mode()
-                    if not ok:
-                        with self._lock:
-                            self._deactivate_locked(
-                                "motion mode restoration was not confirmed")
-                        self.get_logger().error(
-                            f"cannot confirm motion mode restoration; low-level "
-                            f"output remains stopped: {error}")
-                        response.ok = False
-                        return response
-                with self._lock:
-                    self._deactivate_locked("dashboard disengaged controller")
+                ok, error = self._disable_grippers_and_restore_mode(active)
+                if not ok:
+                    self.get_logger().error(
+                        f"cannot complete controller disengage; low-level "
+                        f"output remains stopped: {error}")
+                    response.ok = False
+                    return response
             if self._controller_name in starts:
                 with self._lock:
                     if self._active:
@@ -622,12 +742,30 @@ class MitPositionController(Node):
                         return response
                     state_error = self._state_error_locked(time.monotonic())
                 if state_error:
+                    ok, error = self._disable_grippers()
+                    if not ok:
+                        self.get_logger().error(
+                            f"failed to disable grippers after activation "
+                            f"precheck failed: {error}")
                     self._warn_locked("activation", state_error)
                     response.ok = False
                     return response
 
                 ok, error = self._prepare_low_level_control()
                 if not ok:
+                    disable_ok, disable_error = self._disable_grippers()
+                    if not disable_ok:
+                        error = f"{error}; gripper disable failed: {disable_error}"
+                    self.get_logger().error(
+                        f"cannot activate {self._controller_name}: {error}")
+                    response.ok = False
+                    return response
+                ok, error = self._enable_grippers()
+                if not ok:
+                    rollback_ok, rollback_error = (
+                        self._disable_grippers_and_restore_mode(True))
+                    if not rollback_ok:
+                        error = f"{error}; rollback failed: {rollback_error}"
                     self.get_logger().error(
                         f"cannot activate {self._controller_name}: {error}")
                     response.ok = False
@@ -643,7 +781,11 @@ class MitPositionController(Node):
                         self._activated_at = now
                         self._active = True
                 if state_error:
-                    self._restore_previous_mode()
+                    rollback_ok, rollback_error = (
+                        self._disable_grippers_and_restore_mode(True))
+                    if not rollback_ok:
+                        self.get_logger().error(
+                            f"activation rollback failed: {rollback_error}")
                     self._warn_locked("activation", state_error)
                     response.ok = False
                     return response
@@ -672,10 +814,10 @@ class MitPositionController(Node):
                     return
                 self._deactivate_locked("controller node is shutting down")
             self._wait_for_command_publishers_idle()
-            ok, error = self._restore_previous_mode()
+            ok, error = self._disable_grippers_and_restore_mode(True)
             if not ok:
                 self.get_logger().error(
-                    f"failed to restore motion mode during shutdown: {error}")
+                    f"failed to stop external control during shutdown: {error}")
 
     def _warn_locked(self, key: str, message: str) -> None:
         now = time.monotonic()

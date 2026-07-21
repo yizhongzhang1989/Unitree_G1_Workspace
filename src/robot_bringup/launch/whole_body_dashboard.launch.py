@@ -33,6 +33,8 @@ _CONTROL_DEFAULTS = {
     "lowcmd_topic": "/lowcmd",
     "left_gripper_command_topic": "/grip_arm0/mit_command",
     "right_gripper_command_topic": "/grip_arm1/mit_command",
+    "left_gripper_node": "/grip_arm0",
+    "right_gripper_node": "/grip_arm1",
     "g1_command_rate_hz": "500.0",
     "gripper_command_rate_hz": "100.0",
     "command_timeout_s": "0.25",
@@ -42,6 +44,7 @@ _CONTROL_DEFAULTS = {
     "require_pr_mode": "true",
     "gripper_kp": "10.0",
     "gripper_kd": "5.0",
+    "gripper_service_timeout_s": "3.0",
     "manage_motion_mode": "true",
     "restore_motion_mode": "true",
     "fallback_motion_mode": "ai",
@@ -74,6 +77,10 @@ def generate_launch_description() -> LaunchDescription:
                 "left_gripper_command_topic"),
             "right_gripper_command_topic": LaunchConfiguration(
                 "right_gripper_command_topic"),
+            "left_gripper_node": LaunchConfiguration(
+                "left_gripper_node"),
+            "right_gripper_node": LaunchConfiguration(
+                "right_gripper_node"),
             "g1_command_rate_hz": LaunchConfiguration(
                 "g1_command_rate_hz"),
             "gripper_command_rate_hz": LaunchConfiguration(
@@ -86,6 +93,8 @@ def generate_launch_description() -> LaunchDescription:
             "require_pr_mode": LaunchConfiguration("require_pr_mode"),
             "gripper_kp": LaunchConfiguration("gripper_kp"),
             "gripper_kd": LaunchConfiguration("gripper_kd"),
+            "gripper_service_timeout_s": LaunchConfiguration(
+                "gripper_service_timeout_s"),
             "manage_motion_mode": LaunchConfiguration("manage_motion_mode"),
             "restore_motion_mode": LaunchConfiguration(
                 "restore_motion_mode"),
