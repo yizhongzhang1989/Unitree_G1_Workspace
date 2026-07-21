@@ -1,4 +1,5 @@
 {
+    "ROS2.distro": "foxy",
     "python.defaultInterpreterPath": "/usr/bin/python3",
     "python.analysis.extraPaths": [
         "/opt/ros/foxy/lib/python3.8/site-packages",
@@ -18,5 +19,22 @@
         "${workspaceFolder}/install/robot_bringup/lib/python3.8/site-packages",
         "${workspaceFolder}/install/unitree_api/lib/python3.8/site-packages",
         "${workspaceFolder}/install/unitree_hg/lib/python3.8/site-packages",
+    ],
+    "python.autoComplete.extraPaths": [
+        "/home/unitree/Unitree_G1_Workspace/build/robot_bringup",
+        "/home/unitree/Unitree_G1_Workspace/install/robot_bringup/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/install/unitree_g1_description/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/install/unitree_hg/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/install/unitree_api/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/build/robot_test_dashboard",
+        "/home/unitree/Unitree_G1_Workspace/install/robot_test_dashboard/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/build/kwr57_ros",
+        "/home/unitree/Unitree_G1_Workspace/install/kwr57_ros/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/install/gloria_ros/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/build/can_bridge_ros",
+        "/home/unitree/Unitree_G1_Workspace/install/can_bridge_ros/lib/python3.8/site-packages",
+        "/home/unitree/Unitree_G1_Workspace/build/camera_node",
+        "/home/unitree/Unitree_G1_Workspace/install/camera_node/lib/python3.8/site-packages",
+        "/opt/ros/foxy/lib/python3.8/site-packages"
     ]
 }
