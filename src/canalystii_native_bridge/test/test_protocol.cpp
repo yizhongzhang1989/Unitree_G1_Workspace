@@ -74,6 +74,17 @@ TEST(CanalystiiProtocol, RejectsMalformedMessageBuffers)
   EXPECT_THROW(cb::pack_message_buffer(nullptr, 0), std::invalid_argument);
 }
 
+TEST(CanalystiiProtocol, AcceptsEmptyMessageBuffer)
+{
+  const cb::UsbPacket packet{};
+  std::array<cb::CanFrame, 3> frames{};
+  std::size_t count = 99;
+  std::string error;
+
+  EXPECT_TRUE(cb::parse_message_buffer(packet, frames, count, &error)) << error;
+  EXPECT_EQ(count, 0U);
+}
+
 TEST(CanalystiiProtocol, BuildsFirmwareCommands)
 {
   const cb::UsbPacket init = cb::make_init_1mbps_command();

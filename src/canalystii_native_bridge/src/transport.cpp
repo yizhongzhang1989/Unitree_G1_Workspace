@@ -243,7 +243,9 @@ struct CanalystiiTransport::Impl
     }
     if (first) {
       stopping.store(true);
-      rx_condition.notify_all();
+      for (auto & condition : rx_conditions) {
+        condition.notify_all();
+      }
       tx_condition.notify_all();
       if (error_callback) {
         error_callback(message);
@@ -348,12 +350,14 @@ struct CanalystiiTransport::Impl
         self->set_error("CANalyst-II returned a non-64-byte RX packet");
       } else {
         ++self->rx_packets[slot->channel];
-        if (!self->rx_queues[slot->channel]->push(slot->buffer)) {
-          ++self->rx_queue_drops[slot->channel];
-          self->set_error("CANalyst-II native RX queue overflow on channel " +
-            std::to_string(slot->channel));
-        } else {
-          self->rx_condition.notify_one();
+        if (slot->buffer[0] != 0) {
+          if (!self->rx_queues[slot->channel]->push(slot->buffer)) {
+            ++self->rx_queue_drops[slot->channel];
+            self->set_error("CANalyst-II native RX queue overflow on channel " +
+              std::to_string(slot->channel));
+          } else {
+            self->rx_conditions[slot->channel].notify_one();
+          }
         }
       }
     } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED && !self->stopping.load()) {
@@ -418,9 +422,7 @@ struct CanalystiiTransport::Impl
   {
     bool cancellation_issued = false;
     while (true) {
-      if (!stopping.load()) {
-        send_tx();
-      } else if (!cancellation_issued) {
+      if (stopping.load() && !cancellation_issued) {
         cancellation_issued = true;
         cancel_transfers();
       }
@@ -436,7 +438,24 @@ struct CanalystiiTransport::Impl
       }
     }
     tx_condition.notify_all();
-    rx_condition.notify_all();
+    for (auto & condition : rx_conditions) {
+      condition.notify_all();
+    }
+  }
+
+  void tx_loop()
+  {
+    while (!stopping.load()) {
+      if (!tx_queue.empty()) {
+        send_tx();
+        continue;
+      }
+      std::unique_lock<std::mutex> lock(tx_wait_mutex);
+      tx_condition.wait(lock, [this]() {
+        return stopping.load() || !tx_queue.empty();
+      });
+    }
+    tx_condition.notify_all();
   }
 
   void process_packet(int channel, const UsbPacket & packet)
@@ -463,35 +482,21 @@ struct CanalystiiTransport::Impl
     }
   }
 
-  void processing_loop()
+  void processing_loop(int channel)
   {
-    std::size_t next_channel = 0;
     while (true) {
-      bool processed = false;
-      for (std::size_t offset = 0; offset < channels.size(); ++offset) {
-        const std::size_t index = (next_channel + offset) % channels.size();
-        const int channel = channels[index];
-        UsbPacket packet;
-        if (rx_queues[channel]->pop(packet)) {
-          process_packet(channel, packet);
-          next_channel = (index + 1) % channels.size();
-          processed = true;
-          break;
-        }
-      }
-      if (processed) {
+      UsbPacket packet;
+      if (rx_queues[channel]->pop(packet)) {
+        process_packet(channel, packet);
         continue;
       }
-      if (stopping.load()) {
-        const bool all_empty = std::all_of(
-          channels.begin(), channels.end(),
-          [this](int channel) {return rx_queues[channel]->empty();});
-        if (all_empty) {
-          break;
-        }
+      if (stopping.load() && rx_queues[channel]->empty()) {
+        break;
       }
-      std::unique_lock<std::mutex> lock(rx_wait_mutex);
-      rx_condition.wait_for(lock, std::chrono::milliseconds(5));
+      std::unique_lock<std::mutex> lock(rx_wait_mutex[channel]);
+      rx_conditions[channel].wait(lock, [this, channel]() {
+        return stopping.load() || !rx_queues[channel]->empty();
+      });
     }
   }
 
@@ -508,11 +513,16 @@ struct CanalystiiTransport::Impl
       start_channels();
       opened.store(true);
       event_thread = std::thread(&Impl::event_loop, this);
-      processing_thread = std::thread(&Impl::processing_loop, this);
+      tx_thread = std::thread(&Impl::tx_loop, this);
+      for (const int channel : channels) {
+        processing_threads.emplace_back(&Impl::processing_loop, this, channel);
+      }
     } catch (...) {
       opened.store(false);
       stopping.store(true);
-      rx_condition.notify_all();
+      for (auto & condition : rx_conditions) {
+        condition.notify_all();
+      }
       tx_condition.notify_all();
       if (event_thread.joinable()) {
         event_thread.join();
@@ -524,9 +534,15 @@ struct CanalystiiTransport::Impl
           libusb_handle_events_timeout(context, &timeout);
         }
       }
-      if (processing_thread.joinable()) {
-        processing_thread.join();
+      if (tx_thread.joinable()) {
+        tx_thread.join();
       }
+      for (auto & thread : processing_threads) {
+        if (thread.joinable()) {
+          thread.join();
+        }
+      }
+      processing_threads.clear();
       release_resources();
       throw;
     }
@@ -592,14 +608,22 @@ struct CanalystiiTransport::Impl
       return;
     }
     stopping.store(true);
-    rx_condition.notify_all();
+    for (auto & condition : rx_conditions) {
+      condition.notify_all();
+    }
     tx_condition.notify_all();
     if (event_thread.joinable()) {
       event_thread.join();
     }
-    if (processing_thread.joinable()) {
-      processing_thread.join();
+    if (tx_thread.joinable()) {
+      tx_thread.join();
     }
+    for (auto & thread : processing_threads) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+    processing_threads.clear();
 
     if (handle != nullptr) {
       for (const int channel : channels) {
@@ -638,7 +662,8 @@ struct CanalystiiTransport::Impl
   bool interface_claimed{false};
   std::vector<std::unique_ptr<RxSlot>> rx_slots;
   std::thread event_thread;
-  std::thread processing_thread;
+  std::thread tx_thread;
+  std::vector<std::thread> processing_threads;
   std::atomic<bool> opened{false};
   std::atomic<bool> stopping{false};
   std::atomic<int> active_transfers{0};
@@ -650,9 +675,9 @@ struct CanalystiiTransport::Impl
   std::array<std::atomic<std::uint64_t>, 2> tx_frames{};
   std::array<std::atomic<std::uint64_t>, 2> rx_queue_drops{};
 
-  std::condition_variable rx_condition;
+  std::array<std::condition_variable, 2> rx_conditions;
   std::condition_variable tx_condition;
-  std::mutex rx_wait_mutex;
+  std::array<std::mutex, 2> rx_wait_mutex;
   std::mutex tx_wait_mutex;
   mutable std::mutex error_mutex;
   std::string error_message;
