@@ -1,3 +1,4 @@
+import json
 import unittest
 from typing import List, cast
 
@@ -48,15 +49,22 @@ class BuildBridgeParametersTest(unittest.TestCase):
         self.assertEqual(parameters["bus_names"], ["can0", "can1"])
         self.assertEqual(parameters["rx_routes"], [""])
 
-    def test_kwr57_handler_config_contains_runtime_parameters(self) -> None:
+    def test_kwr57_native_config_contains_runtime_parameters(self) -> None:
         device = _sensor("left", CanBus("can0", 0), 0x10, 0x15)
 
-        self.assertEqual(device.handler_config["channel_id"], 0)
-        self.assertEqual(device.handler_config["node_name"], "left")
-        self.assertEqual(device.handler_config["sample_rate_hz"], 1000)
-        self.assertEqual(device.handler_config["period_ms"], 1)
-        self.assertNotIn("rx_topic", device.handler_config)
-        self.assertNotIn("tx_topic", device.handler_config)
+        self.assertEqual(device.native_config["channel_id"], 0)
+        self.assertEqual(device.native_config["node_name"], "left")
+        self.assertEqual(device.native_config["sample_rate_hz"], 1000)
+        self.assertEqual(device.native_config["period_ms"], 1)
+        self.assertNotIn("rx_topic", device.native_config)
+        self.assertNotIn("tx_topic", device.native_config)
+
+    def test_kwr57_native_spec_is_self_contained(self) -> None:
+        device = _sensor("left", CanBus("can0", 0), 0x10, 0x15)
+
+        spec = json.loads(device.native_spec)
+
+        self.assertEqual(spec, device.native_config)
 
     def test_uses_typed_placeholder_for_empty_routes(self) -> None:
         parameters = build_bridge_parameters([CanBus("can0", 0)], [])

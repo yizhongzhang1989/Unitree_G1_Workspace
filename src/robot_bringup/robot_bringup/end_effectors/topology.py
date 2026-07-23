@@ -1,12 +1,13 @@
 """末端设备拓扑：由一份清单生成 bridge 参数和设备节点参数。"""
 
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple
 
 
 @dataclass(frozen=True)
 class CanBus:
-    """一个 ROS 总线名及其对应的 python-can 消息通道"""
+    """一个 ROS 总线名及其对应的 CANalyst-II 物理通道。"""
 
     name: str
     channel_id: int
@@ -67,8 +68,8 @@ class Kwr57Device:
                 self.data_base_id + 2)
 
     @property
-    def handler_config(self) -> Dict[str, object]:
-        """Return the in-process handler config derived from this device."""
+    def native_config(self) -> Dict[str, object]:
+        """Return the native bridge config derived from this device."""
         return {
             "channel_id": self.bus.channel_id,
             "node_name": self.name,
@@ -83,6 +84,15 @@ class Kwr57Device:
             "autostart": self.autostart,
             "tare_on_start": self.tare_on_start,
         }
+
+    @property
+    def native_spec(self) -> str:
+        """Serialize this device for the native production bridge."""
+        return json.dumps(
+            self.native_config,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
 
 
 @dataclass(frozen=True)

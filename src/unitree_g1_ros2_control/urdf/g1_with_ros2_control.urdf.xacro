@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<robot name="g1_with_dual_gloria_m" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="lowstate_topic" default="/lowstate"/>
+  <xacro:arg name="lowcmd_topic" default="/lowcmd"/>
+  <xacro:arg name="left_gripper_state_topic" default="/grip_arm0/joint_states"/>
+  <xacro:arg name="right_gripper_state_topic" default="/grip_arm1/joint_states"/>
+  <xacro:arg name="left_gripper_command_topic" default="/grip_arm0/mit_command"/>
+  <xacro:arg name="right_gripper_command_topic" default="/grip_arm1/mit_command"/>
+  <xacro:arg name="left_gripper_node" default="/grip_arm0"/>
+  <xacro:arg name="right_gripper_node" default="/grip_arm1"/>
+  <xacro:arg name="left_wrench_topic" default="/arm0/wrench_raw"/>
+  <xacro:arg name="right_wrench_topic" default="/arm1/wrench_raw"/>
+  <xacro:arg name="left_wrench_scale" default="9.80665"/>
+  <xacro:arg name="right_wrench_scale" default="9.80665"/>
+  <xacro:arg name="gain_file" default="$(find unitree_g1_ros2_control)/config/default_29dof_param.yaml"/>
+  <xacro:arg name="gripper_command_rate_hz" default="100.0"/>
+  <xacro:arg name="arm_stiffness_scale" default="2.5"/>
+  <xacro:arg name="state_timeout_s" default="0.25"/>
+  <xacro:arg name="gripper_state_timeout_s" default="0.75"/>
+  <xacro:arg name="require_pr_mode" default="true"/>
+  <xacro:arg name="gripper_kp" default="10.0"/>
+  <xacro:arg name="gripper_kd" default="5.0"/>
+  <xacro:arg name="gripper_service_timeout_s" default="3.0"/>
+  <xacro:arg name="manage_motion_mode" default="true"/>
+  <xacro:arg name="restore_motion_mode" default="true"/>
+  <xacro:arg name="fallback_motion_mode" default="ai"/>
+  <xacro:arg name="motion_switch_timeout_s" default="1.0"/>
+  <xacro:arg name="motion_select_timeout_s" default="10.0"/>
+  <xacro:arg name="motion_release_attempts" default="3"/>
+  <xacro:arg name="motion_release_retry_s" default="0.2"/>
+  <xacro:arg name="lowcmd_quiet_period_s" default="0.1"/>
+  <xacro:arg name="lowcmd_quiet_timeout_s" default="2.0"/>
+
+  <xacro:include filename="$(find unitree_g1_description)/model/G1-with-dual-Gloria-M.urdf.xacro"/>
+  <xacro:include filename="$(find unitree_g1_description)/model/ros2_control_resources.macro.xacro"/>
+
+  <ros2_control name="g1_whole_body_system" type="system">
+    <hardware>
+      <plugin>unitree_g1_ros2_control/G1TopicSystem</plugin>
+      <param name="lowstate_topic">$(arg lowstate_topic)</param>
+      <param name="lowcmd_topic">$(arg lowcmd_topic)</param>
+      <param name="left_gripper_state_topic">$(arg left_gripper_state_topic)</param>
+      <param name="right_gripper_state_topic">$(arg right_gripper_state_topic)</param>
+      <param name="left_gripper_command_topic">$(arg left_gripper_command_topic)</param>
+      <param name="right_gripper_command_topic">$(arg right_gripper_command_topic)</param>
+      <param name="left_gripper_node">$(arg left_gripper_node)</param>
+      <param name="right_gripper_node">$(arg right_gripper_node)</param>
+      <param name="left_wrench_topic">$(arg left_wrench_topic)</param>
+      <param name="right_wrench_topic">$(arg right_wrench_topic)</param>
+      <param name="left_wrench_scale">$(arg left_wrench_scale)</param>
+      <param name="right_wrench_scale">$(arg right_wrench_scale)</param>
+      <param name="gain_file">$(arg gain_file)</param>
+      <param name="gripper_command_rate_hz">$(arg gripper_command_rate_hz)</param>
+      <param name="arm_stiffness_scale">$(arg arm_stiffness_scale)</param>
+      <param name="state_timeout_s">$(arg state_timeout_s)</param>
+      <param name="gripper_state_timeout_s">$(arg gripper_state_timeout_s)</param>
+      <param name="require_pr_mode">$(arg require_pr_mode)</param>
+      <param name="gripper_kp">$(arg gripper_kp)</param>
+      <param name="gripper_kd">$(arg gripper_kd)</param>
+      <param name="gripper_service_timeout_s">$(arg gripper_service_timeout_s)</param>
+      <param name="manage_motion_mode">$(arg manage_motion_mode)</param>
+      <param name="restore_motion_mode">$(arg restore_motion_mode)</param>
+      <param name="fallback_motion_mode">$(arg fallback_motion_mode)</param>
+      <param name="motion_switch_timeout_s">$(arg motion_switch_timeout_s)</param>
+      <param name="motion_select_timeout_s">$(arg motion_select_timeout_s)</param>
+      <param name="motion_release_attempts">$(arg motion_release_attempts)</param>
+      <param name="motion_release_retry_s">$(arg motion_release_retry_s)</param>
+      <param name="lowcmd_quiet_period_s">$(arg lowcmd_quiet_period_s)</param>
+      <param name="lowcmd_quiet_timeout_s">$(arg lowcmd_quiet_timeout_s)</param>
+    </hardware>
+
+    <xacro:g1_ros2_control_resources/>
+  </ros2_control>
+</robot>

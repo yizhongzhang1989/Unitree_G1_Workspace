@@ -1,0 +1,21 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500
+
+    joint_state_broadcaster:
+      type: unitree_g1_broadcasters/JointStateBroadcaster
+
+    pelvis_imu_broadcaster:
+      type: unitree_g1_broadcasters/ImuSensorBroadcaster
+
+    left_ft_broadcaster:
+      type: force_torque_sensor_broadcaster/ForceTorqueSensorBroadcaster
+
+    right_ft_broadcaster:
+      type: force_torque_sensor_broadcaster/ForceTorqueSensorBroadcaster
+
+    forward_position_controller:
+      type: unitree_g1_forward_command_controller/ForwardCommandController
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController

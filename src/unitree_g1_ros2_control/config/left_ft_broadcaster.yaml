@@ -1,0 +1,4 @@
+/left_ft_broadcaster:
+  ros__parameters:
+    sensor_name: left_ft_sensor
+    frame_id: left_wrist_yaw_link

@@ -20,6 +20,28 @@ flowchart LR
 
 `gloria_ros` 负责协议、状态机与安全校验，`can_bridge_ros` 独占物理适配器并完成 CAN 收发；完整系统应由 bringup 为每台夹爪配置专属 RX 路由，避免夹爪节点处理无关的高频总线帧。
 
+### 接入 ros2_control 后
+接入统一控制体系没有把 Gloria-M 协议复制进硬件插件，也没有删除独立设备节点。生产时仍运行左右两个 `gloria_ros` 进程，`unitree_g1_ros2_control/G1TopicSystem` 通过本包原有公开 ROS 接口接入：
+```mermaid
+flowchart LR
+  subgraph CM["ros2_control_node 进程"]
+    C["ForwardCommandController"] -->|"command interface\n进程内，无 DDS"| H["G1TopicSystem"]
+  end
+  H -->|"MitCommand，100 Hz DDS"| G["gloria_ros 独立进程"]
+  G -->|"can_msgs/Frame DDS"| B["can_bridge_ros 进程"]
+  B <--> CAN["CANalyst-II / Gloria-M"]
+  CAN --> B
+  B -->|"can_msgs/Frame DDS"| G
+  G -->|"JointState DDS"| H
+```
+
+- controller 与 `G1TopicSystem` 同进程，通过 ros2_control command/state interface 直接读写，不经过 DDS。
+- `G1TopicSystem` 只生成夹爪目标并发布 `/grip_arm0/mit_command`、`/grip_arm1/mit_command`；本节点继续做 MIT 编码、模式与量程确认、反馈超时保护和 CAN Frame 生成。
+- 本节点发布的 `JointState` 同时供 Dashboard 和硬件插件使用；生产拓扑把关节名设为 `left_eccentric_joint`、`right_eccentric_joint`。
+- 这条路径没有新增 adapter 或重复转发节点，但相对“协议直接写进硬件插件”仍保留 ros2_control -> Gloria、Gloria <-> bridge 的 DDS 边界。这样可以复用经过验证的设备安全状态机，并保留本包全部独立调试入口。
+
+因此，controller 层本身不增加 DDS；Gloria 的 DDS 开销来自刻意保留的独立设备节点边界，命令频率固定为 100 Hz，而不是 manager 的 500 Hz。
+
 ## 安全约束
 - MIT 与 PV 是互斥模式，模式切换固定采用“停止命令 -> 失能 -> 选择模式 -> 写入并回读模式/量程 -> 使能并等待反馈 -> 发送新命令”的顺序；节点在主机状态为已使能时拒绝 `~/set_mode` 和 `~/configure`。
 - 运动命令默认要求模式已确认、使能成功且反馈新鲜；软件限位、超时失能和退出失能不能替代机械限位、驱动器保护、急停与碰撞检测。
@@ -29,7 +51,8 @@ flowchart LR
 
 ## 启动入口
 
-- 生产整机使用 `robot_bringup/all_data.launch.py`，不要单独启动本包的 bridge。
+- 生产整机使用 `robot_bringup/all_data.launch.py scope:=whole_body`，它会启动 bridge、左右 Gloria 节点和唯一 ros2_control manager；不要再单独启动本包的 bridge、夹爪节点或第二个 manager。
+- 只需要设备数据、不需要 ros2_control 时使用 `scope:=end_effectors`；Gloria 节点和原有 ROS 接口完全相同。
 - `gripper_debug.launch.py` 自己启动 bridge 并独占 CANalyst-II，只用于一只夹爪的隔离硬件调试。
 - `gripper.launch.py` 只启动夹爪节点；使用它之前，外部 bridge 必须已启动并配置好该设备的 RX 路由。
 
@@ -39,6 +62,24 @@ source scripts/env.sh
 ```
 
 该脚本会把 Gloria-M-SDK submodule 加入 `PYTHONPATH`；上游包入口会导入串口适配器，因此环境仍需安装其声明的 `pyserial`，但本节点不会打开串口。
+
+### 生产整机
+
+```bash
+# 终端 A：双 Gloria、双 KWR57、相机和唯一 ros2_control manager
+ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
+
+# 终端 B：按需启动纯客户端 Dashboard
+ros2 launch robot_bringup whole_body_dashboard.launch.py
+```
+
+当前 active 的 `forward_position_controller` 或 `joint_trajectory_controller` claim 两只 Gloria interface，hardware interface 以 100 Hz 发布 `MitCommand`。hardware interface 使用 `0.75 s` 夹爪 freshness 阈值，独立于 G1 的 `0.25 s`；本驱动仍以自己的 `feedback_timeout_s=0.5 s` 先行失能故障侧。8770 末端 Dashboard 默认只监视；只有纯末端模式显式设置 `allow_gripper_control:=true` 时才恢复其直接 MIT publisher。
+
+仅启动原有末端设备体系，不加载 ros2_control：
+
+```bash
+ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual
+```
 
 ### 已有外部 bridge
 ```bash

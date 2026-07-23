@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import call, patch
 
 from launch import LaunchContext
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch.utilities import (
     normalize_to_list_of_substitutions,
@@ -10,14 +10,43 @@ from launch.utilities import (
 )
 
 from robot_bringup.end_effectors.nodes import (
+    bridge,
     camera,
     end_effector_actions,
     gripper,
 )
-from robot_bringup.end_effectors.topology import CanBus, GloriaDevice
+from robot_bringup.end_effectors.topology import (
+    CanBus,
+    GloriaDevice,
+    Kwr57Device,
+)
 
 
 class EndEffectorsNodesTest(unittest.TestCase):
+    @patch("robot_bringup.end_effectors.nodes.Node")
+    def test_production_bridge_is_native_cpp(
+            self, node_type) -> None:
+        can0 = CanBus(name="can0", channel_id=0)
+        sensor = Kwr57Device(
+            name="ft_arm0", bus=can0, cmd_id=0x10,
+            data_base_id=0x15, wrench_topic="/arm0/wrench_raw",
+            frame_id="arm0_ft_link")
+
+        action = bridge([can0], [sensor], [])
+
+        self.assertIs(action, node_type.return_value)
+        node_type.assert_called_once()
+        arguments = node_type.call_args.kwargs
+        self.assertEqual(arguments["package"], "canalystii_native_bridge")
+        self.assertEqual(arguments["executable"], "native_bridge_node")
+        self.assertEqual(arguments["name"], "can_bridge_ros")
+        self.assertIsInstance(arguments["on_exit"], Shutdown)
+        self.assertEqual(len(arguments["parameters"]), 1)
+        self.assertEqual(arguments["parameters"][0]["channel_ids"], [0])
+        self.assertNotIn("interface", arguments["parameters"][0])
+        self.assertEqual(len(
+            arguments["parameters"][0]["kwr57_device_specs"]), 1)
+
     def test_gripper_reuses_device_launch_with_topology_parameters(self) -> None:
         can1 = CanBus(name="can1", channel_id=1)
         device = GloriaDevice(
@@ -102,7 +131,7 @@ class EndEffectorsNodesTest(unittest.TestCase):
                     "robot_bringup.end_effectors.nodes.camera", side_effect=[
                     "left_camera", "right_camera"]) as camera_factory:
             actions = end_effector_actions(
-                "unused.yaml", [], [], [], "false")
+                [], [], [], "false")
 
         self.assertEqual(actions, ["bridge", "left_camera", "right_camera"])
         self.assertEqual(camera_factory.call_args_list, [

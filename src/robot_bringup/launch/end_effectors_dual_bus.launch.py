@@ -37,18 +37,17 @@ def generate_launch_description() -> LaunchDescription:
         GloriaDevice(
             name="grip_arm0", bus=can0, command_id=0x01,
             feedback_id=0x101, rx_topic="/can0/grip_arm0/rx",
-            joint_name="arm0_gripper"),
+            joint_name="left_eccentric_joint"),
         GloriaDevice(
             name="grip_arm1", bus=can1, command_id=0x01,
             feedback_id=0x101, rx_topic="/can1/grip_arm1/rx",
-            joint_name="arm1_gripper"),
+            joint_name="right_eccentric_joint"),
     ]
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "enable_grippers_on_start", default_value="true"),
         *end_effector_actions(
-            "dual_bus.yaml",
             buses,
             kwr57_devices,
             gloria_devices,

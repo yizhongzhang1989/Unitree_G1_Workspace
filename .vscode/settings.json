@@ -8,6 +8,7 @@
         "${workspaceFolder}/src/gloria_ros",
         "${workspaceFolder}/src/kwr57_ros",
         "${workspaceFolder}/src/robot_bringup",
+        "${workspaceFolder}/src/inverse_kinematics_toolkit/ikt_pose_commander",
 
         "${workspaceFolder}/sdk/CAN-SDK",
         "${workspaceFolder}/sdk/KWR57-SDK",
@@ -36,5 +37,6 @@
         "/home/unitree/Unitree_G1_Workspace/build/camera_node",
         "/home/unitree/Unitree_G1_Workspace/install/camera_node/lib/python3.8/site-packages",
         "/opt/ros/foxy/lib/python3.8/site-packages"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

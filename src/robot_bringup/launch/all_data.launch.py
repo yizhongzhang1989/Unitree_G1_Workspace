@@ -1,8 +1,8 @@
-"""Launch data producers without any web dashboard.
+"""Launch robot hardware producers without any web dashboard.
 
 scope:=end_effectors starts the complete end-effector data path only.
-scope:=whole_body additionally converts G1 LowState, publishes the assembled
-robot description, and starts robot_state_publisher for TF.
+scope:=whole_body additionally starts the real ros2_control manager, state
+broadcasters, assembled robot description, and an inactive position controller.
 """
 
 import os
@@ -23,12 +23,6 @@ _TOPOLOGY_LAUNCHES = {
     "dual": "end_effectors_dual_bus.launch.py",
 }
 _SCOPES = ("end_effectors", "whole_body")
-_GRIPPER_TOPICS = {
-    "single": ("/grip_left/joint_states", "/grip_right/joint_states"),
-    "dual": ("/grip_arm0/joint_states", "/grip_arm1/joint_states"),
-}
-
-
 def _data_launches(context):
     scope = LaunchConfiguration("scope").perform(context).lower()
     if scope not in _SCOPES:
@@ -50,23 +44,20 @@ def _data_launches(context):
     )]
 
     if scope == "whole_body":
-        left_gripper_topic, right_gripper_topic = _GRIPPER_TOPICS[topology]
-        description_share = get_package_share_directory(
-            "unitree_g1_description")
+        control_share = get_package_share_directory(
+            "unitree_g1_ros2_control")
         actions.append(IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
-                description_share, "launch", "g1_data.launch.py")),
+                control_share, "launch", "control.launch.py")),
             launch_arguments={
+                "topology": topology,
+                "controller_manager": LaunchConfiguration("controller_manager"),
                 "lowstate_topic": LaunchConfiguration("lowstate_topic"),
-                "joint_states_topic": LaunchConfiguration(
-                    "joint_states_topic"),
-                "left_gripper_joint_states_topic": left_gripper_topic,
-                "right_gripper_joint_states_topic": right_gripper_topic,
-                "robot_description_topic": LaunchConfiguration(
-                    "robot_description_topic"),
+                "arm_stiffness_scale": LaunchConfiguration(
+                    "arm_stiffness_scale"),
+                "joint_states_topic": LaunchConfiguration("joint_states_topic"),
+                "robot_description_topic": LaunchConfiguration("robot_description_topic"),
                 "require_pr_mode": LaunchConfiguration("require_pr_mode"),
-                "joint_state_publish_rate_hz": LaunchConfiguration(
-                    "joint_state_publish_rate_hz"),
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
             }.items(),
         ))
@@ -78,16 +69,13 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument("scope", default_value="whole_body"),
         DeclareLaunchArgument("topology", default_value="dual"),
-        DeclareLaunchArgument(
-            "enable_grippers_on_start", default_value="true"),
+        DeclareLaunchArgument("enable_grippers_on_start", default_value="true"),
+        DeclareLaunchArgument("controller_manager", default_value="/controller_manager"),
         DeclareLaunchArgument("lowstate_topic", default_value="/lowstate"),
-        DeclareLaunchArgument(
-            "joint_states_topic", default_value="/joint_states"),
-        DeclareLaunchArgument(
-            "robot_description_topic", default_value="/robot_description"),
+        DeclareLaunchArgument("arm_stiffness_scale", default_value="2.5"),
+        DeclareLaunchArgument("joint_states_topic", default_value="/joint_states"),
+        DeclareLaunchArgument("robot_description_topic", default_value="/robot_description"),
         DeclareLaunchArgument("require_pr_mode", default_value="true"),
-        DeclareLaunchArgument(
-            "joint_state_publish_rate_hz", default_value="100.0"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         OpaqueFunction(function=_data_launches),
     ])

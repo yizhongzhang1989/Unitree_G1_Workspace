@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<library path="unitree_g1_ros2_control">
+  <class
+    name="unitree_g1_forward_command_controller/ForwardCommandController"
+    type="unitree_g1_ros2_control::ForwardPositionController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Whole-body forward position controller with command timeout and jump protection.
+    </description>
+  </class>
+  <class
+    name="unitree_g1_broadcasters/JointStateBroadcaster"
+    type="unitree_g1_ros2_control::ThrottledJointStateBroadcaster"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Standard Foxy joint-state broadcaster with a configurable publish-rate gate.
+    </description>
+  </class>
+  <class
+    name="unitree_g1_broadcasters/ImuSensorBroadcaster"
+    type="unitree_g1_ros2_control::ThrottledImuSensorBroadcaster"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Standard Foxy IMU broadcaster with a configurable publish-rate gate.
+    </description>
+  </class>
+</library>

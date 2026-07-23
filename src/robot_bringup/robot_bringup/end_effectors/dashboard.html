@@ -1255,7 +1255,9 @@
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const state = await response.json();
         for (const hand of Object.keys(HANDS)) {
-          if (state.hands && state.hands[hand]) updateHand(hand, state.hands[hand]);
+          if (state.hands && state.hands[hand]) {
+            updateHand(hand, state.hands[hand]);
+          }
         }
         setServerOnline(true, "网页节点在线");
       } catch (error) {
