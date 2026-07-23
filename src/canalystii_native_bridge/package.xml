@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://download.ros.org/schema/package_format3.xsd"?>
+<package format="3">
+  <name>canalystii_native_bridge</name>
+  <version>0.1.0</version>
+  <description>Native dual-channel CANalyst-II bridge with direct KWR57 wrench publication.</description>
+
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>can_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>yaml_cpp_vendor</depend>
+  <build_depend>libusb-1.0</build_depend>
+  <exec_depend>libusb-1.0</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
