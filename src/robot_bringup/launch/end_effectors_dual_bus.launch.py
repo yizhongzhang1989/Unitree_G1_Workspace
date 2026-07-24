@@ -14,41 +14,16 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
 from robot_bringup.end_effectors.nodes import end_effector_actions
-from robot_bringup.end_effectors.topology import (
-    CanBus,
-    GloriaDevice,
-    Kwr57Device,
-)
+from robot_bringup.end_effectors.topology import deployed_topology
 
 
 def generate_launch_description() -> LaunchDescription:
-    can0 = CanBus(name="can0", channel_id=0)
-    can1 = CanBus(name="can1", channel_id=1)
-    buses = [can0, can1]
-    kwr57_devices = [
-        Kwr57Device(
-            name="ft_arm0", bus=can0, cmd_id=0x10, data_base_id=0x15,
-            wrench_topic="/arm0/wrench_raw", frame_id="arm0_ft_link"),
-        Kwr57Device(
-            name="ft_arm1", bus=can1, cmd_id=0x10, data_base_id=0x15,
-            wrench_topic="/arm1/wrench_raw", frame_id="arm1_ft_link"),
-    ]
-    gloria_devices = [
-        GloriaDevice(
-            name="grip_arm0", bus=can0, command_id=0x01,
-            feedback_id=0x101, rx_topic="/can0/grip_arm0/rx",
-            joint_name="arm0_gripper"),
-        GloriaDevice(
-            name="grip_arm1", bus=can1, command_id=0x01,
-            feedback_id=0x101, rx_topic="/can1/grip_arm1/rx",
-            joint_name="arm1_gripper"),
-    ]
+    buses, kwr57_devices, gloria_devices = deployed_topology("dual")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "enable_grippers_on_start", default_value="true"),
         *end_effector_actions(
-            "dual_bus.yaml",
             buses,
             kwr57_devices,
             gloria_devices,

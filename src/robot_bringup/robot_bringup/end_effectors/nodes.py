@@ -4,11 +4,10 @@ import os
 from typing import Sequence, Union
 
 from ament_index_python.packages import get_package_share_directory
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitution import Substitution
 from launch_ros.actions import Node
-from kwr57_ros.bridge_handler import build_frame_handler_spec
 
 from robot_bringup.end_effectors.topology import (
     CanBus,
@@ -25,25 +24,22 @@ def build_bridge_node_parameters(
     """Build all topology-derived bridge parameters."""
     parameters = build_bridge_parameters(
         buses, kwr57_devices, gloria_devices)
-    parameters["frame_handler_specs"] = [
-        build_frame_handler_spec(device.handler_config)
+    parameters["kwr57_device_specs"] = [
+        device.native_spec
         for device in kwr57_devices
     ] or [""]
     return parameters
 
 
-def bridge(config: str, buses: Sequence[CanBus],
-           kwr57_devices: Sequence[Kwr57Device],
+def bridge(buses: Sequence[CanBus], kwr57_devices: Sequence[Kwr57Device],
               gloria_devices: Sequence[GloriaDevice]) -> Node:
-    """启动 bridge；物理参数来自 YAML，设备路由由本次 bringup 生成。"""
-    config_path = os.path.join(
-        get_package_share_directory("can_bridge_ros"),
-        "config", config)
+    """从末端拓扑直接构造原生 bridge。"""
     return Node(
-        package="can_bridge_ros", executable="bridge_node",
+        package="canalystii_native_bridge", executable="native_bridge_node",
         name="can_bridge_ros", output="screen", emulate_tty=True,
-        parameters=[config_path, build_bridge_node_parameters(
+        parameters=[build_bridge_node_parameters(
             buses, kwr57_devices, gloria_devices)],
+        on_exit=Shutdown(reason="native CANalyst-II bridge exited"),
     )
 
 
@@ -97,16 +93,15 @@ def camera(side: str, ip_address: str, server_port: int) -> Node:
 
 
 def end_effector_actions(
-        config: str,
         buses: Sequence[CanBus],
         kwr57_devices: Sequence[Kwr57Device],
     gloria_devices: Sequence[GloriaDevice],
     enable_grippers_on_start: Union[str, Substitution]):
     """Build all end-effector actions with KWR57 in the bridge process."""
     return [
-        bridge(config, buses, kwr57_devices, gloria_devices),
+                bridge(buses, kwr57_devices, gloria_devices),
                 *(gripper(device, enable_grippers_on_start)
                     for device in gloria_devices),
-        camera("left", "192.168.123.97", 8010),
-        camera("right", "192.168.123.98", 8011),
+                camera("left", "192.168.123.97", 8010),
+                camera("right", "192.168.123.98", 8011),
     ]

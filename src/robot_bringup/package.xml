@@ -10,17 +10,23 @@
 
   <buildtool_depend>ament_python</buildtool_depend>
 
-  <exec_depend>can_bridge_ros</exec_depend>
+  <exec_depend>canalystii_native_bridge</exec_depend>
   <exec_depend>camera_node</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
   <exec_depend>controller_manager_msgs</exec_depend>
-  <exec_depend>kwr57_ros</exec_depend>
   <exec_depend>gloria_ros</exec_depend>
+  <exec_depend>ikt_core</exec_depend>
+  <exec_depend>ikt_pose_commander</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>robot_test_dashboard</exec_depend>
   <exec_depend>unitree_g1_description</exec_depend>
+  <exec_depend>unitree_g1_ros2_control</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 
   <test_depend>python3-pytest</test_depend>

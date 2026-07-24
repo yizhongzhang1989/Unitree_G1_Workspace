@@ -23,7 +23,8 @@ class _Logger:
     def __init__(self) -> None:
         self.errors = []
 
-    def debug(self, _message: str) -> None:
+    def debug(self, message: str) -> None:
+        del message
         pass
 
     def error(self, message: str) -> None:

@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>unitree_g1_ros2_control</name>
+  <version>0.1.0</version>
+  <description>ros2_control hardware and controllers for the Unitree G1 topic interfaces.</description>
+
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>controller_interface</depend>
+  <depend>geometry_msgs</depend>
+  <depend>gloria_ros</depend>
+  <depend>hardware_interface</depend>
+  <depend>imu_sensor_broadcaster</depend>
+  <depend>joint_state_broadcaster</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>realtime_tools</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>unitree_api</depend>
+  <depend>unitree_hg</depend>
+  <depend>yaml_cpp_vendor</depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>force_torque_sensor_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>unitree_g1_description</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -10,3 +10,6 @@
 [submodule "src/unitree_g1_description/model"]
 	path = src/unitree_g1_description/model
 	url = https://github.com/madderscientist/my-UnitreeG1-urdf.git
+[submodule "src/inverse_kinematics_toolkit"]
+	path = src/inverse_kinematics_toolkit
+	url = https://github.com/yizhongzhang1989/inverse_kinematics_toolkit.git

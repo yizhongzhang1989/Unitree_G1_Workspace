@@ -16,7 +16,6 @@ from urllib.request import ProxyHandler, build_opener
 import rclpy
 from geometry_msgs.msg import WrenchStamped
 from gloria_ros.msg import MitCommand
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.logging import get_logger
 from rclpy.node import Node
@@ -24,6 +23,8 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
+
+from robot_bringup.end_effectors.topology import dashboard_topology_parameters
 
 
 _MAX_REQUEST_BYTES = 64 * 1024
@@ -279,7 +280,7 @@ class EndEffectorsDashboard(Node):
 
     def __init__(self) -> None:
         super().__init__("end_effectors_dashboard")
-        self._cb_group = ReentrantCallbackGroup()
+        topology_defaults = dashboard_topology_parameters("dual")
         self._state_lock = threading.Lock()
         self._stream_locks = {
             hand: {
@@ -303,14 +304,8 @@ class EndEffectorsDashboard(Node):
         self.declare_parameter("safe_position_max", 2.77)
         self.declare_parameter("mit_velocity_limit", 10.0)
         self.declare_parameter("mit_torque_limit", 12.0)
-        self.declare_parameter("left_bus", "can0")
-        self.declare_parameter("left_sensor_node", "/ft_arm0")
-        self.declare_parameter("left_wrench_topic", "/arm0/wrench_raw")
-        self.declare_parameter("left_gripper_node", "/grip_arm0")
-        self.declare_parameter("right_bus", "can1")
-        self.declare_parameter("right_sensor_node", "/ft_arm1")
-        self.declare_parameter("right_wrench_topic", "/arm1/wrench_raw")
-        self.declare_parameter("right_gripper_node", "/grip_arm1")
+        for name, value in topology_defaults.items():
+            self.declare_parameter(name, value)
         self.declare_parameter("left_camera_url", "http://127.0.0.1:8010")
         self.declare_parameter("right_camera_url", "http://127.0.0.1:8011")
         self.declare_parameter("camera_timeout_s", 1.0)
@@ -451,7 +446,6 @@ class EndEffectorsDashboard(Node):
                 lambda message, selected=hand: self._on_wrench(
                     selected, message),
                 wrench_qos,
-                callback_group=self._cb_group,
                 raw=True,
             ))
             joint_topic = _child_name(config["gripper_node"], "joint_states")
@@ -461,7 +455,6 @@ class EndEffectorsDashboard(Node):
                 lambda message, selected=hand: self._on_joint_state(
                     selected, message),
                 latest_qos,
-                callback_group=self._cb_group,
             ))
             self._mit_publishers[hand] = self.create_publisher(
                 MitCommand,
@@ -472,7 +465,6 @@ class EndEffectorsDashboard(Node):
                 action: self.create_client(
                     Trigger,
                     _child_name(config["sensor_node"], action),
-                    callback_group=self._cb_group,
                 )
                 for action in _SENSOR_ACTIONS
             }
@@ -480,7 +472,6 @@ class EndEffectorsDashboard(Node):
                 action: self.create_client(
                     Trigger,
                     _child_name(config["gripper_node"], action),
-                    callback_group=self._cb_group,
                 )
                 for action in _GRIPPER_SERVICES
             }

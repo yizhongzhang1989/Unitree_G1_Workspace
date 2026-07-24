@@ -3,6 +3,9 @@
 /install/
 /log/
 
+# CTest
+/Testing/
+
 # python
 __pycache__/
 *.egg-info/

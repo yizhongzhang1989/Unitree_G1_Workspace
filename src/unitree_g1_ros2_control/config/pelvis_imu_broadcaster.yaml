@@ -1,0 +1,5 @@
+/pelvis_imu_broadcaster:
+  ros__parameters:
+    sensor_name: pelvis_imu
+    frame_id: pelvis
+    publish_rate: 100.0

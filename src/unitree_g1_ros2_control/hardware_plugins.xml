@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<library path="unitree_g1_ros2_control">
+  <class
+    name="unitree_g1_ros2_control/G1TopicSystem"
+    type="unitree_g1_ros2_control::G1TopicSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Bridges ros2_control position resources to Unitree LowCmd and Gloria-M ROS interfaces.
+    </description>
+  </class>
+</library>

@@ -1,3 +1,4 @@
+import json
 import unittest
 from typing import List, cast
 
@@ -6,6 +7,8 @@ from robot_bringup.end_effectors.topology import (
     GloriaDevice,
     Kwr57Device,
     build_bridge_parameters,
+    dashboard_topology_parameters,
+    deployed_topology,
 )
 
 
@@ -34,6 +37,26 @@ def _gripper(name: str, bus: CanBus, command_id: int, feedback_id: int,
 
 
 class BuildBridgeParametersTest(unittest.TestCase):
+    def test_dashboard_parameters_are_derived_from_deployed_inventory(
+            self) -> None:
+        for topology in ("single", "dual"):
+            buses, sensors, grippers = deployed_topology(topology)
+            build_bridge_parameters(buses, sensors, grippers)
+            parameters = dashboard_topology_parameters(topology)
+            for hand, sensor, gripper in zip(
+                    ("left", "right"), sensors, grippers):
+                self.assertEqual(parameters[f"{hand}_bus"], sensor.bus.name)
+                self.assertEqual(
+                    parameters[f"{hand}_sensor_node"], f"/{sensor.name}")
+                self.assertEqual(
+                    parameters[f"{hand}_wrench_topic"], sensor.wrench_topic)
+                self.assertEqual(
+                    parameters[f"{hand}_gripper_node"], f"/{gripper.name}")
+
+    def test_rejects_unknown_deployed_topology(self) -> None:
+        with self.assertRaisesRegex(ValueError, "topology must be"):
+            deployed_topology("unknown")
+
     def test_kwr57_inventory_uses_handlers_without_frame_routes(self) -> None:
         can0 = CanBus("can0", 0)
         can1 = CanBus("can1", 1)
@@ -48,15 +71,22 @@ class BuildBridgeParametersTest(unittest.TestCase):
         self.assertEqual(parameters["bus_names"], ["can0", "can1"])
         self.assertEqual(parameters["rx_routes"], [""])
 
-    def test_kwr57_handler_config_contains_runtime_parameters(self) -> None:
+    def test_kwr57_native_config_contains_runtime_parameters(self) -> None:
         device = _sensor("left", CanBus("can0", 0), 0x10, 0x15)
 
-        self.assertEqual(device.handler_config["channel_id"], 0)
-        self.assertEqual(device.handler_config["node_name"], "left")
-        self.assertEqual(device.handler_config["sample_rate_hz"], 1000)
-        self.assertEqual(device.handler_config["period_ms"], 1)
-        self.assertNotIn("rx_topic", device.handler_config)
-        self.assertNotIn("tx_topic", device.handler_config)
+        self.assertEqual(device.native_config["channel_id"], 0)
+        self.assertEqual(device.native_config["node_name"], "left")
+        self.assertEqual(device.native_config["sample_rate_hz"], 1000)
+        self.assertEqual(device.native_config["period_ms"], 1)
+        self.assertNotIn("rx_topic", device.native_config)
+        self.assertNotIn("tx_topic", device.native_config)
+
+    def test_kwr57_native_spec_is_self_contained(self) -> None:
+        device = _sensor("left", CanBus("can0", 0), 0x10, 0x15)
+
+        spec = json.loads(device.native_spec)
+
+        self.assertEqual(spec, device.native_config)
 
     def test_uses_typed_placeholder_for_empty_routes(self) -> None:
         parameters = build_bridge_parameters([CanBus("can0", 0)], [])

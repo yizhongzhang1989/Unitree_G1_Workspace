@@ -1,7 +1,9 @@
 import importlib.util
 from pathlib import Path
+from typing import Any, Dict, List, cast
 
 import pytest
+import yaml
 from launch import LaunchContext
 from launch.actions import IncludeLaunchDescription
 from launch.utilities import (
@@ -31,11 +33,12 @@ def _all_data_context(scope, topology="dual"):
         "scope": scope,
         "topology": topology,
         "enable_grippers_on_start": "true",
+        "controller_manager": "/controller_manager",
         "lowstate_topic": "/lowstate",
+        "arm_stiffness_scale": "2.5",
         "joint_states_topic": "/joint_states",
         "robot_description_topic": "/robot_description",
         "require_pr_mode": "true",
-        "joint_state_publish_rate_hz": "100.0",
         "use_sim_time": "false",
     })
     return context
@@ -50,6 +53,21 @@ def _source_path(include):
 def _perform(context, value):
     return perform_substitutions(
         context, normalize_to_list_of_substitutions(value))
+
+
+def _node_package(node: Node) -> str:
+    return cast(str, getattr(node, "_Node__package"))
+
+
+def _node_executable(node: Node) -> str:
+    return cast(str, getattr(node, "_Node__node_executable"))
+
+
+def _node_parameters(node: Node) -> List[Dict[str, Any]]:
+    return cast(List[Dict[str, Any]], getattr(node, "_Node__parameters"))
+
+
+parametrize = cast(Any, pytest.mark.parametrize)
 
 
 def test_all_data_scope_selects_expected_producers():
@@ -73,11 +91,16 @@ def test_all_data_scope_selects_expected_producers():
                for action in whole_body)
     paths = [_source_path(action) for action in whole_body]
     assert any("end_effectors_dual_bus.launch.py" in path for path in paths)
-    assert any("g1_data.launch.py" in path for path in paths)
+    assert any("control.launch.py" in path for path in paths)
     assert all("dashboard" not in path.lower() for path in paths)
+    control = next(
+        action for action in whole_body
+        if "control.launch.py" in _source_path(action))
+    assert dict(control.launch_arguments)["arm_stiffness_scale"].perform(
+        _all_data_context("whole_body", "dual")) == "2.5"
 
 
-@pytest.mark.parametrize("scope", ["bad", "", "all"])
+@parametrize("scope", ["bad", "", "all"])
 def test_all_data_rejects_unknown_scope(scope):
     module = _load_launch("all_data.launch.py")
     try:
@@ -88,7 +111,7 @@ def test_all_data_rejects_unknown_scope(scope):
         pytest.fail("unknown scope was accepted")
 
 
-@pytest.mark.parametrize("topology", ["bad", "", "two"])
+@parametrize("topology", ["bad", "", "two"])
 def test_all_data_rejects_unknown_topology(topology):
     module = _load_launch("all_data.launch.py")
     try:
@@ -116,30 +139,61 @@ def test_end_effectors_dashboard_expands_to_one_web_node():
     actions = module._dashboard_node(context)
     assert len(actions) == 1
     assert isinstance(actions[0], Node)
-    assert actions[0]._Node__package == "robot_bringup"
-    assert actions[0]._Node__node_executable == "end_effectors_dashboard"
+    assert _node_package(actions[0]) == "robot_bringup"
+    assert _node_executable(actions[0]) == "end_effectors_dashboard"
 
 
-def test_whole_body_dashboard_includes_controller_and_compat_web_node():
+def test_whole_body_dashboard_only_creates_compat_web_node():
     module = _load_launch("whole_body_dashboard.launch.py")
     description = module.generate_launch_description()
     includes = [
         entity for entity in description.entities
         if isinstance(entity, IncludeLaunchDescription)
     ]
-    assert len(includes) == 1
-    paths = [_source_path(include) for include in includes]
-    assert any("mit_control.launch.py" in path for path in paths)
+    assert includes == []
     nodes = [
         entity for entity in description.entities
         if isinstance(entity, Node)
     ]
     assert len(nodes) == 1
-    assert nodes[0]._Node__package == "robot_bringup"
-    assert nodes[0]._Node__node_executable == "whole_body_dashboard"
+    assert _node_package(nodes[0]) == "robot_bringup"
+    assert _node_executable(nodes[0]) == "whole_body_dashboard"
 
 
-@pytest.mark.parametrize(
+def test_ikt_pose_commander_uses_named_position_controllers():
+    module = _load_launch("ikt_pose_commander.launch.py")
+    description = module.generate_launch_description()
+    nodes = [
+        entity for entity in description.entities
+        if isinstance(entity, Node)
+    ]
+    assert len(nodes) == 2
+    by_executable = {
+        _node_executable(node): node
+        for node in nodes
+    }
+    commander = by_executable["ikt_pose_commander"]
+    assert _node_package(commander) == "robot_bringup"
+    assert _node_executable(commander) == "ikt_pose_commander"
+    context = LaunchContext()
+    context.launch_configurations["max_iters"] = module._DEFAULTS["max_iters"]
+    parameters = {
+        _perform(context, name): value
+        for name, value in _node_parameters(commander)[0].items()
+    }
+    assert yaml.safe_load(_perform(context, parameters["command_mode"])) == "fpc"
+    assert yaml.safe_load(_perform(context, parameters["fpc_controller"])) == \
+        "forward_position_controller"
+    assert yaml.safe_load(_perform(context, parameters["jtc_controller"])) == \
+        "joint_trajectory_controller"
+    assert yaml.safe_load(_perform(context, parameters["max_iters"])) == 20
+    assert "max_joint_accel" not in module._DEFAULTS
+    assert "max_joint_accel" not in parameters
+    dashboard = by_executable["ikt_pose_commander_dashboard"]
+    assert _node_package(dashboard) == "robot_bringup"
+
+
+@parametrize(
     "launch_dir,name,package,executable",
     [
         (WORKSPACE_SRC / "kwr57_ros" / "launch",
@@ -162,11 +216,11 @@ def test_single_device_web_launches_only_create_web_node(
     ]
     assert includes == []
     assert len(nodes) == 1
-    assert getattr(nodes[0], "_Node__package") == package
-    assert getattr(nodes[0], "_Node__node_executable") == executable
+    assert _node_package(nodes[0]) == package
+    assert _node_executable(nodes[0]) == executable
 
 
-@pytest.mark.parametrize(
+@parametrize(
     "launch_dir,name,package,executable",
     [
         (WORKSPACE_SRC / "kwr57_ros" / "launch",
@@ -189,8 +243,8 @@ def test_device_launches_only_create_device_node(
     ]
     assert includes == []
     assert len(nodes) == 1
-    assert getattr(nodes[0], "_Node__package") == package
-    assert getattr(nodes[0], "_Node__node_executable") == executable
+    assert _node_package(nodes[0]) == package
+    assert _node_executable(nodes[0]) == executable
 
 
 def test_gripper_debug_owns_bridge_and_reuses_device_launch():
@@ -207,7 +261,7 @@ def test_gripper_debug_owns_bridge_and_reuses_device_launch():
     actions = module._launch_nodes(context)
     assert len(actions) == 2
     assert isinstance(actions[0], Node)
-    assert actions[0]._Node__package == "can_bridge_ros"
+    assert _node_package(actions[0]) == "can_bridge_ros"
     assert isinstance(actions[1], IncludeLaunchDescription)
     assert "gripper.launch.py" in _source_path(actions[1])
     launch_arguments = dict(actions[1].launch_arguments)
@@ -227,7 +281,7 @@ def test_gripper_debug_owns_bridge_and_reuses_device_launch():
     assert _perform(context, launch_arguments["safe_position_max"]) == "2.77"
 
 
-@pytest.mark.parametrize("use_frame_handler,action_count", [
+@parametrize("use_frame_handler,action_count", [
     ("true", 1),
     ("false", 2),
 ])
@@ -254,7 +308,7 @@ def test_ft_sensor_debug_owns_bridge_and_reuses_fallback_launch(
     actions = module._launch_nodes(context)
     assert len(actions) == action_count
     assert isinstance(actions[0], Node)
-    assert actions[0]._Node__package == "can_bridge_ros"
+    assert _node_package(actions[0]) == "can_bridge_ros"
     if use_frame_handler == "false":
         assert isinstance(actions[1], IncludeLaunchDescription)
         assert "ft_sensor.launch.py" in _source_path(actions[1])

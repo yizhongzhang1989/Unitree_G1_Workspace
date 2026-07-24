@@ -1,8 +1,10 @@
 # can_bridge_ros
 
-通用 ROS 2 CAN 总线桥接：一个节点独占一个物理 USB-CAN 设备，支持 CANalyst-II 多通道、`can_msgs/msg/Frame` 话题路由和受约束的进程内 frame handler。
+本包让一个 ROS 2 节点独占 USB-CAN 适配器，并在物理 CAN 帧与 `can_msgs/Frame` 之间转发；多个设备驱动因此可以共享同一个 CANalyst-II，而不会重复打开硬件。
 
-本包只负责 ROS 参数、消息转换、线程调度和话题分发；无 ROS 的总线创建、CANalyst-II `libusb` 准备及权限检查统一由 [`CAN-SDK`](../../sdk/CAN-SDK/README.md) 提供。
+> 简单理解：设备节点发布 TX Frame，`can_bridge_ros` 把它发到 CAN；适配器收到 CAN 帧后，本包再按通道、CAN ID 路由给对应设备节点。高频设备也可用进程内 handler 跳过中间 ROS Frame。
+
+本包只负责总线所有权、帧收发和路由，不解释 KWR57、Gloria-M 等设备协议。无 ROS 的总线创建、CANalyst-II `libusb` 准备及权限检查由 [`CAN-SDK`](../../sdk/CAN-SDK/README.md) 提供。
 
 `CAN-SDK` 是位于根目录 `sdk/` 的纯 Python 包，不在 colcon 默认扫描的 `src/` 下。运行本节点前应 source 工作区的 `scripts/env.sh`，由它通过 `PYTHONPATH` 暴露 SDK 源码；无需安装本地 SDK。
 
