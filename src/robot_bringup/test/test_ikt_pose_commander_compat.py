@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 from action_msgs.msg import GoalStatus
+from builtin_interfaces.msg import Time
 from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.msg import ControllerState
 from controller_manager_msgs.srv import ListControllers, SwitchController
@@ -57,6 +58,26 @@ class _Client:
     def call_async(self, request):
         self.requests.append(request)
         return _Future(self.responses.pop(0))
+
+
+class _Publisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(list(message.data))
+
+
+class _ActionClient:
+    def __init__(self):
+        self.goals = []
+
+    def server_is_ready(self):
+        return True
+
+    def send_goal_async(self, goal):
+        self.goals.append(goal)
+        return _Future(SimpleNamespace(accepted=True))
 
 
 def _state(name, state):
@@ -124,6 +145,140 @@ def test_g1_commander_uses_latest_only_target_and_fpc_qos():
     assert publishers[0].reliability == ReliabilityPolicy.BEST_EFFORT
 
 
+def test_fpc_updates_only_active_ik_targets_and_publishes_full_cache():
+    commander = object.__new__(G1PoseCommander)
+    dynamic = cast(Any, commander)
+    commander._lock = threading.Lock()
+    commander._fpc_joints = ["arm", "base", "passive"]
+    commander._joints = ["arm", "base"]
+    commander._joint_pos = {"arm": 0.0, "base": 0.9, "passive": -0.2}
+    commander._fixed_hold = {"base": 0.4}
+    commander._last_solution = SimpleNamespace(active_joints=["arm"])
+    commander._joint_targets = {}
+    commander._control_rate = 200.0
+    commander._max_speed = 16.0
+    commander._joint_speed_limits = {}
+    commander._last_fpc_cmd = None
+    dynamic._traj = object()
+    commander._decoupled_active = True
+    dynamic._fpc_pub = _Publisher()
+    dynamic._set_msg = lambda msg: setattr(dynamic, "message", msg)
+
+    commander._command_fpc({"arm": 1.0, "base": 2.0})
+    commander._joint_pos.update({"arm": 0.0, "base": 0.7, "passive": -0.4})
+    commander._command_fpc({"arm": 1.0})
+    commander._command_fpc({"arm": -1.0})
+    commander._joint_pos["arm"] = 0.04
+    commander._command_fpc({"arm": 1.0}, best_effort=True)
+
+    assert dynamic._fpc_pub.messages == [
+        [0.08, 0.9, -0.2],
+        [0.16, 0.9, -0.2],
+        [0.08, 0.9, -0.2],
+        [0.16, 0.9, -0.2],
+    ]
+    assert commander._traj is None
+    assert not commander._decoupled_active
+    assert dynamic.message.endswith("[best-effort]")
+
+
+def test_jtc_updates_only_active_ik_targets_and_publishes_full_cache():
+    commander = object.__new__(G1PoseCommander)
+    dynamic = cast(Any, commander)
+    commander._lock = threading.Lock()
+    commander._jtc_joints = ["left_arm", "right_arm", "waist"]
+    commander._joints = ["right_arm"]
+    commander._joint_pos = {
+        "left_arm": 0.2, "right_arm": -0.1, "waist": 0.0}
+    commander._joint_targets = {
+        "left_arm": 1.1, "right_arm": -0.1, "waist": 0.3}
+    commander._fixed_hold = {}
+    commander._last_solution = SimpleNamespace(active_joints=["right_arm"])
+    commander._control_rate = 200.0
+    commander._last_jtc_cmd = None
+    commander._min_time = 0.5
+    commander._max_speed = 16.0
+    commander._jtc = "joint_trajectory_controller"
+    commander._jtc_client = _ActionClient()
+    commander._goal_handle = None
+    dynamic._set_msg = lambda msg: setattr(dynamic, "message", msg)
+
+    commander._command_jtc({"right_arm": 0.8}, 0.9)
+
+    goal = commander._jtc_client.goals[0]
+    assert goal.trajectory.joint_names == [
+        "left_arm", "right_arm", "waist"]
+    assert list(goal.trajectory.points[0].positions) == [1.1, 0.8, 0.3]
+    assert commander._joint_targets == {
+        "left_arm": 1.1, "right_arm": 0.8, "waist": 0.3}
+
+
+def test_enable_republishes_cached_full_target_after_controller_switch():
+    commander = object.__new__(G1PoseCommander)
+    dynamic = cast(Any, commander)
+    commander._lock = threading.Lock()
+    commander._mode = "fpc"
+    commander._fpc_joints = ["left_arm", "right_arm"]
+    commander._joints = ["right_arm"]
+    commander._joint_pos = {"left_arm": 0.2, "right_arm": -0.1}
+    commander._joint_targets = {"left_arm": 1.1, "right_arm": 0.6}
+    commander._fixed_hold = {}
+    commander._last_solution = SimpleNamespace(active_joints=["right_arm"])
+    commander._control_rate = 200.0
+    commander._max_speed = 16.0
+    commander._joint_speed_limits = {}
+    commander._last_fpc_cmd = None
+    commander._traj = None
+    commander._decoupled_active = False
+    dynamic._fpc_pub = _Publisher()
+    dynamic._set_msg = lambda msg: setattr(dynamic, "message", msg)
+
+    with patch.object(
+            PoseCommander, "_try_enable", autospec=True,
+            return_value=(True, "enabled")):
+        result = commander._try_enable()
+
+    assert result == (True, "enabled")
+    assert dynamic._fpc_pub.messages == [[1.1, 0.6]]
+
+
+def test_return_to_start_keeps_other_joint_targets():
+    commander = object.__new__(G1PoseCommander)
+    dynamic = cast(Any, commander)
+    commander._lock = threading.Lock()
+    dynamic._goal_handle = object()
+    commander._joints = ["right_arm"]
+    commander._start_q = {"right_arm": 0.8}
+    commander._jtc_joints = ["left_arm", "right_arm"]
+    commander._joint_pos = {"left_arm": 0.2, "right_arm": -0.1}
+    commander._joint_targets = {"left_arm": 1.1, "right_arm": 0.6}
+    dynamic._pause_targets = lambda: None
+    dynamic._confirm_return_result = lambda result: result
+    dynamic._set_msg = lambda msg: setattr(dynamic, "message", msg)
+    seen = {}
+
+    def return_to_start(_self, _timeout):
+        seen["joints"] = list(_self._joints)
+        seen["targets"] = dict(_self._start_q)
+        return True, "returned to start"
+
+    with patch.object(
+            PoseCommander, "_return_to_start", autospec=True,
+            side_effect=return_to_start):
+        result = commander._return_to_start()
+
+    assert result == (
+        True, "returned to start; disabled in JTC hold")
+    assert seen == {
+        "joints": ["left_arm", "right_arm"],
+        "targets": {"left_arm": 1.1, "right_arm": 0.8},
+    }
+    assert commander._joints == ["right_arm"]
+    assert commander._start_q == {"right_arm": 0.8}
+    assert commander._joint_targets == {
+        "left_arm": 1.1, "right_arm": 0.8}
+
+
 def test_g1_viewer_keeps_only_one_target_post_in_flight():
     source = '''before
 function sendProxyTarget(stream) { api(
@@ -147,6 +302,21 @@ def test_g1_viewer_overlay_disables_browser_cache():
     ).read_text(encoding="utf-8")
 
     assert 'handler.send_header("Cache-Control", "no-store")' in source
+
+
+def test_g1_dashboard_targets_use_latest_transform():
+    dashboard = object.__new__(G1CommanderDashboard)
+    dashboard._base_frame = "torso_link"
+    cast(Any, dashboard).get_clock = lambda: SimpleNamespace(
+        now=lambda: SimpleNamespace(
+            to_msg=lambda: Time(sec=123, nanosec=456)))
+
+    message = dashboard._build_target_msg(
+        [0.1, -0.2, 0.3], [1.0, 0.0, 0.0, 0.0], "torso_link")
+
+    assert message.header.frame_id == "torso_link"
+    assert message.header.stamp.sec == 0
+    assert message.header.stamp.nanosec == 0
 
 
 def test_filter_switch_drops_states_that_already_hold():
@@ -203,17 +373,83 @@ def test_solver_dimension_follows_dynamic_base_target_interval():
     assert reduced.expand(solution.q).shape == seed.shape
 
 
-def test_dynamic_interval_rejects_non_ancestor_base():
+def test_dynamic_interval_uses_chain_through_common_ancestor():
     model = RobotModel(FINAL_URDF.read_text(encoding="utf-8"))
-    joints = model.supporting_joints("right_gripper_base")
+    path = joints_between(
+        model,
+        "torso_link",
+        "left_ankle_roll_link",
+        model.joint_names,
+    )
 
-    try:
-        joints_between(
-            model, "left_wrist_yaw_link", "right_gripper_base", joints)
-    except ValueError as error:
-        assert "not an ancestor" in str(error)
-    else:
-        raise AssertionError("non-ancestor base was accepted")
+    assert len(path) == 9
+    assert set(path) == {
+        "waist_yaw_joint",
+        "waist_roll_joint",
+        "waist_pitch_joint",
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+    }
+
+
+def test_cross_branch_model_uses_relative_chain_jacobian():
+    model = RobotModel(FINAL_URDF.read_text(encoding="utf-8"))
+    seed = model.neutral()
+    base = "torso_link"
+    target = "left_ankle_roll_link"
+    path = joints_between(model, base, target, model.joint_names)
+    reduced = ActiveJointModel(model, seed, path, base)
+    q = reduced.reduce(seed)
+    xyz, quat = model.fk(seed, target)
+    jacobian = reduced.frame_jacobian(q, target)
+
+    for joint in ("waist_yaw_joint", "waist_roll_joint",
+                  "waist_pitch_joint"):
+        assert np.linalg.norm(jacobian[:, reduced.q_index(joint)]) > 1e-6
+
+    epsilon = 1e-7
+    numeric = np.empty_like(jacobian)
+    for column in range(reduced.nq):
+        perturbed = q.copy()
+        perturbed[column] += epsilon
+        numeric[:, column] = -reduced.pose_error(
+            perturbed, target, xyz, quat) / epsilon
+
+    np.testing.assert_allclose(jacobian, numeric, atol=2e-6, rtol=2e-5)
+
+
+def test_cross_branch_model_solves_relative_ankle_target():
+    model = RobotModel(FINAL_URDF.read_text(encoding="utf-8"))
+    seed = model.neutral()
+    base = "torso_link"
+    target = "left_ankle_roll_link"
+    path = joints_between(model, base, target, model.joint_names)
+    reduced = ActiveJointModel(model, seed, path, base)
+    q_seed = reduced.reduce(seed)
+    xyz, quat = model.fk(seed, target)
+    desired_xyz = np.asarray(xyz) + np.asarray([0.002, 0.0, 0.0])
+
+    solution = solve(
+        reduced,
+        q_seed,
+        [Task.pose(target, tuple(desired_xyz), tuple(quat))],
+        params=SolveParams(max_iters=30, tol_pos=1e-5),
+        active_joints=path,
+    )
+
+    initial_error = np.linalg.norm(reduced.pose_error(
+        q_seed, target, desired_xyz, quat)[:3])
+    final_error = np.linalg.norm(reduced.pose_error(
+        solution.q, target, desired_xyz, quat)[:3])
+    waist_delta = solution.q[:3] - q_seed[:3]
+    leg_delta = solution.q[3:] - q_seed[3:]
+    assert final_error < initial_error * 0.1
+    assert np.linalg.norm(waist_delta) > 1e-6
+    assert np.linalg.norm(leg_delta) > 1e-6
 
 
 def test_control_tick_drops_overlapping_callback():

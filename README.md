@@ -47,7 +47,7 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
-`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、互斥 FPC/JTC 和状态 broadcaster：controller 只写关节位置，`G1TopicSystem` 再补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。
+`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、互斥 FPC/JTC 和状态 broadcaster：FPC 只校验全量位置命令的维度与有限值，controller 将目标写入 position interface，`G1TopicSystem` 再按模型 command-interface 范围做最终 clamp、补齐 MIT 参数，并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。
 
 
 ## 目录
@@ -190,7 +190,7 @@ ros2 launch robot_bringup ikt_pose_commander.launch.py
 # http://<机器人 IP>:8180
 ```
 
-该入口默认控制 `right_gripper_base`、以 `pelvis` 为参考帧并保持 disabled。**Track robot** 使用 FPC；**Snap robot** 与 `return_to_start` 使用 JTC。Commander 通过 `/controller_manager/switch_controller` 一停一启，两个 controller 对相同资源的 claim 提供真实互斥。只启动 Commander、不启动 8180 页面时传入 `enable_dashboard:=false`。
+该入口默认控制 `right_gripper_base`、以 `torso_link` 为参考帧并保持 disabled。**Track robot** 使用 FPC；**Snap robot** 与 `return_to_start` 使用 JTC。Commander 通过 `/controller_manager/switch_controller` 一停一启，两个 controller 对相同资源的 claim 提供真实互斥。只启动 Commander、不启动 8180 页面时传入 `enable_dashboard:=false`。
 
 ### 其他启动方式
 只启动末端数据（CAN、双 KWR57、双 Gloria-M、左右相机）：

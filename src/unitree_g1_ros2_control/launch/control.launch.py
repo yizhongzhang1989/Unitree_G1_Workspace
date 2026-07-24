@@ -1,7 +1,9 @@
 """Start the real Foxy ros2_control stack for the assembled Unitree G1."""
 
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlparse
+from xml.dom.minidom import Document
 from xml.etree import ElementTree
 
 from ament_index_python.packages import get_package_share_directory
@@ -40,7 +42,8 @@ _HARDWARE_ARGUMENTS = {
     "lowstate_topic": "/lowstate",
     "lowcmd_topic": "/lowcmd",
     "gripper_command_rate_hz": "100.0",
-    "arm_stiffness_scale": "2.5",
+    # 修改这个让上肢相应更及时（刚性）
+    "arm_stiffness_scale": "",
     "state_timeout_s": "0.25",
     "gripper_state_timeout_s": "0.75",
     "require_pr_mode": "true",
@@ -67,10 +70,10 @@ def _robot_description(context, package_share: Path, topology: str) -> str:
     })
     mappings["gain_file"] = str(
         package_share / "config" / "default_29dof_param.yaml")
-    document = xacro.process_file(
+    document = cast(Document, xacro.process_file(
         str(package_share / "urdf" / "g1_with_ros2_control.urdf.xacro"),
         mappings=mappings,
-    )
+    ))
     root = ElementTree.fromstring(document.toxml())
     model_prefix = "package://unitree_g1_description/model/"
     for mesh in root.iter("mesh"):

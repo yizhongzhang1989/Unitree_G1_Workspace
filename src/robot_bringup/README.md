@@ -199,26 +199,41 @@ ros2 launch robot_bringup ikt_pose_commander.launch.py
 不能同时 active。JTC 和 FPC 最终都只写 `G1TopicSystem` 的 position command
 interface，实际 G1/Gloria MIT 命令仍由现有硬件插件生成，没有第二条底层下发通道。
 
-FPC 使用一个 200 Hz control timer 完成“读取最新 Cartesian 目标、必要时求解 IK、推进
-一次限速关节轨迹并发布”的完整周期，不再叠加第二套 streamer 或 heartbeat。浏览器只允许
-一个目标请求在途，等待槽只保留最新姿态；每个到达 Dashboard 的 `/api/target` 会立即发布
-一次 ROS 目标，100 Hz 定时器只负责保活。Commander 目标订阅和 FPC 命令链均使用
+FPC 使用一个 200 Hz control timer 完成“读取最新 Cartesian 目标、必要时求解 IK、更新
+全关节 target 缓存并发布”的完整周期。缓存按 controller 的 31 个关节名建立，首次缺失项
+才从实测位置初始化；每次 IK 结果只覆盖本次动态 active-joint 区间，区间外关节继续使用
+上次设定的 target，而不是用实时反馈回填。FPC 和 JTC 都按各自关节顺序从同一缓存生成
+全量命令，因此切换控制手或 controller 后仍保留另一只手及其余关节的设定目标。浏览器只
+允许一个目标请求在途，等待槽只保留最新姿态；每个到达 Dashboard 的 `/api/target` 会立即
+发布一次 ROS 目标，100 Hz 定时器只负责保活。Commander 目标订阅和 FPC 命令链均使用
 `KEEP_LAST(1)`，不会在恢复后回放拖动期间的旧 setpoint。
 
 网页选择的 base/target 同时定义本次 IK 的活动关节区间。适配层从完整 Pinocchio 模型创建
 动态 active-joint 视图，只向未修改的 `ikt_core.solve()` 暴露该区间的 Jacobian 列，再把
 结果散射回完整关节向量；因此求解矩阵维度随选择变化，而不是固定 10 或整机 95。当前模型
 中 `pelvis -> right_gripper_base` 为 10 维，`torso_link -> right_gripper_base` 为 7 维，
-`right_shoulder_yaw_link -> right_gripper_base` 为 4 维。非 target 祖先的 base 会被拒绝。
+`right_shoulder_yaw_link -> right_gripper_base` 为 4 维。base 与 target 位于不同分支时，
+区间沿两端到最近公共祖先的唯一链路建立，并使用 base 到 target 的相对位姿误差与 Jacobian；
+例如 `torso_link -> left_ankle_roll_link` 包含 3 个腰关节和 6 个左腿关节，共 9 维。
 
 G1 入口的默认跟踪参数为 `control_rate_hz=200`、`stream_rate_hz=100`、
-`max_joint_speed=1.5 rad/s`、`max_joint_accel=12 rad/s^2`。这些参数只改变安全轨迹生成器的
-速度与加速度上限，不绕过 FPC 的首帧误差、相邻目标跳变、命令超时、URDF 限位或硬件反馈
-freshness 检查；可在 launch 命令行按现场载荷下调。
+`max_joint_speed=2 rad/s`。G1 FPC 适配路径使用
+`max_joint_speed` 限制 active-joint target 缓存每周期的推进量；默认单步上限为
+`2 / 200 = 0.01 rad`。这是 Commander 对 active-joint target 缓存的上游限速，不是 C++
+FPC 自身的限位。C++ FPC 只接受宽度正确且全部有限的全量 target，并原样写入 hardware
+position interface；它不添加目标-反馈误差窗、相邻目标跳变、速度/加速度或命令超时回填。
+`G1TopicSystem` 在生成 MIT 消息时再按 URDF position command interface 的 `min/max` 对
+每个有限目标做最终 clamp；本体出现 `NaN/Inf` 时跳过整帧 `LowCmd`，夹爪出现
+`NaN/Inf` 时只跳过对应侧。G1 launch 不再声明或传入上游 FPC 轨迹生成器专用的
+`max_joint_accel`。
+
+不可达或奇异目标保持 `best-effort`：IK 每次只从当前实测关节 seed 求解并发送最接近配置，
+不切换中立 seed、不保存“最后可达解”，也不需要恢复服务。后续目标回到可达区域时会在同一
+控制周期链上自然恢复为普通跟踪。
 
 适配入口只处理动态模型视图、Foxy 的 controller-manager 字段、inactive controller
 关节元数据和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为
-`right_gripper_base`、参考帧为 `pelvis`，Dashboard 位于
+`right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于
 `http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，
 或传入 `enable_dashboard:=false` 仅启动 Commander。
 
@@ -231,15 +246,19 @@ freshness 检查；可在 launch 命令行按现场载荷下调。
 本体与双夹爪；力传感器不参与 Commander 的命令闭环。
 
 ## 修改拓扑
-CAN 拓扑只修改 `launch/end_effectors_single_bus.launch.py` 或 `launch/end_effectors_dual_bus.launch.py` 中的 `CanBus`、`Kwr57Device` 和 `GloriaDevice` 清单。不要把设备 ID 写入 bridge 的物理 YAML，也不要为生产 KWR57 增加 `rx_routes`；同一份清单会生成 handler、Gloria 路由和节点参数。左右相机的 IP、RTSP URL、Web 端口和图像话题由 `robot_bringup/end_effectors/nodes.py` 中的两个 `camera(...)` 调用定义。
+CAN 设备部署只修改 `robot_bringup/end_effectors/topology.py` 中的
+`deployed_topology()`。不要把设备 ID 写入 bridge 的物理 YAML，也不要为生产 KWR57 增加
+`rx_routes`；同一份清单会生成 handler、Gloria 路由、设备节点参数和 Dashboard 连接参数。
+兄弟包仍只接收普通 launch 参数，不导入该部署清单。左右相机部署仍由
+`robot_bringup/end_effectors/nodes.py` 中的两个 `camera(...)` 调用定义。
 
 | 文件 | 职责 |
 |---|---|
-| `robot_bringup/end_effectors/topology.py` | 末端设备模型、参数生成和冲突检查 |
+| `robot_bringup/end_effectors/topology.py` | 末端部署清单、设备模型、参数生成和冲突检查 |
 | `robot_bringup/end_effectors/nodes.py` | 生成 bridge、Gloria 与左右相机 launch actions |
 | `robot_bringup/end_effectors/dashboard_node.py` | 双手末端设备 HTTP/ROS 联调节点 |
 | `launch/all_data.launch.py` | 统一数据入口，按 scope/topology 组合数据节点 |
-| `launch/end_effectors_*_bus.launch.py` | 单/双总线末端硬件清单 |
+| `launch/end_effectors_*_bus.launch.py` | 选择单/双总线部署并生成硬件 actions |
 | `launch/end_effectors_dashboard.launch.py` | 纯末端 Web Dashboard |
 | `launch/whole_body_dashboard.launch.py` | 纯整机控制器测试 Dashboard |
 | `launch/ikt_pose_commander.launch.py` | 对接互斥 FPC/JTC 的 Foxy IK Commander 入口 |

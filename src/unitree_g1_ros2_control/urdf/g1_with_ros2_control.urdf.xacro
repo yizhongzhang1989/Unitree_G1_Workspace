@@ -14,7 +14,7 @@
   <xacro:arg name="right_wrench_scale" default="9.80665"/>
   <xacro:arg name="gain_file" default="$(find unitree_g1_ros2_control)/config/default_29dof_param.yaml"/>
   <xacro:arg name="gripper_command_rate_hz" default="100.0"/>
-  <xacro:arg name="arm_stiffness_scale" default="2.5"/>
+  <xacro:arg name="arm_stiffness_scale" default=""/>
   <xacro:arg name="state_timeout_s" default="0.25"/>
   <xacro:arg name="gripper_state_timeout_s" default="0.75"/>
   <xacro:arg name="require_pr_mode" default="true"/>
@@ -51,7 +51,9 @@
       <param name="right_wrench_scale">$(arg right_wrench_scale)</param>
       <param name="gain_file">$(arg gain_file)</param>
       <param name="gripper_command_rate_hz">$(arg gripper_command_rate_hz)</param>
-      <param name="arm_stiffness_scale">$(arg arm_stiffness_scale)</param>
+      <xacro:if value="${'$(arg arm_stiffness_scale)' != ''}">
+        <param name="arm_stiffness_scale">$(arg arm_stiffness_scale)</param>
+      </xacro:if>
       <param name="state_timeout_s">$(arg state_timeout_s)</param>
       <param name="gripper_state_timeout_s">$(arg gripper_state_timeout_s)</param>
       <param name="require_pr_mode">$(arg require_pr_mode)</param>

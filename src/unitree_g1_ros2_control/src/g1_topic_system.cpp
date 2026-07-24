@@ -172,9 +172,10 @@ hardware_interface::return_type G1TopicSystem::configure(
         return hardware_interface::return_type::ERROR;
     }
     try {
-        if (!configure_interfaces() || !configure_parameters()) {
+        if (!configure_interfaces()) {
             return hardware_interface::return_type::ERROR;
         }
+        configure_parameters();
         create_ros_interfaces();
     } catch (const std::exception& error) {
         RCLCPP_ERROR(rclcpp::get_logger("G1TopicSystem"), "Configuration failed: %s", error.what());
@@ -302,7 +303,7 @@ bool G1TopicSystem::configure_interfaces() {
     return true;
 }
 
-bool G1TopicSystem::configure_parameters() {
+void G1TopicSystem::configure_parameters() {
     const auto string_parameter = [this](const std::string& name, const std::string& fallback) {
         const auto found = info_.hardware_parameters.find(name);
         return found == info_.hardware_parameters.end() ? fallback : found->second;
@@ -417,7 +418,6 @@ bool G1TopicSystem::configure_parameters() {
         rclcpp::get_logger("G1TopicSystem"),
         "Loaded G1 gains with arm stiffness scale %.2f (arm kd unchanged)",
         arm_stiffness_scale_);
-    return true;
 }
 
 bool G1TopicSystem::load_gains(const std::string& path) {
@@ -747,26 +747,44 @@ hardware_interface::return_type G1TopicSystem::write() {
                 "Stopping G1 body output: %s", state_error.c_str());
             return hardware_interface::return_type::ERROR;
         }
+
+        unitree_hg::msg::LowCmd message;
+        message.mode_pr = 0;
         for (std::size_t index = 0; index < kG1JointCount; ++index) {
-            if ((claimed_mask & (1U << index)) == 0U) {
-                continue;
-            }
             const double value = command_position_[index];
-            if (!std::isfinite(value) || value < lower_limits_[index] ||
-                value > upper_limits_[index]) {
+            const bool claimed = (claimed_mask & (1U << index)) != 0U;
+            if (claimed && !std::isfinite(value)) {
                 RCLCPP_WARN_THROTTLE(
                     node_->get_logger(), *node_->get_clock(), 1000,
-                    "Ignoring out-of-range command for %s",
+                    "Ignoring non-finite command for %s",
                     info_.joints[index].name.c_str());
                 return hardware_interface::return_type::OK;
             }
+            // 根据 urdf 的范围限位；但对于阻抗控制这可能不妥
+            const double bounded_value = std::clamp(
+                value, lower_limits_[index], upper_limits_[index]);
+            if (claimed && bounded_value != value) {
+                RCLCPP_WARN_THROTTLE(
+                    node_->get_logger(), *node_->get_clock(), 1000,
+                    "Clamping command for %s from %.6f to [%.6f, %.6f]",
+                    info_.joints[index].name.c_str(), value,
+                    lower_limits_[index], upper_limits_[index]);
+            }
+
+            auto& command = message.motor_cmd[index];
+            command.mode = 1;
+            command.q = static_cast<float>(bounded_value);
+            command.dq = 0.0F;
+            command.tau = 0.0F;
+            command.kp = static_cast<float>(stiffness_[index]);
+            command.kd = static_cast<float>(damping_[index]);
         }
-        std::uint8_t mode_machine = 0;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            mode_machine = pending_state_.mode_machine;
+            message.mode_machine = pending_state_.mode_machine;
         }
-        lowcmd_publisher_->publish(make_lowcmd(mode_machine));
+        message.crc = lowcmd_crc(message);
+        lowcmd_publisher_->publish(message);
     }
 
     const auto now = Clock::now();
@@ -790,16 +808,23 @@ hardware_interface::return_type G1TopicSystem::write() {
             }
             const std::size_t index = kG1JointCount + side;
             const double value = command_position_[index];
-            if (!std::isfinite(value) || value < lower_limits_[index] ||
-                value > upper_limits_[index]) {
+            if (!std::isfinite(value)) {
                 RCLCPP_ERROR_THROTTLE(
                     node_->get_logger(), *node_->get_clock(), 1000,
-                    "Skipping %s gripper output: invalid command %.6f",
+                    "Skipping %s gripper output: non-finite command %.6f",
                     side == 0 ? "left" : "right", value);
                 continue;
             }
+            const double bounded_value = std::clamp(
+                value, lower_limits_[index], upper_limits_[index]);
+            if (bounded_value != value) {
+                RCLCPP_WARN_THROTTLE(
+                    node_->get_logger(), *node_->get_clock(), 1000,
+                    "Clamping %s gripper command from %.6f to %.6f",
+                    side == 0 ? "left" : "right", value, bounded_value);
+            }
             gloria_ros::msg::MitCommand command;
-            command.q = value;
+            command.q = bounded_value;
             command.dq = 0.0;
             command.kp = gripper_kp_;
             command.kd = gripper_kd_;
@@ -882,7 +907,6 @@ hardware_interface::return_type G1TopicSystem::prepare_command_mode_switch(
     const bool acquiring = current == 0U && next != 0U;
     const bool releasing = current != 0U && next == 0U;
     prepared_joint_mask_ = next;
-    prepared_output_enabled_ = next != 0U;
     std::string error;
     if (acquiring && !acquire_control(error)) {
         RCLCPP_ERROR(node_->get_logger(), "Cannot acquire low-level control: %s", error.c_str());
@@ -902,7 +926,7 @@ hardware_interface::return_type G1TopicSystem::perform_command_mode_switch(
     const std::vector<std::string>&, const std::vector<std::string>&) {
     std::lock_guard<std::mutex> switch_lock(switch_mutex_);
     claimed_joint_mask_.store(prepared_joint_mask_, std::memory_order_release);
-    output_inhibited_.store(!prepared_output_enabled_, std::memory_order_release);
+    output_inhibited_.store(prepared_joint_mask_ == 0U, std::memory_order_release);
     next_gripper_publish_ = Clock::now();
     return hardware_interface::return_type::OK;
 }
@@ -937,9 +961,8 @@ bool G1TopicSystem::acquire_control(std::string& error) {
                 }
                 return false;
             }
-            if (motion_release_retry_s_ > 0.0) {
-                std::this_thread::sleep_for(std::chrono::duration<double>(motion_release_retry_s_));
-            }
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(motion_release_retry_s_));
             if (!check_motion_mode(mode, error)) {
                 std::string rollback_error;
                 release_control(true, rollback_error);
@@ -1154,23 +1177,6 @@ bool G1TopicSystem::wait_for_lowcmd_quiet() {
             lock, std::chrono::duration<double>(lowcmd_quiet_period_s_ - quiet_for));
     }
     return false;
-}
-
-unitree_hg::msg::LowCmd G1TopicSystem::make_lowcmd(std::uint8_t mode_machine) const {
-    unitree_hg::msg::LowCmd message;
-    message.mode_pr = 0;
-    message.mode_machine = mode_machine;
-    for (std::size_t index = 0; index < kG1JointCount; ++index) {
-        auto& command = message.motor_cmd[index];
-        command.mode = 1;
-        command.q = static_cast<float>(command_position_[index]);
-        command.dq = 0.0F;
-        command.tau = 0.0F;
-        command.kp = static_cast<float>(stiffness_[index]);
-        command.kd = static_cast<float>(damping_[index]);
-    }
-    message.crc = lowcmd_crc(message);
-    return message;
 }
 
 void G1TopicSystem::clear_output() {

@@ -99,9 +99,9 @@ def end_effector_actions(
     enable_grippers_on_start: Union[str, Substitution]):
     """Build all end-effector actions with KWR57 in the bridge process."""
     return [
-    bridge(buses, kwr57_devices, gloria_devices),
+                bridge(buses, kwr57_devices, gloria_devices),
                 *(gripper(device, enable_grippers_on_start)
                     for device in gloria_devices),
-        camera("left", "192.168.123.97", 8010),
-        camera("right", "192.168.123.98", 8011),
+                camera("left", "192.168.123.97", 8010),
+                camera("right", "192.168.123.98", 8011),
     ]

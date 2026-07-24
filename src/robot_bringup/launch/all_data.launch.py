@@ -53,8 +53,7 @@ def _data_launches(context):
                 "topology": topology,
                 "controller_manager": LaunchConfiguration("controller_manager"),
                 "lowstate_topic": LaunchConfiguration("lowstate_topic"),
-                "arm_stiffness_scale": LaunchConfiguration(
-                    "arm_stiffness_scale"),
+                "arm_stiffness_scale": LaunchConfiguration("arm_stiffness_scale"),
                 "joint_states_topic": LaunchConfiguration("joint_states_topic"),
                 "robot_description_topic": LaunchConfiguration("robot_description_topic"),
                 "require_pr_mode": LaunchConfiguration("require_pr_mode"),
@@ -72,7 +71,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("enable_grippers_on_start", default_value="true"),
         DeclareLaunchArgument("controller_manager", default_value="/controller_manager"),
         DeclareLaunchArgument("lowstate_topic", default_value="/lowstate"),
-        DeclareLaunchArgument("arm_stiffness_scale", default_value="2.5"),
+        DeclareLaunchArgument("arm_stiffness_scale", default_value="2"),
         DeclareLaunchArgument("joint_states_topic", default_value="/joint_states"),
         DeclareLaunchArgument("robot_description_topic", default_value="/robot_description"),
         DeclareLaunchArgument("require_pr_mode", default_value="true"),

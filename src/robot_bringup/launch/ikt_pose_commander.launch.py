@@ -13,13 +13,13 @@ from launch_ros.actions import Node
 
 _DEFAULTS = {
     "controlled_frame": "right_gripper_base",
-    "base_frame": "pelvis",
+    "base_frame": "torso_link",
     "controller_manager": "/controller_manager",
     "robot_description_topic": "/robot_description",
     "joint_states_topic": "/joint_states",
     "dashboard_port": "8180",
-    "max_joint_speed": "1.5",
-    "max_joint_accel": "12.0",
+
+    "max_joint_speed": "2",
     "max_iters": "20",
     "control_rate_hz": "200.0",
     "stream_rate_hz": "100.0",
@@ -51,7 +51,6 @@ def generate_launch_description() -> LaunchDescription:
             "switch_controllers": True,
             "start_enabled": False,
             "max_joint_speed": LaunchConfiguration("max_joint_speed"),
-            "max_joint_accel": LaunchConfiguration("max_joint_accel"),
             "max_iters": LaunchConfiguration("max_iters"),
             "control_rate_hz": LaunchConfiguration("control_rate_hz"),
         }],

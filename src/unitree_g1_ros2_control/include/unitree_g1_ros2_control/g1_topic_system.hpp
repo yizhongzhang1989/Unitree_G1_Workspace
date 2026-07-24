@@ -86,7 +86,7 @@ private:
     };
 
     bool configure_interfaces();
-    bool configure_parameters();
+    void configure_parameters();
     bool load_gains(const std::string& path);
     void create_ros_interfaces();
     void on_lowstate(const unitree_hg::msg::LowState::SharedPtr message);
@@ -113,7 +113,6 @@ private:
         const std::vector<std::string>& start_interfaces,
         const std::vector<std::string>& stop_interfaces) const;
     void clear_output();
-    unitree_hg::msg::LowCmd make_lowcmd(std::uint8_t mode_machine) const;
 
     std::vector<double> state_position_;
     std::vector<double> state_velocity_;
@@ -123,7 +122,7 @@ private:
     std::vector<double> upper_limits_;
     std::array<double, kG1JointCount> stiffness_{};
     std::array<double, kG1JointCount> damping_{};
-    double arm_stiffness_scale_{2.5};
+    double arm_stiffness_scale_{1.0};   // 双臂 15–28 号关节的 `kp` 的缩放
     std::array<std::array<double, kWrenchAxisCount>, kForceTorqueSensorCount>
         wrench_state_{};
     std::array<std::array<std::atomic<double>, kWrenchAxisCount>, kForceTorqueSensorCount>
@@ -142,7 +141,6 @@ private:
     std::mutex switch_mutex_;
     std::atomic<std::uint32_t> claimed_joint_mask_{0};
     std::uint32_t prepared_joint_mask_{0};
-    bool prepared_output_enabled_{false};
     std::atomic<bool> control_acquired_{false};
     std::string previous_motion_mode_;
 

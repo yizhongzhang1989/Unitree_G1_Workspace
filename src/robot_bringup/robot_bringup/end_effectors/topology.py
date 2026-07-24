@@ -7,7 +7,7 @@ from typing import Dict, List, Sequence, Tuple
 
 @dataclass(frozen=True)
 class CanBus:
-    """一个 ROS 总线名及其对应的 CANalyst-II 物理通道。"""
+    """一个 ROS 总线名及其对应的 CANalyst-II 物理通道"""
 
     name: str
     channel_id: int
@@ -29,7 +29,7 @@ class CanBus:
 
 @dataclass(frozen=True)
 class Kwr57Device:
-    """末端设备 bringup 中一台 KWR57 的完整部署参数。"""
+    """末端设备 bringup 中一台 KWR57 的完整部署参数"""
 
     name: str
     bus: CanBus
@@ -97,7 +97,7 @@ class Kwr57Device:
 
 @dataclass(frozen=True)
 class GloriaDevice:
-    """末端设备 bringup 中一台 Gloria-M 夹爪的完整部署参数。"""
+    """末端设备 bringup 中一台 Gloria-M 夹爪的完整部署参数"""
 
     name: str
     bus: CanBus
@@ -150,6 +150,69 @@ class GloriaDevice:
         if self.control_mode == "pos_vel":
             ids.append(0x100 + self.command_id)
         return tuple(dict.fromkeys(ids))
+
+
+def deployed_topology(name: str) -> Tuple[
+        List[CanBus], List[Kwr57Device], List[GloriaDevice]]:
+    """Return the canonical device inventory for a deployed topology."""
+    can0 = CanBus(name="can0", channel_id=0)
+    if name == "single":
+        sensors = [
+            Kwr57Device(
+                name="ft_left", bus=can0, cmd_id=0x10, data_base_id=0x15,
+                wrench_topic="/ft_left/wrench_raw", frame_id="ft_left_link"),
+            Kwr57Device(
+                name="ft_right", bus=can0, cmd_id=0x11, data_base_id=0x18,
+                wrench_topic="/ft_right/wrench_raw", frame_id="ft_right_link"),
+        ]
+        grippers = [
+            GloriaDevice(
+                name="grip_left", bus=can0, command_id=0x01,
+                feedback_id=0x101, rx_topic="/can0/grip_left/rx",
+                joint_name="left_eccentric_joint"),
+            GloriaDevice(
+                name="grip_right", bus=can0, command_id=0x02,
+                feedback_id=0x102, rx_topic="/can0/grip_right/rx",
+                joint_name="right_eccentric_joint"),
+        ]
+        return [can0], sensors, grippers
+    if name == "dual":
+        can1 = CanBus(name="can1", channel_id=1)
+        sensors = [
+            Kwr57Device(
+                name="ft_arm0", bus=can0, cmd_id=0x10, data_base_id=0x15,
+                wrench_topic="/arm0/wrench_raw", frame_id="arm0_ft_link"),
+            Kwr57Device(
+                name="ft_arm1", bus=can1, cmd_id=0x10, data_base_id=0x15,
+                wrench_topic="/arm1/wrench_raw", frame_id="arm1_ft_link"),
+        ]
+        grippers = [
+            GloriaDevice(
+                name="grip_arm0", bus=can0, command_id=0x01,
+                feedback_id=0x101, rx_topic="/can0/grip_arm0/rx",
+                joint_name="left_eccentric_joint"),
+            GloriaDevice(
+                name="grip_arm1", bus=can1, command_id=0x01,
+                feedback_id=0x101, rx_topic="/can1/grip_arm1/rx",
+                joint_name="right_eccentric_joint"),
+        ]
+        return [can0, can1], sensors, grippers
+    raise ValueError("topology must be 'single' or 'dual'")
+
+
+def dashboard_topology_parameters(name: str) -> Dict[str, str]:
+    """Derive dashboard ROS names and topics from the deployed inventory."""
+    _, sensors, grippers = deployed_topology(name)
+    parameters = {}
+    for hand, sensor, gripper in zip(
+            ("left", "right"), sensors, grippers):
+        parameters.update({
+            f"{hand}_bus": sensor.bus.name,
+            f"{hand}_sensor_node": f"/{sensor.name}",
+            f"{hand}_wrench_topic": sensor.wrench_topic,
+            f"{hand}_gripper_node": f"/{gripper.name}",
+        })
+    return parameters
 
 
 def build_bridge_parameters(

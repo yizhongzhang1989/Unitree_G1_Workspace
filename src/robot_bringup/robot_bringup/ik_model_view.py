@@ -3,6 +3,9 @@
 from typing import Sequence
 
 import numpy as np
+import pinocchio as pin
+
+from ikt_core.robot_model import R_from_quat_wxyz
 
 
 def joints_between(model, base: str, target: str,
@@ -12,13 +15,19 @@ def joints_between(model, base: str, target: str,
         base_chain = []
     else:
         base_chain = model.supporting_joints(base)
-        if target_chain[:len(base_chain)] != base_chain:
-            raise ValueError(
-                f"base frame {base!r} is not an ancestor of {target!r}")
+
+    common = 0
+    for base_joint, target_joint in zip(base_chain, target_chain):
+        if base_joint != target_joint:
+            break
+        common += 1
 
     allowed_set = set(allowed)
     joints = [
-        joint for joint in target_chain[len(base_chain):]
+        joint
+        for joint in (
+            list(reversed(base_chain[common:])) + target_chain[common:]
+        )
         if joint in allowed_set
     ]
     if not joints:
@@ -30,9 +39,15 @@ def joints_between(model, base: str, target: str,
 class ActiveJointModel:
     """Present only the selected DOFs while evaluating the full model."""
 
-    def __init__(self, model, q_seed, joints: Sequence[str]) -> None:
+    def __init__(self, model, q_seed, joints: Sequence[str],
+                 base_frame: str = "") -> None:
         self._model = model
         self._seed = np.asarray(q_seed, dtype=float).copy()
+        self._base_frame = (
+            base_frame if base_frame and model.has_frame(base_frame) else "")
+        self._base_seed = (
+            model.fk_se3(self._seed, self._base_frame)
+            if self._base_frame else None)
         self.joint_names = list(joints)
         self._index = {
             name: position for position, name in enumerate(self.joint_names)}
@@ -63,11 +78,50 @@ class ActiveJointModel:
             [name in selected for name in self.joint_names], dtype=bool)
 
     def pose_error(self, q, frame, xyz, quat):
-        return self._model.pose_error(self.expand(q), frame, xyz, quat)
+        q_full = self.expand(q)
+        if not self._base_frame:
+            return self._model.pose_error(q_full, frame, xyz, quat)
+
+        base = self._model.fk_se3(q_full, self._base_frame)
+        target = self._model.fk_se3(q_full, frame)
+        current_position = base.rotation.T @ (
+            target.translation - base.translation)
+        desired_position = self._base_seed.rotation.T @ (
+            np.asarray(xyz, dtype=float) - self._base_seed.translation)
+        current_rotation = base.rotation.T @ target.rotation
+        desired_rotation = (
+            self._base_seed.rotation.T @ R_from_quat_wxyz(quat))
+        orientation_error = pin.log3(
+            desired_rotation @ current_rotation.T)
+        return np.hstack([
+            desired_position - current_position,
+            orientation_error,
+        ])
 
     def frame_jacobian(self, q, frame):
-        jacobian = self._model.frame_jacobian(self.expand(q), frame)
-        return jacobian[:, self._full_indices]
+        q_full = self.expand(q)
+        target_jacobian = self._model.frame_jacobian(q_full, frame)
+        if not self._base_frame:
+            return target_jacobian[:, self._full_indices]
+
+        base = self._model.fk_se3(q_full, self._base_frame)
+        target = self._model.fk_se3(q_full, frame)
+        base_jacobian = self._model.frame_jacobian(
+            q_full, self._base_frame)
+        rotation = base.rotation.T
+        relative_position = rotation @ (
+            target.translation - base.translation)
+        position_cross = np.array([
+            [0.0, -relative_position[2], relative_position[1]],
+            [relative_position[2], 0.0, -relative_position[0]],
+            [-relative_position[1], relative_position[0], 0.0],
+        ])
+        relative_jacobian = np.vstack([
+            rotation @ (target_jacobian[:3] - base_jacobian[:3]) +
+            position_cross @ rotation @ base_jacobian[3:],
+            rotation @ (target_jacobian[3:] - base_jacobian[3:]),
+        ])
+        return relative_jacobian[:, self._full_indices]
 
     def manipulability(self, q, frame, rows=None):
         jacobian = self.frame_jacobian(q, frame)

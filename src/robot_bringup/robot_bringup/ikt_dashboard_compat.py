@@ -91,6 +91,13 @@ class G1CommanderDashboard(CommanderDashboard):
 
         handler_type._serve_static = serve_static
 
+    def _build_target_msg(self, xyz: list, quat: list,
+                          frame_id: str) -> PoseStamped:
+        message = super()._build_target_msg(xyz, quat, frame_id)
+        message.header.stamp.sec = 0
+        message.header.stamp.nanosec = 0
+        return message
+
     def _on_urdf(self, message) -> None:
         super()._on_urdf(message)
         try:

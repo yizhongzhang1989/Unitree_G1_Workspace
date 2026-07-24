@@ -187,6 +187,8 @@ def test_ikt_pose_commander_uses_named_position_controllers():
     assert yaml.safe_load(_perform(context, parameters["jtc_controller"])) == \
         "joint_trajectory_controller"
     assert yaml.safe_load(_perform(context, parameters["max_iters"])) == 20
+    assert "max_joint_accel" not in module._DEFAULTS
+    assert "max_joint_accel" not in parameters
     dashboard = by_executable["ikt_pose_commander_dashboard"]
     assert _node_package(dashboard) == "robot_bringup"
 

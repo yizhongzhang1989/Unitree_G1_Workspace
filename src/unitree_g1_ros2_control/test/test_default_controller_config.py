@@ -31,8 +31,9 @@ def test_default_controller_claims_g1_body_and_both_grippers():
         (PACKAGE_ROOT / "config" / "default_29dof_param.yaml").read_text(
             encoding="utf-8"))
 
-    joints = forward_config[
-        "/forward_position_controller"]["ros__parameters"]["joints"]
+    forward_parameters = forward_config[
+        "/forward_position_controller"]["ros__parameters"]
+    joints = forward_parameters["joints"]
     trajectory_parameters = trajectory_config[
         "/joint_trajectory_controller"]["ros__parameters"]
     assert joints[:29] == gain_config["joint_names"]
@@ -41,6 +42,7 @@ def test_default_controller_claims_g1_body_and_both_grippers():
         "right_eccentric_joint",
     ]
     assert len(joints) == 31
+    assert set(forward_parameters) == {"joints"}
     assert trajectory_parameters["joints"] == joints
     assert trajectory_parameters["command_interfaces"] == ["position"]
     assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
@@ -64,13 +66,31 @@ def test_controller_manager_registers_mutually_exclusive_fpc_and_jtc():
         "joint_trajectory_controller/JointTrajectoryController"
 
 
-def test_arm_stiffness_uses_a_conservative_startup_scale():
+def test_arm_stiffness_default_is_owned_by_hardware_plugin():
     module = _load_control_launch()
 
-    assert module._HARDWARE_ARGUMENTS["arm_stiffness_scale"] == "2.5"
-
+    assert module._HARDWARE_ARGUMENTS["arm_stiffness_scale"] == ""
     context = LaunchContext()
     context.launch_configurations.update(module._HARDWARE_ARGUMENTS)
+    description = module._robot_description(context, PACKAGE_ROOT, "dual")
+    hardware = ElementTree.fromstring(description).find(
+        "./ros2_control/hardware")
+    parameters = {
+        parameter.get("name"): parameter.text
+        for parameter in hardware.findall("param")
+    }
+    assert "arm_stiffness_scale" not in parameters
+    header = (PACKAGE_ROOT / "include" / "unitree_g1_ros2_control" /
+              "g1_topic_system.hpp").read_text(encoding="utf-8")
+    assert "double arm_stiffness_scale_{1.0};" in header
+
+
+def test_arm_stiffness_explicit_override_reaches_hardware_plugin():
+    module = _load_control_launch()
+    context = LaunchContext()
+    context.launch_configurations.update(module._HARDWARE_ARGUMENTS)
+    context.launch_configurations["arm_stiffness_scale"] = "2.5"
+
     description = module._robot_description(context, PACKAGE_ROOT, "dual")
     hardware = ElementTree.fromstring(description).find(
         "./ros2_control/hardware")

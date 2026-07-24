@@ -7,6 +7,8 @@ from robot_bringup.end_effectors.topology import (
     GloriaDevice,
     Kwr57Device,
     build_bridge_parameters,
+    dashboard_topology_parameters,
+    deployed_topology,
 )
 
 
@@ -35,6 +37,26 @@ def _gripper(name: str, bus: CanBus, command_id: int, feedback_id: int,
 
 
 class BuildBridgeParametersTest(unittest.TestCase):
+    def test_dashboard_parameters_are_derived_from_deployed_inventory(
+            self) -> None:
+        for topology in ("single", "dual"):
+            buses, sensors, grippers = deployed_topology(topology)
+            build_bridge_parameters(buses, sensors, grippers)
+            parameters = dashboard_topology_parameters(topology)
+            for hand, sensor, gripper in zip(
+                    ("left", "right"), sensors, grippers):
+                self.assertEqual(parameters[f"{hand}_bus"], sensor.bus.name)
+                self.assertEqual(
+                    parameters[f"{hand}_sensor_node"], f"/{sensor.name}")
+                self.assertEqual(
+                    parameters[f"{hand}_wrench_topic"], sensor.wrench_topic)
+                self.assertEqual(
+                    parameters[f"{hand}_gripper_node"], f"/{gripper.name}")
+
+    def test_rejects_unknown_deployed_topology(self) -> None:
+        with self.assertRaisesRegex(ValueError, "topology must be"):
+            deployed_topology("unknown")
+
     def test_kwr57_inventory_uses_handlers_without_frame_routes(self) -> None:
         can0 = CanBus("can0", 0)
         can1 = CanBus("can1", 1)

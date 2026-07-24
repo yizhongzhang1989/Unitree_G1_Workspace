@@ -81,6 +81,20 @@ if(BUILD_TESTING)
     test/test_periodic_deadline.cpp
   )
   target_include_directories(test_periodic_deadline PRIVATE include)
+  ament_add_gtest(
+    test_forward_position_controller
+    test/test_forward_position_controller.cpp
+  )
+  target_link_libraries(
+    test_forward_position_controller
+    ${PROJECT_NAME}
+  )
+  ament_target_dependencies(
+    test_forward_position_controller
+    hardware_interface
+    rclcpp
+    std_msgs
+  )
   ament_add_pytest_test(
     test_default_controller_config
     test/test_default_controller_config.py
