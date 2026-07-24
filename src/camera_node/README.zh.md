@@ -13,6 +13,13 @@
 
 通用 ROS 2 IP 相机节点。节点通过 FFmpeg 读取 RTSP 视频流，按新帧事件发布 `sensor_msgs/Image`，同时提供 Flask Web 预览、启停、重连、截图和 ROS 图像发布控制。
 
+## 概览
+本包把 IP 相机的 RTSP 视频流变成 ROS 2 图像和浏览器预览。`robot_bringup` 用它分别连接左右手相机，每台相机对应一个节点、图像话题和 Web 端口。
+
+> 简单理解：FFmpeg 从相机取帧，`camera_node` 保存最新帧，再交给 `sensor_msgs/Image` publisher、MJPEG Web 页面和截图服务。
+
+本包负责连接、断流重连、图像发布、预览和截图；不负责目标识别、视觉定位、深度估计或相机标定。
+
 ## 功能
 - 使用 FFmpeg TCP 传输读取 RTSP 主码流，并在连接失败时提供重试和错误状态。
 - RTSP 相机未连接或中途断流时保持 ROS/Web 节点运行，并在后台定时重连；相机恢复后继续使用原 ROS 发布器和 Web 地址。

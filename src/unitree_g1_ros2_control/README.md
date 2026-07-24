@@ -1,7 +1,25 @@
 # unitree_g1_ros2_control
-`unitree_g1_ros2_control` 将 Unitree G1、双 Gloria-M、双 KWR57 和 pelvis IMU 接入 ROS 2 Foxy 原生 `ros2_control`。包内提供一个统一 `SystemInterface`、一个自定义 C++ forward-position controller、一个标准 JointTrajectoryController 实例和两个节流 broadcaster；不创建额外通信节点或 controller-manager facade。
 
-## 资源与数据流
+## 概览
+本包负责把 ros2_control 的**关节位置命令**变成设备真正接收的 **MIT 命令**，并把 G1、双夹爪、双 FT 和 IMU 的反馈变成 ros2_control 状态。
+
+> 简单理解：FPC/JTC 只写目标位置；`G1TopicSystem` 再填齐 MIT 命令所需的其他字段，然后发布 G1 `LowCmd` 或夹爪 `MitCommand`。
+
+具体来说，`q` 来自 position interface，`kp/kd` 来自[默认增益表](config/default_29dof_param.yaml)，`dq/tau` 固定为 `0`，`mode` 固定为 MIT 模式，`mode_machine` 跟随 `/lowstate`，CRC 在发布前计算。夹爪的 `q` 同样来自 position interface，其他 MIT 参数使用夹爪配置。实际位置闭环由设备底层完成。
+
+| 组件 | 负责 |
+|---|---|
+| `G1TopicSystem` | 填充并发布 MIT 命令，接收设备反馈，执行控制权与反馈安全检查 |
+| `ForwardPositionController` | 接收连续关节位置，检查首帧误差、相邻跳变和命令超时 |
+| `JointTrajectoryController` | 使用标准 JTC 执行离散关节轨迹 |
+| broadcasters | 按需发布关节、IMU 和 FT 状态 |
+| `control.launch.py` | 启动唯一 controller manager、硬件插件、RSP 和 controllers |
+
+本包不负责 IK、动作规划、网页交互或设备 CAN 协议。命令链为 `Dashboard / IK -> FPC 或 JTC -> position interface -> G1TopicSystem -> LowCmd / MitCommand`；FPC 与 JTC 互斥使用同一组 position interface。
+
+## 实现细节
+
+### 硬件资源
 `unitree_g1_ros2_control/G1TopicSystem` 导出：
 
 | 资源 | 数量 | 输入/输出 |
@@ -13,13 +31,13 @@
 
 manager 以 500 Hz 调用 `read()`/`write()`。G1 命令直接从 `write()` 发布；Gloria-M 在同一路径内用 steady clock 固定相位 deadline 降采样到 100 Hz。若一次 `write()` 错过一个或多个时隙，deadline 直接前移到下一个未来时隙，不补发过期命令，也不按“当前时刻 + 10 ms”累积漂移。KWR57 raw 保持设备节点原有 1 kHz 话题，插件用每侧原子快照读取，不增加转发节点。FT 数值按 `9.80665` 从 kgf/kgf m 转为 SI；Unitree 四元数从 `w,x,y,z` 转为 ROS `x,y,z,w` 并归一化。
 
-G1 增益表保持物理电机顺序不变。启动参数 `arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，默认 `2.5`（肩肘约 `35.8`、腕部约 `42.0`），腿、腰和全部 `kd` 不变；该值接近 Unitree 低层双臂示例常用的 `kp=40`。需要回退原始增益时传入 `arm_stiffness_scale:=1.0`，允许范围为 `(0, 4]`。
+G1 增益表保持物理电机顺序不变。底层 `G1TopicSystem` 以固定倍率 `1.0` 使用增益表中的双臂 `kp`；腿、腰和全部 `kd` 同样保持增益表原值。倍率不属于机器人模型，也不通过 URDF 或 launch 配置。
 
 硬件导出的 31 个 command interface 由 `forward_position_controller`（FPC）或 `joint_trajectory_controller`（JTC）互斥 claim。ros2_control 的 claim 只提供命令资源互斥，不检查反馈是否新鲜；feedback freshness 是 `G1TopicSystem` 自己实现的安全策略。G1 使用 `state_timeout_s=0.25 s`，Gloria 使用独立的 `gripper_state_timeout_s=0.75 s`。单侧夹爪 stale 时只跳过该侧 MIT 输出，G1 LowCmd 和另一侧不受影响；反馈恢复后该侧自然恢复。
 
 启动反馈到达前，对外 joint state 使用有限零值，IMU 使用单位四元数，避免 `robot_state_publisher` 产生 NaN TF。控制安全仍由独立的 `received` 标志和 freshness 检查决定，中性启动值不能使 controller 通过 Engage。
 
-### 进程与通信边界
+### 进程与设备边界
 `controller_manager`、`ForwardCommandController`、`JointTrajectoryController` 和 `G1TopicSystem` 都在同一个 `ros2_control_node` 进程中。每个 500 Hz 周期按“硬件 `read()` -> active controller `update()` -> 硬件 `write()`”运行，state/command interface 是指向插件存储的 C++ 接口；controller 与硬件插件之间没有 ROS topic、序列化或 DDS。
 
 `G1TopicSystem` 内部用于 `/lowstate`、双 Gloria、双 KWR57、MotionSwitcher 和服务客户端的节点由 `SingleThreadedExecutor` 驱动。回调只更新缓存或完成事务，500 Hz manager 循环继续通过硬件接口读写；这里不增加并发 callback worker，避免在 PC2 上为高频订阅引入额外调度竞争。
@@ -30,7 +48,7 @@ G1 增益表保持物理电机顺序不变。启动参数 `arm_stiffness_scale` 
 - Gloria-M：硬件插件发布既有 `gloria_ros/msg/MitCommand`，独立 `gloria_ros` 节点继续负责模式、量程、安全检查和 CAN 编码；反馈仍用其 `JointState`。
 - KWR57：CAN 三帧协议由 `canalystii_native_bridge` 在 C++ 进程内解析；硬件插件直接订阅既有 raw `WrenchStamped`，不会创建中间节点或再次发布 raw Wrench。
 
-所以 ros2_control 的 controller-to-hardware 路径本身不增加 DDS hop。外部 Dashboard/IK 通过 FPC commands 或 JTC action 进入当前 active controller；这与旧 Python facade 的命令输入边界等价。Gloria 保留两段已有的 ROS 设备边界，KWR57 只增加 ros2_control 作为 raw Wrench 的一个订阅者。默认不启动 FT broadcaster，避免把 1 kHz 状态再发布一次。
+所以 ros2_control 的 controller-to-hardware 路径本身不增加 DDS hop。外部 Dashboard/IK 通过 FPC commands 或 JTC action 进入当前 active controller。Gloria 保留已有 ROS 设备边界，KWR57 只增加 ros2_control 作为 raw Wrench 的订阅者。默认不启动 FT broadcaster，避免重复发布 1 kHz 状态。
 
 2026-07-23 的四设备 30 秒实机验收中，左右 MIT 命令为 `100.000/100.000 Hz`，bridge 实际 CAN TX 为 `99.999/100.001 Hz`；同场景双 KWR57 source 最大 gap 为 `6.860/7.322 ms`，ROS receive 最大 gap 为 `7.027/7.433 ms`。完整配置、USB 空包根因和测试边界见 [canalystii_native_bridge/README.md](../canalystii_native_bridge/README.md)。
 

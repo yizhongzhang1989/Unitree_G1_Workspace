@@ -1,6 +1,22 @@
 # Unitree_G1_Workspace
 
-Unitree G1 项目的 ROS 2 工作区。
+Unitree G1 的 ROS 2 Foxy 工作区，覆盖整机位置控制、IK、双夹爪、双六轴力传感器、双相机和 Web 调试。生产入口由 `robot_bringup` 统一启动；各设备包仍可单独用于调试。
+
+| 模块 | 负责 |
+|---|---|
+| `robot_bringup` | 组合整机或末端设备的生产 launch |
+| `unitree_g1_ros2_control` | 把 FPC/JTC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
+| `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
+| `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
+| `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
+
+常用入口：
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
+```
+
+下面先说明各子系统的边界，再给出目录、安装和调试细节。
 
 ## 末端执行器与相机
 
@@ -31,7 +47,7 @@ Unitree G1 项目的 ROS 2 工作区。
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
-`unitree_g1_description` 提供整机 URDF、`/lowstate` 到 `/joint_states` 的状态适配，以及面向 `robot_test_dashboard` 的受限 MIT 位置控制节点。该节点提供一个 forward-position 控制器外观，将网页给出的 31 个实际关节位置分发为 G1 `/lowcmd` 和左右 Gloria-M `MitCommand`。它不是通用 `ros2_control` 硬件接口或运动控制器。
+`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、互斥 FPC/JTC 和状态 broadcaster：controller 只写关节位置，`G1TopicSystem` 再补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。
 
 
 ## 目录

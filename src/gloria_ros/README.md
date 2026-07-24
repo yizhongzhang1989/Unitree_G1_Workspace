@@ -1,5 +1,10 @@
 # gloria_ros
-Gloria-M 夹爪的 ROS2 设备包，通过 `can_bridge_ros` 共享项目统一管理的 CAN 设备，仅复用 Gloria-M-SDK 的 MIT 协议与量程定义，不打开 SDK 串口适配器；硬件接口、CAN 协议、寄存器和标定方法见 [`HARDWARE.md`](HARDWARE.md)。
+
+Gloria-M 夹爪的 ROS 2 设备驱动。
+
+> 简单理解：上层发送 `MitCommand` 或 PV 目标，`gloria_ros` 补齐模式与量程语义、执行安全检查并编码为 CAN Frame；反馈帧则被解码为 `JointState` 和诊断信息。
+
+本包负责夹爪协议、模式切换、量程确认、使能和反馈超时，不负责独占 USB-CAN，也不生成机器人轨迹。物理 CAN 由 bridge 统一管理；本包只复用 Gloria-M-SDK 的协议与量程定义，不打开其串口适配器。硬件接口、寄存器和标定方法见 [`HARDWARE.md`](HARDWARE.md)。
 
 ## 功能
 - 支持 MIT 阻抗/扭矩命令与 PV 位置速度命令，不实现缺少完整公开帧定义的 VEL 和 TORQUE_POS 模式。

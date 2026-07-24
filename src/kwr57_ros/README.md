@@ -1,6 +1,10 @@
 # `kwr57_ros`
 
-坤维 KWR57 六轴力/力矩传感器的 ROS 2 驱动。`can_bridge_ros` 独占物理 CAN，KWR57 协议、三帧组包、控制服务和 `WrenchStamped` 发布由本包负责。
+坤维 KWR57 六轴力/力矩传感器的 ROS 2 驱动。
+
+> 简单理解：bridge 提供原始 CAN 帧，`kwr57_ros` 按 KWR57 协议把连续三帧拼成一次六轴测量，再发布 `WrenchStamped`；启动、停止和调零命令沿反方向发回 CAN。
+
+本包负责 KWR57 协议、三帧组包、控制服务和测量发布，不负责独占或驱动 USB-CAN 适配器。生产系统由 `canalystii_native_bridge` 在同一进程加载本包的 handler；独立调试也可通过标准 ROS Frame 连接 `can_bridge_ros`。
 
 ## 两种结构
 
