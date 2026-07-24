@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>G1 手臂重力标定</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">UNITREE G1 / TORSO-RELATIVE ARMS</p>
+      <h1>手臂重力参数标定</h1>
+    </div>
+    <div class="live-status">
+      <span id="connectionDot" class="status-dot"></span>
+      <div>
+        <strong id="phaseLabel">连接中</strong>
+        <span id="messageLabel">读取工作流状态</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="stepbar" aria-label="标定流程">
+    <button class="step active" data-scroll="parameters"><b>01</b><span>参数源</span></button>
+    <button class="step" data-scroll="selection"><b>02</b><span>关节选择</span></button>
+    <button class="step" data-scroll="capture"><b>03</b><span>被动采点</span></button>
+    <button class="step" data-scroll="calibration"><b>04</b><span>自动标定</span></button>
+  </nav>
+
+  <main>
+    <section id="parameters" class="section band-light">
+      <div class="section-heading">
+        <div><span class="section-index">01</span><h2>参数源</h2></div>
+        <div class="file-actions">
+          <a class="button secondary" href="/api/file?kind=parameters" download>下载 JSON</a>
+          <button id="exportButton" class="button secondary">导出 URDF</button>
+          <a class="button secondary" href="/api/file?kind=urdf" download>下载 URDF</a>
+        </div>
+      </div>
+      <div class="file-grid">
+        <div class="file-row"><span>参数文件</span><code id="parameterPath">-</code><b id="parameterState">检测中</b></div>
+        <div class="file-row"><span>源模型</span><code id="sourcePath">-</code><b id="schemaValue">-</b></div>
+        <div class="file-row"><span>标定模型</span><code id="outputPath">-</code><b>同构输出</b></div>
+        <div class="file-row"><span>源校验</span><code id="sourceHash">-</code><b>SHA-256</b></div>
+      </div>
+    </section>
+
+    <section id="selection" class="section">
+      <div class="section-heading">
+        <div><span class="section-index">02</span><h2>选择标定关节</h2></div>
+        <div class="selection-actions">
+          <button id="selectLeft" class="text-button">全选左臂</button>
+          <button id="selectRight" class="text-button">全选右臂</button>
+          <button id="clearSelection" class="text-button">清空</button>
+        </div>
+      </div>
+      <div class="joint-columns">
+        <div class="joint-column">
+          <h3>左臂 <span>motor 15–21</span></h3>
+          <div id="leftJoints" class="joint-list"></div>
+        </div>
+        <div class="joint-column">
+          <h3>右臂 <span>motor 22–28</span></h3>
+          <div id="rightJoints" class="joint-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="capture" class="section band-ink">
+      <div class="section-heading inverse">
+        <div><span class="section-index">03</span><h2>被动采点</h2></div>
+        <div class="output-lock" id="outputLock">LOWCMD OFF</div>
+      </div>
+      <div class="capture-layout">
+        <div class="capture-controls">
+          <label class="toggle-row">
+            <input id="autoCapture" type="checkbox" checked>
+            <span>移动后静止自动记录</span>
+          </label>
+          <div class="button-row">
+            <button id="startCapture" class="button primary">开始采点</button>
+            <button id="capturePoint" class="button dark-secondary">记录当前姿态</button>
+            <button id="stopCapture" class="button dark-secondary">结束采点</button>
+          </div>
+          <dl class="telemetry">
+            <div><dt>LowState</dt><dd id="stateAge">-</dd></div>
+            <div><dt>PR mode</dt><dd id="modePr">-</dd></div>
+            <div><dt>IMU accel</dt><dd id="accelValue">-</dd></div>
+            <div><dt>已记录</dt><dd id="targetCount">0</dd></div>
+          </dl>
+        </div>
+        <div class="plot-panel">
+          <div class="plot-toolbar">
+            <label>X <select id="xAxis"></select></label>
+            <label>Y <select id="yAxis"></select></label>
+            <button id="clearTargets" class="text-button inverse-text">清空采点</button>
+          </div>
+          <canvas id="posePlot" width="900" height="390"></canvas>
+        </div>
+      </div>
+      <div class="target-table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>来源</th><th>时间</th><th>左臂范围</th><th>右臂范围</th><th></th></tr></thead>
+          <tbody id="targetRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="calibration" class="section">
+      <div class="section-heading">
+        <div><span class="section-index">04</span><h2>自动标定</h2></div>
+        <span id="lowcmdBadge" class="danger-badge off">LOWCMD INACTIVE</span>
+      </div>
+      <div class="calibration-layout">
+        <div class="run-panel">
+          <div class="run-status">
+            <div class="progress-ring" id="progressRing"><span id="progressNumber">0%</span></div>
+            <div>
+              <p id="progressStage">等待开始</p>
+              <h3 id="progressTarget">尚未运行</h3>
+              <span id="progressSide">-</span>
+            </div>
+          </div>
+          <label class="confirmation-field">
+            <span>启动确认</span>
+            <input id="confirmationInput" autocomplete="off" spellcheck="false" placeholder="START_TORQUE_CALIBRATION">
+          </label>
+          <div class="button-row">
+            <button id="startCalibration" class="button danger">启动纯扭矩标定</button>
+            <button id="stopCalibration" class="button secondary">停止输出</button>
+          </div>
+        </div>
+        <div class="gravity-panel">
+          <h3>躯干坐标重力</h3>
+          <div class="gravity-vector">
+            <div><span>X</span><b id="gravityX">0.000</b></div>
+            <div><span>Y</span><b id="gravityY">0.000</b></div>
+            <div><span>Z</span><b id="gravityZ">-9.810</b></div>
+          </div>
+          <div class="gravity-bar"><i id="gravityBar"></i></div>
+          <p id="gravityNorm">|g| = 9.810 m/s²</p>
+        </div>
+      </div>
+
+      <div class="results-heading">
+        <h3>逐 Link 参数</h3>
+        <div class="legend"><span class="identified">数据辨识</span><span class="distributed">URDF 约束分配</span></div>
+      </div>
+      <div class="result-table-wrap">
+        <table>
+          <thead><tr><th>侧</th><th>所属 Joint</th><th>Link</th><th>Scale</th><th>质量 kg</th><th>可观测度</th><th>来源</th></tr></thead>
+          <tbody id="parameterRows"></tbody>
+        </table>
+      </div>
+
+      <div class="results-heading iteration-heading"><h3>迭代记录</h3><span id="iterationCount">0 rounds</span></div>
+      <div class="result-table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>侧</th><th>目标</th><th>RMSE before</th><th>RMSE after</th><th>Rank</th><th>Nullity</th><th>内点</th></tr></thead>
+          <tbody id="iterationRows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
