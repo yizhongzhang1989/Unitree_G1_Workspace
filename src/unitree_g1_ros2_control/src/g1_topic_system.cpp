@@ -197,8 +197,6 @@ bool G1TopicSystem::configure_interfaces() {
     state_velocity_.assign(kControlledJointCount, 0.0);
     state_effort_.assign(kControlledJointCount, 0.0);
     command_position_.assign(kControlledJointCount, nan);
-    lower_limits_.resize(kControlledJointCount);
-    upper_limits_.resize(kControlledJointCount);
 
     for (std::size_t index = 0; index < info_.joints.size(); ++index) {
         const auto& joint = info_.joints[index];
@@ -230,22 +228,6 @@ bool G1TopicSystem::configure_interfaces() {
             RCLCPP_ERROR(
                 rclcpp::get_logger("G1TopicSystem"),
                 "%s must expose position, velocity and effort state interfaces",
-                joint.name.c_str());
-            return false;
-        }
-        try {
-            lower_limits_[index] = std::stod(joint.command_interfaces[0].min);
-            upper_limits_[index] = std::stod(joint.command_interfaces[0].max);
-        } catch (const std::exception&) {
-            RCLCPP_ERROR(
-                rclcpp::get_logger("G1TopicSystem"),
-                "%s position command interface requires finite min/max", joint.name.c_str());
-            return false;
-        }
-        if (!std::isfinite(lower_limits_[index]) || !std::isfinite(upper_limits_[index]) ||
-            lower_limits_[index] > upper_limits_[index]) {
-            RCLCPP_ERROR(
-                rclcpp::get_logger("G1TopicSystem"), "%s has invalid position limits",
                 joint.name.c_str());
             return false;
         }
@@ -760,20 +742,10 @@ hardware_interface::return_type G1TopicSystem::write() {
                     info_.joints[index].name.c_str());
                 return hardware_interface::return_type::OK;
             }
-            // 根据 urdf 的范围限位；但对于阻抗控制这可能不妥
-            const double bounded_value = std::clamp(
-                value, lower_limits_[index], upper_limits_[index]);
-            if (claimed && bounded_value != value) {
-                RCLCPP_WARN_THROTTLE(
-                    node_->get_logger(), *node_->get_clock(), 1000,
-                    "Clamping command for %s from %.6f to [%.6f, %.6f]",
-                    info_.joints[index].name.c_str(), value,
-                    lower_limits_[index], upper_limits_[index]);
-            }
 
             auto& command = message.motor_cmd[index];
             command.mode = 1;
-            command.q = static_cast<float>(bounded_value);
+            command.q = static_cast<float>(value);
             command.dq = 0.0F;
             command.tau = 0.0F;
             command.kp = static_cast<float>(stiffness_[index]);
@@ -815,16 +787,8 @@ hardware_interface::return_type G1TopicSystem::write() {
                     side == 0 ? "left" : "right", value);
                 continue;
             }
-            const double bounded_value = std::clamp(
-                value, lower_limits_[index], upper_limits_[index]);
-            if (bounded_value != value) {
-                RCLCPP_WARN_THROTTLE(
-                    node_->get_logger(), *node_->get_clock(), 1000,
-                    "Clamping %s gripper command from %.6f to %.6f",
-                    side == 0 ? "left" : "right", value, bounded_value);
-            }
             gloria_ros::msg::MitCommand command;
-            command.q = bounded_value;
+            command.q = value;
             command.dq = 0.0;
             command.kp = gripper_kp_;
             command.kd = gripper_kd_;

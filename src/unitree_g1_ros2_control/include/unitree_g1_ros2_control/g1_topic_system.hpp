@@ -118,8 +118,6 @@ private:
     std::vector<double> state_velocity_;
     std::vector<double> state_effort_;
     std::vector<double> command_position_;
-    std::vector<double> lower_limits_;
-    std::vector<double> upper_limits_;
     std::array<double, kG1JointCount> stiffness_{};
     std::array<double, kG1JointCount> damping_{};
     double arm_stiffness_scale_{1.0};   // 双臂 15–28 号关节的 `kp` 的缩放

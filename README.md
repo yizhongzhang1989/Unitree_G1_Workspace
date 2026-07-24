@@ -47,7 +47,7 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
-`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、互斥 FPC/JTC 和状态 broadcaster：FPC 只校验全量位置命令的维度与有限值，controller 将目标写入 position interface，`G1TopicSystem` 再按模型 command-interface 范围做最终 clamp、补齐 MIT 参数，并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。
+`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、互斥 FPC/JTC 和状态 broadcaster：FPC 只校验全量位置命令的维度与有限值，controller 将目标写入 position interface，`G1TopicSystem` 不限制有限 target 的数据范围，直接补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。这是因为阻抗控制需要通过目标位置相对反馈位置的偏移产生力矩。
 
 
 ## 目录

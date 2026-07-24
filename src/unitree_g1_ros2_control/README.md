@@ -9,7 +9,7 @@
 
 | 组件 | 负责 |
 |---|---|
-| `G1TopicSystem` | 生成 MIT 命令，执行最终位置 clamp、控制权与反馈安全检查 |
+| `G1TopicSystem` | 生成 MIT 命令，执行控制权与反馈安全检查 |
 | `ForwardPositionController` | 校验全量命令的维度与有限值，合法目标原样写入 position interface |
 | `JointTrajectoryController` | 使用标准 JTC 执行离散关节轨迹 |
 | broadcasters | 按需发布关节、IMU 和 FT 状态 |
@@ -89,29 +89,25 @@ ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 
 FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也只暴露最新样本；短暂调度繁忙后不会依次执行过时 setpoint。可靠发布者仍可与该订阅匹配，G1 Pose Commander 则直接使用相同的 BEST_EFFORT latest-only 配置。
 
-### 命令校验与限位
+### 命令校验与输出
 
-限位沿命令链分层执行。FPC 负责样本完整性，`G1TopicSystem` 负责写入设备消息前的
-最终位置范围限制；两者不是两套重复的轨迹保护器。
+本包不对有限位置目标执行范围、误差或变化率限制。FPC 只负责样本完整性，
+`G1TopicSystem` 负责将 position interface 的目标原样写入设备消息。
 
 | 层 | 当前规则 | 非法或超限时的动作 |
 |---|---|---|
 | FPC 激活 | 当前配置必须获得 31 个 command interface 和 31 个 position state interface，且激活时全部位置反馈为有限值 | 条件不满足则拒绝激活；成功激活时用当前反馈初始化 31 个 command interface |
 | FPC 命令样本 | `Float64MultiArray` 必须恰好包含 31 个有限值 | 任一值为 `NaN/Inf` 或宽度错误时丢弃整个样本，command interface 保持上一个已接受目标 |
 | FPC 目标范围 | 不读取 URDF min/max，不限制目标与反馈误差、相邻目标跳变、速度或加速度，也没有命令超时回填 | 合法的 31 维目标原样写入 hardware position interface；没有新样本时继续保持原目标 |
-| `G1TopicSystem` 本体输出 | 每个已 claim 的 G1 目标必须有限；每个有限目标按对应 command interface 的 `[min, max]` clamp | 任一已 claim 本体目标为 `NaN/Inf` 时，本次 `write()` 不发布整帧 `LowCmd`，本周期后续夹爪输出也不执行；有限超限值只对该关节 clamp，其余关节仍正常组帧发送 |
-| `G1TopicSystem` 夹爪输出 | 每侧在自己的 100 Hz 输出周期内检查反馈 freshness 和目标有限性，再按该侧 command interface 范围 clamp | stale 或 `NaN/Inf` 只跳过对应侧；有限超限值 clamp 后发送，不影响本体和另一侧 |
+| `G1TopicSystem` 本体输出 | 每个已 claim 的 G1 目标必须有限；不读取 URDF min/max，不限制目标范围、目标与反馈误差或相邻目标跳变 | 任一已 claim 本体目标为 `NaN/Inf` 时，本次 `write()` 不发布整帧 `LowCmd`，本周期后续夹爪输出也不执行；任意有限目标原样写入对应 `LowCmd.q` |
+| `G1TopicSystem` 夹爪输出 | 每侧在自己的 100 Hz 输出周期内检查反馈 freshness 和目标有限性，不限制目标范围 | stale 或 `NaN/Inf` 只跳过对应侧；任意有限目标原样写入 `MitCommand.q`，不影响本体和另一侧 |
 
-31 个位置范围没有在 FPC 或 C++ 插件中另存一份常量。`G1TopicSystem` 配置时从
-[`ros2_control_resources.macro.xacro`](../unitree_g1_description/model/ros2_control_resources.macro.xacro)
-的 position command interface 读取 `min/max`，并要求二者有限且 `min <= max`。其中 29 个
-G1 关节沿用模型关节范围；左右 `eccentric_joint` 均为
-`[0, 2.76377472169236] rad`。clamp 只作用于本周期即将发送的 `LowCmd.q` 或
-`MitCommand.q`，不会改写 command interface 中的原目标，因此上游持续给出有限超限目标时，
-硬件层会在每个输出周期继续发送相同的边界值。
-
-这里的位置 clamp 不产生速度或加速度轨迹，也不比较目标与实测位置。G1 本体消息的
-`dq/tau` 固定为 `0`；Gloria-M 驱动仍保留独立的固件量程确认、`safe_position` 限制和
+FPC 和 `G1TopicSystem` 都不读取 position command interface 的 `min/max`。
+`G1TopicSystem` 不限制有限 target 的数据范围，因为 MIT 阻抗控制通过目标位置与反馈位置的
+偏移产生力矩；在这一层裁剪目标会改变期望的恢复力矩。G1 本体的目标直接写入
+`LowCmd.q`，夹爪目标直接写入 `MitCommand.q`，且不附加速度、加速度、步长或误差窗口。
+G1 本体消息的 `dq/tau` 固定为 `0`。URDF 关节范围仍可供上层规划和界面使用，但不参与
+本硬件插件的命令输出。Gloria-M 驱动仍保留独立的固件量程确认、`safe_position` 限制和
 反馈超时失能，详见 [`gloria_ros/README.md`](../gloria_ros/README.md)。
 
 `robot_test_dashboard` 中的 JTC/FPC 代码只是测试命令生成器，不应搬入本包。JTC 的插值、目标容差和 action 状态机已经由标准插件实现；重复实现会产生第二套语义。Cartesian IK 同样保持在 `ikt_core`/Pose Commander 算法层，它输出关节目标但不拥有 hardware interface。只有将来确实需要硬实时 Cartesian servo 时，才应新增独立 C++ ros2_control controller 包，并复用这里的 position interfaces，而不是把 Python IK 或网页逻辑放进硬件插件。
