@@ -101,7 +101,7 @@
       </div>
       <div class="target-table-wrap">
         <table>
-          <thead><tr><th>ID</th><th>来源</th><th>时间</th><th>左臂范围</th><th>右臂范围</th><th></th></tr></thead>
+          <thead><tr><th>ID</th><th>采集侧<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="这个姿态是在哪只手臂上手拉出来的。标定另一侧时会自动按左右镜像取反后使用（pitch / elbow / wrist_pitch 保号，roll / yaw 取反），因此同一批采点两只手臂都能用。"></span></th><th>来源</th><th>时间</th><th>左臂范围</th><th>右臂范围</th><th></th></tr></thead>
           <tbody id="targetRows"></tbody>
         </table>
       </div>
@@ -126,6 +126,7 @@
             <span>启动确认</span>
             <input id="confirmationInput" autocomplete="off" spellcheck="false" placeholder="START_TORQUE_CALIBRATION">
           </label>
+          <p id="armWarning" class="arm-warning"></p>
           <div class="button-row">
             <button id="startCalibration" class="button danger">启动纯扭矩标定</button>
             <button id="stopCalibration" class="button secondary">停止输出</button>

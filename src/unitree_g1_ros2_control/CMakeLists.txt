@@ -6,6 +6,7 @@ if(NOT CMAKE_CXX_STANDARD)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(controller_interface REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(gloria_ros REQUIRED)
@@ -24,6 +25,7 @@ find_package(yaml_cpp_vendor REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
+  src/arm_gravity_compensation_controller.cpp
   src/forward_position_controller.cpp
   src/g1_topic_system.cpp
   src/throttled_broadcasters.cpp
@@ -33,6 +35,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(${PROJECT_NAME}
+  ament_index_cpp
   controller_interface
   geometry_msgs
   gloria_ros
@@ -95,6 +98,20 @@ if(BUILD_TESTING)
     rclcpp
     std_msgs
   )
+  ament_add_gtest(
+    test_arm_gravity_compensation_controller
+    test/test_arm_gravity_compensation_controller.cpp
+  )
+  target_link_libraries(
+    test_arm_gravity_compensation_controller
+    ${PROJECT_NAME}
+  )
+  ament_target_dependencies(
+    test_arm_gravity_compensation_controller
+    hardware_interface
+    rclcpp
+    std_msgs
+  )
   ament_add_pytest_test(
     test_default_controller_config
     test/test_default_controller_config.py
@@ -104,6 +121,7 @@ endif()
 ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})
 ament_export_dependencies(
+  ament_index_cpp
   controller_interface
   geometry_msgs
   gloria_ros

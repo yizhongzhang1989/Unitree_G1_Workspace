@@ -6,12 +6,13 @@ import xml.etree.ElementTree as ET
 from typing import Dict, Mapping, Sequence, Tuple
 
 import numpy as np
+from numpy.typing import ArrayLike
 import pinocchio as pin
 
 from .constants import ALL_ARM_JOINTS, ARM_JOINTS, SIDES
 
 
-def _rpy_matrix(rpy: Sequence[float]) -> np.ndarray:
+def _rpy_matrix(rpy: ArrayLike) -> np.ndarray:
     roll, pitch, yaw = (float(value) for value in rpy)
     cr, sr = np.cos(roll), np.sin(roll)
     cp, sp = np.cos(pitch), np.sin(pitch)
@@ -21,6 +22,32 @@ def _rpy_matrix(rpy: Sequence[float]) -> np.ndarray:
         [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
         [-sp, cp * sr, cp * cr],
     ])
+
+
+_UNIT_AXES = {"JointModelRX": (1.0, 0.0, 0.0),
+              "JointModelRY": (0.0, 1.0, 0.0),
+              "JointModelRZ": (0.0, 0.0, 1.0)}
+
+
+def _joint_axis(joint) -> np.ndarray:
+    """Return the rotation axis of a revolute joint in its own frame."""
+    aligned = _UNIT_AXES.get(joint.shortname())
+    if aligned is not None:
+        return np.array(aligned, dtype=float)
+    axis = getattr(joint, "axis", None)
+    if axis is None:
+        raise ValueError("unsupported joint type %s" % joint.shortname())
+    return np.asarray(axis, dtype=float)
+
+
+def _axis_rotation(axis: ArrayLike, angle: float) -> np.ndarray:
+    """Rodrigues rotation about a unit axis."""
+    unit = np.asarray(axis, dtype=float)
+    cross = np.array([[0.0, -unit[2], unit[1]],
+                      [unit[2], 0.0, -unit[0]],
+                      [-unit[1], unit[0], 0.0]])
+    return (np.eye(3) + np.sin(angle) * cross +
+            (1.0 - np.cos(angle)) * (cross @ cross))
 
 
 def imu_to_torso_rotation(urdf_xml: str) -> np.ndarray:
@@ -50,7 +77,7 @@ def _model_link(source: ET.Element) -> ET.Element:
 
 def extract_torso_arm_urdf(
     urdf_xml: str,
-) -> Tuple[str, Dict[str, str], Dict[str, Tuple[str, ...]], Dict[str, str]]:
+) -> Tuple[str, Dict[str, Tuple[str, ...]], Dict[str, str]]:
     """Extract both complete shoulder subtrees with a fixed torso root.
 
     Each inertial link is assigned to its nearest upstream Unitree arm joint.
@@ -71,7 +98,6 @@ def extract_torso_arm_urdf(
 
     reduced = ET.Element("robot", {"name": "g1_complete_torso_arms"})
     ET.SubElement(reduced, "link", {"name": "torso_link"})
-    child_links: Dict[str, str] = {}
     parameter_links = {side: [] for side in SIDES}
     parameter_owner: Dict[str, str] = {}
     added_links = {"torso_link"}
@@ -89,7 +115,6 @@ def extract_torso_arm_urdf(
             raise ValueError("joint %s child link is missing" % joint_name)
         if joint_name in ALL_ARM_JOINTS:
             owner = joint_name
-            child_links[joint_name] = child_name
         if not owner:
             raise ValueError("link %s has no controlled arm owner" % child_name)
         if child_name not in added_links:
@@ -110,7 +135,6 @@ def extract_torso_arm_urdf(
         append_subtree(joints[side + "_shoulder_pitch_joint"])
     return (
         ET.tostring(reduced, encoding="unicode"),
-        child_links,
         {side: tuple(parameter_links[side]) for side in SIDES},
         parameter_owner,
     )
@@ -175,9 +199,8 @@ class TorsoArmGravityModel:
     """A 14-DoF model retaining one scale per original arm-subtree link."""
 
     def __init__(self, urdf_xml: str) -> None:
-        self.urdf_sha256 = hashlib.sha256(urdf_xml.encode("utf-8")).hexdigest()
         self.imu_to_torso = imu_to_torso_rotation(urdf_xml)
-        (reduced_xml, child_links, self.parameter_links,
+        (reduced_xml, self.parameter_links,
          self.parameter_owner) = extract_torso_arm_urdf(urdf_xml)
         self._template = ET.fromstring(reduced_xml)
         self._scales = {
@@ -211,16 +234,6 @@ class TorsoArmGravityModel:
         self.data = self.model.createData()
         self.joint_names = ALL_ARM_JOINTS
         self._refresh_indices()
-        self.arm_link_names = {
-            side: tuple(child_links[name] for name in ARM_JOINTS[side])
-            for side in SIDES
-        }
-        self.payload_link_names = {
-            side: tuple(name for name in self.parameter_links[side]
-                        if name not in self.arm_link_names[side])
-            for side in SIDES
-        }
-        self.link_names = self.arm_link_names
         self._basis_models: Dict[str, tuple] = {}
 
     @classmethod
@@ -233,7 +246,7 @@ class TorsoArmGravityModel:
         return np.array([self._q_indices[name] for name in ARM_JOINTS[side]],
                         dtype=int)
 
-    def configuration(self, arm_positions: Mapping[str, Sequence[float]]) -> np.ndarray:
+    def configuration(self, arm_positions: Mapping[str, ArrayLike]) -> np.ndarray:
         q = np.zeros(self.model.nq, dtype=float)
         for side, values in arm_positions.items():
             self._check_side(side)
@@ -246,8 +259,8 @@ class TorsoArmGravityModel:
     def set_arm_parameters(
         self,
         side: str,
-        mass_scales: Sequence[float],
-        torque_bias: Sequence[float],
+        mass_scales: ArrayLike,
+        torque_bias: ArrayLike,
     ) -> None:
         self._check_side(side)
         scales = np.asarray(mass_scales, dtype=float)
@@ -294,8 +307,8 @@ class TorsoArmGravityModel:
         return np.where(total > 0.0, weighted / np.where(total > 0.0, total, 1.0),
                         1.0)
 
-    def compensation(self, side: str, q: Sequence[float],
-                     gravity: Sequence[float]) -> np.ndarray:
+    def compensation(self, side: str, q: ArrayLike,
+                     gravity: ArrayLike) -> np.ndarray:
         self._check_side(side)
         configuration = self._validate_configuration(q)
         self._set_gravity(self.model, gravity)
@@ -304,8 +317,8 @@ class TorsoArmGravityModel:
         rows = np.array([self._v_indices[name] for name in ARM_JOINTS[side]])
         return np.asarray(torque, dtype=float)[rows] + self._biases[side]
 
-    def design_matrix(self, side: str, q: Sequence[float],
-                      gravity: Sequence[float]) -> np.ndarray:
+    def design_matrix(self, side: str, q: ArrayLike,
+                      gravity: ArrayLike) -> np.ndarray:
         """Return one scale column per original link plus seven bias columns."""
         self._check_side(side)
         configuration = self._validate_configuration(q)
@@ -320,14 +333,6 @@ class TorsoArmGravityModel:
         matrix[:, len(self.parameter_links[side]):] = np.eye(7)
         return matrix
 
-    def corrected_inertials(self, side: str) -> Dict[str, Dict[str, object]]:
-        self._check_side(side)
-        return {
-            link_name: {"scale": float(scale)}
-            for link_name, scale in zip(
-                self.parameter_links[side], self._scales[side])
-        }
-
     def parameter_groups(self, side: str) -> Dict[str, Tuple[str, ...]]:
         self._check_side(side)
         return {
@@ -336,6 +341,87 @@ class TorsoArmGravityModel:
                 if self.parameter_owner[link_name] == joint_name)
             for joint_name in ARM_JOINTS[side]
         }
+
+    def gravity_table(self) -> Dict[str, object]:
+        """Export the lumped serial chain a runtime controller needs.
+
+        Every link welded to a moving body is already merged into that body by
+        the reduced model, so seven rigid bodies per arm reproduce the joint
+        torques exactly. The values are flat per-side arrays so the export is
+        directly loadable as a ROS 2 parameter file; a consumer only needs
+        forward kinematics plus one cross product per body.
+        """
+        table = {"imu_to_torso": [float(value)
+                                  for value in self.imu_to_torso.ravel()]}
+        for side in SIDES:
+            names, axes, origins, rotations = [], [], [], []
+            masses, centres = [], []
+            for index, name in enumerate(ARM_JOINTS[side]):
+                joint_id = int(self.model.getJointId(name))
+                expected_parent = 0 if index == 0 else joint_id - 1
+                if int(self.model.parents[joint_id]) != expected_parent:
+                    raise ValueError(
+                        "%s is not a serial chain rooted at torso_link" % side)
+                placement = self.model.jointPlacements[joint_id]
+                inertia = self.model.inertias[joint_id]
+                names.append(name)
+                axes.extend(_joint_axis(self.model.joints[joint_id]).tolist())
+                origins.extend(placement.translation.tolist())
+                rotations.extend(
+                    float(value)
+                    for value in np.asarray(placement.rotation).ravel())
+                masses.append(float(inertia.mass))
+                centres.extend(np.asarray(inertia.lever, dtype=float).tolist())
+            table[side] = {
+                "joints": names,
+                "axis": axes,
+                "origin_xyz": origins,
+                "origin_rotation": rotations,
+                "mass": masses,
+                "com": centres,
+            }
+        return table
+
+    @staticmethod
+    def gravity_from_table(table: Dict[str, object], side: str,
+                           q: ArrayLike,
+                           gravity: ArrayLike) -> np.ndarray:
+        """Reference implementation of what the runtime controller evaluates."""
+        chain = table[side]
+        angles = np.asarray(q, dtype=float)
+        gravity_vector = np.asarray(gravity, dtype=float)
+        masses = np.asarray(chain["mass"], dtype=float)
+        count = masses.size
+
+        rotation = np.eye(3)
+        translation = np.zeros(3)
+        origins = np.zeros((count, 3))
+        axes = np.zeros((count, 3))
+        moments = np.zeros((count, 3))
+        for index in range(count):
+            block = slice(3 * index, 3 * index + 3)
+            translation = translation + rotation @ np.asarray(
+                chain["origin_xyz"][block], dtype=float)
+            rotation = rotation @ np.asarray(
+                chain["origin_rotation"][9 * index:9 * index + 9],
+                dtype=float).reshape(3, 3)
+            axis = np.asarray(chain["axis"][block], dtype=float)
+            rotation = rotation @ _axis_rotation(axis, float(angles[index]))
+            origins[index] = translation
+            axes[index] = rotation @ axis
+            moments[index] = masses[index] * (
+                translation + rotation @ np.asarray(
+                    chain["com"][block], dtype=float))
+
+        torque = np.zeros(count, dtype=float)
+        for index in range(count):
+            downstream_mass = float(np.sum(masses[index:]))
+            downstream_moment = np.sum(moments[index:], axis=0)
+            torque[index] -= axes[index] @ np.cross(
+                downstream_moment - downstream_mass * origins[index],
+                gravity_vector)
+        return torque
+
 
     def _scaled_urdf(self, only_link: str = "") -> str:
         root = copy.deepcopy(self._template)
@@ -382,7 +468,7 @@ class TorsoArmGravityModel:
                 "Pinocchio joint order does not match the LowState motor order")
 
     @staticmethod
-    def _set_gravity(model, gravity: Sequence[float]) -> None:
+    def _set_gravity(model, gravity: ArrayLike) -> None:
         vector = np.asarray(gravity, dtype=float)
         if vector.shape != (3,) or not np.all(np.isfinite(vector)):
             raise ValueError("gravity must contain three finite values")
@@ -390,7 +476,7 @@ class TorsoArmGravityModel:
             raise ValueError("gravity vector must be non-zero")
         model.gravity.linear = vector
 
-    def _validate_configuration(self, q: Sequence[float]) -> np.ndarray:
+    def _validate_configuration(self, q: ArrayLike) -> np.ndarray:
         array = np.asarray(q, dtype=float)
         if array.shape != (self.model.nq,) or not np.all(np.isfinite(array)):
             raise ValueError("q must contain 14 finite arm positions")

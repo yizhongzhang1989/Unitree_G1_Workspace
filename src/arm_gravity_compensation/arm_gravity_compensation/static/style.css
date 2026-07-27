@@ -115,7 +115,7 @@ main { max-width: 1500px; margin: 0 auto; background: var(--surface); border-inl
 select { min-height: 32px; max-width: 210px; padding: 0 25px 0 8px; border: 1px solid #56615d; border-radius: 3px; color: #f4f7f5; background: #28312e; }
 .plot-toolbar .text-button { margin-left: auto; }
 canvas { width: 100%; height: 390px; display: block; background: #161c1a; border: 1px solid #46504c; border-radius: var(--radius); }
-.target-table-wrap { margin-top: 28px; max-height: 260px; overflow: auto; border-top: 1px solid #46504c; }
+.target-table-wrap { margin-top: 28px; overflow-x: auto; border-top: 1px solid #46504c; }
 table { width: 100%; border-collapse: collapse; }
 th { height: 40px; color: var(--muted); font-size: 11px; text-align: left; font-weight: 600; text-transform: uppercase; }
 td { min-height: 42px; padding: 10px 8px 10px 0; border-top: 1px solid var(--line); font-size: 12px; vertical-align: middle; }
@@ -141,6 +141,8 @@ td code { font-family: "IBM Plex Mono", monospace; font-size: 11px; }
 .progress-ring span { z-index: 1; color: var(--ink); font: 600 13px/1 "IBM Plex Mono", monospace; }
 .confirmation-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: center; gap: 12px; margin-bottom: 14px; }
 .confirmation-field span { color: var(--muted); }
+.arm-warning { margin: 10px 0 0; font-weight: 600; font-size: 12px; color: var(--red); }
+.arm-warning:empty { display: none; }
 input[type="text"], .confirmation-field input { width: 100%; min-height: 40px; padding: 0 10px; border: 1px solid #bfc6bf; border-radius: 3px; background: #fff; font-family: "IBM Plex Mono", monospace; }
 .gravity-panel { padding: 20px 22px; background: #edf1ec; border-left: 4px solid var(--blue); }
 .gravity-panel h3 { margin: 0 0 18px; font-size: 14px; }

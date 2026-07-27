@@ -2,9 +2,8 @@
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Sequence
-
 import numpy as np
+from numpy.typing import ArrayLike
 
 
 @dataclass(frozen=True)
@@ -14,7 +13,6 @@ class TorqueStep:
     applied: np.ndarray
     target_error: np.ndarray
     trajectory_complete: bool
-    settled: bool
 
 
 class PoseStabilityWindow:
@@ -32,9 +30,6 @@ class PoseStabilityWindow:
             raise ValueError("position stability tolerance must be non-negative")
         self.duration = float(duration)
         self.position_range_tolerance = float(position_range_tolerance)
-        self.reset()
-
-    def reset(self) -> None:
         self._samples = deque()
         self.span = 0.0
         self.max_velocity = float("inf")
@@ -43,8 +38,8 @@ class PoseStabilityWindow:
     def update(
         self,
         timestamp: float,
-        position: Sequence[float],
-        velocity: Sequence[float],
+        position: ArrayLike,
+        velocity: ArrayLike,
     ) -> bool:
         position_array = TorquePoseController._seven(position, "position")
         velocity_array = TorquePoseController._seven(velocity, "velocity")
@@ -77,12 +72,10 @@ class TorquePoseController:
     def __init__(
         self,
         *,
-        stiffness: Sequence[float] = (40.0, 40.0, 40.0, 40.0, 40.0, 20.0, 20.0),
-        damping: Sequence[float] = (3.0, 3.0, 3.0, 3.0, 3.0, 1.5, 1.5),
-        torque_slew_rate: Sequence[float] = (30.0,) * 7,
+        stiffness: ArrayLike = (40.0, 40.0, 40.0, 40.0, 40.0, 20.0, 20.0),
+        damping: ArrayLike = (3.0, 3.0, 3.0, 3.0, 3.0, 1.5, 1.5),
+        torque_slew_rate: ArrayLike = (30.0,) * 7,
         maximum_speed: float = 0.35,
-        position_tolerance: float = 0.04,
-        velocity_tolerance: float = 0.05,
         minimum_duration: float = 2.0,
     ) -> None:
         self.stiffness = self._seven(stiffness, "stiffness")
@@ -96,14 +89,12 @@ class TorquePoseController:
         self.maximum_speed = float(maximum_speed)
         if self.maximum_speed <= 0.0:
             raise ValueError("maximum speed must be positive")
-        self.position_tolerance = float(position_tolerance)
-        self.velocity_tolerance = float(velocity_tolerance)
         self.minimum_duration = float(minimum_duration)
         self._active = False
 
-    def start(self, timestamp: float, position: Sequence[float],
-              target: Sequence[float],
-              initial_torque: Sequence[float] = (0.0,) * 7) -> float:
+    def start(self, timestamp: float, position: ArrayLike,
+              target: ArrayLike,
+              initial_torque: ArrayLike = (0.0,) * 7) -> float:
         self._start = self._seven(position, "position")
         self._target = self._seven(target, "target")
         self._start_time = float(timestamp)
@@ -118,9 +109,9 @@ class TorquePoseController:
     def step(
         self,
         timestamp: float,
-        position: Sequence[float],
-        velocity: Sequence[float],
-        gravity_torque: Sequence[float],
+        position: ArrayLike,
+        velocity: ArrayLike,
+        gravity_torque: ArrayLike,
     ) -> TorqueStep:
         """算出这一拍要下发给电机的设定点，并预测电机会产生多大力矩。
 
@@ -183,25 +174,17 @@ class TorquePoseController:
         # ---- 4. 状态汇报 ----
         # target_error 是"最终目标"与实测位置之差，只写进记录供诊断，
         # 不参与控制，也不作为静止判据（判据在 PoseStabilityWindow 里看位置量程）。
-        target_error = self._target - position_array
         # trajectory_complete：参考轨迹本身走完了（不代表手臂到位了）。
-        trajectory_complete = ratio >= 1.0
-        # settled：轨迹走完 + 实测位置贴近目标 + 速度足够小。目前只用于诊断。
-        settled = bool(
-            trajectory_complete and
-            np.max(np.abs(target_error)) <= self.position_tolerance and
-            np.max(np.abs(velocity_array)) <= self.velocity_tolerance)
         return TorqueStep(
             feedforward=self._last_feedforward.copy(),  # 写入 LowCmd 的 tau
             reference=reference,                        # 写入 LowCmd 的 q
             applied=applied,                            # 回归用的观测力矩
-            target_error=target_error,
-            trajectory_complete=trajectory_complete,
-            settled=settled,
+            target_error=self._target - position_array,
+            trajectory_complete=ratio >= 1.0,
         )
 
     @staticmethod
-    def _seven(value: Sequence[float], name: str) -> np.ndarray:
+    def _seven(value: ArrayLike, name: str) -> np.ndarray:
         array = np.asarray(value, dtype=float)
         if array.shape != (7,) or not np.all(np.isfinite(array)):
             raise ValueError("%s must contain seven finite values" % name)

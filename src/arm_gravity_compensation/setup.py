@@ -14,6 +14,10 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml", "README.md"]),
         ("share/" + package_name + "/launch", glob("launch/*.launch.py")),
+        # Calibration outputs live in the repository so the identified values
+        # are version controlled; --symlink-install makes the node write back
+        # through to the source tree.
+        ("share/" + package_name + "/config", glob("config/*")),
     ],
     package_data={package_name: ["static/*.html", "static/*.css", "static/*.js"]},
     include_package_data=True,

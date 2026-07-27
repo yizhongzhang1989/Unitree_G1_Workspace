@@ -282,6 +282,8 @@ bool G1TopicSystem::configure_interfaces() {
     imu_state_.fill(0.0);
     imu_state_[3] = 1.0;
     pending_imu_ = imu_state_;
+    torso_imu_state_ = imu_state_;
+    pending_torso_imu_ = imu_state_;
     return true;
 }
 
@@ -313,6 +315,11 @@ void G1TopicSystem::configure_parameters() {
     };
 
     lowstate_topic_ = string_parameter("lowstate_topic", "/lowstate");
+    // The torso IMU is a separate sensor from ``LowState.imu_state`` (pelvis);
+    // it is exported under its own name rather than declared in the URDF so
+    // that the shared description submodule stays untouched.
+    torso_imu_topic_ = string_parameter("torso_imu_topic", "/secondary_imu");
+    torso_imu_sensor_name_ = string_parameter("torso_imu_sensor", "torso_imu");
     lowcmd_topic_ = string_parameter("lowcmd_topic", "/lowcmd");
     gripper_state_topics_ = {
         string_parameter("left_gripper_state_topic", "/grip_arm0/joint_states"),
@@ -357,6 +364,7 @@ void G1TopicSystem::configure_parameters() {
         double_parameter("lowcmd_quiet_period_s", lowcmd_quiet_period_s_);
     lowcmd_quiet_timeout_s_ =
         double_parameter("lowcmd_quiet_timeout_s", lowcmd_quiet_timeout_s_);
+    release_ramp_s_ = double_parameter("release_ramp_s", release_ramp_s_);
     require_pr_mode_ = bool_parameter("require_pr_mode", require_pr_mode_);
     manage_motion_mode_ = bool_parameter("manage_motion_mode", manage_motion_mode_);
     restore_motion_mode_ = bool_parameter("restore_motion_mode", restore_motion_mode_);
@@ -372,7 +380,9 @@ void G1TopicSystem::configure_parameters() {
         !finite_positive(arm_stiffness_scale_) || arm_stiffness_scale_ > 4.0 ||
         motion_release_attempts_ <= 0 || !std::isfinite(motion_release_retry_s_) ||
         motion_release_retry_s_ < 0.0 || gripper_kp_ < 0.0 || gripper_kp_ > 500.0 ||
-        gripper_kd_ < 0.0 || gripper_kd_ > 5.0) {
+        gripper_kd_ < 0.0 || gripper_kd_ > 5.0 ||
+        !std::isfinite(release_ramp_s_) || release_ramp_s_ < 0.0 ||
+        release_ramp_s_ > 30.0) {
         throw std::invalid_argument("invalid ros2_control hardware safety parameter");
     }
     if (lowstate_topic_.empty() || lowcmd_topic_.empty() ||
@@ -395,6 +405,14 @@ void G1TopicSystem::configure_parameters() {
     const std::string gain_file = string_parameter("gain_file", "");
     if (gain_file.empty() || !load_gains(gain_file)) {
         throw std::invalid_argument("gain_file is missing or invalid");
+    }
+    // Mirror the effective gains onto the controlled-joint layout, including
+    // the two Gloria eccentrics, so controllers can read them as state.
+    std::copy(stiffness_.begin(), stiffness_.end(), gain_stiffness_.begin());
+    std::copy(damping_.begin(), damping_.end(), gain_damping_.begin());
+    for (std::size_t index = kG1JointCount; index < kControlledJointCount; ++index) {
+        gain_stiffness_[index] = gripper_kp_;
+        gain_damping_[index] = gripper_kd_;
     }
     RCLCPP_INFO(
         rclcpp::get_logger("G1TopicSystem"),
@@ -451,6 +469,13 @@ void G1TopicSystem::create_ros_interfaces() {
     lowstate_subscription_ = node_->create_subscription<unitree_hg::msg::LowState>(
         lowstate_topic_, sensor_qos,
         [this](unitree_hg::msg::LowState::SharedPtr message) { on_lowstate(std::move(message)); });
+    if (!torso_imu_topic_.empty()) {
+        torso_imu_subscription_ = node_->create_subscription<unitree_hg::msg::IMUState>(
+            torso_imu_topic_, sensor_qos,
+            [this](unitree_hg::msg::IMUState::SharedPtr message) {
+                on_torso_imu(std::move(message));
+            });
+    }
     for (std::size_t side = 0; side < 2; ++side) {
         gripper_state_subscriptions_[side] =
             node_->create_subscription<sensor_msgs::msg::JointState>(
@@ -494,6 +519,12 @@ std::vector<hardware_interface::StateInterface> G1TopicSystem::export_state_inte
             info_.joints[index].name, hardware_interface::HW_IF_EFFORT,
             &state_effort_[index]);
     }
+    for (std::size_t index = 0; index < info_.joints.size(); ++index) {
+        interfaces.emplace_back(
+            info_.joints[index].name, "kp", &gain_stiffness_[index]);
+        interfaces.emplace_back(
+            info_.joints[index].name, "kd", &gain_damping_[index]);
+    }
     for (std::size_t sensor = 0; sensor < kForceTorqueSensorCount; ++sensor) {
         for (std::size_t axis = 0; axis < kWrenchAxisCount; ++axis) {
             interfaces.emplace_back(
@@ -504,6 +535,13 @@ std::vector<hardware_interface::StateInterface> G1TopicSystem::export_state_inte
     for (std::size_t axis = 0; axis < kImuAxisCount; ++axis) {
         interfaces.emplace_back(
             imu_sensor_name_, kImuInterfaceNames[axis], &imu_state_[axis]);
+    }
+    if (!torso_imu_sensor_name_.empty()) {
+        for (std::size_t axis = 0; axis < kImuAxisCount; ++axis) {
+            interfaces.emplace_back(
+                torso_imu_sensor_name_, kImuInterfaceNames[axis],
+                &torso_imu_state_[axis]);
+        }
     }
     return interfaces;
 }
@@ -526,6 +564,7 @@ hardware_interface::return_type G1TopicSystem::start() {
     executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     executor_->add_node(node_);
     executor_thread_ = std::thread([executor = executor_]() { executor->spin(); });
+    start_release_channel();
     status_ = hardware_interface::status::STARTED;
     RCLCPP_INFO(node_->get_logger(), "G1 topic system started with output disabled");
     return hardware_interface::return_type::OK;
@@ -533,12 +572,16 @@ hardware_interface::return_type G1TopicSystem::start() {
 
 hardware_interface::return_type G1TopicSystem::stop() {
     if (status_ == hardware_interface::status::STARTED) {
+        release_body();
         clear_output();
-        if (rclcpp::ok() && control_acquired_.load(std::memory_order_acquire)) {
-            std::string error;
-            if (!release_control(true, error)) {
-                RCLCPP_ERROR(node_->get_logger(), "Shutdown cleanup failed: %s", error.c_str());
-            }
+        if (control_acquired_.load(std::memory_order_acquire)) {
+            // Not release_control(): that waits for service replies, and by the
+            // time stop() runs the executor is gone so none can arrive.
+            // restore_motion_mode() alone would retry for
+            // motion_select_timeout_s_, far past the point where launch gives up
+            // waiting and sends SIGTERM. The gripper nodes disable themselves
+            // from their own shutdown handler, so only the motion mode is left.
+            restore_motion_on_shutdown();
         }
     }
     if (executor_) {
@@ -548,6 +591,7 @@ hardware_interface::return_type G1TopicSystem::stop() {
         }
         executor_.reset();
     }
+    stop_release_channel();
     status_ = hardware_interface::status::STOPPED;
     return hardware_interface::return_type::OK;
 }
@@ -571,32 +615,47 @@ void G1TopicSystem::on_lowstate(const unitree_hg::msg::LowState::SharedPtr messa
     }
     pending_state_.mode_pr = message->mode_pr;
     pending_state_.mode_machine = message->mode_machine;
+    decode_imu(message->imu_state, pending_imu_);
+    pending_state_.g1_received_at = Clock::now();
+}
+
+void G1TopicSystem::decode_imu(
+    const unitree_hg::msg::IMUState& imu,
+    std::array<double, kImuAxisCount>& target) {
+    // Unitree stores the quaternion as (w, x, y, z); ros2_control expects
+    // (x, y, z, w).
     const std::array<double, 4> orientation = {
-        message->imu_state.quaternion[1],
-        message->imu_state.quaternion[2],
-        message->imu_state.quaternion[3],
-        message->imu_state.quaternion[0],
+        imu.quaternion[1],
+        imu.quaternion[2],
+        imu.quaternion[3],
+        imu.quaternion[0],
     };
     const double orientation_norm = std::sqrt(
         orientation[0] * orientation[0] + orientation[1] * orientation[1] +
         orientation[2] * orientation[2] + orientation[3] * orientation[3]);
     if (std::isfinite(orientation_norm) && orientation_norm > 0.0) {
         for (std::size_t axis = 0; axis < orientation.size(); ++axis) {
-            pending_imu_[axis] = orientation[axis] / orientation_norm;
+            target[axis] = orientation[axis] / orientation_norm;
         }
     } else {
-        pending_imu_[0] = 0.0;
-        pending_imu_[1] = 0.0;
-        pending_imu_[2] = 0.0;
-        pending_imu_[3] = 1.0;
+        target[0] = 0.0;
+        target[1] = 0.0;
+        target[2] = 0.0;
+        target[3] = 1.0;
     }
     for (std::size_t axis = 0; axis < 3; ++axis) {
-        const double angular_velocity = message->imu_state.gyroscope[axis];
-        const double linear_acceleration = message->imu_state.accelerometer[axis];
-        pending_imu_[4 + axis] = std::isfinite(angular_velocity) ? angular_velocity : 0.0;
-        pending_imu_[7 + axis] = std::isfinite(linear_acceleration) ? linear_acceleration : 0.0;
+        const double angular_velocity = imu.gyroscope[axis];
+        const double linear_acceleration = imu.accelerometer[axis];
+        target[4 + axis] = std::isfinite(angular_velocity) ? angular_velocity : 0.0;
+        target[7 + axis] =
+            std::isfinite(linear_acceleration) ? linear_acceleration : 0.0;
     }
-    pending_state_.g1_received_at = Clock::now();
+}
+
+void G1TopicSystem::on_torso_imu(const unitree_hg::msg::IMUState::SharedPtr message) {
+    std::lock_guard<std::mutex> guard(state_mutex_);
+    decode_imu(*message, pending_torso_imu_);
+    torso_imu_received_.store(true, std::memory_order_release);
 }
 
 void G1TopicSystem::on_gripper_state(
@@ -680,6 +739,9 @@ hardware_interface::return_type G1TopicSystem::read() {
             state_effort_[index] = pending_state_.effort[index];
         }
         imu_state_ = pending_imu_;
+        if (torso_imu_received_.load(std::memory_order_acquire)) {
+            torso_imu_state_ = pending_torso_imu_;
+        }
     }
     for (std::size_t sensor = 0; sensor < kForceTorqueSensorCount; ++sensor) {
         if (wrench_received_[sensor].load(std::memory_order_acquire)) {
@@ -1145,6 +1207,110 @@ bool G1TopicSystem::wait_for_lowcmd_quiet() {
 
 void G1TopicSystem::clear_output() {
     output_inhibited_.store(true, std::memory_order_release);
+}
+
+void G1TopicSystem::release_body() {
+    // Stopping the publisher does not release a joint: the firmware has no
+    // watchdog, so the last kp/kd/q keeps being held and the arm stays locked at
+    // whatever pose it was in, drawing current until it overheats. Something has
+    // to wind the gains down, which is what this does before clear_output().
+    const std::uint32_t claimed = claimed_joint_mask_.load(std::memory_order_acquire);
+    if ((claimed & kBodyClaimMask) == 0U || !release_lowcmd_publisher_ ||
+        output_inhibited_.load(std::memory_order_acquire) || release_ramp_s_ <= 0.0) {
+        return;
+    }
+
+    constexpr double kRate = 100.0;
+    const int steps = std::max(1, static_cast<int>(release_ramp_s_ * kRate));
+    std::uint8_t mode_machine = 0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        mode_machine = pending_state_.mode_machine;
+    }
+
+    RCLCPP_INFO(
+        node_->get_logger(), "Releasing body joints over %.1f s", release_ramp_s_);
+    for (int step = 1; step <= steps + 1; ++step) {
+        const bool last = step > steps;
+        const double scale = last ? 0.0 : 1.0 - static_cast<double>(step) / steps;
+        unitree_hg::msg::LowCmd message;
+        message.mode_pr = 0;
+        message.mode_machine = mode_machine;
+        for (std::size_t index = 0; index < kG1JointCount; ++index) {
+            auto& command = message.motor_cmd[index];
+            const bool owned = (claimed & (1U << index)) != 0U;
+            command.mode = owned && !last ? 1 : 0;
+            // Holding the last command rather than the measurement is what makes
+            // this a fade instead of a drop: the command already sits a droop
+            // away from the feedback, so torque = kp * scale * droop decays from
+            // exactly what the motor is producing now. Commanding the measured
+            // pose would zero the error, and the arm would fall on frame one.
+            command.q = static_cast<float>(
+                std::isfinite(command_position_[index]) ? command_position_[index]
+                                                        : state_position_[index]);
+            command.dq = 0.0F;
+            command.tau = 0.0F;
+            command.kp = owned ? static_cast<float>(stiffness_[index] * scale) : 0.0F;
+            // kd carries the whole descent and only goes on the last frame, where
+            // the pose is at rest and removing it moves nothing.
+            command.kd = owned && !last ? static_cast<float>(damping_[index]) : 0.0F;
+        }
+        message.crc = lowcmd_crc(message);
+        release_lowcmd_publisher_->publish(message);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(static_cast<int>(1000.0 / kRate)));
+    }
+}
+
+void G1TopicSystem::start_release_channel() {
+    // Deliberately a second context with shutdown_on_sigint disabled. The global
+    // one is already down by the time stop() runs, and rclcpp silently drops
+    // publishes on a shut-down context, so the release would go nowhere.
+    rclcpp::InitOptions options;
+    options.shutdown_on_sigint = false;
+    release_context_ = std::make_shared<rclcpp::Context>();
+    release_context_->init(0, nullptr, options);
+    rclcpp::NodeOptions node_options;
+    node_options.context(release_context_);
+    node_options.start_parameter_services(false);
+    node_options.start_parameter_event_publisher(false);
+    release_node_ = std::make_shared<rclcpp::Node>("g1_release_channel", node_options);
+    release_lowcmd_publisher_ = release_node_->create_publisher<unitree_hg::msg::LowCmd>(
+        lowcmd_topic_, rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
+    release_motion_publisher_ = release_node_->create_publisher<unitree_api::msg::Request>(
+        "/api/motion_switcher/request", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
+}
+
+void G1TopicSystem::stop_release_channel() {
+    release_lowcmd_publisher_.reset();
+    release_motion_publisher_.reset();
+    release_node_.reset();
+    if (release_context_) {
+        release_context_->shutdown("g1 release channel done");
+        release_context_.reset();
+    }
+}
+
+void G1TopicSystem::restore_motion_on_shutdown() {
+    if (!manage_motion_mode_ || !restore_motion_mode_ || !release_motion_publisher_) {
+        return;
+    }
+    const std::string target =
+        previous_motion_mode_.empty() ? fallback_motion_mode_ : previous_motion_mode_;
+    if (!safe_mode_name(target)) {
+        return;
+    }
+    unitree_api::msg::Request request;
+    request.header.identity.id =
+        static_cast<std::int64_t>(Clock::now().time_since_epoch().count());
+    request.header.identity.api_id = kSelectModeApiId;
+    request.parameter = "{\"name\":\"" + target + "\"}";
+    release_motion_publisher_->publish(request);
+    RCLCPP_INFO(node_->get_logger(), "Handing the robot back to motion mode '%s'",
+                target.c_str());
+    // The reply cannot be read here, so give the transport a moment to flush
+    // before the process tears the publisher down.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
 
 }  // namespace unitree_g1_ros2_control

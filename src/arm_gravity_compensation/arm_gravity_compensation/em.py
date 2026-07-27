@@ -1,9 +1,10 @@
 """Robust linear parameter fitting with a Gaussian-mixture EM model."""
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional
 
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy.optimize import lsq_linear
 
 
@@ -13,8 +14,6 @@ class EMResult:
     inlier_probability: np.ndarray
     inlier_fraction: float
     noise_std: float
-    outlier_noise_std: float
-    iterations: int
     converged: bool
 
 
@@ -61,19 +60,19 @@ def _weighted_ridge(
 
 
 def fit_robust_em(
-    design: Sequence[Sequence[float]],
-    observed: Sequence[float],
+    design: ArrayLike,
+    observed: ArrayLike,
     *,
-    prior_mean=0.0,
-    prior_precision=0.0,
-    blocks: Optional[Sequence[int]] = None,
+    prior_mean: ArrayLike = 0.0,
+    prior_precision: ArrayLike = 0.0,
+    blocks: Optional[ArrayLike] = None,
     outlier_scale: float = 10.0,
     initial_inlier_fraction: float = 0.9,
     max_iterations: int = 100,
     tolerance: float = 1e-7,
     minimum_noise_std: float = 1e-4,
-    lower_bounds: Optional[Sequence[float]] = None,
-    upper_bounds: Optional[Sequence[float]] = None,
+    lower_bounds: Optional[ArrayLike] = None,
+    upper_bounds: Optional[ArrayLike] = None,
 ) -> EMResult:
     """Fit ``observed = design @ parameters`` with a two-noise EM model.
 
@@ -139,7 +138,7 @@ def fit_robust_em(
     probability = np.full(values.size, inlier_fraction, dtype=float)
     converged = False
 
-    for iteration in range(1, max_iterations + 1):
+    for _ in range(max_iterations):
         previous = parameters
         residual = values - matrix @ parameters
         log_ratio = np.bincount(
@@ -186,7 +185,5 @@ def fit_robust_em(
         inlier_probability=probability,
         inlier_fraction=inlier_fraction,
         noise_std=noise_std,
-        outlier_noise_std=outlier_noise_std,
-        iterations=iteration,
         converged=converged,
     )

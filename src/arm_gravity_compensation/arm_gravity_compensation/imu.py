@@ -1,28 +1,40 @@
 """Stable torso-frame gravity estimation from the head IMU accelerometer."""
 
 from dataclasses import dataclass
-from typing import Sequence
-
 import numpy as np
+from numpy.typing import ArrayLike
 
 
 @dataclass(frozen=True)
 class GravityEstimate:
     gravity: np.ndarray
     mean_acceleration: np.ndarray
-    acceleration_std: np.ndarray
-    mean_gyro_norm: float
     sample_count: int
-    duration: float
+
+
+def gravity_from_acceleration(
+    imu_to_torso_rotation: ArrayLike,
+    acceleration: ArrayLike,
+    *,
+    acceleration_sign: float = -1.0,
+    gravity_magnitude: float = 9.81,
+) -> np.ndarray:
+    """Rotate one accelerometer reading into the torso-frame gravity vector."""
+    rotation = np.asarray(imu_to_torso_rotation, dtype=float)
+    if rotation.shape != (3, 3):
+        raise ValueError("imu_to_torso_rotation must have shape (3, 3)")
+    direction = rotation @ np.asarray(acceleration, dtype=float)
+    norm = float(np.linalg.norm(direction))
+    if norm < 1e-6:
+        raise ValueError("accelerometer reading is degenerate")
+    return (float(acceleration_sign) * float(gravity_magnitude) *
+            direction / norm)
 
 
 class ImuSampleWindow:
     """Collect one bounded IMU window and reject it when the torso moved."""
 
     def __init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
         self._times = []
         self._accelerations = []
         self._gyroscopes = []
@@ -30,8 +42,8 @@ class ImuSampleWindow:
     def add(
         self,
         timestamp: float,
-        acceleration: Sequence[float],
-        gyroscope: Sequence[float],
+        acceleration: ArrayLike,
+        gyroscope: ArrayLike,
     ) -> None:
         acceleration_array = np.asarray(acceleration, dtype=float)
         gyroscope_array = np.asarray(gyroscope, dtype=float)
@@ -60,7 +72,7 @@ class ImuSampleWindow:
 
     def estimate(
         self,
-        imu_to_torso_rotation: Sequence[Sequence[float]],
+        imu_to_torso_rotation: ArrayLike,
         *,
         acceleration_sign: float = -1.0,
         gravity_magnitude: float = 9.81,
@@ -91,17 +103,11 @@ class ImuSampleWindow:
                 "torso is rotating (mean gyro norm %.3f > %.3f)"
                 % (mean_gyro_norm, maximum_gyro_norm))
 
-        rotation = np.asarray(imu_to_torso_rotation, dtype=float)
-        if rotation.shape != (3, 3):
-            raise ValueError("imu_to_torso_rotation must have shape (3, 3)")
-        direction = rotation @ mean_acceleration
-        gravity = (float(acceleration_sign) * float(gravity_magnitude) *
-                   direction / np.linalg.norm(direction))
         return GravityEstimate(
-            gravity=gravity,
+            gravity=gravity_from_acceleration(
+                imu_to_torso_rotation, mean_acceleration,
+                acceleration_sign=acceleration_sign,
+                gravity_magnitude=gravity_magnitude),
             mean_acceleration=mean_acceleration,
-            acceleration_std=acceleration_std,
-            mean_gyro_norm=mean_gyro_norm,
             sample_count=self.sample_count,
-            duration=self.duration,
         )

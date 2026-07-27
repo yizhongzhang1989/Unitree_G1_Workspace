@@ -53,6 +53,17 @@ function selectedJoints() {
   return [...document.querySelectorAll(".joint-check:checked")].map(input => input.value);
 }
 
+function updateArmWarning() {
+  const joints = selectedJoints();
+  const sides = [
+    ...(joints.some(name => name.startsWith("left_")) ? ["左臂"] : []),
+    ...(joints.some(name => name.startsWith("right_")) ? ["右臂"] : []),
+  ];
+  ui.armWarning.textContent = sides.length
+    ? `启动后将运动：${sides.join(" + ")}（共 ${joints.length} 个关节）`
+    : "未选择任何关节";
+}
+
 function buildJointSelection(snapshot) {
   const selected = new Set(snapshot.selected_joints);
   ["left", "right"].forEach(side => {
@@ -123,7 +134,7 @@ function updateRuntime(snapshot) {
   ui.capturePoint.disabled = !captureActive;
   ui.stopCapture.disabled = !captureActive;
   ui.startCalibration.disabled = calibrationActive || !online || !runtime.torque_output_allowed || snapshot.targets.length === 0 || selectedJoints().length === 0;
-  ui.stopCalibration.disabled = !calibrationActive;
+  updateArmWarning();  ui.stopCalibration.disabled = !calibrationActive;
 }
 
 function updateTargets(snapshot) {
@@ -133,12 +144,14 @@ function updateTargets(snapshot) {
     const right = values.slice(7);
     const range = list => `${Math.min(...list).toFixed(2)} … ${Math.max(...list).toFixed(2)}`;
     return `<tr>
-      <td><code>#${target.id}</code></td><td>${target.source}</td>
+      <td><code>#${target.id}</code></td>
+      <td>${{ left: "左臂", right: "右臂" }[target.side] ?? "双臂"}</td>
+      <td>${target.source}</td>
       <td>${target.captured_at.replace("T", " ").slice(0, 19)}</td>
       <td><code>${range(left)}</code></td><td><code>${range(right)}</code></td>
       <td><button class="delete-button" data-remove="${target.id}" title="删除姿态">×</button></td>
     </tr>`;
-  }).join("") : `<tr><td class="empty-row" colspan="6">尚未记录标定姿态</td></tr>`;
+  }).join("") : `<tr><td class="empty-row" colspan="7">尚未记录标定姿态</td></tr>`;
   drawPlot(snapshot);
 }
 
@@ -274,7 +287,7 @@ function bind() {
     catch (error) { toast(error.message, true); }
   });
   ui.startCalibration.addEventListener("click", async () => {
-    try { const result = await api("/api/calibration/start", { confirmation: ui.confirmationInput.value }); toast(result.message); await refresh(); }
+    try { const result = await api("/api/calibration/start", { confirmation: ui.confirmationInput.value, selected_joints: selectedJoints() }); toast(result.message); await refresh(); }
     catch (error) { toast(error.message, true); }
   });
   ui.stopCalibration.addEventListener("click", async () => {
@@ -285,6 +298,8 @@ function bind() {
     try { const result = await api("/api/export"); toast(`已写入 ${result.path}`); }
     catch (error) { toast(error.message, true); }
   });
+  [ui.leftJoints, ui.rightJoints].forEach(root =>
+    root.addEventListener("change", updateArmWarning));
   [ui.xAxis, ui.yAxis].forEach(select => select.addEventListener("change", () => state && drawPlot(state)));
   window.addEventListener("resize", () => state && drawPlot(state));
 

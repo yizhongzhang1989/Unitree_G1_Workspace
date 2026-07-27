@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
+from arm_gravity_compensation.constants import ARM_JOINTS
 from arm_gravity_compensation.gravity_model import TorsoArmGravityModel
 
 
@@ -9,6 +10,46 @@ URDF = (Path(__file__).parents[2] / "unitree_g1_description" / "model" /
         "g1_description" / "g1_29dof_mode_15.urdf")
 FINAL_URDF = (Path(__file__).parents[2] / "unitree_g1_description" / "model" /
           "final.urdf")
+
+
+def test_gravity_table_reproduces_pinocchio_for_both_arms():
+    model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
+    aggregation = model.group_aggregation("left")
+    model.set_arm_parameters(
+        "left", aggregation @ np.array([1.05, 0.9, 1.1, 0.95, 1.2, 1.0, 1.4]),
+        np.array([0.3, -0.2, 0.15, 0.25, -0.05, 0.1, -0.08]))
+    model.set_arm_parameters(
+        "right", np.full(len(model.parameter_links["right"]), 1.12),
+        np.linspace(-0.2, 0.2, 7))
+    table = model.gravity_table()
+    random = np.random.RandomState(5)
+
+    for _ in range(50):
+        q = random.uniform(-2.0, 2.0, size=14)
+        gravity = random.normal(size=3)
+        gravity *= 9.81 / np.linalg.norm(gravity)
+        for offset, side in ((0, "left"), (7, "right")):
+            # 导出表只带纯重力项，标定出的力矩偏置不外传，所以要减掉。
+            _, biases = model.arm_parameters(side)
+            np.testing.assert_allclose(
+                model.gravity_from_table(
+                    table, side, q[offset:offset + 7], gravity),
+                model.compensation(side, q, gravity) - biases,
+                atol=1e-12)
+
+    assert "torque_bias" not in table["left"]
+
+    # 归并后每侧只剩 7 个刚体，腕偏航体的质量等于它名下 8 个固连 link 的标定后质量之和。
+    assert table["left"]["joints"] == list(ARM_JOINTS["left"])
+    assert len(table["left"]["origin_rotation"]) == 63
+    scales, _ = model.arm_parameters("left")
+    welded = [index for index, name in enumerate(model.parameter_links["left"])
+              if model.parameter_owner[name] == "left_wrist_yaw_joint"]
+    assert len(welded) == 8
+    np.testing.assert_allclose(
+        table["left"]["mass"][6],
+        float(np.sum(model.parameter_masses["left"][welded] * scales[welded])),
+        rtol=1e-12)
 
 
 def test_real_urdf_is_reduced_to_two_torso_relative_arms():

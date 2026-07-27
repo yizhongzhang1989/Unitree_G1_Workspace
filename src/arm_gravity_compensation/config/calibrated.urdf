@@ -1,0 +1,1857 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="g1_with_dual_gloria_m">
+  <material name="dark">
+    <color rgba="0.2 0.2 0.2 1" />
+  </material>
+  <material name="white">
+    <color rgba="0.7 0.7 0.7 1" />
+  </material>
+  <mujoco>
+    <compiler discardvisual="false" meshdir="meshes" />
+  </mujoco>
+  
+  
+  <link name="pelvis">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 -0.07605" />
+      <mass value="3.8130000000000002" />
+      <inertia ixx="0.010548999999999999" ixy="0" ixz="2.0999999999999998e-06" iyy="0.0093089000000000002" iyz="0" izz="0.0079184000000000008" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/pelvis_ver0529.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+  </link>
+  
+  <link name="left_hip_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.002741 0.047791 -0.02606" />
+      <mass value="1.3500000000000001" />
+      <inertia ixx="0.0018109999999999999" ixy="3.68e-05" ixz="-3.4400000000000003e-05" iyy="0.0014193000000000001" iyz="0.00017100000000000001" izz="0.0012811999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_hip_pitch_link.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_hip_pitch_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_hip_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0.064452 -0.1027" />
+    <parent link="pelvis" />
+    <child link="left_hip_pitch_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="139" lower="-2.5307" upper="2.8798" velocity="20" />
+  </joint>
+  <link name="left_hip_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.029812 -0.001045 -0.087934" />
+      <mass value="1.52" />
+      <inertia ixx="0.0023773000000000002" ixy="-3.8e-06" ixz="-0.00039080000000000001" iyy="0.0024123" iyz="1.84e-05" izz="0.0016595" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_hip_roll_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_hip_roll_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_hip_roll_joint" type="revolute">
+    <origin rpy="0 -0.1749 0" xyz="0 0.052 -0.030465" />
+    <parent link="left_hip_pitch_link" />
+    <child link="left_hip_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="139" lower="-0.5236" upper="2.9671" velocity="20" />
+  </joint>
+  <link name="left_hip_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.057709 -0.010981 -0.15078" />
+      <mass value="1.702" />
+      <inertia ixx="0.0057774000000000002" ixy="-0.00054109999999999998" ixz="-0.0023947999999999999" iyy="0.0076124000000000001" iyz="-0.00070719999999999995" izz="0.0031489999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_hip_yaw_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_hip_yaw_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_hip_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.025001 0 -0.12412" />
+    <parent link="left_hip_roll_link" />
+    <child link="left_hip_yaw_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="88" lower="-2.7576" upper="2.7576" velocity="32" />
+  </joint>
+  <link name="left_knee_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.005457 0.003964 -0.12074" />
+      <mass value="1.9319999999999999" />
+      <inertia ixx="0.011329000000000001" ixy="4.8199999999999999e-05" ixz="-4.49e-05" iyy="0.011277000000000001" iyz="-0.00071460000000000002" izz="0.0015168" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_knee_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_knee_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_knee_joint" type="revolute">
+    <origin rpy="0 0.1749 0" xyz="-0.078273 0.0021489 -0.17734" />
+    <parent link="left_hip_yaw_link" />
+    <child link="left_knee_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="139" lower="-0.087267" upper="2.8798" velocity="20" />
+  </joint>
+  <link name="left_ankle_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.007269 0 0.011137" />
+      <mass value="0.073999999999999996" />
+      <inertia ixx="8.3999999999999992e-06" ixy="0" ixz="-2.9000000000000002e-06" iyy="1.8899999999999999e-05" iyz="0" izz="1.26e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_ankle_pitch_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_ankle_pitch_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_ankle_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 -9.4445E-05 -0.30001" />
+    <parent link="left_knee_link" />
+    <child link="left_ankle_pitch_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="35" lower="-0.87267" upper="0.5236" velocity="30" />
+  </joint>
+  <link name="left_ankle_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.026505 0 -0.016425" />
+      <mass value="0.60799999999999998" />
+      <inertia ixx="0.0002231" ixy="1.9999999999999999e-07" ixz="8.9099999999999997e-05" iyy="0.0016161000000000001" iyz="-9.9999999999999995e-08" izz="0.0016666999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_ankle_roll_link.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.05 0.025 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.05 -0.025 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.12 0.03 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.12 -0.03 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_ankle_roll_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 -0.017558" />
+    <parent link="left_ankle_pitch_link" />
+    <child link="left_ankle_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="35" lower="-0.2618" upper="0.2618" velocity="30" />
+  </joint>
+  <link name="right_hip_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.002741 -0.047791 -0.02606" />
+      <mass value="1.3500000000000001" />
+      <inertia ixx="0.0018109999999999999" ixy="-3.68e-05" ixz="-3.4400000000000003e-05" iyy="0.0014193000000000001" iyz="-0.00017100000000000001" izz="0.0012811999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_hip_pitch_link.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_hip_pitch_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_hip_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 -0.064452 -0.1027" />
+    <parent link="pelvis" />
+    <child link="right_hip_pitch_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="139" lower="-2.5307" upper="2.8798" velocity="20" />
+  </joint>
+  <link name="right_hip_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.029812 0.001045 -0.087934" />
+      <mass value="1.52" />
+      <inertia ixx="0.0023773000000000002" ixy="3.8e-06" ixz="-0.00039080000000000001" iyy="0.0024123" iyz="-1.84e-05" izz="0.0016595" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_hip_roll_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_hip_roll_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_hip_roll_joint" type="revolute">
+    <origin rpy="0 -0.1749 0" xyz="0 -0.052 -0.030465" />
+    <parent link="right_hip_pitch_link" />
+    <child link="right_hip_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="139" lower="-2.9671" upper="0.5236" velocity="20" />
+  </joint>
+  <link name="right_hip_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.057709 0.010981 -0.15078" />
+      <mass value="1.702" />
+      <inertia ixx="0.0057774000000000002" ixy="0.00054109999999999998" ixz="-0.0023947999999999999" iyy="0.0076124000000000001" iyz="0.00070719999999999995" izz="0.0031489999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_hip_yaw_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_hip_yaw_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_hip_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.025001 0 -0.12412" />
+    <parent link="right_hip_roll_link" />
+    <child link="right_hip_yaw_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="88" lower="-2.7576" upper="2.7576" velocity="32" />
+  </joint>
+  <link name="right_knee_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.005457 -0.003964 -0.12074" />
+      <mass value="1.9319999999999999" />
+      <inertia ixx="0.011329000000000001" ixy="-4.8199999999999999e-05" ixz="4.49e-05" iyy="0.011277000000000001" iyz="0.00071460000000000002" izz="0.0015168" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_knee_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_knee_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_knee_joint" type="revolute">
+    <origin rpy="0 0.1749 0" xyz="-0.078273 -0.0021489 -0.17734" />
+    <parent link="right_hip_yaw_link" />
+    <child link="right_knee_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="139" lower="-0.087267" upper="2.8798" velocity="20" />
+  </joint>
+  <link name="right_ankle_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.007269 0 0.011137" />
+      <mass value="0.073999999999999996" />
+      <inertia ixx="8.3999999999999992e-06" ixy="0" ixz="-2.9000000000000002e-06" iyy="1.8899999999999999e-05" iyz="0" izz="1.26e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_ankle_pitch_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_ankle_pitch_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_ankle_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 9.4445E-05 -0.30001" />
+    <parent link="right_knee_link" />
+    <child link="right_ankle_pitch_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="35" lower="-0.87267" upper="0.5236" velocity="30" />
+  </joint>
+  <link name="right_ankle_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.026505 0 -0.016425" />
+      <mass value="0.60799999999999998" />
+      <inertia ixx="0.0002231" ixy="-1.9999999999999999e-07" ixz="8.9099999999999997e-05" iyy="0.0016161000000000001" iyz="9.9999999999999995e-08" izz="0.0016666999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_ankle_roll_link.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.05 0.025 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.05 -0.025 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.12 0.03 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.12 -0.03 -0.03" />
+      <geometry>
+        <sphere radius="0.005" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_ankle_roll_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 -0.017558" />
+    <parent link="right_ankle_pitch_link" />
+    <child link="right_ankle_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="35" lower="-0.2618" upper="0.2618" velocity="30" />
+  </joint>
+  
+  <link name="waist_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.003494 0.000233 0.018034" />
+      <mass value="0.214" />
+      <inertia ixx="0.00010673" ixy="2.7030000000000002e-06" ixz="-7.6310000000000003e-06" iyy="0.00010422" iyz="-2.0100000000000001e-07" izz="0.00016249999999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/waist_yaw_link_rev_1_0.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+  </link>
+  <joint name="waist_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <parent link="pelvis" />
+    <child link="waist_yaw_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="88" lower="-2.618" upper="2.618" velocity="32" />
+  </joint>
+  <link name="waist_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 2.3E-05 0" />
+      <mass value="0.085999999999999993" />
+      <inertia ixx="7.0790000000000003e-06" ixy="0" ixz="0" iyy="6.3389999999999998e-06" iyz="0" izz="8.2449999999999998e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/waist_roll_link_rev_1_0.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+  </link>
+  <joint name="waist_roll_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="-0.0039635 0 0.044" />
+    <parent link="waist_yaw_link" />
+    <child link="waist_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="35" lower="-0.52" upper="0.52" velocity="30" />
+  </joint>
+  <link name="torso_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.000931 0.000346 0.15082" />
+      <mass value="6.7800000000000002" />
+      <inertia ixx="0.059049999999999998" ixy="3.3302000000000001e-05" ixz="-0.0017715000000000001" iyy="0.047014" iyz="-2.2399e-05" izz="0.025652000000000001" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/torso_link_rev_1_0.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/torso_link_rev_1_0.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="waist_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <parent link="waist_roll_link" />
+    <child link="torso_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="35" lower="-0.52" upper="0.52" velocity="30" />
+  </joint>
+  
+  <joint name="logo_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0039635 0 -0.044" />
+    <parent link="torso_link" />
+    <child link="logo_link" />
+  </joint>
+  <link name="logo_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="9.9999999999999995e-08" ixy="0" ixz="0" iyy="9.9999999999999995e-08" iyz="0" izz="9.9999999999999995e-08" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/logo_link.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/logo_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  
+  <link name="head_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.005267 0.000299 0.449869" />
+      <mass value="1.036" />
+      <inertia ixx="0.0040850510000000001" ixy="-2.543e-06" ixz="-6.9455000000000005e-05" iyy="0.0041852119999999998" iyz="-3.726e-06" izz="0.0018079109999999999" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/head_link.STL" />
+      </geometry>
+      <material name="dark" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/head_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="head_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.0039635 0 -0.044" />
+    <parent link="torso_link" />
+    <child link="head_link" />
+  </joint>
+  
+  <link name="imu_in_torso" />
+  <joint name="imu_in_torso_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="-0.03959 -0.00224 0.14792" />
+    <parent link="torso_link" />
+    <child link="imu_in_torso" />
+  </joint>
+  <link name="imu_in_pelvis" />
+  <joint name="imu_in_pelvis_joint" type="fixed">
+    <origin rpy="0 0 0" xyz="0.04525 0 -0.08339" />
+    <parent link="pelvis" />
+    <child link="imu_in_pelvis" />
+  </joint>
+  
+  <link name="d435_link" />
+  <joint name="d435_joint" type="fixed">
+    <origin rpy="0 0.8307767239493009 0" xyz="0.0576235 0.01753 0.42987" />
+    <parent link="torso_link" />
+    <child link="d435_link" />
+  </joint>
+  
+  <link name="mid360_link" />
+  <joint name="mid360_joint" type="fixed">
+    <origin rpy="3.141592653589793 0.05112069379091391 0" xyz="0.0002835 0.00003 0.428434" />
+    <parent link="torso_link" />
+    <child link="mid360_link" />
+  </joint>
+  
+  <link name="left_shoulder_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0.035892 -0.011628" />
+      <mass value="0.64885876347088633" />
+      <inertia ixx="0.00038777896296010773" ixy="-8.3140677213539749e-06" ixz="5.7836992844201569e-06" iyy="0.00040937746497536425" iyz="2.0423688098108678e-05" izz="0.00038226637457964473" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_shoulder_pitch_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 1.5707963267948966 0" xyz="0 0.04 -0.01" />
+      <geometry>
+        <cylinder length="0.05" radius="0.03" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_shoulder_pitch_joint" type="revolute">
+    <origin rpy="0.27931 5.4949E-05 -0.00019159" xyz="0.0039563 0.10022 0.24778" />
+    <parent link="torso_link" />
+    <child link="left_shoulder_pitch_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="25" lower="-3.0892" upper="2.6704" velocity="37" />
+  </joint>
+  <link name="left_shoulder_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.000227 0.00727 -0.063243" />
+      <mass value="0.84214224073079758" />
+      <inertia ixx="0.00080900662845943025" ixy="-1.3097079949157037e-06" ixz="1.1394459555766623e-05" iyy="0.00090527016608573448" iyz="-6.9414523730532304e-06" izz="0.00051000029322017507" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_shoulder_roll_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.004 0.006 -0.053" />
+      <geometry>
+        <cylinder length="0.03" radius="0.03" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_shoulder_roll_joint" type="revolute">
+    <origin rpy="-0.27925 0 0" xyz="0 0.038 -0.013831" />
+    <parent link="left_shoulder_pitch_link" />
+    <child link="left_shoulder_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="25" lower="-1.5882" upper="2.2515" velocity="37" />
+  </joint>
+  <link name="left_shoulder_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.010773 -0.002949 -0.072009" />
+      <mass value="1.4666459619647374" />
+      <inertia ixx="0.0019957574752185012" ixy="1.5785426566105486e-05" ixz="0.0002821395229283664" iyy="0.0021190436548550466" iyz="-5.7147240479824923e-05" izz="0.00086999680087118084" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_shoulder_yaw_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_shoulder_yaw_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_shoulder_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 0.00624 -0.1032" />
+    <parent link="left_shoulder_roll_link" />
+    <child link="left_shoulder_yaw_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="25" lower="-2.618" upper="2.618" velocity="37" />
+  </joint>
+  <link name="left_elbow_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.064956 0.004454 -0.010062" />
+      <mass value="0.80908115271697001" />
+      <inertia ixx="0.00038984226875079337" ixy="8.8054998787363573e-05" ixz="2.3193659711219809e-05" iyy="0.00055988415768014332" iyz="-7.5514240920250535e-06" izz="0.00056595226632552055" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_elbow_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_elbow_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_elbow_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.015783 0 -0.080518" />
+    <parent link="left_shoulder_yaw_link" />
+    <child link="left_elbow_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="25" lower="-1.0472" upper="2.0944" velocity="37" />
+  </joint>
+  <joint name="left_wrist_roll_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.100 0.00188791 -0.010" />
+    <axis xyz="1 0 0" />
+    <parent link="left_elbow_link" />
+    <child link="left_wrist_roll_link" />
+    <limit effort="25" lower="-1.972222054" upper="1.972222054" velocity="37" />
+  </joint>
+  <link name="left_wrist_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.01713944778 0.00053759094 0.00000048864" />
+      <mass value="0.082447764775937349" />
+      <inertia ixx="4.6524152438812743e-05" ixy="-4.0962014157181607e-06" ixz="4.9268835040781594e-09" iyy="3.5923082749181342e-05" iyz="-1.1919202443429282e-09" izz="5.2898067337483782e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_wrist_roll_link_5010.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_wrist_roll_link_5010.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_wrist_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.038 0 0" />
+    <axis xyz="0 1 0" />
+    <parent link="left_wrist_roll_link" />
+    <child link="left_wrist_pitch_link" />
+    <limit effort="13.4" lower="-1.614429558" upper="1.614429558" velocity="27" />
+  </joint>
+  <link name="left_wrist_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.02549150483 -0.00054042511 -0.00054143853" />
+      <mass value="0.46737746040628725" />
+      <inertia ixx="0.00017491806956244896" ixy="-5.8885260890186869e-06" ixz="-5.8594606978834736e-06" iyy="0.00048947025150968058" iyz="-9.5625975039430946e-08" izz="0.00048918834899528644" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_wrist_pitch_link_5010.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_wrist_pitch_link_5010.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_wrist_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.051 0 0" />
+    <axis xyz="0 0 1" />
+    <parent link="left_wrist_pitch_link" />
+    <child link="left_wrist_yaw_link" />
+    <limit effort="13.4" lower="-1.614429558" upper="1.614429558" velocity="27" />
+  </joint>
+  <link name="left_wrist_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.02200381568 0.00049485096 0.00053861123" />
+      <mass value="0.11303829598388193" />
+      <inertia ixx="6.5878881372342577e-05" ixy="-6.1126484798207545e-07" ixz="5.9591175561096857e-06" iyy="7.9834966392295758e-05" iyz="5.776072729351356e-07" izz="5.249969668548325e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_wrist_yaw_link_5010.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/left_wrist_yaw_link_5010.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_shoulder_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 -0.035892 -0.011628" />
+      <mass value="0.64885876347088633" />
+      <inertia ixx="0.00038777896296010773" ixy="8.3140677213539749e-06" ixz="5.7836992844201569e-06" iyy="0.00040937746497536425" iyz="-2.0423688098108678e-05" izz="0.00038226637457964473" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_shoulder_pitch_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 1.5707963267948966 0" xyz="0 -0.04 -0.01" />
+      <geometry>
+        <cylinder length="0.05" radius="0.03" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_shoulder_pitch_joint" type="revolute">
+    <origin rpy="-0.27931 5.4949E-05 0.00019159" xyz="0.0039563 -0.10021 0.24778" />
+    <parent link="torso_link" />
+    <child link="right_shoulder_pitch_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="25" lower="-3.0892" upper="2.6704" velocity="37" />
+  </joint>
+  <link name="right_shoulder_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="-0.000227 -0.00727 -0.063243" />
+      <mass value="0.84214224073079758" />
+      <inertia ixx="0.00080900662845943025" ixy="1.3097079949157037e-06" ixz="1.1394459555766623e-05" iyy="0.00090527016608573448" iyz="6.9414523730532304e-06" izz="0.00051000029322017507" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_shoulder_roll_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.004 -0.006 -0.053" />
+      <geometry>
+        <cylinder length="0.03" radius="0.03" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_shoulder_roll_joint" type="revolute">
+    <origin rpy="0.27925 0 0" xyz="0 -0.038 -0.013831" />
+    <parent link="right_shoulder_pitch_link" />
+    <child link="right_shoulder_roll_link" />
+    <axis xyz="1 0 0" />
+    <limit effort="25" lower="-2.2515" upper="1.5882" velocity="37" />
+  </joint>
+  <link name="right_shoulder_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.010773 0.002949 -0.072009" />
+      <mass value="1.4666459619647374" />
+      <inertia ixx="0.0019957574752185012" ixy="-1.5785426566105486e-05" ixz="0.0002821395229283664" iyy="0.0021190436548550466" iyz="5.7147240479824923e-05" izz="0.00086999680087118084" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_shoulder_yaw_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_shoulder_yaw_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_shoulder_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0 -0.00624 -0.1032" />
+    <parent link="right_shoulder_roll_link" />
+    <child link="right_shoulder_yaw_link" />
+    <axis xyz="0 0 1" />
+    <limit effort="25" lower="-2.618" upper="2.618" velocity="37" />
+  </joint>
+  <link name="right_elbow_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.064956 -0.004454 -0.010062" />
+      <mass value="0.80908115271697001" />
+      <inertia ixx="0.00038984226875079337" ixy="-8.8054998787363573e-05" ixz="2.3193659711219809e-05" iyy="0.00055988415768014332" iyz="7.5514240920250535e-06" izz="0.00056595226632552055" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_elbow_link.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_elbow_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_elbow_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.015783 0 -0.080518" />
+    <parent link="right_shoulder_yaw_link" />
+    <child link="right_elbow_link" />
+    <axis xyz="0 1 0" />
+    <limit effort="25" lower="-1.0472" upper="2.0944" velocity="37" />
+  </joint>
+  <joint name="right_wrist_roll_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.100 -0.00188791 -0.010" />
+    <axis xyz="1 0 0" />
+    <parent link="right_elbow_link" />
+    <child link="right_wrist_roll_link" />
+    <limit effort="25" lower="-1.972222054" upper="1.972222054" velocity="37" />
+  </joint>
+  <link name="right_wrist_roll_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.01713944778 -0.00053759094 0.00000048864" />
+      <mass value="0.082447764775937349" />
+      <inertia ixx="4.6524152438812743e-05" ixy="4.0962014157181607e-06" ixz="4.9268835040781594e-09" iyy="3.5923082749181342e-05" iyz="1.1919202443429282e-09" izz="5.2898067337483782e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_wrist_roll_link_5010.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_wrist_roll_link_5010.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_wrist_pitch_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.038 0 0" />
+    <axis xyz="0 1 0" />
+    <parent link="right_wrist_roll_link" />
+    <child link="right_wrist_pitch_link" />
+    <limit effort="13.4" lower="-1.614429558" upper="1.614429558" velocity="27" />
+  </joint>
+  <link name="right_wrist_pitch_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.02549150483 0.00054042511 -0.00054143853" />
+      <mass value="0.46737746040628725" />
+      <inertia ixx="0.00017491806956244896" ixy="5.8885260890186869e-06" ixz="5.8594606978834736e-06" iyy="0.00048947025150968058" iyz="-9.5625975039430946e-08" izz="0.00048918834899528644" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_wrist_pitch_link_5010.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_wrist_pitch_link_5010.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_wrist_yaw_joint" type="revolute">
+    <origin rpy="0 0 0" xyz="0.051 0 0" />
+    <axis xyz="0 0 1" />
+    <parent link="right_wrist_pitch_link" />
+    <child link="right_wrist_yaw_link" />
+    <limit effort="13.4" lower="-1.614429558" upper="1.614429558" velocity="27" />
+  </joint>
+  <link name="right_wrist_yaw_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0.02200381568 -0.00049485096 0.00053861123" />
+      <mass value="0.11303829598388193" />
+      <inertia ixx="6.5878881372342577e-05" ixy="6.1126484798207545e-07" ixz="5.9591175561096857e-06" iyy="7.9834966392295758e-05" iyz="-5.776072729351356e-07" izz="5.249969668548325e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_wrist_yaw_link_5010.STL" />
+      </geometry>
+      <material name="white" />
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="g1_description/meshes/right_wrist_yaw_link_5010.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_kwr57b_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0.0265" />
+      <mass value="0.34749566819009242" />
+      <inertia ixx="0.00015190628345068146" ixy="0" ixz="0" iyy="0.00015190628345068146" iyz="0" izz="0.00014112667824370129" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.0265" />
+      <geometry>
+        <cylinder length="0.053" radius="0.0285" />
+      </geometry>
+      <material name="left_kwr57b_gray">
+        <color rgba="0.35 0.37 0.40 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.0265" />
+      <geometry>
+        <cylinder length="0.053" radius="0.0285" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_kwr57b_mount_joint" type="fixed">
+    <parent link="left_wrist_yaw_link" />
+    <child link="left_kwr57b_link" />
+    <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0.0415 0 0" />
+  </joint>
+  <link name="left_gripper_base">
+    <inertial>
+      <mass value="0.44722251443870648" />
+      <origin rpy="0 0 0" xyz="-9.4e-7 -0.00337385 0.03285995" />
+      <inertia ixx="0.00022744928004842278" ixy="-5.3460872029244987e-08" ixz="1.3365218007311247e-08" iyy="0.00039995414886878899" iyz="-3.2878436297985669e-06" izz="0.00034026508524813702" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/gripper_base.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/gripper_base.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_eccentric">
+    <inertial>
+      <mass value="0.029687330116124018" />
+      <origin rpy="0 0 0" xyz="-5.9e-7 3e-7 -0.00523699" />
+      <inertia ixx="5.2792611128879429e-06" ixy="-1.4434435447896147e-06" ixz="0" iyy="3.1541914497254537e-06" iyz="0" izz="7.7250960082259002e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/eccentric.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/eccentric.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_left_slider">
+    <inertial>
+      <mass value="0.087085448352924824" />
+      <origin rpy="0 0 0" xyz="-0.00350049 0.01234977 0.14115772" />
+      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_slider.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_slider.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_left_connecting_rod">
+    <inertial>
+      <mass value="0.008590079552441076" />
+      <origin rpy="0 0 0" xyz="0.00108395 -0.02207129 -0.00254398" />
+      <inertia ixx="1.9245913930528195e-06" ixy="9.3556526051178733e-08" ixz="0" iyy="9.3556526051178733e-08" iyz="4.0095654021933732e-08" izz="1.9780522650820645e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_connecting_rod.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_connecting_rod.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_right_slider">
+    <inertial>
+      <mass value="0.087085448352924824" />
+      <origin rpy="0 0 0" xyz="-0.00300049 0.01384977 0.14115772" />
+      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_slider.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_slider.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_right_connecting_rod">
+    <inertial>
+      <mass value="0.008590079552441076" />
+      <origin rpy="0 0 0" xyz="-0.02207129 -0.00108395 -0.00254398" />
+      <inertia ixx="9.3556526051178733e-08" ixy="-9.3556526051178733e-08" ixz="4.0095654021933732e-08" iyy="1.9245913930528195e-06" iyz="0" izz="1.9780522650820645e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_connecting_rod.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_connecting_rod.stl" />
+      </geometry>
+    </collision>
+  </link>
+  
+  <link name="left_internal_left_slider_spline_01" />
+  <link name="left_internal_left_slider_spline_02" />
+  <link name="left_internal_left_slider_spline_03" />
+  <link name="left_internal_left_slider_spline_04" />
+  <link name="left_internal_left_slider_spline_05" />
+  <link name="left_internal_left_slider_spline_06" />
+  <link name="left_internal_left_slider_spline_07" />
+  <link name="left_internal_right_slider_spline_01" />
+  <link name="left_internal_right_slider_spline_02" />
+  <link name="left_internal_right_slider_spline_03" />
+  <link name="left_internal_right_slider_spline_04" />
+  <link name="left_internal_right_slider_spline_05" />
+  <link name="left_internal_right_slider_spline_06" />
+  <link name="left_internal_right_slider_spline_07" />
+  <link name="left_internal_left_connecting_rod_spline_01" />
+  <link name="left_internal_left_connecting_rod_spline_02" />
+  <link name="left_internal_left_connecting_rod_spline_03" />
+  <link name="left_internal_left_connecting_rod_spline_04" />
+  <link name="left_internal_left_connecting_rod_spline_05" />
+  <link name="left_internal_left_connecting_rod_spline_06" />
+  <link name="left_internal_left_connecting_rod_spline_07" />
+  <link name="left_internal_right_connecting_rod_spline_01" />
+  <link name="left_internal_right_connecting_rod_spline_02" />
+  <link name="left_internal_right_connecting_rod_spline_03" />
+  <link name="left_internal_right_connecting_rod_spline_04" />
+  <link name="left_internal_right_connecting_rod_spline_05" />
+  <link name="left_internal_right_connecting_rod_spline_06" />
+  <link name="left_internal_right_connecting_rod_spline_07" />
+  
+  <joint name="left_eccentric_joint" type="revolute">
+    <parent link="left_gripper_base" />
+    <child link="left_eccentric" />
+    <origin rpy="0 0 -4.33457105169236" xyz="0 -0.0035753 0.058" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="2.76377472169236" velocity="1" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_00_joint" type="prismatic">
+    <parent link="left_gripper_base" />
+    <child link="left_internal_left_slider_spline_01" />
+    <origin rpy="1.57079633 0 1.57079633" xyz="-0.08 -0.0000753 0.07425" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.0426533846696232" upper="0" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.0154330178703947" offset="-0.0426533846696232" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_01_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_01" />
+    <child link="left_internal_left_slider_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.018134714440453" upper="0" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.00749894257635273" offset="-0.018134714440453" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_02_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_02" />
+    <child link="left_internal_left_slider_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.00547344332022431" upper="0" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.00264056414210814" offset="-0.00547344332022431" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_03_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_03" />
+    <child link="left_internal_left_slider_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00260508142747074" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00150812953430622" offset="0.00260508142747074" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_04_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_04" />
+    <child link="left_internal_left_slider_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00528482358887161" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00382435192520722" offset="0.00528482358887161" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_05_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_05" />
+    <child link="left_internal_left_slider_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.0045014302251524" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00434326786460706" offset="0.0045014302251524" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_06_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_06" />
+    <child link="left_internal_left_slider_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00270808616767398" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00391940218053044" offset="0.00270808616767398" />
+  </joint>
+  <joint name="left_internal_left_slider_spline_07_joint" type="prismatic">
+    <parent link="left_internal_left_slider_spline_07" />
+    <child link="left_left_slider" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00116212102113173" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00336386612703404" offset="0.00116212102113173" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_00_joint" type="prismatic">
+    <parent link="left_gripper_base" />
+    <child link="left_internal_right_slider_spline_01" />
+    <origin rpy="1.57079633 0 -1.57079633" xyz="0.08 -0.0065753 0.07275" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.0426533846696232" upper="0" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.0154330178703947" offset="-0.0426533846696232" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_01_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_01" />
+    <child link="left_internal_right_slider_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.018134714440453" upper="0" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.00749894257635273" offset="-0.018134714440453" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_02_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_02" />
+    <child link="left_internal_right_slider_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.00547344332022431" upper="0" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.00264056414210814" offset="-0.00547344332022431" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_03_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_03" />
+    <child link="left_internal_right_slider_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00260508142747074" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00150812953430622" offset="0.00260508142747074" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_04_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_04" />
+    <child link="left_internal_right_slider_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00528482358887161" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00382435192520722" offset="0.00528482358887161" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_05_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_05" />
+    <child link="left_internal_right_slider_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.0045014302251524" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00434326786460706" offset="0.0045014302251524" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_06_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_06" />
+    <child link="left_internal_right_slider_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00270808616767398" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00391940218053044" offset="0.00270808616767398" />
+  </joint>
+  <joint name="left_internal_right_slider_spline_07_joint" type="prismatic">
+    <parent link="left_internal_right_slider_spline_07" />
+    <child link="left_right_slider" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00116212102113173" velocity="0.1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.00336386612703404" offset="0.00116212102113173" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_00_joint" type="revolute">
+    <parent link="left_left_slider" />
+    <child link="left_internal_left_connecting_rod_spline_01" />
+    <origin rpy="1.57079633 0 0" xyz="-0.017 -0.0130032 0.14725" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="-1.22582002453148" upper="0" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.443531093511438" offset="-1.22582002453148" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_01_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_01" />
+    <child link="left_internal_left_connecting_rod_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.326020748605095" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.134813861035248" offset="0.326020748605095" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_02_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_02" />
+    <child link="left_internal_left_connecting_rod_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.361675539038642" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.174483849304561" offset="0.361675539038642" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_03_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_03" />
+    <child link="left_internal_left_connecting_rod_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.33706240533789" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.19513162353927" offset="0.33706240533789" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_04_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_04" />
+    <child link="left_internal_left_connecting_rod_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.256298400777284" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.185469820507182" offset="0.256298400777284" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_05_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_05" />
+    <child link="left_internal_left_connecting_rod_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.156563488412148" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.151062469921599" offset="0.156563488412148" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_06_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_06" />
+    <child link="left_internal_left_connecting_rod_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0743836519705957" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.107655159281648" offset="0.0743836519705957" />
+  </joint>
+  <joint name="left_internal_left_connecting_rod_spline_07_joint" type="revolute">
+    <parent link="left_internal_left_connecting_rod_spline_07" />
+    <child link="left_left_connecting_rod" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0227501705942326" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.0658524601608683" offset="0.0227501705942326" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_00_joint" type="revolute">
+    <parent link="left_right_slider" />
+    <child link="left_internal_right_connecting_rod_spline_01" />
+    <origin rpy="1.57079633 -1.57079633 0" xyz="-0.0165 -0.01225 0.14725" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="-1.22582002453148" upper="0" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="0.443531093511438" offset="-1.22582002453148" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_01_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_01" />
+    <child link="left_internal_right_connecting_rod_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.326020748605095" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.134813861035248" offset="0.326020748605095" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_02_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_02" />
+    <child link="left_internal_right_connecting_rod_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.361675539038642" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.174483849304561" offset="0.361675539038642" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_03_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_03" />
+    <child link="left_internal_right_connecting_rod_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.33706240533789" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.19513162353927" offset="0.33706240533789" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_04_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_04" />
+    <child link="left_internal_right_connecting_rod_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.256298400777284" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.185469820507182" offset="0.256298400777284" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_05_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_05" />
+    <child link="left_internal_right_connecting_rod_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.156563488412148" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.151062469921599" offset="0.156563488412148" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_06_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_06" />
+    <child link="left_internal_right_connecting_rod_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0743836519705957" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.107655159281648" offset="0.0743836519705957" />
+  </joint>
+  <joint name="left_internal_right_connecting_rod_spline_07_joint" type="revolute">
+    <parent link="left_internal_right_connecting_rod_spline_07" />
+    <child link="left_right_connecting_rod" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0227501705942326" velocity="1" />
+    <mimic joint="left_eccentric_joint" multiplier="-0.0658524601608683" offset="0.0227501705942326" />
+  </joint>
+  <joint name="left_gloria_m_mount_joint" type="fixed">
+    <parent link="left_kwr57b_link" />
+    <child link="left_gripper_base" />
+    <origin rpy="0 0 0" xyz="0 0.003 0.053" />
+  </joint>
+  <link name="left_camera_mount_link">
+    <visual name="left_camera_mount_main_visual">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0031 0.07915" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-main.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </visual>
+    <collision name="left_camera_mount_main_collision">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0031 0.07915" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-main.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </collision>
+    <visual name="left_camera_mount_ring_visual">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0345 0.03" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-ring.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </visual>
+    <collision name="left_camera_mount_ring_collision">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0345 0.03" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-ring.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_camera_mount_joint" type="fixed">
+    <parent link="left_gripper_base" />
+    <child link="left_camera_mount_link" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+  </joint>
+  <link name="right_kwr57b_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0.0265" />
+      <mass value="0.34749566819009242" />
+      <inertia ixx="0.00015190628345068146" ixy="0" ixz="0" iyy="0.00015190628345068146" iyz="0" izz="0.00014112667824370129" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0.0265" />
+      <geometry>
+        <cylinder length="0.053" radius="0.0285" />
+      </geometry>
+      <material name="right_kwr57b_gray">
+        <color rgba="0.35 0.37 0.40 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.0265" />
+      <geometry>
+        <cylinder length="0.053" radius="0.0285" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_kwr57b_mount_joint" type="fixed">
+    <parent link="right_wrist_yaw_link" />
+    <child link="right_kwr57b_link" />
+    <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0.0415 0 0" />
+  </joint>
+  <link name="right_gripper_base">
+    <inertial>
+      <mass value="0.44722251443870648" />
+      <origin rpy="0 0 0" xyz="-9.4e-7 -0.00337385 0.03285995" />
+      <inertia ixx="0.00022744928004842278" ixy="-5.3460872029244987e-08" ixz="1.3365218007311247e-08" iyy="0.00039995414886878899" iyz="-3.2878436297985669e-06" izz="0.00034026508524813702" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/gripper_base.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/gripper_base.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_eccentric">
+    <inertial>
+      <mass value="0.029687330116124018" />
+      <origin rpy="0 0 0" xyz="-5.9e-7 3e-7 -0.00523699" />
+      <inertia ixx="5.2792611128879429e-06" ixy="-1.4434435447896147e-06" ixz="0" iyy="3.1541914497254537e-06" iyz="0" izz="7.7250960082259002e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/eccentric.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/eccentric.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_left_slider">
+    <inertial>
+      <mass value="0.087085448352924824" />
+      <origin rpy="0 0 0" xyz="-0.00350049 0.01234977 0.14115772" />
+      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_slider.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_slider.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_left_connecting_rod">
+    <inertial>
+      <mass value="0.008590079552441076" />
+      <origin rpy="0 0 0" xyz="0.00108395 -0.02207129 -0.00254398" />
+      <inertia ixx="1.9245913930528195e-06" ixy="9.3556526051178733e-08" ixz="0" iyy="9.3556526051178733e-08" iyz="4.0095654021933732e-08" izz="1.9780522650820645e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_connecting_rod.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/left_connecting_rod.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_right_slider">
+    <inertial>
+      <mass value="0.087085448352924824" />
+      <origin rpy="0 0 0" xyz="-0.00300049 0.01384977 0.14115772" />
+      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_slider.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_slider.stl" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_right_connecting_rod">
+    <inertial>
+      <mass value="0.008590079552441076" />
+      <origin rpy="0 0 0" xyz="-0.02207129 -0.00108395 -0.00254398" />
+      <inertia ixx="9.3556526051178733e-08" ixy="-9.3556526051178733e-08" ixz="4.0095654021933732e-08" iyy="1.9245913930528195e-06" iyz="0" izz="1.9780522650820645e-06" />
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_connecting_rod.stl" />
+      </geometry>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="Gloria-M/meshes/right_connecting_rod.stl" />
+      </geometry>
+    </collision>
+  </link>
+  
+  <link name="right_internal_left_slider_spline_01" />
+  <link name="right_internal_left_slider_spline_02" />
+  <link name="right_internal_left_slider_spline_03" />
+  <link name="right_internal_left_slider_spline_04" />
+  <link name="right_internal_left_slider_spline_05" />
+  <link name="right_internal_left_slider_spline_06" />
+  <link name="right_internal_left_slider_spline_07" />
+  <link name="right_internal_right_slider_spline_01" />
+  <link name="right_internal_right_slider_spline_02" />
+  <link name="right_internal_right_slider_spline_03" />
+  <link name="right_internal_right_slider_spline_04" />
+  <link name="right_internal_right_slider_spline_05" />
+  <link name="right_internal_right_slider_spline_06" />
+  <link name="right_internal_right_slider_spline_07" />
+  <link name="right_internal_left_connecting_rod_spline_01" />
+  <link name="right_internal_left_connecting_rod_spline_02" />
+  <link name="right_internal_left_connecting_rod_spline_03" />
+  <link name="right_internal_left_connecting_rod_spline_04" />
+  <link name="right_internal_left_connecting_rod_spline_05" />
+  <link name="right_internal_left_connecting_rod_spline_06" />
+  <link name="right_internal_left_connecting_rod_spline_07" />
+  <link name="right_internal_right_connecting_rod_spline_01" />
+  <link name="right_internal_right_connecting_rod_spline_02" />
+  <link name="right_internal_right_connecting_rod_spline_03" />
+  <link name="right_internal_right_connecting_rod_spline_04" />
+  <link name="right_internal_right_connecting_rod_spline_05" />
+  <link name="right_internal_right_connecting_rod_spline_06" />
+  <link name="right_internal_right_connecting_rod_spline_07" />
+  
+  <joint name="right_eccentric_joint" type="revolute">
+    <parent link="right_gripper_base" />
+    <child link="right_eccentric" />
+    <origin rpy="0 0 -4.33457105169236" xyz="0 -0.0035753 0.058" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="2.76377472169236" velocity="1" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_00_joint" type="prismatic">
+    <parent link="right_gripper_base" />
+    <child link="right_internal_left_slider_spline_01" />
+    <origin rpy="1.57079633 0 1.57079633" xyz="-0.08 -0.0000753 0.07425" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.0426533846696232" upper="0" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.0154330178703947" offset="-0.0426533846696232" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_01_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_01" />
+    <child link="right_internal_left_slider_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.018134714440453" upper="0" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.00749894257635273" offset="-0.018134714440453" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_02_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_02" />
+    <child link="right_internal_left_slider_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.00547344332022431" upper="0" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.00264056414210814" offset="-0.00547344332022431" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_03_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_03" />
+    <child link="right_internal_left_slider_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00260508142747074" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00150812953430622" offset="0.00260508142747074" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_04_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_04" />
+    <child link="right_internal_left_slider_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00528482358887161" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00382435192520722" offset="0.00528482358887161" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_05_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_05" />
+    <child link="right_internal_left_slider_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.0045014302251524" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00434326786460706" offset="0.0045014302251524" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_06_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_06" />
+    <child link="right_internal_left_slider_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00270808616767398" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00391940218053044" offset="0.00270808616767398" />
+  </joint>
+  <joint name="right_internal_left_slider_spline_07_joint" type="prismatic">
+    <parent link="right_internal_left_slider_spline_07" />
+    <child link="right_left_slider" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00116212102113173" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00336386612703404" offset="0.00116212102113173" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_00_joint" type="prismatic">
+    <parent link="right_gripper_base" />
+    <child link="right_internal_right_slider_spline_01" />
+    <origin rpy="1.57079633 0 -1.57079633" xyz="0.08 -0.0065753 0.07275" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.0426533846696232" upper="0" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.0154330178703947" offset="-0.0426533846696232" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_01_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_01" />
+    <child link="right_internal_right_slider_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.018134714440453" upper="0" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.00749894257635273" offset="-0.018134714440453" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_02_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_02" />
+    <child link="right_internal_right_slider_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="-0.00547344332022431" upper="0" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.00264056414210814" offset="-0.00547344332022431" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_03_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_03" />
+    <child link="right_internal_right_slider_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00260508142747074" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00150812953430622" offset="0.00260508142747074" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_04_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_04" />
+    <child link="right_internal_right_slider_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00528482358887161" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00382435192520722" offset="0.00528482358887161" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_05_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_05" />
+    <child link="right_internal_right_slider_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.0045014302251524" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00434326786460706" offset="0.0045014302251524" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_06_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_06" />
+    <child link="right_internal_right_slider_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00270808616767398" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00391940218053044" offset="0.00270808616767398" />
+  </joint>
+  <joint name="right_internal_right_slider_spline_07_joint" type="prismatic">
+    <parent link="right_internal_right_slider_spline_07" />
+    <child link="right_right_slider" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="100" lower="0" upper="0.00116212102113173" velocity="0.1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.00336386612703404" offset="0.00116212102113173" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_00_joint" type="revolute">
+    <parent link="right_left_slider" />
+    <child link="right_internal_left_connecting_rod_spline_01" />
+    <origin rpy="1.57079633 0 0" xyz="-0.017 -0.0130032 0.14725" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="-1.22582002453148" upper="0" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.443531093511438" offset="-1.22582002453148" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_01_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_01" />
+    <child link="right_internal_left_connecting_rod_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.326020748605095" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.134813861035248" offset="0.326020748605095" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_02_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_02" />
+    <child link="right_internal_left_connecting_rod_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.361675539038642" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.174483849304561" offset="0.361675539038642" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_03_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_03" />
+    <child link="right_internal_left_connecting_rod_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.33706240533789" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.19513162353927" offset="0.33706240533789" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_04_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_04" />
+    <child link="right_internal_left_connecting_rod_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.256298400777284" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.185469820507182" offset="0.256298400777284" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_05_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_05" />
+    <child link="right_internal_left_connecting_rod_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.156563488412148" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.151062469921599" offset="0.156563488412148" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_06_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_06" />
+    <child link="right_internal_left_connecting_rod_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0743836519705957" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.107655159281648" offset="0.0743836519705957" />
+  </joint>
+  <joint name="right_internal_left_connecting_rod_spline_07_joint" type="revolute">
+    <parent link="right_internal_left_connecting_rod_spline_07" />
+    <child link="right_left_connecting_rod" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0227501705942326" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.0658524601608683" offset="0.0227501705942326" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_00_joint" type="revolute">
+    <parent link="right_right_slider" />
+    <child link="right_internal_right_connecting_rod_spline_01" />
+    <origin rpy="1.57079633 -1.57079633 0" xyz="-0.0165 -0.01225 0.14725" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="-1.22582002453148" upper="0" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="0.443531093511438" offset="-1.22582002453148" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_01_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_01" />
+    <child link="right_internal_right_connecting_rod_spline_02" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.326020748605095" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.134813861035248" offset="0.326020748605095" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_02_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_02" />
+    <child link="right_internal_right_connecting_rod_spline_03" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.361675539038642" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.174483849304561" offset="0.361675539038642" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_03_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_03" />
+    <child link="right_internal_right_connecting_rod_spline_04" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.33706240533789" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.19513162353927" offset="0.33706240533789" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_04_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_04" />
+    <child link="right_internal_right_connecting_rod_spline_05" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.256298400777284" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.185469820507182" offset="0.256298400777284" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_05_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_05" />
+    <child link="right_internal_right_connecting_rod_spline_06" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.156563488412148" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.151062469921599" offset="0.156563488412148" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_06_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_06" />
+    <child link="right_internal_right_connecting_rod_spline_07" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0743836519705957" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.107655159281648" offset="0.0743836519705957" />
+  </joint>
+  <joint name="right_internal_right_connecting_rod_spline_07_joint" type="revolute">
+    <parent link="right_internal_right_connecting_rod_spline_07" />
+    <child link="right_right_connecting_rod" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="10" lower="0" upper="0.0227501705942326" velocity="1" />
+    <mimic joint="right_eccentric_joint" multiplier="-0.0658524601608683" offset="0.0227501705942326" />
+  </joint>
+  <joint name="right_gloria_m_mount_joint" type="fixed">
+    <parent link="right_kwr57b_link" />
+    <child link="right_gripper_base" />
+    <origin rpy="0 0 0" xyz="0 0.003 0.053" />
+  </joint>
+  <link name="right_camera_mount_link">
+    <visual name="right_camera_mount_main_visual">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0031 0.07915" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-main.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </visual>
+    <collision name="right_camera_mount_main_collision">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0031 0.07915" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-main.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </collision>
+    <visual name="right_camera_mount_ring_visual">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0345 0.03" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-ring.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </visual>
+    <collision name="right_camera_mount_ring_collision">
+      <origin rpy="0 0 0" xyz="-0.037308144 -0.0345 0.03" />
+      <geometry>
+        <mesh filename="camera_mount/mesh/cam-ring.STL" scale="0.001 0.001 -0.001" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_camera_mount_joint" type="fixed">
+    <parent link="right_gripper_base" />
+    <child link="right_camera_mount_link" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+  </joint>
+</robot>

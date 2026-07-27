@@ -26,16 +26,127 @@
 |---|---:|---|
 | 关节 position command | 31 | G1 `/lowcmd`，双 Gloria-M `~/mit_command` |
 | 关节 position/velocity/effort state | 93 | `/lowstate` 与双 Gloria-M `JointState` |
+| 关节 `kp`/`kd` state | 62 | 插件实际写入命令的增益 |
 | 双 FT state | 12 | 左右 KWR57 原始 `WrenchStamped` |
-| pelvis IMU state | 10 | `/lowstate.imu_state` |
+| `pelvis_imu` state | 10 | `/lowstate.imu_state`（**盆骨**） |
+| `torso_imu` state | 10 | `/secondary_imu`（**躯干**，`torso_imu_topic` 可改） |
+
+G1 有两颗 IMU，中间隔着三个腰关节，弯腰时重力方向相差可达 10°（实测依据见 [`G1.md`](../../G1.md)）。以 `torso_link` 为根的计算必须用 `torso_imu`。因为 `unitree_g1_description/model` 是 submodule，`torso_imu` 直接由插件导出，未写入 URDF 的 `<ros2_control>` 标签；接口名与 `pelvis_imu` 完全一致，可用 `torso_imu_sensor` 参数重命名，置空 `torso_imu_topic` 则不订阅也不导出。
 
 manager 以 500 Hz 调用 `read()`/`write()`。G1 命令直接从 `write()` 发布；Gloria-M 在同一路径内用 steady clock 固定相位 deadline 降采样到 100 Hz。若一次 `write()` 错过一个或多个时隙，deadline 直接前移到下一个未来时隙，不补发过期命令，也不按“当前时刻 + 10 ms”累积漂移。KWR57 raw 保持设备节点原有 1 kHz 话题，插件用每侧原子快照读取，不增加转发节点。FT 数值按 `9.80665` 从 kgf/kgf m 转为 SI；Unitree 四元数从 `w,x,y,z` 转为 ROS `x,y,z,w` 并归一化。
 
 G1 增益表保持物理电机顺序不变。`arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，腿、腰和全部 `kd` 不变。唯一数值默认值由底层 `G1TopicSystem` 持有，为 `1.0`；上层 launch/xacro 的默认值为空，因此默认生成的 URDF 不包含该字段。需要覆盖时显式传入（例如 `arm_stiffness_scale:=2.5`），xacro 才会把它写入 ros2_control hardware 参数；允许范围为 `(0, 4]`。
 
+**缩放后的最终增益以 `<joint>/kp`、`<joint>/kd` state interface 导出**。它们是 `write()` 写进 `LowCmd` 的同一份数据，不是副本，所以任何需要知道增益的 controller（如重力补偿）都不必重复声明增益文件，也不会在 `arm_stiffness_scale` 变化时遗漏同步。夹爪两项填 `gripper_kp`/`gripper_kd`。
+
 硬件导出的 31 个 command interface 由 `forward_position_controller`（FPC）或 `joint_trajectory_controller`（JTC）互斥 claim。ros2_control 的 claim 只提供命令资源互斥，不检查反馈是否新鲜；feedback freshness 是 `G1TopicSystem` 自己实现的安全策略。G1 使用 `state_timeout_s=0.25 s`，Gloria 使用独立的 `gripper_state_timeout_s=0.75 s`。单侧夹爪 stale 时只跳过该侧 MIT 输出，G1 LowCmd 和另一侧不受影响；反馈恢复后该侧自然恢复。
 
 启动反馈到达前，对外 joint state 使用有限零值，IMU 使用单位四元数，避免 `robot_state_publisher` 产生 NaN TF。控制安全仍由独立的 `received` 标志和 freshness 检查决定，中性启动值不能使 controller 通过 Engage。
+
+### 手臂重力补偿 controller
+`unitree_g1_controllers/ArmGravityCompensation`（实例名 `arm_gravity_compensation`）**不 claim 任何 command interface**，因此可与 FPC 同时 active。它本质上是个**目标改写器**：订阅 `~/target`（`Float64MultiArray`，31 值，与 FPC 同构），只改写 14 个手臂位，其余 17 位原样透传，再发到 `command_topic`（默认 `/forward_position_controller/commands`）。
+
+```mermaid
+graph LR
+    subgraph P["启动参数（on_configure 读一次）"]
+        Y["gravity_table.yaml<br/>package:// 解析后读文件"]
+    end
+    subgraph S["state interface（每周期，进程内直读）"]
+        I["torso_imu/orientation.xyzw"]
+        K["14 × &lt;arm_joint&gt;/kp"]
+    end
+    T["~/target<br/>31 个绝对位置"] --> C
+    Y --> C["ArmGravityCompensation"]
+    I --> C
+    K --> C
+    C -->|"31 个绝对位置"| F["/forward_position_controller/commands"]
+    F --> G["FPC → G1TopicSystem → LowCmd"]
+```
+
+共 18 个 state interface（4 个 IMU 四元数 + 14 个 `kp`），全部是同进程内的 `double` 直读，无序列化。输出是**绝对**关节位置，不是增量——格式与 FPC 期望的输入完全一致，这正是它能透明插在中间的原因。上游（如 `ikt_pose_commander`）只需把发布目标改到 `/arm_gravity_compensation/target` 就接入了。
+
+电机内部执行 $\tau = k_p(q_{cmd}-q) - k_d\dot q$，想让手臂停在 $q_{target}$ 就需要
+$$q_{cmd} = q_{target} + s\,\frac{G(q_{target})}{k_p}$$
+
+其中 $s$ 是 `compensation_scale`（默认 1.0），可运行时调：
+
+```bash
+ros2 param set /arm_gravity_compensation compensation_scale 0.95
+```
+
+标定残留的共模误差只有手臂浮起来后才看得出（表现为缓慢上飘或下沉），靠手感拧到位比重新辨识快得多。写入是无锁的，可在 controller 活动时随时改。
+
+> 需要这个倍率本身就是一个待修缺陷：静态标定把静摩擦当成了质量，系统性抬高约 5%。修法（双向逼近）和另一个零空间漂移缺陷见 [arm_gravity_compensation/README.md](../arm_gravity_compensation/README.md) 的「两个已知缺陷」。
+
+三个关键选择：
+- **$G$ 在目标位置求值**，不是实测位置。目标无噪声、天然领先于测量，且这本就是平衡条件要求的。用速度外推测量位置反而会引入系数为 $K_g\Delta t$ 的负阻尼。
+- **不补偿 `kd`**。阻尼是稳定项，且稳态下 $\dot q \to 0$ 本就不进入偏移量。
+- **$k_p$ 从 `<joint>/kp` state interface 读**，不在 controller 配置里重写。增益不一致会把每一个补偿力矩按同比例算错而没有任何外部症状，所以只允许一个数据源。
+
+#### 重力表里有什么
+Controller 不解析 URDF、也不依赖任何动力学库。URDF 中与静态重力有关的只有两类信息，它们已在导出时蒸馏进 `gravity_table`（默认 `package://arm_gravity_compensation/config/gravity_table.yaml`，即仓库内受版本管理的那份；参数同时接受普通绝对路径和 `~`）：
+
+| 重力需要的 | URDF 字段 | 表里的字段 | 形状（每侧） |
+|---|---|---|---|
+| 运动学 | `<joint><origin>` | `origin_xyz` `origin_rotation` | 7×3、7×9 |
+| 运动学 | `<joint><axis>` | `axis` | 7×3 |
+| 惯性 | `<inertial><mass>` | `mass` | 7 |
+| 惯性 | `<inertial><origin>` | `com` | 7×3 |
+
+另带顶层 `imu_to_torso`（3×3）把 IMU 姿态转到躯干系。visual、collision、limit、mimic 和惯量张量全部不在表中——静态重力矩与它们无关。
+
+每侧只有 **7 个已归并的刚体**。腕偏航下游那 8 个固连件（KWR57、夹爪基座、偏心轮、两组滑块连杆）之间没有相对运动，在**任意**姿态下它们对任何关节的力矩贡献都只通过 $\sum m_j$ 和 $\sum m_j c_j$ 进入，所以合并成一个等效体无任何精度损失。
+
+每周期两趟循环：先沿链做正运动学
+$$t_i = t_{i-1} + R_{i-1}\,\mathrm{origin\_xyz}_i,\qquad R_i = R_{i-1}\,\mathrm{origin\_rotation}_i\,\mathrm{Rot}(\mathrm{axis}_i, q_i)$$
+再用下游力矩求和
+$$\tau_i = -\,a_i \cdot \Big[\Big(\textstyle\sum_{j\ge i} p_j - t_i \sum_{j\ge i} m_j\Big) \times g\Big],\qquad a_i = R_i\,\mathrm{axis}_i,\quad p_j = m_j(t_j + R_j c_j)$$
+7 次 3×3 矩阵乘加 7 次叉积。该实现与 Pinocchio 在 50 组随机姿态 + 随机重力方向下对拍，最大偏差 $10^{-15}$ N·m（即双精度舍入）。
+
+#### 为什么不在 controller 里链 Pinocchio
+不是因为没有 C++ 版。本机的 Pinocchio 2.6.21 是 pip/cmeel 装的，`include/pinocchio/`、`lib/libpinocchio.so` 和 `lib/cmake/pinocchio/pinocchioConfig.cmake` 都在，实测可以编译链接并运行。真正的理由是：
+
+- **部署脆弱**。它装在 `~/.local/lib/python3.8/site-packages/cmeel.prefix/` 下，不是系统包、rosdep 解析不到。链它就意味着构建依赖一个用户家目录下的 pip 安装，换台机器或进 CI 就构建不了，而且 `controller_manager` 进程还得带对 `LD_LIBRARY_PATH`。
+- **文件无论如何都要导**。标定出的参数总得有个载体传给 controller。既然已经在写文件，写归并后的形式不多花任何代价，反而省掉运行时重做一遍解析和归并。
+- **规模差得多**。完整模型 108 link，归并后每侧 7 体；后者在 500 Hz 循环里只是几十次浮点运算，也不引入 Boost / urdfdom / Eigen 的依赖链。
+
+Pinocchio 仍然用在**导出那一步**：标定包里用它读 `final.urdf`、`buildReducedModel` 做归并、写出表。这和“源码 → 编译产物”是一回事，controller 拿到的是编译好的东西。
+
+表中不包含力矩偏置。标定出的 `torque_bias` 留在 `parameters.json` 里，**不导出到运行时**：它在拟合中的作用是吸收静摩擦和传感器偏移以保护质量估计，而静摩擦是反抗运动方向的、不是恒定单向的。把它回放到运行时等于持续朝一个方向推关节，在位置保持模式下被 $k_p$ 吐掉看不出来，在手臂浮起来时则直接表现为单向爬行。实测 `right_shoulder_roll` 的偏置到了 0.813 N·m，而其余 13 个关节绝对值的中位数只有 0.122。双向逼近标定后它才有资格导出。
+
+#### 安全限制
+偏移量**不设人为上限**，与本包其他环节一致（见下面「安全切换」）。它是纯前馈量 $G(q_{target})/k_p$，输入只有已校验的重力表（质量有限非负）和归一化到 9.81 的重力方向，没有反馈回路，因此天然由标定时的负载定界；人为 clamp 只会在负载变重时悄悄削弱补偿。
+
+> 整条链路（本 controller → FPC → `G1TopicSystem`）都不读 URDF 关节限位。目标本就靠近机械限位时，重力偏移会把 `q_cmd` 推出限位外，关节会以 $k_p \times$ 超出量 顶在硬限位上（`arm_stiffness_scale=2` 时 $k_p$ 约 28.6 N·m/rad）。这是 MIT 阻抗控制的固有行为，不是本 controller 特有的。
+
+激活时偏移从 0 线性升到全量（`offset_ramp_s`，默认 2 s）。肩部稳态偏移可达 0.4–0.8 rad（`arm_stiffness_scale=2` 时约 0.4 rad），若直接施加，命令会相对当前下垂位置阶跃两倍偏移量，产生接近电机上限的力矩冲击。
+
+其余保护：IMU 四元数模长偏离 1 超过 0.1 时保持上一个有效重力方向；没收到过 `~/target` 就不发任何命令；激活时任一 `kp` 非正则拒绝。
+
+> 本 controller 不读 `MotorState.mode`，无法感知电机已失去使能。电机不再跟随位置指令时只剩绕组阻尼，**手感是“紧”而不是“软”**——排查“手臂不听指令”时应先查 `/lowstate` 的 `mode`、`temperature` 和 `motorstate`，再查控制链路。字段含义与实测记录见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
+
+`gravity_table` 不存在时 `on_configure` 会失败并进入 `finalized`（而不是静默地不做补偿）。首次标定完成并导出后，需要重新加载该 controller——重启控制栈或：
+
+```bash
+ros2 control unload_controller arm_gravity_compensation
+ros2 control load_controller arm_gravity_compensation --set-state configure
+```
+
+### 关闭时的卸力斜坡
+
+固件没有看门狗，**停止发布 `/lowcmd` 不等于释放关节**：最后一帧的 `kp`/`kd`/`q` 会被电机一直保持，手臂停在哪就顶在哪，持续吃电流直到过热。所以 `stop()` 在 `clear_output()` 之前先调 `release_body()`。
+
+斜坡期间命令位置固定为 `command_position_`（即含重力补偿偏移的最后一个命令），只缩放 `kp`，于是力矩 $k_p s\,(q_{cmd}-q_{meas})$ 从当前实际出力平滑淡出。**不能改成实测位置**——那样误差当场归零，手臂第一帧就掉下去。`kd` 全程保持、只在最后一帧归零。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `release_ramp_s` | 2.0 | 斜坡时长，上限 30 s；设 0 关闭斜坡（恢复为直接停发） |
+
+斜坡只能让下降变缓，不能匀速：静态下垂量是 $\tau_g/k_p$，$k_p\to 0$ 时按 $1/k_p$ 发散，后半段必然更快。手臂最终一定停在自然下垂位。
+
+斜坡帧和模式交还请求走的是 **`start_release_channel()` 建立的私有 context**，不是 `node_`。`stop()` 只会在全局 context 已关闭后被调到，而 rclcpp 会静默丢弃关闭后的发布——实测确认用 `node_` 发时总线上 **一帧都看不到**。同理不能在这里用 `release_control()`，它要等服务响应，而 executor 已停。详见 [G1.md](../../G1.md) 的「关闭时发布必须用独立 context」。
+
+控制栈被强杀或崩溃时该路径不会执行，用 `ros2 run robot_bringup exit_debug_mode` 兜底。机制详见 [G1.md](../../G1.md) 的「退出低层控制必须主动卸力」。
 
 ### 进程与设备边界
 `controller_manager`、`ForwardCommandController`、`JointTrajectoryController` 和 `G1TopicSystem` 都在同一个 `ros2_control_node` 进程中。每个 500 Hz 周期按“硬件 `read()` -> active controller `update()` -> 硬件 `write()`”运行，state/command interface 是指向插件存储的 C++ 接口；controller 与硬件插件之间没有 ROS topic、序列化或 DDS。

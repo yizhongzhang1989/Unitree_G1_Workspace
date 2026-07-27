@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from arm_gravity_compensation.constants import ARM_JOINTS
+from arm_gravity_compensation.constants import ARM_JOINTS, MIRROR_SIGNS
 from arm_gravity_compensation.parameter_store import ParameterStore
 
 
@@ -119,3 +119,51 @@ def test_final_urdf_groups_payload_and_exports_same_tree(tmp_path):
         "identification"]
     assert identification["source"] == "prior_distributed"
     assert identification["observability"] == 0.5
+
+def test_capture_side_is_recorded_and_mirrored_for_the_other_arm(tmp_path):
+    store = ParameterStore(str(tmp_path / "parameters.json"))
+    store.initialize(str(URDF))
+    pose = np.linspace(-0.6, 0.8, 7)
+    positions = {name: 0.0 for side in ARM_JOINTS for name in ARM_JOINTS[side]}
+    positions.update(dict(zip(ARM_JOINTS["right"], pose)))
+
+    target = store.append_target(positions, source="manual", side="right")
+
+    assert target["side"] == "right"
+    np.testing.assert_allclose(
+        store.target_positions(target, "right"), pose)
+    np.testing.assert_allclose(
+        store.target_positions(target, "left"), MIRROR_SIGNS * pose)
+
+
+def test_targets_without_a_side_are_backfilled_from_selected_joints(tmp_path):
+    path = tmp_path / "parameters.json"
+    store = ParameterStore(str(path))
+    document = store.initialize(str(URDF))
+    document["calibration"]["selected_joints"] = list(ARM_JOINTS["right"])
+    document["calibration"]["targets"] = [{
+        "id": 1, "captured_at": "", "source": "manual",
+        "positions": {name: 0.3 for side in ARM_JOINTS
+                      for name in ARM_JOINTS[side]},
+    }]
+    store.save(document)
+
+    restored = store.initialize(str(URDF))
+
+    assert restored["calibration"]["targets"][0]["side"] == "right"
+
+
+def test_mirrored_estimate_seeds_the_other_arm(tmp_path):
+    store = ParameterStore(str(tmp_path / "parameters.json"))
+    document = store.initialize(str(URDF))
+    links = document["model_scope"]["parameter_links"]["right"]
+    scales = np.linspace(0.9, 1.3, len(links))
+    biases = np.linspace(-0.3, 0.4, 7)
+    store.apply_link_estimate(
+        "right", links, scales, biases, np.ones(len(links)), np.ones(7), {})
+
+    store.mirror_link_estimate("right")
+
+    left_scales, left_biases = store.link_estimate("left")
+    np.testing.assert_allclose(left_scales, scales)
+    np.testing.assert_allclose(left_biases, MIRROR_SIGNS * biases)

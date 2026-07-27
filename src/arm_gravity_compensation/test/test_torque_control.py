@@ -40,14 +40,15 @@ def test_reference_starts_at_the_measured_pose_so_kp_cannot_jerk_the_arm():
     np.testing.assert_allclose(first.applied, np.zeros(7), atol=1e-12)
 
 
-def test_torque_controller_reports_settle_with_noisy_velocity():
+def test_reference_reaches_the_target_and_restarts_cleanly():
     controller = TorquePoseController(minimum_duration=1.0)
     target = np.linspace(0.0, 0.3, 7)
     controller.start(0.0, np.zeros(7), target)
 
-    settled = controller.step(1.1, target, np.zeros(7), np.zeros(7))
-    assert settled.trajectory_complete
-    assert settled.settled
+    arrived = controller.step(1.1, target, np.zeros(7), np.zeros(7))
+    assert arrived.trajectory_complete
+    np.testing.assert_allclose(arrived.reference, target, atol=1e-12)
+    np.testing.assert_allclose(arrived.target_error, np.zeros(7), atol=1e-12)
 
     controller.start(2.0, target, target)
     moving = controller.step(

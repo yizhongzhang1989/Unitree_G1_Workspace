@@ -11,11 +11,16 @@ from typing import Dict, Mapping, Optional, Sequence
 import xml.etree.ElementTree as ET
 
 import numpy as np
+from numpy.typing import ArrayLike
 
-from .constants import ALL_ARM_JOINTS, ARM_JOINTS, SIDES
+from .constants import (ALL_ARM_JOINTS, ARM_JOINTS, SIDES, mirror_arm_values,
+                        opposite_side)
 
 
 SCHEMA_VERSION = 2
+# A pose is hand-guided on one arm, or on both at once when the operator
+# selected joints from each side.
+CAPTURE_SIDES = SIDES + ("both",)
 # Posterior variance reduction above which a link counts as measured rather
 # than carried over from the URDF prior.
 IDENTIFIED_OBSERVABILITY = 0.9
@@ -33,6 +38,14 @@ def _vector(element: Optional[ET.Element], attribute: str,
         raise ValueError("%s must contain three values" % attribute)
     return values
 
+# 类型转换用
+def _number(element: ET.Element, attribute: str) -> float:
+    text = element.get(attribute)
+    if text is None:
+        raise ValueError(
+            "<%s> is missing the %s attribute" % (element.tag, attribute))
+    return float(text)
+
 
 def _inertial_parameters(link: ET.Element) -> Optional[Dict[str, object]]:
     inertial = link.find("inertial")
@@ -46,9 +59,9 @@ def _inertial_parameters(link: ET.Element) -> Optional[Dict[str, object]]:
     return {
         "origin_xyz": _vector(origin, "xyz", "0 0 0"),
         "origin_rpy": _vector(origin, "rpy", "0 0 0"),
-        "mass": float(mass.get("value")),
+        "mass": _number(mass, "value"),
         "inertia": {
-            name: float(inertia.get(name))
+            name: _number(inertia, name)
             for name in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz")
         },
     }
@@ -74,9 +87,9 @@ def create_parameter_document(urdf_xml: str, source_path: str) -> dict:
             "parent_link": parent.get("link"),
             "child_link": child_link,
             "limit": None if limit is None else {
-                key: float(limit.get(key))
+                key: float(text)
                 for key in ("lower", "upper", "effort", "velocity")
-                if limit.get(key) is not None
+                if (text := limit.get(key)) is not None
             },
         }
 
@@ -173,18 +186,15 @@ def load_parameter_document(path: str) -> dict:
     return document
 
 
-def atomic_write_parameter_document(path: str, document: Mapping) -> None:
+def atomic_write(path: str, payload: bytes) -> str:
+    """Replace ``path`` with ``payload`` only after it is fully on disk."""
     destination = Path(path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    serializable = copy.deepcopy(dict(document))
-    serializable["updated_at"] = utc_now()
     descriptor, temporary_path = tempfile.mkstemp(
-        prefix=destination.name + ".", suffix=".tmp",
-        dir=str(destination.parent), text=True)
+        prefix=destination.name + ".", suffix=".tmp", dir=str(destination.parent))
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(serializable, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_path, destination)
@@ -194,6 +204,14 @@ def atomic_write_parameter_document(path: str, document: Mapping) -> None:
         except FileNotFoundError:
             pass
         raise
+    return str(destination)
+
+
+def atomic_write_parameter_document(path: str, document: Mapping) -> None:
+    serializable = copy.deepcopy(dict(document))
+    serializable["updated_at"] = utc_now()
+    atomic_write(path, (json.dumps(
+        serializable, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 class ParameterStore:
@@ -218,10 +236,25 @@ class ParameterStore:
                 raise ValueError(
                     "existing parameter file belongs to a different URDF; "
                     "back it up and reinitialize explicitly")
-            return document
+            return self._backfill_target_sides(document)
         source = Path(urdf_path).expanduser().resolve()
         with open(source, "r", encoding="utf-8") as stream:
             document = create_parameter_document(stream.read(), str(source))
+        self.save(document)
+        return self.load()
+
+    def _backfill_target_sides(self, document: dict) -> dict:
+        """Tag targets captured before the capture side was recorded."""
+        targets = [target for target in document["calibration"]["targets"]
+                   if "side" not in target]
+        if not targets:
+            return document
+        selected = document["calibration"]["selected_joints"]
+        sides = {side for side in SIDES
+                 if any(name in ARM_JOINTS[side] for name in selected)}
+        inferred = sides.pop() if len(sides) == 1 else "both"
+        for target in targets:
+            target["side"] = inferred
         self.save(document)
         return self.load()
 
@@ -242,22 +275,42 @@ class ParameterStore:
         return self.load()
 
     def append_target(self, positions: Mapping[str, float],
-                      *, source: str) -> dict:
-        missing = [name for name in ALL_ARM_JOINTS if name not in positions]
-        values = {name: float(positions[name]) for name in ALL_ARM_JOINTS}
-        if missing or not np.all(np.isfinite(list(values.values()))):
+                      *, source: str, side: str) -> dict:
+        # A missing joint becomes NaN so it fails the same check as a bad value
+        # instead of escaping as a KeyError from the comprehension.
+        values = {name: float(positions.get(name, np.nan))
+                  for name in ALL_ARM_JOINTS}
+        if not np.all(np.isfinite(list(values.values()))):
             raise ValueError("target must contain 14 finite arm positions")
+        if side not in CAPTURE_SIDES:
+            raise ValueError("capture side must be one of %s" % (CAPTURE_SIDES,))
         document = self.load()
         targets = document["calibration"]["targets"]
         target = {
             "id": 1 + max((int(item["id"]) for item in targets), default=0),
             "captured_at": utc_now(),
             "source": source,
+            "side": side,
             "positions": values,
         }
         targets.append(target)
         self.save(document)
         return target
+
+    def target_positions(self, target: Mapping, side: str) -> np.ndarray:
+        """Return the seven joint targets ``side`` should track for ``target``.
+
+        A pose hand-guided on one arm is reused on the other by mirroring it,
+        which is exact because the two arms are mirror images in the URDF.
+        """
+        if side not in SIDES:
+            raise ValueError("side must be 'left' or 'right'")
+        captured = target.get("side", "both")
+        source = side if captured not in SIDES else captured
+        values = [target["positions"][name] for name in ARM_JOINTS[source]]
+        if source != side:
+            values = mirror_arm_values(values)
+        return np.asarray(values, dtype=float)
 
     def remove_target(self, target_id: int) -> bool:
         document = self.load()
@@ -273,26 +326,21 @@ class ParameterStore:
         self,
         side: str,
         parameter_links: Sequence[str],
-        mass_scales: Sequence[float],
-        torque_bias: Sequence[float],
-        scale_observability: Sequence[float],
-        bias_observability: Sequence[float],
+        mass_scales: ArrayLike,
+        torque_bias: ArrayLike,
+        scale_observability: ArrayLike,
+        bias_observability: ArrayLike,
         iteration: Mapping,
     ) -> dict:
         if side not in SIDES:
             raise ValueError("side must be 'left' or 'right'")
-        scales = np.asarray(mass_scales, dtype=float)
-        biases = np.asarray(torque_bias, dtype=float)
-        scale_observability_array = np.asarray(scale_observability, dtype=float)
-        bias_observability_array = np.asarray(bias_observability, dtype=float)
         links = tuple(parameter_links)
-        if (scales.shape != (len(links),) or biases.shape != (7,) or
-                scale_observability_array.shape != scales.shape or
-                bias_observability_array.shape != biases.shape or
-                not np.all(np.isfinite(scales)) or
-                not np.all(np.isfinite(biases)) or
-                not np.all(np.isfinite(scale_observability_array)) or
-                not np.all(np.isfinite(bias_observability_array)) or
+        arrays = [np.asarray(value, dtype=float) for value in (
+            mass_scales, torque_bias, scale_observability, bias_observability)]
+        scales, biases = arrays[0], arrays[1]
+        shapes = ((len(links),), (7,), (len(links),), (7,))
+        if (any(array.shape != shape for array, shape in zip(arrays, shapes)) or
+                not all(np.all(np.isfinite(array)) for array in arrays) or
                 np.any(scales <= 0.0)):
             raise ValueError("link estimates have invalid dimensions or values")
 
@@ -300,8 +348,7 @@ class ParameterStore:
         expected_links = tuple(document["model_scope"]["parameter_links"][side])
         if links != expected_links:
             raise ValueError("parameter links do not match the parameter file")
-        for link_name, scale, observability in zip(
-                links, scales, scale_observability_array):
+        for link_name, scale, observability in zip(links, scales, arrays[2]):
             inertial = document["links"][link_name]["inertial"]
             if inertial is None:
                 raise ValueError("parameter link %s has no inertial" % link_name)
@@ -320,8 +367,7 @@ class ParameterStore:
                            else "prior_distributed"),
                 "observability": float(np.clip(observability, 0.0, 1.0)),
             }
-        for joint_name, bias, observability in zip(
-                ARM_JOINTS[side], biases, bias_observability_array):
+        for joint_name, bias in zip(ARM_JOINTS[side], biases):
             document["calibration"]["joint_torque_bias"][joint_name] = float(bias)
 
         record = copy.deepcopy(dict(iteration))
@@ -330,10 +376,8 @@ class ParameterStore:
         record["parameter_links"] = list(links)
         record["mass_scales"] = [float(value) for value in scales]
         record["torque_bias"] = [float(value) for value in biases]
-        record["scale_observability"] = [
-            float(value) for value in scale_observability_array]
-        record["bias_observability"] = [
-            float(value) for value in bias_observability_array]
+        record["scale_observability"] = [float(value) for value in arrays[2]]
+        record["bias_observability"] = [float(value) for value in arrays[3]]
         document["calibration"]["iterations"].append(record)
         self.save(document)
         return self.load()
@@ -348,6 +392,25 @@ class ParameterStore:
         biases = [document["calibration"]["joint_torque_bias"][joint_name]
                   for joint_name in ARM_JOINTS[side]]
         return np.asarray(scales, dtype=float), np.asarray(biases, dtype=float)
+
+    def mirror_link_estimate(self, source_side: str) -> dict:
+        """Seed the opposite arm with the mirror of ``source_side``.
+
+        Mass scales are dimensionless ratios of mirrored links so they carry
+        over unchanged; joint torques mirror with ``MIRROR_SIGNS`` just like
+        the gravity torque does. The result is only a starting estimate, the
+        opposite arm still has to be measured.
+        """
+        scales, biases = self.link_estimate(source_side)
+        document = self.load()
+        links = document["model_scope"]["parameter_links"]
+        observed = [document["links"][name]["inertial"]["identification"]
+                    ["observability"] for name in links[source_side]]
+        return self.apply_link_estimate(
+            opposite_side(source_side), tuple(links[opposite_side(source_side)]),
+            scales, mirror_arm_values(biases), observed, np.zeros(7),
+            {"source": "mirrored_from_%s" % source_side, "sample_count": 0,
+             "rank": 0, "nullity": 0, "rmse_before": 0.0, "rmse_after": 0.0})
 
     def export_calibrated_urdf(self, output_path: str) -> str:
         """Write calibrated inertials into a copy of the original URDF tree."""
@@ -369,22 +432,5 @@ class ParameterStore:
             for key, value in values["inertia"].items():
                 inertia.set(key, "%.17g" % value)
 
-        destination = Path(output_path).expanduser().resolve()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_path = tempfile.mkstemp(
-            prefix=destination.name + ".", suffix=".tmp",
-            dir=str(destination.parent), text=True)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                ET.ElementTree(root).write(
-                    stream, encoding="utf-8", xml_declaration=True)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, destination)
-        except Exception:
-            try:
-                os.unlink(temporary_path)
-            except FileNotFoundError:
-                pass
-            raise
-        return str(destination)
+        return atomic_write(output_path, ET.tostring(
+            root, encoding="utf-8", xml_declaration=True))

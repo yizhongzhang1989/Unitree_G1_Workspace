@@ -3,6 +3,7 @@
 from typing import Optional, Sequence
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 
 class PassivePoseCapture:
@@ -32,7 +33,7 @@ class PassivePoseCapture:
         self._moved = False
         self._settled_since: Optional[float] = None
 
-    def reset(self, current_position: Optional[Sequence[float]] = None) -> None:
+    def reset(self, current_position: Optional[ArrayLike] = None) -> None:
         self._anchor = (None if current_position is None
                         else self._vector(current_position, "position"))
         self._last_pose = None
@@ -42,8 +43,8 @@ class PassivePoseCapture:
     def update(
         self,
         timestamp: float,
-        position: Sequence[float],
-        velocity: Sequence[float],
+        position: ArrayLike,
+        velocity: ArrayLike,
     ) -> Optional[np.ndarray]:
         position_array = self._vector(position, "position")
         velocity_array = self._vector(velocity, "velocity")
@@ -82,7 +83,7 @@ class PassivePoseCapture:
         return captured
 
     @staticmethod
-    def _vector(value: Sequence[float], name: str) -> np.ndarray:
+    def _vector(value: ArrayLike, name: str) -> np.ndarray:
         array = np.asarray(value, dtype=float)
         if array.shape != (14,) or not np.all(np.isfinite(array)):
             raise ValueError("%s must contain 14 finite values" % name)

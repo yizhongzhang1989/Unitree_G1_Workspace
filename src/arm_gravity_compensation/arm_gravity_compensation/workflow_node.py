@@ -7,26 +7,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
 import time
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, cast
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import rclpy
+import yaml
+from numpy.typing import ArrayLike
 from ament_index_python.packages import get_package_share_directory
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (HistoryPolicy, QoSProfile, ReliabilityPolicy)
 from unitree_api.msg import Request, Response
-from unitree_hg.msg import LowCmd, LowState
+from unitree_hg.msg import IMUState, LowCmd, LowState
 
 from .calibration import StaticSample, fit_selected_joints
 from .capture import PassivePoseCapture
 from .constants import (ALL_ARM_JOINTS, ALL_ARM_MOTOR_INDICES,
                         ARM_JOINTS, ARM_MOTOR_INDICES, SIDES)
 from .gravity_model import TorsoArmGravityModel
-from .imu import ImuSampleWindow
+from .imu import ImuSampleWindow, gravity_from_acceleration
 from .lowcmd import MotorSetpoint, populate_arm_command
-from .parameter_store import ParameterStore
+from .parameter_store import ParameterStore, atomic_write
 from .torque_control import (PoseStabilityWindow, TorquePoseController,
                             TorqueStep)
 
@@ -48,72 +50,93 @@ class ArmGravityWorkflow(Node):
         description_share = Path(get_package_share_directory(
             "unitree_g1_description"))
         default_urdf = description_share / "model" / "final.urdf"
-        default_data = Path.home() / ".ros" / "arm_gravity_compensation"
+        # Installed as symlinks by --symlink-install, and every writer resolves
+        # the link, so exporting lands on the version controlled source files.
+        default_data = Path(get_package_share_directory(
+            "arm_gravity_compensation")) / "config"
 
         self._urdf_path = str(Path(self.declare_parameter(
-            "urdf_path", str(default_urdf)).value).expanduser().resolve())
+            "urdf_path", str(default_urdf)
+        ).get_parameter_value().string_value).expanduser().resolve())
         self._parameter_path = str(Path(self.declare_parameter(
-            "parameter_file", str(default_data / "parameters.json")).value
-                                        ).expanduser().resolve())
+            "parameter_file", str(default_data / "parameters.json")
+        ).get_parameter_value().string_value).expanduser().resolve())
         self._output_urdf = str(Path(self.declare_parameter(
-            "calibrated_urdf", str(default_data / "calibrated.urdf")).value
-                                    ).expanduser().resolve())
-        self._lowstate_topic = str(self.declare_parameter(
-            "lowstate_topic", "/lowstate").value)
-        self._lowcmd_topic = str(self.declare_parameter(
-            "lowcmd_topic", "/lowcmd").value)
-        self._host = str(self.declare_parameter("host", "0.0.0.0").value)
-        self._port = int(self.declare_parameter("port", 8310).value)
-        self._control_rate = float(self.declare_parameter(
-            "control_rate_hz", 200.0).value)
-        self._state_timeout = float(self.declare_parameter(
-            "state_timeout_s", 0.25).value)
-        self._target_timeout = float(self.declare_parameter(
-            "target_timeout_s", 20.0).value)
-        self._settle_duration = float(self.declare_parameter(
-            "settle_duration_s", 0.6).value)
-        self._stability_position_range = float(self.declare_parameter(
-            "stability_position_range", 0.02).value)
-        self._sample_duration = float(self.declare_parameter(
-            "sample_duration_s", 1.0).value)
-        self._imu_duration = float(self.declare_parameter(
-            "imu_duration_s", 1.0).value)
-        self._imu_samples = int(self.declare_parameter(
-            "imu_minimum_samples", 100).value)
-        self._imu_timeout = float(self.declare_parameter(
-            "imu_timeout_s", 10.0).value)
-        self._acceleration_sign = float(self.declare_parameter(
-            "accelerometer_to_gravity_sign", -1.0).value)
-        self._lowcmd_quiet_period = float(self.declare_parameter(
-            "lowcmd_quiet_period_s", 0.2).value)
-        self._lowcmd_quiet_timeout = float(self.declare_parameter(
-            "lowcmd_quiet_timeout_s", 3.0).value)
-        self._motion_timeout = float(self.declare_parameter(
-            "motion_switch_timeout_s", 1.5).value)
-        self._restore_motion = bool(self.declare_parameter(
-            "restore_motion_mode", True).value)
-        self._allow_torque_output = bool(self.declare_parameter(
-            "allow_torque_output", False).value)
-        self._fallback_motion = str(self.declare_parameter(
-            "fallback_motion_mode", "ai").value)
+            "calibrated_urdf", str(default_data / "calibrated.urdf")
+        ).get_parameter_value().string_value).expanduser().resolve())
+        # Lumped rigid-body chain consumed by the ros2_control gravity
+        # compensation controller, written as a ready-to-load parameter file.
+        self._gravity_table_path = str(Path(self.declare_parameter(
+            "gravity_table", str(default_data / "gravity_table.yaml")
+        ).get_parameter_value().string_value).expanduser().resolve())
+        self._controller_name = self.declare_parameter(
+            "gravity_controller_name", "arm_gravity_compensation"
+        ).get_parameter_value().string_value
+        self._lowstate_topic = self.declare_parameter(
+            "lowstate_topic", "/lowstate").get_parameter_value().string_value
+        # The torso IMU. G1 carries two: ``LowState.imu_state`` sits in the
+        # pelvis and is separated from ``torso_link`` by the three waist
+        # joints, while ``/secondary_imu`` sits at ``imu_in_torso``, which is
+        # exactly the frame this gravity model is rooted in.
+        self._imu_topic = self.declare_parameter(
+            "imu_topic", "/secondary_imu").get_parameter_value().string_value
+        self._lowcmd_topic = self.declare_parameter(
+            "lowcmd_topic", "/lowcmd").get_parameter_value().string_value
+        self._host = self.declare_parameter(
+            "host", "0.0.0.0").get_parameter_value().string_value
+        self._port = self.declare_parameter(
+            "port", 8310).get_parameter_value().integer_value
+        self._control_rate = self.declare_parameter(
+            "control_rate_hz", 200.0).get_parameter_value().double_value
+        self._state_timeout = self.declare_parameter(
+            "state_timeout_s", 0.25).get_parameter_value().double_value
+        self._target_timeout = self.declare_parameter(
+            "target_timeout_s", 20.0).get_parameter_value().double_value
+        self._settle_duration = self.declare_parameter(
+            "settle_duration_s", 0.6).get_parameter_value().double_value
+        self._stability_position_range = self.declare_parameter(
+            "stability_position_range", 0.02
+        ).get_parameter_value().double_value
+        self._imu_duration = self.declare_parameter(
+            "imu_duration_s", 1.0).get_parameter_value().double_value
+        self._imu_samples = self.declare_parameter(
+            "imu_minimum_samples", 100).get_parameter_value().integer_value
+        self._imu_timeout = self.declare_parameter(
+            "imu_timeout_s", 10.0).get_parameter_value().double_value
+        self._acceleration_sign = self.declare_parameter(
+            "accelerometer_to_gravity_sign", -1.0
+        ).get_parameter_value().double_value
+        self._lowcmd_quiet_period = self.declare_parameter(
+            "lowcmd_quiet_period_s", 0.2).get_parameter_value().double_value
+        self._lowcmd_quiet_timeout = self.declare_parameter(
+            "lowcmd_quiet_timeout_s", 3.0).get_parameter_value().double_value
+        self._motion_timeout = self.declare_parameter(
+            "motion_switch_timeout_s", 1.5).get_parameter_value().double_value
+        self._restore_motion = self.declare_parameter(
+            "restore_motion_mode", True).get_parameter_value().bool_value
+        self._allow_torque_output = self.declare_parameter(
+            "allow_torque_output", False).get_parameter_value().bool_value
+        self._fallback_motion = self.declare_parameter(
+            "fallback_motion_mode", "ai").get_parameter_value().string_value
 
         self._controller_kwargs = {
             "stiffness": self.declare_parameter(
                 "motor_stiffness", [40.0, 40.0, 40.0, 40.0,
-                                    40.0, 20.0, 20.0]).value,
+                                    40.0, 20.0, 20.0]
+            ).get_parameter_value().double_array_value,
             "damping": self.declare_parameter(
                 "motor_damping", [3.0, 3.0, 3.0, 3.0,
-                                  3.0, 1.5, 1.5]).value,
+                                  3.0, 1.5, 1.5]
+            ).get_parameter_value().double_array_value,
             "torque_slew_rate": self.declare_parameter(
-                "torque_slew_rate", [30.0] * 7).value,
-            "maximum_speed": float(self.declare_parameter(
-                "maximum_reference_speed", 0.35).value),
-            "position_tolerance": float(self.declare_parameter(
-                "position_tolerance", 0.04).value),
-            "velocity_tolerance": float(self.declare_parameter(
-                "velocity_tolerance", 0.05).value),
-            "minimum_duration": float(self.declare_parameter(
-                "minimum_move_duration", 2.0).value),
+                "torque_slew_rate", [30.0] * 7
+            ).get_parameter_value().double_array_value,
+            "maximum_speed": self.declare_parameter(
+                "maximum_reference_speed", 0.35
+            ).get_parameter_value().double_value,
+            "minimum_duration": self.declare_parameter(
+                "minimum_move_duration", 2.0
+            ).get_parameter_value().double_value,
         }
 
         self._lock = threading.RLock()
@@ -131,6 +154,7 @@ class ArmGravityWorkflow(Node):
         self._imu_window: Optional[ImuSampleWindow] = None
         self._capture: Optional[PassivePoseCapture] = None
         self._capture_automatic = False
+        self._capture_side = "both"
 
         self._phase = "idle"
         self._message = "Waiting for LowState"
@@ -140,16 +164,11 @@ class ArmGravityWorkflow(Node):
         self._velocity = np.zeros(14, dtype=float)
         self._estimated_torque = np.zeros(14, dtype=float)
         self._acceleration = np.zeros(3, dtype=float)
-        self._gyroscope = np.zeros(3, dtype=float)
         self._mode_pr = 0
         self._mode_machine = 0
         self._state_stamp = 0.0
         self._last_observed_lowcmd = 0.0
-        self._last_command = {
-            side: np.zeros(7, dtype=float) for side in SIDES
-        }
         self._last_setpoints: Dict[int, MotorSetpoint] = {}
-        self._last_gravity = np.array([0.0, 0.0, -9.81])
 
         self._store = ParameterStore(self._parameter_path)
         with self._file_lock:
@@ -169,6 +188,8 @@ class ArmGravityWorkflow(Node):
         )
         self._lowstate_subscription = self.create_subscription(
             LowState, self._lowstate_topic, self._on_lowstate, sensor_qos)
+        self._imu_subscription = self.create_subscription(
+            IMUState, self._imu_topic, self._on_torso_imu, sensor_qos)
         self._lowcmd_subscription = self.create_subscription(
             LowCmd, self._lowcmd_topic, self._on_lowcmd, sensor_qos)
         self._motion_request = self.create_publisher(
@@ -193,20 +214,19 @@ class ArmGravityWorkflow(Node):
 
     def _on_lowstate(self, message: LowState) -> None:
         now = time.monotonic()
+        motor_state = cast(Any, message.motor_state)
         position = np.array([
-            message.motor_state[index].q for index in ALL_ARM_MOTOR_INDICES
+            motor_state[index].q for index in ALL_ARM_MOTOR_INDICES
         ], dtype=float)
         velocity = np.array([
-            message.motor_state[index].dq for index in ALL_ARM_MOTOR_INDICES
+            motor_state[index].dq for index in ALL_ARM_MOTOR_INDICES
         ], dtype=float)
         estimated = np.array([
-            message.motor_state[index].tau_est
+            motor_state[index].tau_est
             for index in ALL_ARM_MOTOR_INDICES
         ], dtype=float)
-        acceleration = np.asarray(message.imu_state.accelerometer, dtype=float)
-        gyroscope = np.asarray(message.imu_state.gyroscope, dtype=float)
         if not all(np.all(np.isfinite(value)) for value in
-                   (position, velocity, estimated, acceleration, gyroscope)):
+                   (position, velocity, estimated)):
             return
 
         captured = None
@@ -215,23 +235,32 @@ class ArmGravityWorkflow(Node):
             self._position = position
             self._velocity = velocity
             self._estimated_torque = estimated
-            self._acceleration = acceleration
-            self._gyroscope = gyroscope
             self._mode_pr = int(message.mode_pr)
             self._mode_machine = int(message.mode_machine)
             self._state_stamp = now
             if first_state and self._phase == "idle":
                 self._message = "LowState connected; select joints and capture poses"
-            if self._imu_window is not None:
-                self._imu_window.add(now, acceleration, gyroscope)
-            if self._phase == "passive_capture" and self._capture_automatic:
-                captured = self._capture.update(now, position, velocity)
+            capture = self._capture
+            if (self._phase == "passive_capture" and self._capture_automatic and capture is not None):
+                captured = capture.update(now, position, velocity)
             self._state_condition.notify_all()
         if captured is not None:
             try:
                 self._append_target(captured, "automatic_settle")
             except Exception as error:  # noqa: BLE001
                 self._set_message("Automatic capture failed: %s" % error)
+
+    def _on_torso_imu(self, message: IMUState) -> None:
+        now = time.monotonic()
+        acceleration = np.asarray(message.accelerometer, dtype=float)
+        gyroscope = np.asarray(message.gyroscope, dtype=float)
+        if not (np.all(np.isfinite(acceleration)) and np.all(np.isfinite(gyroscope))):
+            return
+        with self._lock:
+            self._acceleration = acceleration
+            if self._imu_window is not None:
+                self._imu_window.add(now, acceleration, gyroscope)
+            self._state_condition.notify_all()
 
     def _on_lowcmd(self, _message: LowCmd) -> None:
         with self._lock:
@@ -246,29 +275,40 @@ class ArmGravityWorkflow(Node):
             self._motion_response = message
             self._motion_event.set()
 
-    def _append_target(self, position: Sequence[float], source: str) -> dict:
+    def _append_target(self, position: ArrayLike, source: str) -> dict:
+        position_array = np.asarray(position, dtype=float)
         values = {
             name: float(value)
-            for name, value in zip(ALL_ARM_JOINTS, position)
+            for name, value in zip(ALL_ARM_JOINTS, position_array)
         }
+        with self._lock:
+            side = self._capture_side
         with self._file_lock:
-            target = self._store.append_target(values, source=source)
-        self._set_message("Captured pose %d" % target["id"])
+            target = self._store.append_target(
+                values, source=source, side=side)
+        self._set_message("Captured pose %d on the %s arm" % (target["id"], side))
         return target
 
-    def start_capture(self, selected_joints: Sequence[str], automatic: bool) -> dict:
+    @staticmethod
+    def _validated_selection(selected_joints: Sequence[str]) -> list:
         selected = list(dict.fromkeys(str(name) for name in selected_joints))
         invalid = [name for name in selected if name not in ALL_ARM_JOINTS]
         if not selected or invalid:
             raise ValueError("select one or more valid arm joints")
+        return selected
+
+    @staticmethod
+    def _selected_sides(selected_joints: Sequence[str]) -> list:
+        return [side for side in SIDES
+                if any(name in ARM_JOINTS[side] for name in selected_joints)]
+
+    def start_capture(self, selected_joints: Sequence[str], automatic: bool) -> dict:
+        selected = self._validated_selection(selected_joints)
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
                 raise RuntimeError("automatic calibration is running")
             self._require_fresh_state_locked()
-            selected_sides = {
-                side for side in SIDES
-                if any(name in ARM_JOINTS[side] for name in selected)
-            }
+            selected_sides = self._selected_sides(selected)
             indices = [
                 index for index, name in enumerate(ALL_ARM_JOINTS)
                 if any(name in ARM_JOINTS[side] for side in selected_sides)
@@ -277,8 +317,12 @@ class ArmGravityWorkflow(Node):
             capture.reset(self._position)
             self._capture = capture
             self._capture_automatic = bool(automatic)
+            self._capture_side = (selected_sides[0]
+                                  if len(selected_sides) == 1 else "both")
             self._phase = "passive_capture"
-            self._message = "Passive capture active; LowCmd output is disabled"
+            self._message = (
+                "Passive capture active on the %s arm; LowCmd output is disabled"
+                % self._capture_side)
         with self._file_lock:
             self._store.set_selected_joints(selected)
         return {"ok": True, "message": self._message}
@@ -320,19 +364,22 @@ class ArmGravityWorkflow(Node):
             self._store.save(document)
         return {"ok": True, "message": "All captured poses removed"}
 
-    def start_calibration(self, confirmation: str) -> dict:
+    def start_calibration(self, confirmation: str,
+                          selected_joints: Sequence[str]) -> dict:
         if not self._allow_torque_output:
             raise RuntimeError(
                 "torque output is disabled; relaunch with "
                 "allow_torque_output:=true after supporting the robot")
         if confirmation != _CONFIRMATION:
             raise ValueError("torque calibration confirmation is missing")
+        # The request carries the selection so that a run can never inherit the
+        # joints of an earlier capture session and move the wrong arm.
+        selected = self._validated_selection(selected_joints)
+        sides = self._selected_sides(selected)
         with self._file_lock:
+            self._store.set_selected_joints(selected)
             document = self._store.load()
-        selected = document["calibration"]["selected_joints"]
         targets = document["calibration"]["targets"]
-        if not selected:
-            raise ValueError("select joints before calibration")
         if not targets:
             raise ValueError("capture at least one pose before calibration")
         with self._lock:
@@ -343,7 +390,9 @@ class ArmGravityWorkflow(Node):
             self._capture_automatic = False
             self._stop_event.clear()
             self._phase = "preflight"
-            self._message = "Checking IMU and low-level control ownership"
+            self._message = (
+                "Calibrating the %s arm; checking IMU and low-level control "
+                "ownership" % " and ".join(sides))
             self._progress = {
                 "side": None, "target": 0, "total": len(targets),
                 "stage": "preflight", "iteration": 0,
@@ -362,7 +411,13 @@ class ArmGravityWorkflow(Node):
     def export_urdf(self) -> dict:
         with self._file_lock:
             output = self._store.export_calibrated_urdf(self._output_urdf)
-        return {"ok": True, "path": output}
+            table = atomic_write(
+                self._gravity_table_path,
+                yaml.safe_dump(
+                    {self._controller_name: {
+                        "ros__parameters": self._model.gravity_table()}},
+                    default_flow_style=None, sort_keys=False).encode("utf-8"))
+        return {"ok": True, "path": output, "gravity_table": table}
 
     def _run_calibration(self) -> None:
         previous_mode = ""
@@ -420,16 +475,14 @@ class ArmGravityWorkflow(Node):
                         side=side, target=target_number, total=len(targets),
                         stage="move", iteration=len(samples) + 1)
 
-                    target_array = np.array([
-                        target["positions"][name] for name in ARM_JOINTS[side]
-                    ], dtype=float)
+                    target_array = self._store.target_positions(target, side)
                     with self._lock:
                         self._require_fresh_state_locked()
                         side_position = self._side_values(self._position, side)
                     controller = TorquePoseController(**self._controller_kwargs)
                     controller.start(
                         time.monotonic(), side_position, target_array,
-                        initial_torque=self._last_command[side])
+                        initial_torque=self._last_feedforward(side))
                     hold_controllers[side] = controller
                     self._move_until_stable(
                         side, controller, hold_gravity, hold_controllers)
@@ -485,9 +538,9 @@ class ArmGravityWorkflow(Node):
                 }
                 with self._file_lock:
                     self._store.apply_link_estimate(
-                        side, fit.parameter_links, fit.mass_scales,
-                        fit.torque_bias, fit.scale_observability,
-                        fit.bias_observability, iteration)
+                        side, fit.parameter_links, fit.mass_scales, # type: ignore
+                        fit.torque_bias, fit.scale_observability, # type: ignore
+                        fit.bias_observability, iteration) # type: ignore
                     self._store.export_calibrated_urdf(self._output_urdf)
                 self._model.set_arm_parameters(
                     side, fit.mass_scales, fit.torque_bias)
@@ -546,8 +599,6 @@ class ArmGravityWorkflow(Node):
                 estimate = window.estimate(
                     self._model.imu_to_torso,
                     acceleration_sign=self._acceleration_sign)
-                with self._lock:
-                    self._last_gravity = estimate.gravity.copy()
                 self._set_message(
                     "IMU stable: mean=[%.3f, %.3f, %.3f], n=%d"
                     % (*estimate.mean_acceleration, estimate.sample_count))
@@ -612,7 +663,7 @@ class ArmGravityWorkflow(Node):
                 self._imu_window = imu_window
             try:
                 while not imu_window.ready(
-                        self._sample_duration, self._imu_samples):
+                        self._imu_duration, self._imu_samples):
                     self._check_stop()
                     if time.monotonic() >= overall_deadline:
                         break
@@ -632,7 +683,7 @@ class ArmGravityWorkflow(Node):
                         self._imu_window = None
 
             if (not positions or not imu_window.ready(
-                    self._sample_duration, self._imu_samples)):
+                    self._imu_duration, self._imu_samples)):
                 last_error = "static averaging window timed out"
                 continue
             position_array = np.asarray(positions)
@@ -656,8 +707,6 @@ class ArmGravityWorkflow(Node):
 
             q = np.mean(position_array, axis=0)
             side_position = self._side_values(q, side)
-            with self._lock:
-                self._last_gravity = gravity_estimate.gravity.copy()
             return StaticSample(
                 target_id=target_id,
                 q=q,
@@ -721,8 +770,16 @@ class ArmGravityWorkflow(Node):
         publisher.publish(message)
         with self._lock:
             self._last_setpoints = setpoints
-            for side, step in steps.items():
-                self._last_command[side] = step.feedforward.copy()
+
+    def _last_feedforward(self, side: str) -> np.ndarray:
+        """The gravity feed-forward still on the wire, so a new controller can
+        ramp on from it instead of stepping the torque."""
+        with self._lock:
+            setpoints = self._last_setpoints
+            return np.array([
+                setpoints[index].tau if index in setpoints else 0.0
+                for index in ARM_MOTOR_INDICES[side]
+            ], dtype=float)
 
     def _sleep_until_next_tick(self) -> None:
         period = 1.0 / self._control_rate
@@ -758,9 +815,6 @@ class ArmGravityWorkflow(Node):
         self._lowcmd_publisher = None
         with self._lock:
             self._last_setpoints = {}
-            self._last_command = {
-                side: np.zeros(7, dtype=float) for side in SIDES
-            }
 
     def _call_motion(self, api_id: int, parameter: str) -> Response:
         with self._motion_call_lock:
@@ -822,6 +876,15 @@ class ArmGravityWorkflow(Node):
         if self._stop_event.is_set():
             raise CalibrationStopped("calibration stop requested")
 
+    def _live_gravity_locked(self) -> np.ndarray:
+        """Torso gravity from the newest accelerometer sample, for display."""
+        try:
+            return gravity_from_acceleration(
+                self._model.imu_to_torso, self._acceleration,
+                acceleration_sign=self._acceleration_sign)
+        except ValueError:
+            return np.zeros(3, dtype=float)
+
     @staticmethod
     def _side_values(values: np.ndarray, side: str) -> np.ndarray:
         return values[ArmGravityWorkflow._side_slice(side)].copy()
@@ -861,7 +924,7 @@ class ArmGravityWorkflow(Node):
                 "velocity": self._velocity.tolist(),
                 "estimated_torque": self._estimated_torque.tolist(),
                 "accelerometer": self._acceleration.tolist(),
-                "gravity": self._last_gravity.tolist(),
+                "gravity": self._live_gravity_locked().tolist(),
                 "lowcmd_active": self._lowcmd_publisher is not None,
                 "capture_automatic": self._capture_automatic,
                 "torque_output_allowed": self._allow_torque_output,
@@ -960,7 +1023,8 @@ class ArmGravityWorkflow(Node):
                             int(body.get("id", 0))),
                         "/api/targets/clear": workflow.clear_targets,
                         "/api/calibration/start": lambda: workflow.start_calibration(
-                            str(body.get("confirmation", ""))),
+                            str(body.get("confirmation", "")),
+                            body.get("selected_joints", [])),
                         "/api/calibration/stop": workflow.stop_calibration,
                         "/api/export": workflow.export_urdf,
                     }

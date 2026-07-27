@@ -25,7 +25,6 @@ class CalibrationFit:
     mass_scales: np.ndarray
     torque_bias: np.ndarray
     parameter_links: tuple
-    selected_joint_names: tuple
     group_scales: np.ndarray
     joint_noise: np.ndarray
     rank: int
@@ -193,7 +192,6 @@ def fit_selected_joints(
         mass_scales=updated_scales,
         torque_bias=updated_biases,
         parameter_links=tuple(parameter_links),
-        selected_joint_names=tuple(ARM_JOINTS[side][index] for index in indices),
         group_scales=group_scales,
         joint_noise=joint_weights * noise_scale,
         rank=rank,
