@@ -6,7 +6,7 @@ from arm_gravity_compensation.torque_control import (
 )
 
 
-def test_torque_controller_uses_gravity_pd_and_slew_rate():
+def test_feedforward_is_slew_limited_and_feedback_is_left_to_the_motor():
     controller = TorquePoseController(
         stiffness=np.ones(7) * 10.0,
         damping=np.ones(7),
@@ -19,9 +19,25 @@ def test_torque_controller_uses_gravity_pd_and_slew_rate():
     first = controller.step(0.1, np.zeros(7), np.zeros(7), np.ones(7))
     second = controller.step(0.2, np.zeros(7), np.zeros(7), np.ones(7))
 
-    assert np.all(first.torque <= 0.5 + 1e-12)
-    assert np.all(second.torque <= 1.0 + 1e-12)
+    assert np.all(first.feedforward <= 0.5 + 1e-12)
+    assert np.all(second.feedforward <= 1.0 + 1e-12)
     assert not second.trajectory_complete
+    # 反馈项不再由本节点施加，只用于预测电机的实际输出力矩。
+    np.testing.assert_allclose(
+        second.applied,
+        second.feedforward + 10.0 * second.reference,
+        atol=1e-12)
+
+
+def test_reference_starts_at_the_measured_pose_so_kp_cannot_jerk_the_arm():
+    controller = TorquePoseController(minimum_duration=1.0)
+    start = np.linspace(-0.3, 0.3, 7)
+
+    controller.start(0.0, start, np.zeros(7))
+    first = controller.step(0.0, start, np.zeros(7), np.zeros(7))
+
+    np.testing.assert_allclose(first.reference, start, atol=1e-12)
+    np.testing.assert_allclose(first.applied, np.zeros(7), atol=1e-12)
 
 
 def test_torque_controller_reports_settle_with_noisy_velocity():

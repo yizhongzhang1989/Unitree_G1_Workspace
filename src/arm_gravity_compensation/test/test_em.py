@@ -24,6 +24,24 @@ def test_em_recovers_parameters_with_large_outliers():
     assert result.noise_std < 0.03
 
 
+def test_disturbed_blocks_are_rejected_as_a_whole():
+    random = np.random.RandomState(5)
+    design = random.normal(size=(60, 3))
+    expected = np.array([0.9, -1.2, 0.4])
+    observed = design @ expected + random.normal(scale=0.01, size=60)
+    blocks = np.repeat(np.arange(20), 3)
+    disturbed = blocks == 7
+    observed[disturbed] += [0.4, 0.05, 0.35]
+
+    result = fit_robust_em(
+        design, observed, blocks=blocks, minimum_noise_std=1e-3)
+
+    np.testing.assert_allclose(result.parameters, expected, atol=0.02)
+    assert np.all(result.inlier_probability[disturbed] < 0.05)
+    assert np.all(result.inlier_probability[~disturbed] > 0.95)
+    assert len(set(np.round(result.inlier_probability[disturbed], 12))) == 1
+
+
 def test_em_rejects_non_finite_input():
     design = np.eye(2)
     design[0, 0] = np.nan

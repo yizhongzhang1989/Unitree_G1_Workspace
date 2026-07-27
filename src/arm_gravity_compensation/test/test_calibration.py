@@ -61,22 +61,26 @@ def test_rank_deficient_pose_set_keeps_urdf_nearest_solution():
     np.testing.assert_allclose(fit.torque_bias, np.zeros(7), atol=1e-8)
 
 
-def test_final_urdf_reports_payload_null_space_and_link_observability():
+def test_final_urdf_identifies_the_welded_payload_as_one_group():
     final_urdf = (Path(__file__).parents[2] / "unitree_g1_description" /
                   "model" / "final.urdf")
     random = np.random.RandomState(8)
     model = TorsoArmGravityModel.from_urdf_file(str(final_urdf))
-    expected_scales = np.ones(len(model.parameter_links["left"]))
-    expected_biases = np.zeros(7)
+    wrist_links = model.parameter_groups("left")["left_wrist_yaw_joint"]
+    payload = [model.parameter_links["left"].index(name)
+               for name in wrist_links]
+    expected_group = np.ones(7)
+    expected_group[6] = 1.35
+    expected_scales = model.group_aggregation("left") @ expected_group
     samples = []
-    for target_id in range(25):
+    for target_id in range(20):
         q = model.configuration({
             "left": random.uniform(-0.9, 0.9, size=7),
             "right": np.zeros(7),
         })
         gravity = np.array([0.15, -0.1, -9.808])
         design = model.design_matrix("left", q, gravity)
-        torque = design @ np.concatenate([expected_scales, expected_biases])
+        torque = design @ np.concatenate([expected_scales, np.zeros(7)])
         samples.append(StaticSample(
             target_id, q, gravity, torque, torque,
             np.zeros(7), np.zeros(7)))
@@ -84,9 +88,13 @@ def test_final_urdf_reports_payload_null_space_and_link_observability():
     fit = fit_selected_joints(
         model, "left", ["left_wrist_yaw_joint"], samples)
 
-    wrist_links = model.parameter_groups("left")["left_wrist_yaw_joint"]
     assert len(wrist_links) == 8
-    assert fit.nullity >= 3
+    assert fit.nullity == 0
+    assert fit.condition_number < 100.0
+    np.testing.assert_allclose(fit.group_scales[6], 1.35, atol=1e-3)
+    np.testing.assert_allclose(fit.mass_scales[payload], 1.35, atol=1e-3)
+    assert np.all(fit.scale_observability[payload] > 0.9)
     assert fit.parameter_links == model.parameter_links["left"]
-    np.testing.assert_allclose(fit.mass_scales, expected_scales, atol=1e-8)
-    assert np.count_nonzero(fit.scale_observability < 1.0 - 1e-6) >= 3
+    unchanged = [index for index in range(len(expected_scales))
+                 if index not in payload]
+    np.testing.assert_allclose(fit.mass_scales[unchanged], 1.0, atol=1e-12)

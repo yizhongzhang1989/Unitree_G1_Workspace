@@ -222,9 +222,10 @@ function updateParameters(snapshot) {
     <td>${String(item.side || "-").toUpperCase()}</td><td>${targets}</td>
     <td>${Number(item.rmse_before ?? 0).toFixed(6)}</td><td>${Number(item.rmse_after ?? 0).toFixed(6)}</td>
     <td>${item.rank ?? "-"}</td><td>${item.nullity ?? "-"}</td>
+    <td>${Number.isFinite(item.condition_number) ? item.condition_number.toFixed(1) : "-"}</td>
     <td>${item.inlier_fraction === undefined ? "-" : `${(item.inlier_fraction * 100).toFixed(1)}%`}</td>
   </tr>`;
-  }).join("") : `<tr><td class="empty-row" colspan="8">尚无标定迭代</td></tr>`;
+  }).join("") : `<tr><td class="empty-row" colspan="9">尚无标定迭代</td></tr>`;
 }
 
 async function refresh() {
@@ -286,6 +287,34 @@ function bind() {
   });
   [ui.xAxis, ui.yAxis].forEach(select => select.addEventListener("change", () => state && drawPlot(state)));
   window.addEventListener("resize", () => state && drawPlot(state));
+
+  document.addEventListener("pointerover", event => showHint(event.target.closest(".hint")));
+  document.addEventListener("pointerout", event => event.target.closest(".hint") && hideHint());
+  document.addEventListener("focusin", event => showHint(event.target.closest(".hint")));
+  document.addEventListener("focusout", hideHint);
+  document.addEventListener("scroll", hideHint, true);
+  window.addEventListener("resize", hideHint);
+}
+
+function showHint(anchor) {
+  const text = anchor && anchor.dataset.tip;
+  if (!text) return;
+  ui.tooltip.textContent = text;
+  ui.tooltip.classList.add("show");
+  const margin = 12;
+  const target = anchor.getBoundingClientRect();
+  const bubble = ui.tooltip.getBoundingClientRect();
+  const left = target.left + target.width / 2 - bubble.width / 2;
+  let top = target.bottom + 8;
+  if (top + bubble.height > window.innerHeight - margin) {
+    top = target.top - bubble.height - 8;
+  }
+  ui.tooltip.style.left = `${Math.min(Math.max(margin, left), window.innerWidth - bubble.width - margin)}px`;
+  ui.tooltip.style.top = `${Math.max(margin, top)}px`;
+}
+
+function hideHint() {
+  ui.tooltip.classList.remove("show");
 }
 
 document.addEventListener("DOMContentLoaded", async () => {

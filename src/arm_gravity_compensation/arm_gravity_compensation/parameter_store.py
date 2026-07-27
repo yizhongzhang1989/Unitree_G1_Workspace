@@ -16,6 +16,9 @@ from .constants import ALL_ARM_JOINTS, ARM_JOINTS, SIDES
 
 
 SCHEMA_VERSION = 2
+# Posterior variance reduction above which a link counts as measured rather
+# than carried over from the URDF prior.
+IDENTIFIED_OBSERVABILITY = 0.9
 
 
 def utc_now() -> str:
@@ -312,7 +315,8 @@ class ParameterStore:
             inertial["calibrated"] = calibrated
             inertial["scale"] = float(scale)
             inertial["identification"] = {
-                "source": ("data_identified" if observability >= 1.0 - 1e-6
+                "source": ("data_identified"
+                           if observability >= IDENTIFIED_OBSERVABILITY
                            else "prior_distributed"),
                 "observability": float(np.clip(observability, 0.0, 1.0)),
             }

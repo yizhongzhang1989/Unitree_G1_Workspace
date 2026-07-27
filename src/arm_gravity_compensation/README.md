@@ -3,14 +3,15 @@ Unitree G1 双臂相对 `torso_link` 的重力参数标定工具。网页串联�
 
 ## 边界
 - 只使用 `/lowstate`、`/lowcmd` 和 MotionSwitcher API，不使用夹爪、力传感器或 CAN 接口。
-- 只控制 G1 左右各 7 个手臂电机（索引 15–21、22–28）。`LowCmd` 的 `q/dq/kp` 为零，软件位置闭环写入 `tau`；电机端 `kd=3` 提供附加速度阻尼。
+- 只控制 G1 左右各 7 个手臂电机（索引 15–21、22–28）。**位置环由电机内部以自身频率闭合**：`LowCmd` 写入 `tau`（重力前馈）、`q`（参考轨迹）、`kp`（`motor_stiffness`，默认 40×5/20×2）和 `kd`（`motor_damping`，默认 3×5/1.5×2），`dq` 恒为零。本节点不做软件 PD，因此跟踪不受 ROS/DDS 延时和力矩限速影响。
+- 电机实际输出 $\tau = \tau_{ff} + k_p(q_{des}-q) - k_d\dot q$，三项均已知或可测，所以它就是静态辨识的观测量；手臂停在哪里都不影响正确性。随着迭代收敛 $q_{des}-q \to 0$，观测量趋近纯前馈，也就越来越不依赖 $k_p$ 的标称精度。
 - Pinocchio 以 `torso_link` 为固定根，只计算两条完整手臂子树。`final.urdf` 中固连的 KWR57、Gloria-M 和安装件都保留为独立 link 参数；夹爪主动关节固定在闭合位，mimic 链按 URDF 展开后锁定。
 - 采点阶段不创建 `/lowcmd` publisher，也不调用 MotionSwitcher。只有显式允许并从页面确认后，自动标定阶段才取得低层输出权。
 - 当前只修正刚体质量缩放。对每个 link 使用同一系数 $s$：`mass *= s`，六个 inertia 分量同时 `*= s`，`origin xyz/rpy` 不变。
 
-固定末端各 link 在静态重力数据中并非全部独立可辨识。系统仍逐 link 保存和输出参数，但 EM 只更新数据可观测的组合；零空间取距离当前 URDF 最近的解。JSON 为每个 link 记录 `observability` 和来源：
-- `data_identified`：该参数方向由数据完整辨识。
-- `prior_distributed`：部分结果由 URDF 最近解约束分配。
+固连在同一个运动体上的若干 link（腕偏航下游的 KWR57、Gloria-M 和全部夹爪实体）只通过合计质量和合计一阶矩影响关节力矩，逐 link 估计是奇异的。因此**估计时按固连组归并为一个系数**（每侧 7 组，对应 7 个手臂关节），**写回 URDF 时再把该系数分配给组内每个 link**。JSON 仍逐 link 记录 `scale`、`observability` 和来源：
+- `data_identified`：后验方差相对先验下降超过 90%，该系数由数据决定。
+- `prior_distributed`：信噪比不足，结果主要来自 URDF 先验。
 - `urdf_initial`：尚未标定。
 
 ## 构建
@@ -45,7 +46,7 @@ python3 src/arm_gravity_compensation/extract_urdf_parameters.py \
 - 机械臂得到可靠支撑，周围无人且运动范围无障碍物。
 - ros2_control 的 FPC/JTC 都是 inactive，不存在其他 `/lowcmd` publisher。
 - `/lowstate` 新鲜，`mode_pr == 0`。
-- 已记录足够多且分布不同的姿态。页面会显示回归 rank/nullity；增加姿态只能改善可观测子空间，固定末端固有的零空间仍由 URDF 约束分配。
+- 已记录足够多且分布不同的姿态。页面会显示回归 rank/nullity 和条件数；姿态越多、分布越分散，可观测子空间越完整。
 
 重新启动并显式开放扭矩输出：
 ```bash
@@ -56,10 +57,11 @@ ros2 launch arm_gravity_compensation gravity_calibration.launch.py \
 页面要求输入固定确认词。开始后每个姿态依次执行：
 
 1. 开始接管前等待 IMU 稳定窗口，平均 `LowState.imu_state.accelerometer`，经 `imu_in_torso` 固定旋转得到躯干坐标重力方向。
-2. Pinocchio 使用源 URDF 参数计算当前位置重力前馈；软件侧 PD 只生成 `tau`，以限速、限力矩变化率轨迹把手臂引导到目标附近。当前不做力矩幅值裁剪。
-3. 轨迹结束后不要求实际位置贴近手拉目标。只要实测位置窗口稳定，就在保持扭矩的同时同步平均实际位置、IMU、命令扭矩和 `tau_est`；`dq` 只用于诊断，目标误差仅写入记录。
+2. Pinocchio 用**当前已标定参数**算重力前馈写入 `tau`，平滑参考轨迹（smoothstep）写入 `q`，电机自己完成位置跟踪。参考轨迹从接管瞬间的实测位置起步，所以 `kp` 项初始为零，不会甩手臂；`tau` 受 `torque_slew_rate` 限速，反馈项不受限。
+3. 轨迹结束后不要求实际位置贴近目标。只要实测位置窗口稳定，就同步平均实际位置、IMU、电机实际输出力矩和 `tau_est`；回归始终在**实测位置**上建立，目标误差只写入记录。
 4. 所有目标均采集完成前不更新模型参数；使用每个静态窗口的新重力方向进入下一个标记点。
-5. 整侧全部目标完成后，使用所有静态样本统一执行一次带 URDF 弱先验的有界鲁棒 EM，随后原子写回 JSON，并导出 `calibrated.urdf`。每个点的实际位置、IMU 重力和两种力矩都保存在该批次记录中。
+5. 整侧全部目标完成后，用所有静态样本一次性求解静态平衡方程 $\tau_{cmd}=G(q)\,s+b$：按固连组归并列，按关节额定力矩把残差归一化到噪声单位，噪声水平由残差自适应（含自由度修正），并对系数施加 URDF 先验取最大后验解。EM 的两高斯混合按**整个姿态**判定内点，被人碰过或卡住的姿态会整块剔除。随后原子写回 JSON，并导出 `calibrated.urdf`。
+6. 每次点击标定都从上一次的结果继续，是一次真正的外层迭代。页面记录每轮的 rank、nullity、条件数、每关节噪声和 RMSE。
 
 任一 LowState 超时、PR 模式错误、IMU 不稳定、目标超时或用户停止都会终止输出。节点退出时先停止 `/lowcmd`，再尝试恢复接管前的 MotionSwitcher 模式。
 

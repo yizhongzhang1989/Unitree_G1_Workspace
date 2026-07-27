@@ -65,6 +65,20 @@ def test_final_urdf_keeps_each_payload_link_as_an_individual_parameter():
     assert len(wrist_group) == 8
 
 
+def test_welded_links_collapse_into_one_parameter_group():
+    model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
+    aggregation = model.group_aggregation("left")
+
+    assert aggregation.shape == (14, 7)
+    np.testing.assert_allclose(aggregation.sum(axis=1), np.ones(14))
+    assert aggregation[:, 6].sum() == 8
+
+    expected = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.4])
+    model.set_arm_parameters("left", aggregation @ expected, np.zeros(7))
+    np.testing.assert_allclose(
+        model.group_scales("left"), expected, atol=1e-12)
+
+
 def test_final_urdf_link_columns_reproduce_individual_link_scales():
     model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
     q = model.configuration({

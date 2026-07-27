@@ -25,9 +25,10 @@ from .constants import (ALL_ARM_JOINTS, ALL_ARM_MOTOR_INDICES,
                         ARM_JOINTS, ARM_MOTOR_INDICES, SIDES)
 from .gravity_model import TorsoArmGravityModel
 from .imu import ImuSampleWindow
-from .lowcmd import populate_torque_only
+from .lowcmd import MotorSetpoint, populate_arm_command
 from .parameter_store import ParameterStore
-from .torque_control import PoseStabilityWindow, TorquePoseController
+from .torque_control import (PoseStabilityWindow, TorquePoseController,
+                            TorqueStep)
 
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -98,11 +99,11 @@ class ArmGravityWorkflow(Node):
 
         self._controller_kwargs = {
             "stiffness": self.declare_parameter(
-                "software_stiffness", [10.0, 10.0, 8.0, 8.0,
-                                       4.0, 4.0, 3.0]).value,
+                "motor_stiffness", [40.0, 40.0, 40.0, 40.0,
+                                    40.0, 20.0, 20.0]).value,
             "damping": self.declare_parameter(
-                "software_damping", [2.0, 2.0, 1.5, 1.5,
-                                     1.0, 1.0, 0.5]).value,
+                "motor_damping", [3.0, 3.0, 3.0, 3.0,
+                                  3.0, 1.5, 1.5]).value,
             "torque_slew_rate": self.declare_parameter(
                 "torque_slew_rate", [30.0] * 7).value,
             "maximum_speed": float(self.declare_parameter(
@@ -126,6 +127,7 @@ class ArmGravityWorkflow(Node):
         self._worker: Optional[threading.Thread] = None
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._lowcmd_publisher = None
+        self._next_tick = 0.0
         self._imu_window: Optional[ImuSampleWindow] = None
         self._capture: Optional[PassivePoseCapture] = None
         self._capture_automatic = False
@@ -146,6 +148,7 @@ class ArmGravityWorkflow(Node):
         self._last_command = {
             side: np.zeros(7, dtype=float) for side in SIDES
         }
+        self._last_setpoints: Dict[int, MotorSetpoint] = {}
         self._last_gravity = np.array([0.0, 0.0, -9.81])
 
         self._store = ParameterStore(self._parameter_path)
@@ -371,20 +374,11 @@ class ArmGravityWorkflow(Node):
             targets = tuple(document["calibration"]["targets"])
             sides = tuple(side for side in SIDES
                           if any(name in ARM_JOINTS[side] for name in selected))
-            selected_set = set(selected)
+            # Each run continues from the stored estimate so that repeated
+            # runs are true outer iterations of the same fit.
             for baseline_side in SIDES:
                 scales, biases = self._store.link_estimate(baseline_side)
-                scales = np.asarray(scales, dtype=float)
-                biases = np.asarray(biases, dtype=float)
-                for index, link_name in enumerate(
-                        self._model.parameter_links[baseline_side]):
-                    if self._model.parameter_owner[link_name] in selected_set:
-                        scales[index] = 1.0
-                for index, joint_name in enumerate(ARM_JOINTS[baseline_side]):
-                    if joint_name in selected_set:
-                        biases[index] = 0.0
-                self._model.set_arm_parameters(
-                    baseline_side, scales, biases)
+                self._model.set_arm_parameters(baseline_side, scales, biases)
             first_gravity = self._collect_gravity(control_tick=None)
             previous_mode = self._check_motion_mode()
             motion_managed = True
@@ -413,7 +407,7 @@ class ArmGravityWorkflow(Node):
                 self._control_tick(
                     "left", hold_controllers["left"], first_gravity,
                     hold_controllers)
-                time.sleep(1.0 / self._control_rate)
+                self._sleep_until_next_tick()
 
             for side in sides:
                 side_selected = tuple(name for name in selected
@@ -460,6 +454,13 @@ class ArmGravityWorkflow(Node):
                     "selected_joints": list(side_selected),
                     "rank": fit.rank,
                     "nullity": fit.nullity,
+                    "condition_number": (
+                        fit.condition_number
+                        if np.isfinite(fit.condition_number) else None),
+                    "group_scales": [float(value)
+                                     for value in fit.group_scales],
+                    "joint_noise": [float(value)
+                                    for value in fit.joint_noise],
                     "singular_values": [float(value)
                                         for value in fit.singular_values],
                     "rmse_before": fit.rmse_before,
@@ -492,9 +493,10 @@ class ArmGravityWorkflow(Node):
                     side, fit.mass_scales, fit.torque_bias)
                 self._set_message(
                     "%s batch complete: %d poses, RMSE %.4f -> %.4f, "
-                    "rank %d, nullity %d"
+                    "rank %d, nullity %d, cond %.1f"
                     % (side, len(samples), fit.rmse_before,
-                       fit.rmse_after, fit.rank, fit.nullity))
+                       fit.rmse_after, fit.rank, fit.nullity,
+                       fit.condition_number))
 
             self._set_phase(
                 "complete", "Calibration complete; parameters and URDF written")
@@ -580,7 +582,7 @@ class ArmGravityWorkflow(Node):
                     velocity = self._side_values(self._velocity, side)
                 if stability.update(time.monotonic(), position, velocity):
                     return
-            time.sleep(1.0 / self._control_rate)
+            self._sleep_until_next_tick()
         error = (float(np.max(np.abs(last_step.target_error)))
                  if last_step is not None else float("nan"))
         raise RuntimeError(
@@ -622,8 +624,8 @@ class ArmGravityWorkflow(Node):
                             self._velocity, side))
                         estimated.append(self._side_values(
                             self._estimated_torque, side))
-                    commands.append(step.torque.copy())
-                    time.sleep(1.0 / self._control_rate)
+                    commands.append(step.applied.copy())
+                    self._sleep_until_next_tick()
             finally:
                 with self._lock:
                     if self._imu_window is imu_window:
@@ -679,67 +681,74 @@ class ArmGravityWorkflow(Node):
             self._require_fresh_state_locked()
             q = self._position.copy()
             velocity_all = self._velocity.copy()
-            position = self._side_values(self._position, side)
-            velocity = self._side_values(velocity_all, side)
             mode_machine = self._mode_machine
-        # 计算重力补偿
-        gravity_torque = self._model.compensation(side, q, gravity) # type: ignore
-        step = controller.step(time.monotonic(), position, velocity, gravity_torque) # type: ignore
-        torques = {side: step.torque}
-        for hold_side, hold_controller in (controllers or {}).items():
-            if hold_side == side:
-                continue
-            hold_position = self._side_values(q, hold_side)
-            hold_velocity = self._side_values(velocity_all, hold_side)
-            hold_gravity_torque = self._model.compensation(
-                hold_side, q, gravity)
-            hold_step = hold_controller.step(
-                time.monotonic(), hold_position, hold_velocity,
-                hold_gravity_torque)
-            torques[hold_side] = hold_step.torque
-        self._publish_torque(torques, mode_machine)
-        return step
+        active = dict(controllers or {})
+        active[side] = controller
+        now = time.monotonic()
+        steps = {
+            each_side: each_controller.step(
+                now,
+                self._side_values(q, each_side),
+                self._side_values(velocity_all, each_side),
+                self._model.compensation(each_side, q, gravity))
+            for each_side, each_controller in active.items()
+        }
+        self._publish_setpoints(steps, active, mode_machine)
+        return steps[side]
 
-    def _publish_torque(
-        self, torques: Dict[str, Sequence[float]], mode_machine: int,
+    def _publish_setpoints(
+        self,
+        steps: Dict[str, TorqueStep],
+        controllers: Dict[str, TorquePoseController],
+        mode_machine: int,
     ) -> None:
         publisher = self._lowcmd_publisher
         if publisher is None:
             raise RuntimeError("LowCmd output is not active")
-        mapping = {}
-        for side in SIDES:
-            values = np.asarray(
-                torques.get(side, self._last_command[side]), dtype=float)
-            mapping.update({
-                index: float(value)
-                for index, value in zip(ARM_MOTOR_INDICES[side], values)
+        setpoints = dict(self._last_setpoints)
+        for side, step in steps.items():
+            controller = controllers[side]
+            setpoints.update({
+                index: MotorSetpoint(
+                    tau=float(tau), q=float(position),
+                    kp=float(stiffness), kd=float(damping))
+                for index, tau, position, stiffness, damping in zip(
+                    ARM_MOTOR_INDICES[side], step.feedforward, step.reference,
+                    controller.stiffness, controller.damping)
             })
         message = LowCmd()
-        populate_torque_only(message, mode_machine, mapping)
+        populate_arm_command(message, mode_machine, setpoints)
         publisher.publish(message)
         with self._lock:
-            for side, values in torques.items():
-                self._last_command[side] = np.asarray(
-                    values, dtype=float).copy()
+            self._last_setpoints = setpoints
+            for side, step in steps.items():
+                self._last_command[side] = step.feedforward.copy()
+
+    def _sleep_until_next_tick(self) -> None:
+        period = 1.0 / self._control_rate
+        now = time.monotonic()
+        if self._next_tick < now:
+            self._next_tick = now
+        self._next_tick += period
+        remaining = self._next_tick - time.monotonic()
+        if remaining > 0.0:
+            time.sleep(remaining)
 
     def _close_lowcmd_output(self) -> None:
         publisher = self._lowcmd_publisher
         if publisher is None:
             return
         with self._lock:
-            commands = {side: values.copy()
-                        for side, values in self._last_command.items()}
+            setpoints = dict(self._last_setpoints)
             mode_machine = self._mode_machine
         for ratio in np.linspace(0.9, 0.0, 10):
-            mapping = {}
-            for side in SIDES:
-                mapping.update({
-                    index: float(value * ratio)
-                    for index, value in zip(
-                        ARM_MOTOR_INDICES[side], commands[side])
-                })
             message = LowCmd()
-            populate_torque_only(message, mode_machine, mapping)
+            populate_arm_command(message, mode_machine, {
+                index: MotorSetpoint(
+                    tau=setpoint.tau * ratio, q=setpoint.q,
+                    kp=setpoint.kp * ratio, kd=setpoint.kd * ratio)
+                for index, setpoint in setpoints.items()
+            })
             publisher.publish(message)
             time.sleep(0.01)
         try:
@@ -748,6 +757,7 @@ class ArmGravityWorkflow(Node):
             pass
         self._lowcmd_publisher = None
         with self._lock:
+            self._last_setpoints = {}
             self._last_command = {
                 side: np.zeros(7, dtype=float) for side in SIDES
             }

@@ -185,17 +185,32 @@ class TorsoArmGravityModel:
             for side in SIDES
         }
         self._biases = {side: np.zeros(7, dtype=float) for side in SIDES}
+        template_masses = {
+            link.get("name"): float(link.find("inertial").find("mass").get("value"))
+            for link in self._template.findall("link")
+            if link.find("inertial") is not None
+        }
+        self.parameter_masses = {
+            side: np.array([template_masses[name]
+                            for name in self.parameter_links[side]], dtype=float)
+            for side in SIDES
+        }
+        template_efforts = {
+            joint.get("name"): float(joint.find("limit").get("effort"))
+            for joint in self._template.findall("joint")
+            if joint.find("limit") is not None
+        }
+        self.joint_efforts = {
+            side: np.array([template_efforts[name] for name in ARM_JOINTS[side]],
+                           dtype=float)
+            for side in SIDES
+        }
+        if any(np.any(values <= 0.0) for values in self.joint_efforts.values()):
+            raise ValueError("arm joints must declare a positive effort limit")
         self.model = _build_reduced_model(reduced_xml)
         self.data = self.model.createData()
         self.joint_names = ALL_ARM_JOINTS
-        self._q_indices = {
-            name: int(self.model.idx_qs[self.model.getJointId(name)])
-            for name in ALL_ARM_JOINTS
-        }
-        self._v_indices = {
-            name: int(self.model.idx_vs[self.model.getJointId(name)])
-            for name in ALL_ARM_JOINTS
-        }
+        self._refresh_indices()
         self.arm_link_names = {
             side: tuple(child_links[name] for name in ARM_JOINTS[side])
             for side in SIDES
@@ -249,18 +264,35 @@ class TorsoArmGravityModel:
         self._biases[side] = biases.copy()
         self.model = _build_reduced_model(self._scaled_urdf())
         self.data = self.model.createData()
-        self._q_indices = {
-            name: int(self.model.idx_qs[self.model.getJointId(name)])
-            for name in ALL_ARM_JOINTS
-        }
-        self._v_indices = {
-            name: int(self.model.idx_vs[self.model.getJointId(name)])
-            for name in ALL_ARM_JOINTS
-        }
+        self._refresh_indices()
 
     def arm_parameters(self, side: str) -> Tuple[np.ndarray, np.ndarray]:
         self._check_side(side)
         return self._scales[side].copy(), self._biases[side].copy()
+
+    def group_aggregation(self, side: str) -> np.ndarray:
+        """Return the link-by-joint indicator of rigidly welded link groups.
+
+        Links sharing an owner joint are welded to the same moving body, so
+        gravity only reveals their aggregate mass and first moment.
+        """
+        self._check_side(side)
+        joint_names = ARM_JOINTS[side]
+        matrix = np.zeros(
+            (len(self.parameter_links[side]), len(joint_names)), dtype=float)
+        for row, link_name in enumerate(self.parameter_links[side]):
+            matrix[row, joint_names.index(self.parameter_owner[link_name])] = 1.0
+        return matrix
+
+    def group_scales(self, side: str) -> np.ndarray:
+        """Collapse the stored per-link scales into one scale per group."""
+        self._check_side(side)
+        aggregation = self.group_aggregation(side)
+        masses = self.parameter_masses[side]
+        total = aggregation.T @ masses
+        weighted = aggregation.T @ (masses * self._scales[side])
+        return np.where(total > 0.0, weighted / np.where(total > 0.0, total, 1.0),
+                        1.0)
 
     def compensation(self, side: str, q: Sequence[float],
                      gravity: Sequence[float]) -> np.ndarray:
@@ -332,6 +364,22 @@ class TorsoArmGravityModel:
             cached = (model, model.createData())
             self._basis_models[link_name] = cached
         return cached
+
+    def _refresh_indices(self) -> None:
+        """Cache the Pinocchio indices and assert they match the motor order."""
+        self._q_indices = {
+            name: int(self.model.idx_qs[self.model.getJointId(name)])
+            for name in ALL_ARM_JOINTS
+        }
+        self._v_indices = {
+            name: int(self.model.idx_vs[self.model.getJointId(name)])
+            for name in ALL_ARM_JOINTS
+        }
+        expected = list(range(len(ALL_ARM_JOINTS)))
+        if ([self._q_indices[name] for name in ALL_ARM_JOINTS] != expected or
+                [self._v_indices[name] for name in ALL_ARM_JOINTS] != expected):
+            raise ValueError(
+                "Pinocchio joint order does not match the LowState motor order")
 
     @staticmethod
     def _set_gravity(model, gravity: Sequence[float]) -> None:

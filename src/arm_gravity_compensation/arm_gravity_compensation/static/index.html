@@ -157,7 +157,17 @@
       <div class="results-heading iteration-heading"><h3>迭代记录</h3><span id="iterationCount">0 rounds</span></div>
       <div class="result-table-wrap">
         <table>
-          <thead><tr><th>时间</th><th>侧</th><th>目标</th><th>RMSE before</th><th>RMSE after</th><th>Rank</th><th>Nullity</th><th>内点</th></tr></thead>
+          <thead><tr>
+            <th>时间<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="该轮拟合结果写入 parameters.json 的 UTC 时间。"></span></th>
+            <th>侧<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="本轮标定的手臂。每次点击标定，会对包含所选关节的每一侧各产生一条记录。"></span></th>
+            <th>目标<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="本轮实际用到的采点 ID，与上方“被动采点”表格中的 ID 对应。"></span></th>
+            <th>RMSE before<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="拟合前的力矩残差均方根（N·m）：用上一轮参数预测的关节力矩与本轮实测力矩之差。它衡量“开始这一轮时模型有多准”，逐轮下降说明外层迭代在收敛。"></span></th>
+            <th>RMSE after<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="拟合后的力矩残差均方根（N·m）：换成本轮新参数后的同一残差。这是样本内残差，参数越多它必然越小，所以必须结合 Rank 和条件数一起看。当 before ≈ after 且都接近力矩噪声底时，就说明已经收敛，再迭代也不会更好。"></span></th>
+            <th>Rank<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="真正被数据确定的参数方向数：把残差归一化到噪声单位后，奇异值超过噪声水平的方向个数。上限 = 所选关节数 × 2（每个关节一个刚体质量系数 + 一个力矩零偏）。"></span></th>
+            <th>Nullity<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="待估参数总数减去 Rank，即数据无法区分、只能沿用 URDF 先验的方向数。想降低它就增加姿态数量、并让姿态在关节空间里分布得更分散。"></span></th>
+            <th>条件数<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="设计矩阵按列归一化后的 σmax/σmin，衡量这批姿态对各参数的激励是否均衡。约 100 以内属于正常；数值越大，不同参数越难被区分，结果对力矩噪声越敏感。"></span></th>
+            <th>内点<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="鲁棒 EM 判定为可信的姿态比例。EM 以整个姿态（7 个关节一起）为单位判定，所以被人碰到、卡住或没真正静止的姿态会整块被剔除。明显低于 100% 就说明采集过程中有姿态受到了干扰。"></span></th>
+          </tr></thead>
           <tbody id="iterationRows"></tbody>
         </table>
       </div>
@@ -165,6 +175,7 @@
   </main>
 
   <div id="toast" class="toast" role="status"></div>
+  <div id="tooltip" class="tooltip" role="tooltip"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

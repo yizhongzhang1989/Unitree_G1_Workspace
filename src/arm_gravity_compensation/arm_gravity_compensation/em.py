@@ -33,7 +33,6 @@ def _weighted_ridge(
     weights: np.ndarray,
     prior_mean: np.ndarray,
     prior_precision: np.ndarray,
-    prior_factor: np.ndarray,
     lower_bounds: np.ndarray,
     upper_bounds: np.ndarray,
 ) -> np.ndarray:
@@ -49,10 +48,6 @@ def _weighted_ridge(
         augmented_design = np.vstack([augmented_design, expanded_rows])
         augmented_observed = np.concatenate([
             augmented_observed, np.zeros(prior_rows.shape[0])])
-    if prior_factor.shape[0]:
-        augmented_design = np.vstack([augmented_design, prior_factor])
-        augmented_observed = np.concatenate([
-            augmented_observed, np.zeros(prior_factor.shape[0])])
     result = lsq_linear(
         augmented_design,
         augmented_observed,
@@ -71,7 +66,7 @@ def fit_robust_em(
     *,
     prior_mean=0.0,
     prior_precision=0.0,
-    prior_factor: Optional[Sequence[Sequence[float]]] = None,
+    blocks: Optional[Sequence[int]] = None,
     outlier_scale: float = 10.0,
     initial_inlier_fraction: float = 0.9,
     max_iterations: int = 100,
@@ -84,8 +79,9 @@ def fit_robust_em(
 
     The narrow Gaussian models settled static samples. The second Gaussian
     absorbs disturbances and is constrained to be at least ``outlier_scale``
-    times wider. A diagonal Gaussian prior anchors weakly observable inertial
-    coefficients to their URDF values.
+    times wider. A diagonal Gaussian prior anchors weakly observable
+    coefficients to their prior values. ``blocks`` groups rows that share a
+    single disturbance, so one shifted pose is accepted or rejected as a whole.
     """
     matrix = np.asarray(design, dtype=float)
     values = np.asarray(observed, dtype=float)
@@ -106,12 +102,14 @@ def fit_robust_em(
         prior_precision, parameter_count, "prior_precision")
     if np.any(precision < 0.0):
         raise ValueError("prior_precision must be non-negative")
-    factor = (np.empty((0, parameter_count), dtype=float)
-              if prior_factor is None else np.asarray(prior_factor, dtype=float))
-    if (factor.ndim != 2 or factor.shape[1] != parameter_count or
-            not np.all(np.isfinite(factor))):
-        raise ValueError(
-            "prior_factor must be finite with one column per parameter")
+    if blocks is None:
+        block_index = np.arange(values.size)
+    else:
+        block_index = np.asarray(blocks, dtype=int)
+        if block_index.shape != values.shape or np.any(block_index < 0):
+            raise ValueError(
+                "blocks must hold one non-negative index per observation")
+    block_count = int(block_index.max()) + 1
 
     lower = _as_parameter_vector(
         -np.inf if lower_bounds is None else lower_bounds,
@@ -127,8 +125,7 @@ def fit_robust_em(
         raise ValueError("lower_bounds must not exceed upper_bounds")
 
     parameters = _weighted_ridge(
-        matrix, values, np.ones(values.size), prior, precision,
-        factor, lower, upper,
+        matrix, values, np.ones(values.size), prior, precision, lower, upper,
     )
     residual = values - matrix @ parameters
     median_residual = np.median(residual)
@@ -145,25 +142,23 @@ def fit_robust_em(
     for iteration in range(1, max_iterations + 1):
         previous = parameters
         residual = values - matrix @ parameters
-        normalized = residual / noise_std
-        log_inlier = (
-            np.log(inlier_fraction)
-            - np.log(noise_std)
-            - 0.5 * normalized * normalized
-        )
-        log_outlier = (
-            np.log1p(-inlier_fraction)
-            - np.log(outlier_noise_std)
-            - 0.5 * (residual / outlier_noise_std) ** 2
-        )
-        probability = 1.0 / (1.0 + np.exp(np.clip(
-            log_outlier - log_inlier, -700.0, 700.0)))
+        log_ratio = np.bincount(
+            block_index,
+            weights=(
+                np.log(noise_std / outlier_noise_std)
+                + 0.5 * (residual / noise_std) ** 2
+                - 0.5 * (residual / outlier_noise_std) ** 2
+            ),
+            minlength=block_count,
+        ) + np.log1p(-inlier_fraction) - np.log(inlier_fraction)
+        block_probability = 1.0 / (1.0 + np.exp(np.clip(
+            log_ratio, -700.0, 700.0)))
+        probability = block_probability[block_index]
 
         effective_weight = probability + (
             (1.0 - probability) * noise_std ** 2 / outlier_noise_std ** 2)
         parameters = _weighted_ridge(
-            matrix, values, effective_weight, prior, precision,
-            factor, lower, upper,
+            matrix, values, effective_weight, prior, precision, lower, upper,
         )
         residual = values - matrix @ parameters
         inlier_weight = max(float(np.sum(probability)), 1.0)
@@ -177,7 +172,8 @@ def fit_robust_em(
                 np.sum((1.0 - probability) * residual ** 2) / outlier_weight)),
             outlier_scale * noise_std,
         )
-        inlier_fraction = float(np.clip(np.mean(probability), 0.01, 0.99))
+        inlier_fraction = float(np.clip(
+            np.mean(block_probability), 0.01, 0.99))
 
         delta = np.linalg.norm(parameters - previous)
         scale = 1.0 + np.linalg.norm(previous)
