@@ -28,6 +28,10 @@ setup(
         'console_scripts': [
             'end_effectors_dashboard = '
             'robot_bringup.end_effectors.dashboard_node:main',
+            'exit_debug_mode = '
+            'robot_bringup.exit_debug_mode:main',
+            'gravity_float_demo = '
+            'robot_bringup.gravity_float_demo:main',
             'ikt_pose_commander = '
             'robot_bringup.ikt_pose_commander_compat:main',
             'ikt_pose_commander_dashboard = '

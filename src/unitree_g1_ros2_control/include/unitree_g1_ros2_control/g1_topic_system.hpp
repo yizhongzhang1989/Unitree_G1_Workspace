@@ -39,6 +39,7 @@ struct HasHeader<unitree_api::msg::Response, void> : public std::false_type {};
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "unitree_api/msg/request.hpp"
+#include "unitree_hg/msg/imu_state.hpp"
 #include "unitree_hg/msg/low_cmd.hpp"
 #include "unitree_hg/msg/low_state.hpp"
 
@@ -90,6 +91,10 @@ private:
     bool load_gains(const std::string& path);
     void create_ros_interfaces();
     void on_lowstate(const unitree_hg::msg::LowState::SharedPtr message);
+    void on_torso_imu(const unitree_hg::msg::IMUState::SharedPtr message);
+    static void decode_imu(
+        const unitree_hg::msg::IMUState& imu,
+        std::array<double, kImuAxisCount>& target);
     void on_gripper_state(
         std::size_t side, const sensor_msgs::msg::JointState::SharedPtr message);
     void on_wrench(
@@ -113,6 +118,10 @@ private:
         const std::vector<std::string>& start_interfaces,
         const std::vector<std::string>& stop_interfaces) const;
     void clear_output();
+    void release_body();
+    void restore_motion_on_shutdown();
+    void start_release_channel();
+    void stop_release_channel();
 
     std::vector<double> state_position_;
     std::vector<double> state_velocity_;
@@ -120,6 +129,12 @@ private:
     std::vector<double> command_position_;
     std::array<double, kG1JointCount> stiffness_{};
     std::array<double, kG1JointCount> damping_{};
+    // 停止时把 `kp` 降到零的时长；`kd` 全程保留，只在最后一帧归零。
+    double release_ramp_s_{2.0};
+    // The gains actually written into every command, exported as state so that
+    // controllers never have to duplicate the gain file.
+    std::array<double, kControlledJointCount> gain_stiffness_{};
+    std::array<double, kControlledJointCount> gain_damping_{};
     double arm_stiffness_scale_{1.0};   // 双臂 15–28 号关节的 `kp` 的缩放
     std::array<std::array<double, kWrenchAxisCount>, kForceTorqueSensorCount>
         wrench_state_{};
@@ -129,6 +144,12 @@ private:
     std::array<std::atomic<std::uint64_t>, kForceTorqueSensorCount> wrench_sequence_{};
     std::array<double, kImuAxisCount> imu_state_{};
     std::array<double, kImuAxisCount> pending_imu_{};
+    // Second IMU, physically in the torso. ``LowState.imu_state`` sits in the
+    // pelvis, which is separated from ``torso_link`` by the three waist
+    // joints, so torso-rooted models must use this one instead.
+    std::array<double, kImuAxisCount> torso_imu_state_{};
+    std::array<double, kImuAxisCount> pending_torso_imu_{};
+    std::atomic<bool> torso_imu_received_{false};
 
     mutable std::mutex state_mutex_;
     PendingState pending_state_;
@@ -143,6 +164,8 @@ private:
     std::string previous_motion_mode_;
 
     std::string lowstate_topic_;
+    std::string torso_imu_topic_;
+    std::string torso_imu_sensor_name_;
     std::string lowcmd_topic_;
     std::array<std::string, 2> gripper_state_topics_;
     std::array<std::string, 2> gripper_command_topics_;
@@ -175,6 +198,7 @@ private:
     std::array<rclcpp::Publisher<gloria_ros::msg::MitCommand>::SharedPtr, 2>
         gripper_publishers_;
     rclcpp::Subscription<unitree_hg::msg::LowState>::SharedPtr lowstate_subscription_;
+    rclcpp::Subscription<unitree_hg::msg::IMUState>::SharedPtr torso_imu_subscription_;
     std::array<rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr, 2>
         gripper_state_subscriptions_;
     std::array<
@@ -183,6 +207,14 @@ private:
         wrench_subscriptions_;
     rclcpp::Subscription<unitree_hg::msg::LowCmd>::SharedPtr lowcmd_subscription_;
     rclcpp::Publisher<unitree_api::msg::Request>::SharedPtr motion_request_publisher_;
+    // stop() only runs once the global context is already shutting down, and a
+    // publisher on a dead context silently drops every message. These live on a
+    // private context that is kept out of the signal handler, so the release
+    // ramp and the motion hand-back actually reach the robot.
+    rclcpp::Context::SharedPtr release_context_;
+    rclcpp::Node::SharedPtr release_node_;
+    rclcpp::Publisher<unitree_hg::msg::LowCmd>::SharedPtr release_lowcmd_publisher_;
+    rclcpp::Publisher<unitree_api::msg::Request>::SharedPtr release_motion_publisher_;
     rclcpp::Subscription<unitree_api::msg::Response>::SharedPtr motion_response_subscription_;
     std::array<std::array<rclcpp::Client<Trigger>::SharedPtr, 2>, 2> gripper_clients_;
 

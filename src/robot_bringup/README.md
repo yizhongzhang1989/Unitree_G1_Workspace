@@ -9,6 +9,7 @@
 | `end_effectors_dual_bus.launch.py` | `all_data topology:=dual` 使用的底层双通道末端拓扑 |
 | `end_effectors_dashboard.launch.py` | 仅端口 `8770` 的末端联调网页；不启动数据节点 |
 | `whole_body_dashboard.launch.py` | 仅端口 `8200` 的 controller 测试网页；连接已有 manager，不启动数据或控制节点 |
+| `gravity_float_demo.launch.py` | 激活重力补偿 + FPC，让双臂进入可徒手推动的失重状态；连接已有 manager |
 
 末端设备实现集中在 `robot_bringup/end_effectors/`。`unitree_g1_description` 只提供模型资源；`unitree_g1_ros2_control` 提供真实 Foxy `SystemInterface`、C++ controller 与 broadcaster。
 
@@ -179,6 +180,8 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 
 Dashboard wrapper 处理 Foxy 字段兼容、inactive controller 关节元数据发现和 30 秒切换等待，不代理任何 controller-manager 服务。Web 快照还会按 URDF joint limit 一次性重算 Gloria-M 的受限分段 mimic FK，并隐藏 `internal_*` 虚拟 link/joint；浏览器中的夹爪部分只显示物理连杆和两个 `eccentric_joint`，不改变 `/joint_states`、TF 或 ros2_control 控制链。Engage/Disengage 的 MotionSwitcher、夹爪生命周期、状态 freshness 和回滚由 C++ 硬件插件执行，详见 [`unitree_g1_ros2_control/README.md`](../unitree_g1_ros2_control/README.md)。实机 Disengage 后仍建议独立确认 controller 为 `inactive`、命令接口为 `unclaimed`、两只夹爪已失能且 MotionSwitcher 模式已恢复。
 
+`arm_gravity_compensation` 也出现在控制器列表里，按前向位置控制器的方式驱动：它不 claim 任何 command interface，wrapper 因此只给它填关节列表（取自它自己的 `joints` 参数）而不填 command interface，否则页面会把它要喂的 FPC 停掉。Engage 它会先把它 `command_topic` 指向的 FPC 一起拉起来，setpoint 发到 `<name>/target`；直接 Engage 那个 FPC 则会先停掉它，两者不会同时往一个命令话题发。
+
 `robot_test_dashboard` 不是 controller 实现。它只是通用测试客户端：对 JTC 生成单点 `JointTrajectory`，对 FPC 生成限速后的 `Float64MultiArray`。真正的 JTC 是 ROS 2 `joint_trajectory_controller` 包提供的标准插件；本工作区只在 `unitree_g1_ros2_control` 中保存其实例配置。IK 也不属于 Dashboard 或硬件插件，它由 `ikt_core` 求解、由 Pose Commander 选择目标并调用 FPC/JTC。
 
 Gloria-M 使用 `kp=10`、`kd=5`。`kd=5` 是 SDK `pack_mit_command()` 将 12 bit 字段映射到 `[0,5]` 后的最大值；输入 10 会在 SDK 层被夹到 5，因此统一节点启动时拒绝超出该范围的配置。
@@ -191,59 +194,95 @@ Gloria-M 使用 `kp=10`、`kd=5`。`kd=5` 是 SDK `pack_mit_command()` 将 12 bi
 ros2 launch robot_bringup ikt_pose_commander.launch.py
 ```
 
-该入口连接两个真实 ros2_control controller：自定义
-`forward_position_controller`（FPC）用于 **Track robot** 连续跟踪，Foxy 标准
-`joint_trajectory_controller`（JTC）用于 **Snap robot**、Disable 后持位和
-`return_to_start`。两者配置完全相同的 31 个 position command interface；Commander
-通过 `/controller_manager/switch_controller` 一启一停，manager 的资源 claim 保证它们
-不能同时 active。JTC 和 FPC 最终都只写 `G1TopicSystem` 的 position command
-interface，实际 G1/Gloria MIT 命令仍由现有硬件插件生成，没有第二条底层下发通道。
+该入口连接两个真实 ros2_control controller：自定义 `forward_position_controller`（FPC）用于 **Track robot** 连续跟踪，Foxy 标准 `joint_trajectory_controller`（JTC）用于 **Snap robot**、Disable 后持位和 `return_to_start`。两者配置完全相同的 31 个 position command interface；Commander 通过 `/controller_manager/switch_controller` 一启一停，manager 的资源 claim 保证它们不能同时 active。JTC 和 FPC 最终都只写 `G1TopicSystem` 的 position command interface，实际 G1/Gloria MIT 命令仍由现有硬件插件生成，没有第二条底层下发通道。
 
-FPC 使用一个 200 Hz control timer 完成“读取最新 Cartesian 目标、必要时求解 IK、更新
-全关节 target 缓存并发布”的完整周期。缓存按 controller 的 31 个关节名建立，首次缺失项
-才从实测位置初始化；每次 IK 结果只覆盖本次动态 active-joint 区间，区间外关节继续使用
-上次设定的 target，而不是用实时反馈回填。FPC 和 JTC 都按各自关节顺序从同一缓存生成
-全量命令，因此切换控制手或 controller 后仍保留另一只手及其余关节的设定目标。浏览器只
-允许一个目标请求在途，等待槽只保留最新姿态；每个到达 Dashboard 的 `/api/target` 会立即
-发布一次 ROS 目标，100 Hz 定时器只负责保活。Commander 目标订阅和 FPC 命令链均使用
-`KEEP_LAST(1)`，不会在恢复后回放拖动期间的旧 setpoint。
+`command_topic` 决定 FPC 那条全量位置流发给谁，同时决定 Engage 时要额外激活哪个 controller（话题的属主）：
 
-网页选择的 base/target 同时定义本次 IK 的活动关节区间。适配层从完整 Pinocchio 模型创建
-动态 active-joint 视图，只向未修改的 `ikt_core.solve()` 暴露该区间的 Jacobian 列，再把
-结果散射回完整关节向量；因此求解矩阵维度随选择变化，而不是固定 10 或整机 95。当前模型
-中 `pelvis -> right_gripper_base` 为 10 维，`torso_link -> right_gripper_base` 为 7 维，
-`right_shoulder_yaw_link -> right_gripper_base` 为 4 维。base 与 target 位于不同分支时，
-区间沿两端到最近公共祖先的唯一链路建立，并使用 base 到 target 的相对位姿误差与 Jacobian；
-例如 `torso_link -> left_ankle_roll_link` 包含 3 个腰关节和 6 个左腿关节，共 9 维。
+| `command_topic` | 效果 |
+|---|---|
+| `/arm_gravity_compensation/target`（默认） | 经重力补偿 controller：每个 setpoint 加上标定后的手臂重力偏移再转发给 FPC，手臂停在指令位姿上 |
+| `/forward_position_controller/commands` | 直接下发 FPC，不做补偿，手臂稳定沉在每个指令位姿下方 |
 
-G1 入口的默认跟踪参数为 `control_rate_hz=200`、`stream_rate_hz=100`、
-`max_joint_speed=2 rad/s`。G1 FPC 适配路径使用
-`max_joint_speed` 限制 active-joint target 缓存每周期的推进量；默认单步上限为
-`2 / 200 = 0.01 rad`。这是 Commander 对 active-joint target 缓存的上游限速，不是 C++
-FPC 自身的限位。C++ FPC 只接受宽度正确且全部有限的全量 target，并原样写入 hardware
-position interface；它不添加目标-反馈误差窗、相邻目标跳变、速度/加速度或命令超时回填。
-`G1TopicSystem` 在生成 MIT 消息时再按 URDF position command interface 的 `min/max` 对
-每个有限目标做最终 clamp；本体出现 `NaN/Inf` 时跳过整帧 `LowCmd`，夹爪出现
-`NaN/Inf` 时只跳过对应侧。G1 launch 不再声明或传入上游 FPC 轨迹生成器专用的
-`max_joint_accel`。
+重力补偿 controller 不 claim 任何 command interface，因此与 FPC 同时 active。Engage 时先切 FPC，再在发第一帧 setpoint 之前激活它——它的 `offset_ramp_s` 从激活时刻起算，间隔太久会把整个重力偏移一次性加满。激活前会读它的 `command_topic` 参数确认确实转发给本 Commander 的 FPC；不匹配或激活失败就回滚 FPC 并拒绝 Engage，不会出现「FPC 已 active 占着硬件但没人转发、机器人一动不动」。Stop/Disengage 在同一次 `switch_controller` 里把 FPC、JTC 和它一起停掉。
 
-不可达或奇异目标保持 `best-effort`：IK 每次只从当前实测关节 seed 求解并发送最接近配置，
-不切换中立 seed、不保存“最后可达解”，也不需要恢复服务。后续目标回到可达区域时会在同一
-控制周期链上自然恢复为普通跟踪。
+FPC 使用一个 200 Hz control timer 完成“读取最新 Cartesian 目标、必要时求解 IK、更新全关节 target 缓存并发布”的完整周期。缓存按 controller 的 31 个关节名建立，首次缺失项才从实测位置初始化；每次 IK 结果只覆盖本次动态 active-joint 区间，区间外关节继续使用上次设定的 target，而不是用实时反馈回填。FPC 和 JTC 都按各自关节顺序从同一缓存生成全量命令，因此切换控制手或 controller 后仍保留另一只手及其余关节的设定目标。浏览器只允许一个目标请求在途，等待槽只保留最新姿态；每个到达 Dashboard 的 `/api/target` 会立即发布一次 ROS 目标，100 Hz 定时器只负责保活。Commander 目标订阅和 FPC 命令链均使用 `KEEP_LAST(1)`，不会在恢复后回放拖动期间的旧 setpoint。
 
-适配入口只处理动态模型视图、Foxy 的 controller-manager 字段、inactive controller
-关节元数据和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为
-`right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于
-`http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，
-或传入 `enable_dashboard:=false` 仅启动 Commander。
+网页选择的 base/target 同时定义本次 IK 的活动关节区间。适配层从完整 Pinocchio 模型创建动态 active-joint 视图，只向未修改的 `ikt_core.solve()` 暴露该区间的 Jacobian 列，再把结果散射回完整关节向量；因此求解矩阵维度随选择变化，而不是固定 10 或整机 95。当前模型中 `pelvis -> right_gripper_base` 为 10 维，`torso_link -> right_gripper_base` 为 7 维，`right_shoulder_yaw_link -> right_gripper_base` 为 4 维。base 与 target 位于不同分支时，区间沿两端到最近公共祖先的唯一链路建立，并使用 base 到 target 的相对位姿误差与 Jacobian；例如 `torso_link -> left_ankle_roll_link` 包含 3 个腰关节和 6 个左腿关节，共 9 维。
 
-8180 Dashboard 复用整机测试页面的 Gloria-M 受限分段 mimic FK 与虚拟节点过滤；
-`internal_*` link/joint 不进入 3D 标签、关节面板、控制帧下拉框或 fixed-joint 列表，
-但仍作为计算中间量保证物理 slider 和 connecting rod 的模型联动。
+G1 入口的默认跟踪参数为 `control_rate_hz=200`、`stream_rate_hz=100`、`max_joint_speed=2 rad/s`。G1 FPC 适配路径使用 `max_joint_speed` 限制 active-joint target 缓存每周期的推进量；默认单步上限为 `2 / 200 = 0.01 rad`。这是 Commander 对 active-joint target 缓存的上游限速，不是 C++ FPC 自身的限位。C++ FPC 只接受宽度正确且全部有限的全量 target，并原样写入 hardware position interface；它不添加目标-反馈误差窗、相邻目标跳变、速度/加速度或命令超时回填。`G1TopicSystem` 同样**不读 URDF position command interface 的 `min/max`、不对目标做任何限幅**：MIT 阻抗控制靠目标与反馈的偏移产生力矩，在这一层裁剪会直接改变期望的恢复力矩。本体出现 `NaN/Inf` 时跳过整帧 `LowCmd`，夹爪出现 `NaN/Inf` 时只跳过对应侧。G1 launch 不再声明或传入上游 FPC 轨迹生成器专用的 `max_joint_accel`。
 
-启动仍默认 disabled。先在页面确认模型、关节状态、控制帧和
-两个 controller 均已识别，再 Engage。任一控制器都会按既有设计同时 claim G1
-本体与双夹爪；力传感器不参与 Commander 的命令闭环。
+不可达或奇异目标保持 `best-effort`：IK 每次只从当前实测关节 seed 求解并发送最接近配置，不切换中立 seed、不保存“最后可达解”，也不需要恢复服务。后续目标回到可达区域时会在同一控制周期链上自然恢复为普通跟踪。
+
+适配入口只处理动态模型视图、Foxy 的 controller-manager 字段、inactive controller 关节元数据和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为 `right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于 `http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，`command_topic:=/forward_position_controller/commands` 关闭重力补偿，或传入 `enable_dashboard:=false` 仅启动 Commander。
+
+8180 Dashboard 复用整机测试页面的 Gloria-M 受限分段 mimic FK 与虚拟节点过滤；`internal_*` link/joint 不进入 3D 标签、关节面板、控制帧下拉框或 fixed-joint 列表，但仍作为计算中间量保证物理 slider 和 connecting rod 的模型联动。
+
+启动仍默认 disabled。先在页面确认模型、关节状态、控制帧和两个 controller 均已识别，再 Engage。任一控制器都会按既有设计同时 claim G1 本体与双夹爪；力传感器不参与 Commander 的命令闭环。
+
+### 手臂失重 demo
+先按上面启动整机数据与控制栈，再单独启动 demo：
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup gravity_float_demo.launch.py
+```
+
+它做两件事：把 `arm_gravity_compensation` 和 `forward_position_controller` 一起切到 active（两者可共存——重力补偿 controller 不 claim 任何 command interface），然后启动 `gravity_float_demo` 节点。
+
+该节点把 **14 个手臂关节**的目标持续跟随 `/joint_states` 的实测值。controller 随后写出 `q_cmd = q_meas + G(q_meas)/kp`，电机实际施加：
+```
+tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq
+```
+
+位置项恰好抵消，只剩重力项和阻尼：手臂在任意姿态都能自撑自重，你只需克服阻尼就能推动它。
+
+**其余 17 个关节（腿、腰、夹爪）只在启动时快照一次，之后锁死。** 重力补偿 controller 对非手臂关节是透传的，如果它们也跟随实测值，力矩就只剩 `-kd*dq`，腿会发软。浮动关节列表由 launch 从重力表 `left.joints` / `right.joints` 读出，与 controller 实际补偿的范围严格一致。
+
+启动瞬间有 2 s 斜坡（controller 的 `offset_ramp_s`），在此期间手臂会从下垂位置逐渐抬起到持平。
+
+**不要让手臂长时间停在水平位附近。** 肩 pitch 没有减速自锁，保持姿态全靠持续电流，手臂水平伸出时约 20 N·m，是最恶劣的持续工况。实测悬停数分钟后 `left_shoulder_pitch` 绕组到 97 °C。补偿越准电机越会老实地一直顶着，热负荷比标定时高一个量级。用完及时退出调试模式，玩的时候优先把手臂放低。
+
+电机失去命令后不再接受位置指令，`tau_est` 掉到约 0，只剩绕组阻尼——**手感是“紧”而不是“软”**，很容易误判成软件把命令锁死了。字段含义见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
+
+停止：`Ctrl-C` 结束 demo 后，controller 仍是 active，需要显式停回去。
+```bash
+ros2 control switch_controllers --stop forward_position_controller arm_gravity_compensation
+```
+
+### 退出调试模式
+正常用 `Ctrl-C` 关闭 `all_data.launch.py scope:=whole_body` 时，`G1TopicSystem::stop()` 会自动花 2s 把关节增益降到零，再把机器人交还给 `ai`（零力矩）模式，**不需要额外命令**。
+
+> **不要用 `pkill` 停控制栈。** 各节点的清理逻辑都挂在 SIGINT 上，`pkill` 默认发 SIGTERM，rclpy 不处理它，rclcpp 也来不及跑完关闭序列。本仓库已经因此踩过三次坑：
+>
+> | 被跳过的清理 | 后果 |
+> |---|---|
+> | `G1TopicSystem::stop()` 的卸力斜坡 | 关节保持最后一帧命令持续吃电流，肩部绕组升到 97 °C |
+> | `gloria_ros` 的 `disable_on_shutdown` | 两只 Gloria-M 一直留在使能态 |
+> | `native_bridge_node` 的 USB 传输取消 | CANalyst-II 固件卡死，之后每次启动都报 `LIBUSB_ERROR_TIMEOUT`，**只能物理拔插复位** |
+>
+> 必须用信号时也要发 SIGINT，且**只发给 launch 进程**，由它按依赖顺序转发：
+>
+> ```bash
+> kill -INT "$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)"
+> ```
+>
+> 发给整个进程组（`kill -INT -- -PID`）会让子进程被直接杀死，launch 来不及编排关闭，效果和 `pkill` 一样。
+
+控制栈被强杀、崩溃或从未启动时该路径不会执行，关节会保持最后一帧命令持续吃电流。用这个工具兜底：
+```bash
+source scripts/env.sh
+ros2 run robot_bringup exit_debug_mode
+```
+
+它不走 ros2_control，直连 `/lowcmd` 与 MotionSwitcher，所以控制栈是否存在都能用。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--ramp-s` | 2.0 | 力矩淡出时长 |
+| `--damping` | 1.5 | 下降全程保持的 `kd`，调大可以降得更慢 |
+| `--motion-mode` | `ai` | 交还的运动服务，`ai` 即零力矩模式 |
+| `--keep-debug-mode` | — | 只卸力，不交还运控服务 |
+
+手臂最终一定停在自然下垂位——把它举着本身就要力矩，任何卸力都以下垂告终；斜坡只决定它是缓降还是硞下来。原理见 [G1.md](../../G1.md) 的「退出低层控制必须主动卸力」。
 
 ## 修改拓扑
 CAN 设备部署只修改 `robot_bringup/end_effectors/topology.py` 中的
