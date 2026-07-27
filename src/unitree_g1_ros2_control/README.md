@@ -17,6 +17,143 @@
 
 本包不负责 IK、动作规划、网页交互或设备 CAN 协议。命令链为 `Dashboard / IK -> FPC 或 JTC -> position interface -> G1TopicSystem -> LowCmd / MitCommand`；FPC 与 JTC 互斥使用同一组 position interface。
 
+## 系统结构
+
+### 先看懂 ros2_control 的三个概念
+不熟悉 ros2_control 的话，只需要这三个：
+
+- **hardware interface（硬件插件）**——唯一碰真实设备的东西。它把设备"能读的量"导出成 **state interface**、"能写的量"导出成 **command interface**；每个 interface 就是一个具名的 `double`，例如 `left_elbow_joint/position`。本包的实现是 `G1TopicSystem`。
+- **controller**——读 state interface、写 command interface 的算法插件。它不知道下面是真机还是仿真，也不知道 `LowCmd` 长什么样。
+- **controller_manager**——把上面两者装进**同一个进程**，按固定频率跑 `read() → 所有 active controller 的 update() → write()`，并**仲裁**谁能写哪个 command interface：同一个 command interface 在任意时刻只能被一个 controller claim。FPC 与 JTC 的互斥完全来自这条规则，没有任何额外代码。
+
+关键一点：**controller 与硬件插件之间没有话题**，是同进程的指针读写。只有"外部节点 → controller"这一段才走 DDS。
+
+### 进程布局
+下面这张图是**从外朝里**读的：上游客户端在最上面，往下依次是 controller、硬件插件、真实设备。箭头上标的就是各自的接口名。
+
+```mermaid
+flowchart TB
+  UP["上游命令源（独立进程）<br/>8200 控制器面板 · 8180 IK Commander"]
+
+  subgraph P1["进程 A：ros2_control_node —— 唯一 controller_manager，500 Hz"]
+    direction TB
+    CM["ControllerManager<br/>list / switch_controller<br/>command interface 仲裁"]
+    subgraph CTRL["controller（pluginlib 装入本进程）"]
+      direction LR
+      GC["arm_gravity_compensation<br/>claim：无"]
+      FPC["forward_position_controller<br/>claim：31 × position"]
+      JTC["joint_trajectory_controller<br/>claim：31 × position"]
+      BC["joint_state_broadcaster<br/>pelvis_imu_broadcaster<br/>claim：无"]
+    end
+    HW["G1TopicSystem<br/>read() → 各 update() → write()"]
+  end
+
+  subgraph DEV["设备侧进程"]
+    direction LR
+    G1["G1 低层"]
+    GLO["gloria_ros ×2"]
+    BRG["native bridge + KWR57"]
+  end
+
+  RSP["robot_state_publisher → TF"]
+
+  UP -. "① ~/target（31 值）" .-> GC
+  UP -. "② ~/commands（31 值）" .-> FPC
+  UP -. "③ ~/joint_trajectory + ~/follow_joint_trajectory" .-> JTC
+  UP -. "switch_controller" .-> CM
+  CM --- CTRL
+  GC -. "command_topic 指向 ②<br/>同进程回环，+1 拍" .-> FPC
+
+  FPC ==> |"写 31 × &lt;joint&gt;/position"| HW
+  JTC ==> |"写 31 × &lt;joint&gt;/position"| HW
+  HW ==> |"读 14 × kp + torso_imu 四元数"| GC
+  HW ==> |"读 position/velocity/effort + pelvis_imu"| BC
+
+  HW -. "/lowcmd（含 CRC，500 Hz）" .-> G1
+  G1 -. "/lowstate、/secondary_imu" .-> HW
+  HW -. "~/mit_command（100 Hz）" .-> GLO
+  GLO -. "JointState" .-> HW
+  BRG -. "WrenchStamped（1 kHz）" .-> HW
+  BC -. "/joint_states、~/imu" .-> RSP
+```
+
+读图三条规则：
+
+- **虚线 `-.->` 是 DDS**（跨进程或同进程回环都算），**粗实线 `==>` 是同进程指针读写**——后者不经过任何序列化，也不会丢帧。
+- **①②③ 是三个互斥入口**，上游同一时刻只能用其中一个：②③ 因为 FPC/JTC claim 同一组 command interface 而互斥（manager 强制），①② 因为重力补偿的输出就是 ②、两个 publisher 会抢同一个话题而互斥（约定，由上游自己保证）。
+- 只有 `G1TopicSystem` 碰真实设备；FPC/JTC 从头到尾不知道 `LowCmd` 长什么样。
+
+下面几节把图上每条边的消息类型、QoS 和数量展开。
+
+### 每个部件由哪个 launch 启动
+
+| 部件 | 启动它的 launch | 启动后状态 |
+|---|---|---|
+| `ros2_control_node`（含 manager + 全部 controller + `G1TopicSystem`） | [control.launch.py](launch/control.launch.py)，被 `robot_bringup/all_data.launch.py scope:=whole_body` include | 唯一 manager，500 Hz |
+| `robot_state_publisher` | 同上 | 发 `/robot_description` 与 TF |
+| `joint_state_broadcaster`、`pelvis_imu_broadcaster` | 同上，`spawner.py` | **active**，各 100 Hz |
+| `forward_position_controller`、`joint_trajectory_controller`、`arm_gravity_compensation` | 同上，`spawner.py --stopped` | **inactive**，用谁激活谁 |
+| `left_ft_broadcaster`、`right_ft_broadcaster` | 已在 `controllers.yaml` 注册，默认不 spawn | 未加载（KWR57 raw 话题已存在，避免 1 kHz 重复发布） |
+| CAN bridge、KWR57、Gloria-M、相机 | `robot_bringup/all_data.launch.py`（两个 scope 都启动） | 独立进程 |
+| 8200 控制器测试网页 | `robot_bringup/whole_body_dashboard.launch.py` | 独立进程，纯客户端 |
+| 8180 IK Commander + 网页 | `robot_bringup/ikt_pose_commander.launch.py` | 独立进程 |
+
+`all_data.launch.py scope:=whole_body` 已经 include 本包的 `control.launch.py`——**不要再起第二个 manager**。
+
+### 三个 controller 的对外接口
+
+| | `forward_position_controller`（FPC） | `joint_trajectory_controller`（JTC） | `arm_gravity_compensation` |
+|---|---|---|---|
+| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `joint_trajectory_controller/JointTrajectoryController`（Foxy 官方） | `unitree_g1_controllers/ArmGravityCompensation` |
+| **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) | 话题 `~/joint_trajectory`<br/>+ action `~/follow_joint_trajectory`<br/>（`control_msgs/FollowJointTrajectory`） | 话题 `~/target`<br/>格式与 FPC 的 `~/commands` 完全相同<br/>BEST_EFFORT · KEEP_LAST(1) |
+| **输出** | 写 command interface | 写 command interface | **发话题**：参数 `command_topic`，默认 `/forward_position_controller/commands` |
+| claim 的 command interface | 31 × `<joint>/position` | 31 × `<joint>/position`（同一组） | **无**（`interface_configuration_type::NONE`） |
+| 读的 state interface | 31 × `<joint>/position` | 同左 | 4 × `torso_imu/orientation.{x,y,z,w}` + 14 × `<arm_joint>/kp` |
+| 运行时可调参数 | — | 标准 JTC 容差等 | `compensation_scale`（无锁写，active 时可改） |
+
+两个 broadcaster 方向相反——它们只读 state interface，往外发话题：`joint_state_broadcaster` → `/joint_states`（100 Hz），`pelvis_imu_broadcaster` → `sensor_name: pelvis_imu` / `frame_id: pelvis`（100 Hz）。
+
+### controller 之间的关系：互斥 + 嫁接
+
+```mermaid
+flowchart LR
+  U1["8200 面板 / IK Commander"]
+  U1 -->|"~/target"| GC
+  U1 -.->|"或直接 ~/commands"| FPC
+  U1 -.->|"或 ~/joint_trajectory"| JTC
+  GC["arm_gravity_compensation<br/>claim：无"] -->|"command_topic<br/>（DDS，同进程回环）"| FPC
+  FPC["forward_position_controller<br/>claim：31 × position"]
+  JTC["joint_trajectory_controller<br/>claim：31 × position"]
+  FPC ==>|"指针写"| HW["G1TopicSystem"]
+  JTC ==>|"指针写"| HW
+  FPC <-.->|"互斥：同一组 command interface<br/>只能一个 active"| JTC
+```
+
+- **互斥（FPC ↔ JTC）**：两者 `joints` 顺序完全相同、请求同一组 31 个 `<joint>/position`。ResourceManager 拒绝重复 claim，所以 `switch_controller` 激活其中一个时必须同时停掉另一个。这不是约定，是硬约束。
+- **嫁接（重力补偿 → FPC）**：重力补偿**一个 command interface 都不 claim**，所以它可以和 FPC 同时 active。它是个纯粹的**目标改写器**：收 31 个绝对位置 → 把 14 个手臂位加上重力偏移 → 原样格式再发出去。连接方式就是**话题名对接**——它的 `command_topic` 指向 FPC 的 `~/commands`。上游想接入，只要把发布目标从 `/forward_position_controller/commands` 改成 `/arm_gravity_compensation/target` 即可，消息一个字节都不用改。
+- 因此**上游必须二选一**：要么直接发 FPC，要么发重力补偿的 `~/target`。两个同时发就是两个 publisher 抢同一个话题。8200 面板和 IK 入口都各自实现了这个互斥（见 [robot_bringup/README.md](../robot_bringup/README.md)）。
+- 这一跳的代价是固定一拍延迟，原因和为什么可以接受见下面的[嫁接的代价](#嫁接的代价固定一拍延迟)。
+
+### `G1TopicSystem` 的接口
+
+它有上下两个面。**对上（面向 controller，同进程指针）**就是[硬件资源](#硬件资源)那张表里的 state / command interface；简言之只有 31 个 position **可写**，其余全部只读。
+
+**对下（面向设备，DDS）**：
+
+| 方向 | 话题 / 服务 | 类型 | QoS | 说明 |
+|---|---|---|---|---|
+| 发布 | `/lowcmd`（`lowcmd_topic`） | `unitree_hg/LowCmd` | RELIABLE · KEEP_LAST(5) | 每个 `write()` 一帧，含 CRC |
+| 发布 | 左右夹爪 `~/mit_command` | `gloria_ros/MitCommand` | RELIABLE · KEEP_LAST(5) | 固定相位降采样到 100 Hz |
+| 订阅 | `/lowstate` | `unitree_hg/LowState` | BEST_EFFORT · KEEP_LAST(1) | 29 关节 + **盆骨** IMU |
+| 订阅 | `/secondary_imu`（`torso_imu_topic`） | `unitree_hg/IMUState` | 同上 | **躯干** IMU，重力补偿用的就是它 |
+| 订阅 | 左右夹爪 `JointState` | `sensor_msgs/JointState` | 同上 | 两个 `eccentric_joint` |
+| 订阅 | 左右 KWR57 `WrenchStamped` | `geometry_msgs/WrenchStamped` | BEST_EFFORT · KEEP_LAST(64) | 1 kHz raw，原子快照读取 |
+| 订阅 | `/lowcmd`（自订阅） | `unitree_hg/LowCmd` | BEST_EFFORT · KEEP_LAST(1) | 只记录时间戳，用于确认交还控制权后总线上确实没人再发 |
+| 收发 | `/api/motion_switcher/request` `/response` | `unitree_api/Request` `/Response` | RELIABLE · KEEP_LAST(1) | 接管/交还运控模式 |
+| 服务客户端 | `<gripper_node>/enable`、`/disable` | `std_srvs/Trigger` | — | Engage/Disengage 时的夹爪生命周期 |
+
+这些收发都跑在插件自建的 `<hw_name>_topic_bridge` 节点 + 独立 `SingleThreadedExecutor` 线程上，**不占用 500 Hz 控制线程**；回调只更新缓存或完成事务，`read()` 再把缓存拷进 state 数组。这里刻意不加并发 callback worker，避免在 PC2 上为这些高频订阅引入额外调度竞争。
+
 ## 实现细节
 
 ### 硬件资源
@@ -82,6 +219,26 @@ ros2 param set /arm_gravity_compensation compensation_scale 0.95
 - **$G$ 在目标位置求值**，不是实测位置。目标无噪声、天然领先于测量，且这本就是平衡条件要求的。用速度外推测量位置反而会引入系数为 $K_g\Delta t$ 的负阻尼。
 - **不补偿 `kd`**。阻尼是稳定项，且稳态下 $\dot q \to 0$ 本就不进入偏移量。
 - **$k_p$ 从 `<joint>/kp` state interface 读**，不在 controller 配置里重写。增益不一致会把每一个补偿力矩按同比例算错而没有任何外部症状，所以只允许一个数据源。
+
+#### 嫁接的代价：固定一拍延迟
+它和 FPC 之间是**话题**，不是共享内存。虽然两个 controller 由同一个 `ros2_control_node` 进程加载，这一跳仍然要走完整的 rclcpp 链路——本仓库的 controller 用的是不带 `NodeOptions` 的 `init(const std::string&)` 重载，节点没开 `use_intra_process_comms`。
+
+真正决定延迟的不是传输，而是三次线程交接：
+
+```
+[cm_thread, 第 N 拍]   重力补偿 update() → RealtimePublisher::unlockAndPublish()
+[RealtimePublisher 线程]                 → publish()
+[executor 线程]         FPC 订阅回调      → RealtimeBuffer::writeFromNonRT()
+[cm_thread, 第 N+1 拍] FPC update()       → readFromRT()
+```
+
+订阅回调由 controller_manager 的 `MultiThreadedExecutor` 派发，不在 500 Hz 控制线程上，因此**无论如何赶不上同一拍**。`update_rate: 500` 下这是固定 2 ms。
+
+开进程内通信解决不了这个问题：Foxy 的 IPC 仍然是“写进订阅端 ring buffer + 触发 guard condition”，回调照样由 executor 派发，三次交接一次不少；省下的只有 31 个 `double`（248 B）的序列化，微秒级。而且 `RealtimePublisher` 按 const-ref 发 `Float64MultiArray`（不是 `unique_ptr` move），连零拷贝也拿不到。
+
+**为什么可以接受**：重力偏移的带宽被 `gravity_filter_cutoff_hz`（默认 2.0）限死，2 Hz 信号上 2 ms 只相当于 $2\pi \cdot 2 \cdot 0.002 = 0.025$ rad $= 1.4°$ 相位滞后，远小于标定残差本身。补偿量又是在**目标位置**求值的，本就领先于测量，这一拍不会变成负阻尼。丢帧同样无害：两端都是 `best_effort` + `KeepLast(1)`，而它每拍都重发（不看上游是否更新——躯干姿态和激活斜坡一直在变），FPC 最多多持一拍旧命令。
+
+真要消掉这一拍只有两条路，且都要放弃“可独立开关”：把补偿并进 FPC 的 `update()`，或者让它自己 claim command interface 直接写（那它就变成位置控制器，与 FPC 互斥，8200 面板那套“叠在 FPC 前面”的模型也随之作废）。
 
 #### 重力表里有什么
 Controller 不解析 URDF、也不依赖任何动力学库。URDF 中与静态重力有关的只有两类信息，它们已在导出时蒸馏进 `gravity_table`（默认 `package://arm_gravity_compensation/config/gravity_table.yaml`，即仓库内受版本管理的那份；参数同时接受普通绝对路径和 `~`）：
@@ -149,9 +306,7 @@ ros2 control load_controller arm_gravity_compensation --set-state configure
 控制栈被强杀或崩溃时该路径不会执行，用 `ros2 run robot_bringup exit_debug_mode` 兜底。机制详见 [G1.md](../../G1.md) 的「退出低层控制必须主动卸力」。
 
 ### 进程与设备边界
-`controller_manager`、`ForwardCommandController`、`JointTrajectoryController` 和 `G1TopicSystem` 都在同一个 `ros2_control_node` 进程中。每个 500 Hz 周期按“硬件 `read()` -> active controller `update()` -> 硬件 `write()`”运行，state/command interface 是指向插件存储的 C++ 接口；controller 与硬件插件之间没有 ROS topic、序列化或 DDS。
-
-`G1TopicSystem` 内部用于 `/lowstate`、双 Gloria、双 KWR57、MotionSwitcher 和服务客户端的节点由 `SingleThreadedExecutor` 驱动。回调只更新缓存或完成事务，500 Hz manager 循环继续通过硬件接口读写；这里不增加并发 callback worker，避免在 PC2 上为高频订阅引入额外调度竞争。
+进程划分和线程模型见[进程布局](#进程布局)：controller 与硬件插件同进程、以指针交换 interface，之间没有 topic、序列化或 DDS。
 
 设备驱动边界保持不变：
 

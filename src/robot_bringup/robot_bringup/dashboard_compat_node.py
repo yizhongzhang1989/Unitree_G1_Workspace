@@ -13,6 +13,7 @@ from controller_manager_msgs.srv import ListControllers, SwitchController
 from rcl_interfaces.srv import GetParameters
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Float64MultiArray
 
 
 RobotTestDashboard = importlib.import_module(
@@ -21,6 +22,17 @@ RobotTestDashboard = importlib.import_module(
 
 JOINT_KINDS = ("forward_position", "joint_trajectory")
 SWITCH_TIMEOUT_S = 30.0
+QUERY_TIMEOUT_S = 3.0
+# The gravity-compensation controller claims NO command interface: it consumes
+# a whole-body position target on ``~/target`` and republishes it -- with the
+# calibrated arm gravity folded in as a stiffness-scaled offset -- into the
+# topic named by its ``command_topic`` parameter. It therefore STACKS on the
+# forward-position controller instead of replacing it (unlike the trajectory
+# controller, which claims the same ``position`` interfaces and is mutually
+# exclusive with it). The bench drives it exactly like a forward-position
+# controller, only the setpoints go to ``~/target``.
+GRAVITY_TYPE_HINT = "gravitycompensation"
+GRAVITY_TARGET_SUFFIX = "/target"
 
 
 Matrix = List[List[float]]
@@ -316,13 +328,22 @@ def _wait_result(future, timeout_s: float):
         return None
 
 
-def _parameter_service(controller_manager: str, controller: str) -> str:
+def _controller_path(controller_manager: str, controller: str) -> str:
     manager = "/" + controller_manager.strip("/")
     namespace = manager.rpartition("/")[0]
     path = "/" + controller.strip("/")
     if namespace and not path.startswith(namespace + "/"):
         path = namespace + path
-    return path + "/get_parameters"
+    return path
+
+
+def _parameter_service(controller_manager: str, controller: str) -> str:
+    return _controller_path(controller_manager, controller) + "/get_parameters"
+
+
+def _is_gravity(controller: dict) -> bool:
+    return GRAVITY_TYPE_HINT in str(
+        controller.get("type", "")).lower().replace("_", "")
 
 
 class G1RobotTestDashboard(RobotTestDashboard):
@@ -331,6 +352,7 @@ class G1RobotTestDashboard(RobotTestDashboard):
         self._joint_clients = {}
         self._joint_pending = set()
         self._joint_cache: Dict[str, List[str]] = {}
+        self._topic_cache: Dict[str, str] = {}
         self._mimic_specs: Tuple[MimicJointSpec, ...] = ()
         self._hidden_mimic_links = set()
         self._hidden_mimic_joints = set()
@@ -372,6 +394,12 @@ class G1RobotTestDashboard(RobotTestDashboard):
             cached = dict(self._joint_cache)
         with self._lock:
             for controller in self._controllers:
+                # Stacks on the forward-position controller rather than
+                # replacing it, so the bench drives it with the very same
+                # joint-space panel (its ``joints`` parameter is that same
+                # whole-body list, in the same order).
+                if _is_gravity(controller):
+                    controller["kind"] = "forward_position"
                 if controller["cmd_ifaces"]:
                     continue
                 interfaces = cached.get(controller["name"])
@@ -384,14 +412,32 @@ class G1RobotTestDashboard(RobotTestDashboard):
 
     @staticmethod
     def _apply_interfaces(controller: dict, interfaces: List[str]) -> None:
+        joints = [interface.rpartition("/")[0] for interface in interfaces]
+        if _is_gravity(controller):
+            # Claiming interfaces it does not own would make the bench
+            # deactivate the very controller this one feeds.
+            controller["joints"] = joints
+            return
         controller["cmd_ifaces"] = list(interfaces)
-        controller["joints"] = [
-            interface.rpartition("/")[0] for interface in interfaces]
+        controller["joints"] = joints
 
     def _request_joints(self, name: str) -> None:
         with self._joint_meta_lock:
             if name in self._joint_cache or name in self._joint_pending:
                 return
+        client = self._parameter_client(name)
+        if not client.service_is_ready():
+            return
+        with self._joint_meta_lock:
+            self._joint_pending.add(name)
+        request = GetParameters.Request()
+        request.names = ["joints"]
+        future = client.call_async(request)
+        future.add_done_callback(
+            lambda done, controller=name: self._store_joints(controller, done))
+
+    def _parameter_client(self, name: str):
+        with self._joint_meta_lock:
             client = self._joint_clients.get(name)
             if client is None:
                 client = self.create_client(
@@ -400,14 +446,7 @@ class G1RobotTestDashboard(RobotTestDashboard):
                     callback_group=self._joint_parameter_group,
                 )
                 self._joint_clients[name] = client
-            if not client.service_is_ready():
-                return
-            self._joint_pending.add(name)
-        request = GetParameters.Request()
-        request.names = ["joints"]
-        future = client.call_async(request)
-        future.add_done_callback(
-            lambda done, controller=name: self._store_joints(controller, done))
+        return client
 
     def _store_joints(self, name: str, future) -> None:
         try:
@@ -428,6 +467,102 @@ class G1RobotTestDashboard(RobotTestDashboard):
                     if controller["name"] == name and not controller["cmd_ifaces"]:
                         self._apply_interfaces(controller, interfaces)
                         break
+
+    # ------------------------------------------------------------------ #
+    # Gravity compensation: stacked in FRONT of a forward-position controller
+    # ------------------------------------------------------------------ #
+    def _command_topic(self, controller: str) -> str:
+        """``command_topic`` of a gravity filter: the topic it republishes into.
+
+        Cached after the first successful read -- it is fixed at the
+        controller's configure time.
+        """
+        with self._joint_meta_lock:
+            cached = self._topic_cache.get(controller)
+        if cached is not None:
+            return cached
+        client = self._parameter_client(controller)
+        if not client.wait_for_service(timeout_sec=QUERY_TIMEOUT_S):
+            return ""
+        request = GetParameters.Request()
+        request.names = ["command_topic"]
+        response = _wait_result(
+            client.call_async(request), QUERY_TIMEOUT_S + 1.0)
+        values = list(getattr(response, "values", []) or []) if response else []
+        topic = str(values[0].string_value).rstrip("/") if values else ""
+        if topic:
+            with self._joint_meta_lock:
+                self._topic_cache[controller] = topic
+        return topic
+
+    def _downstream(self, gravity: str) -> Optional[dict]:
+        """The controller a gravity filter feeds, from its ``command_topic``."""
+        topic = self._command_topic(gravity)
+        if not topic.endswith("/commands"):
+            return None
+        name = topic[:-len("/commands")].strip("/").rpartition("/")[2]
+        return self._controller_info(name)
+
+    def _gravity_feeding(self, controller: str) -> str:
+        """Name of the ACTIVE gravity filter that owns ``controller``'s
+        command topic, if any."""
+        wanted = _controller_path(self._cm_ns, controller) + "/commands"
+        with self._lock:
+            names = [c["name"] for c in self._controllers
+                     if _is_gravity(c) and c["state"] == "active"]
+        for name in names:
+            if self._command_topic(name) == wanted:
+                return name
+        return ""
+
+    def _is_gravity_name(self, controller: str) -> bool:
+        info = self._controller_info(controller)
+        return info is not None and _is_gravity(info)
+
+    def _cmd_pub(self, name: str):
+        """Setpoints for a gravity filter go to ``~/target``, not ``~/commands``
+        -- the filter owns the downstream controller's command topic."""
+        if not self._is_gravity_name(name):
+            return super()._cmd_pub(name)
+        with self._lock:
+            publisher = self._cmd_pubs.get(name)
+        if publisher is None:
+            publisher = self.create_publisher(
+                Float64MultiArray,
+                _controller_path(self._cm_ns, name) + GRAVITY_TARGET_SUFFIX,
+                10)
+            with self._lock:
+                self._cmd_pubs[name] = publisher
+        return publisher
+
+    def engage(self, name: str) -> dict:
+        """Keep the filter and the controller it feeds consistent.
+
+        Engaging the filter also brings up its downstream controller (it only
+        rewrites setpoints -- something has to write them to the hardware), and
+        engaging that controller directly first releases the filter, so the two
+        never publish on the same command topic at once.
+        """
+        info = self._controller_info(name)
+        if info is None:
+            return super().engage(name)
+        if _is_gravity(info):
+            downstream = self._downstream(name)
+            if downstream is None:
+                return {"ok": False,
+                        "message": "cannot read %s/command_topic; is the "
+                                   "controller loaded?" % name}
+            if not self._activate_exclusive(downstream):
+                return {"ok": False,
+                        "message": "cannot activate %s, which %s feeds"
+                                   % (downstream["name"], name)}
+            return super().engage(name)
+        blocking = self._gravity_feeding(name)
+        if blocking and not self._switch([], [blocking]):
+            return {"ok": False,
+                    "message": "cannot release %s, which feeds %s"
+                               % (blocking, name)}
+        return super().engage(name)
 
     def _switch(self, activate: List[str], deactivate: List[str],
                 timeout: float = SWITCH_TIMEOUT_S) -> bool:
