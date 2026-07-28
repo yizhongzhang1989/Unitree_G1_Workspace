@@ -57,7 +57,7 @@ TEST_F(ForwardPositionControllerTest, forwards_finite_position_commands_unchange
     state_interfaces.emplace_back(state_interface);
     controller.assign_interfaces(
         std::move(command_interfaces), std::move(state_interfaces));
-    ASSERT_EQ(controller.activate().label(), "active");
+    ASSERT_EQ(controller.get_node()->activate().label(), "active");
     ASSERT_DOUBLE_EQ(command_position, 0.0);
 
     auto publisher_node = std::make_shared<rclcpp::Node>("fpc_test_publisher");
@@ -65,7 +65,7 @@ TEST_F(ForwardPositionControllerTest, forwards_finite_position_commands_unchange
         "/test_forward_position_controller/commands",
         rclcpp::QoS(rclcpp::KeepLast(1)).best_effort());
     rclcpp::executors::SingleThreadedExecutor executor;
-    executor.add_node(controller.get_node());
+    executor.add_node(controller.get_node()->get_node_base_interface());
     executor.add_node(publisher_node);
 
     const auto discovery_deadline = std::chrono::steady_clock::now() +
@@ -86,7 +86,7 @@ TEST_F(ForwardPositionControllerTest, forwards_finite_position_commands_unchange
         while (command_position != expected &&
                std::chrono::steady_clock::now() < command_deadline) {
             executor.spin_some();
-            controller.update();
+            controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
             std::this_thread::yield();
         }
         EXPECT_DOUBLE_EQ(command_position, expected);
@@ -97,11 +97,11 @@ TEST_F(ForwardPositionControllerTest, forwards_finite_position_commands_unchange
     publish_and_expect(0.2, 0.2);
 
     state_position = -0.1;
-    ASSERT_EQ(controller.deactivate().label(), "inactive");
-    ASSERT_EQ(controller.activate().label(), "active");
+    ASSERT_EQ(controller.get_node()->deactivate().label(), "inactive");
+    ASSERT_EQ(controller.get_node()->activate().label(), "active");
     EXPECT_DOUBLE_EQ(command_position, -0.1);
 
-    EXPECT_EQ(controller.deactivate().label(), "inactive");
+    EXPECT_EQ(controller.get_node()->deactivate().label(), "inactive");
     controller.release_interfaces();
 }
 

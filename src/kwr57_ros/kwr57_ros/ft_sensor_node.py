@@ -42,7 +42,7 @@ import time
 from typing import Any, Callable, List, Optional, Union
 
 import rclpy
-# ROS 2 包 can_msgs 提供的标准 CAN 帧消息；Foxy: apt install ros-foxy-can-msgs
+# ROS 2 包 can_msgs 提供的标准 CAN 帧消息；apt install ros-humble-can-msgs
 # 它与负责物理总线 I/O 的 python-can/can_sdk 是不同层次的依赖。
 from can_msgs.msg import Frame
 from geometry_msgs.msg import WrenchStamped

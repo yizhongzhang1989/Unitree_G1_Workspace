@@ -11,7 +11,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>python3-can</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <!-- 上游 ROS 2 can_msgs 包提供 can_msgs/msg/Frame；Foxy 二进制包：ros-foxy-can-msgs。 -->
+  <!-- 上游 ROS 2 can_msgs 包提供 can_msgs/msg/Frame；二进制包：ros-humble-can-msgs。 -->
   <exec_depend>can_msgs</exec_depend>
   <exec_depend>ros2launch</exec_depend>
 

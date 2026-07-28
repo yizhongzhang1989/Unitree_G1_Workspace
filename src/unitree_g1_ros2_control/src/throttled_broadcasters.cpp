@@ -13,7 +13,8 @@ using CallbackReturn =
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
 template <typename ClockDuration>
-bool configure_period(const rclcpp::Node::SharedPtr& node, ClockDuration& period) {
+bool configure_period(
+    const rclcpp_lifecycle::LifecycleNode::SharedPtr& node, ClockDuration& period) {
     const double rate = node->get_parameter("publish_rate").as_double();
     if (!std::isfinite(rate) || rate <= 0.0) {
         RCLCPP_ERROR(node->get_logger(), "publish_rate must be finite and positive");
@@ -26,19 +27,18 @@ bool configure_period(const rclcpp::Node::SharedPtr& node, ClockDuration& period
 
 }  // namespace
 
-controller_interface::return_type ThrottledJointStateBroadcaster::init(
-    const std::string& controller_name) {
-    const auto result = joint_state_broadcaster::JointStateBroadcaster::init(controller_name);
-    if (result != controller_interface::return_type::OK) {
+controller_interface::CallbackReturn ThrottledJointStateBroadcaster::on_init() {
+    const auto result = joint_state_broadcaster::JointStateBroadcaster::on_init();
+    if (result != CallbackReturn::SUCCESS) {
         return result;
     }
     try {
         auto_declare<double>("publish_rate", 100.0);
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare publish_rate: %s", error.what());
-        return controller_interface::return_type::ERROR;
+        return CallbackReturn::ERROR;
     }
-    return controller_interface::return_type::OK;
+    return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn ThrottledJointStateBroadcaster::on_configure(
@@ -59,7 +59,8 @@ CallbackReturn ThrottledJointStateBroadcaster::on_activate(
     return result;
 }
 
-controller_interface::return_type ThrottledJointStateBroadcaster::update() {
+controller_interface::return_type ThrottledJointStateBroadcaster::update(
+    const rclcpp::Time& time, const rclcpp::Duration& period) {
     const auto now = Clock::now();
     if (now < next_publish_) {
         return controller_interface::return_type::OK;
@@ -67,22 +68,21 @@ controller_interface::return_type ThrottledJointStateBroadcaster::update() {
     do {
         next_publish_ += publish_period_;
     } while (next_publish_ <= now);
-    return joint_state_broadcaster::JointStateBroadcaster::update();
+    return joint_state_broadcaster::JointStateBroadcaster::update(time, period);
 }
 
-controller_interface::return_type ThrottledImuSensorBroadcaster::init(
-    const std::string& controller_name) {
-    const auto result = imu_sensor_broadcaster::IMUSensorBroadcaster::init(controller_name);
-    if (result != controller_interface::return_type::OK) {
+controller_interface::CallbackReturn ThrottledImuSensorBroadcaster::on_init() {
+    const auto result = imu_sensor_broadcaster::IMUSensorBroadcaster::on_init();
+    if (result != CallbackReturn::SUCCESS) {
         return result;
     }
     try {
         auto_declare<double>("publish_rate", 100.0);
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare publish_rate: %s", error.what());
-        return controller_interface::return_type::ERROR;
+        return CallbackReturn::ERROR;
     }
-    return controller_interface::return_type::OK;
+    return CallbackReturn::SUCCESS;
 }
 
 CallbackReturn ThrottledImuSensorBroadcaster::on_configure(
@@ -102,7 +102,8 @@ CallbackReturn ThrottledImuSensorBroadcaster::on_activate(
     return result;
 }
 
-controller_interface::return_type ThrottledImuSensorBroadcaster::update() {
+controller_interface::return_type ThrottledImuSensorBroadcaster::update(
+    const rclcpp::Time& time, const rclcpp::Duration& period) {
     const auto now = Clock::now();
     if (now < next_publish_) {
         return controller_interface::return_type::OK;
@@ -110,7 +111,7 @@ controller_interface::return_type ThrottledImuSensorBroadcaster::update() {
     do {
         next_publish_ += publish_period_;
     } while (next_publish_ <= now);
-    return imu_sensor_broadcaster::IMUSensorBroadcaster::update();
+    return imu_sensor_broadcaster::IMUSensorBroadcaster::update(time, period);
 }
 
 }  // namespace unitree_g1_ros2_control

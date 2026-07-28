@@ -15,12 +15,13 @@ namespace unitree_g1_ros2_control {
 class ThrottledJointStateBroadcaster :
     public joint_state_broadcaster::JointStateBroadcaster {
 public:
-    controller_interface::return_type init(const std::string& controller_name) override;
+    controller_interface::CallbackReturn on_init() override;
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_configure(
         const rclcpp_lifecycle::State& previous_state) override;
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_activate(
         const rclcpp_lifecycle::State& previous_state) override;
-    controller_interface::return_type update() override;
+    controller_interface::return_type update(
+        const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -31,12 +32,13 @@ private:
 class ThrottledImuSensorBroadcaster :
     public imu_sensor_broadcaster::IMUSensorBroadcaster {
 public:
-    controller_interface::return_type init(const std::string& controller_name) override;
+    controller_interface::CallbackReturn on_init() override;
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_configure(
         const rclcpp_lifecycle::State& previous_state) override;
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_activate(
         const rclcpp_lifecycle::State& previous_state) override;
-    controller_interface::return_type update() override;
+    controller_interface::return_type update(
+        const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
 private:
     using Clock = std::chrono::steady_clock;

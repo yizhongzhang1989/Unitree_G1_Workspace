@@ -5,9 +5,9 @@
 
 本文档不是原 `README.md` 的逐句翻译，而是面向当前工作区的部署说明，主要差异如下：
 
-- 原 README 面向 ROS 2 Humble 和通用 `192.168.1.x` 示例；本文档以当前 ROS 2 Foxy 环境为准。
+- 原 README 面向通用 `192.168.1.x` 示例；本文档以当前工作区的 ROS 2 Humble 容器环境为准。
 - 原 README 主要介绍包内自带的单相机、双相机和机械臂测试 launch；本文档重点记录 `robot_bringup` 实际启动的左右相机，包括 IP、RTSP URL、Web 端口和 ROS 图像话题。
-- 本文档按当前 Ubuntu/ROS 环境说明 apt、`rosdep` 和 `ffmpeg` 的安装关系，避免把 `ffprobe` 当作独立 apt 包，也避免 pip 版 OpenCV/NumPy 与 Foxy 的 `cv_bridge` 产生兼容问题。
+- 本文档按当前 Ubuntu/ROS 环境说明 apt、`rosdep` 和 `ffmpeg` 的安装关系，避免把 `ffprobe` 当作独立 apt 包，也避免 pip 版 OpenCV/NumPy 与 ROS 自带的 `cv_bridge` 产生兼容问题。
 - 本文档以当前源码为准修正接口说明：图像话题由 `ros_topic_name` 明确指定，不会根据 `camera_name` 自动生成。
 - 原 README 仍可用于了解上游设计和历史示例；在本工作区构建、启动与排障时应以本文档和 `robot_bringup` 当前配置为准。
 
@@ -41,7 +41,7 @@ flowchart LR
 FFmpeg 读取线程保存最新帧；ROS 发布线程仅在新帧到达时转换并发布图像；Flask 在独立线程中提供 Web 接口。Web 预览和 ROS 发布共享同一条 RTSP 输入，不会为每个浏览器连接重复打开相机。
 
 ## 依赖与构建
-本工作区使用 ROS 2 Foxy。`ffprobe` 随 Ubuntu 的 `ffmpeg` 软件包安装：
+本工作区使用 ROS 2 Humble。`ffmpeg`（含 `ffprobe`）已预装在开发镜像里；如需在其他环境重建：
 ```bash
 cd ~/Unitree_G1_Workspace
 sudo apt-get update

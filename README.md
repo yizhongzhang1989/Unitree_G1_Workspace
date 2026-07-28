@@ -1,6 +1,6 @@
 # Unitree_G1_Workspace
 
-Unitree G1 的 ROS 2 Foxy 工作区，覆盖整机位置控制、IK、双夹爪、双六轴力传感器、双相机和 Web 调试。生产入口由 `robot_bringup` 统一启动；各设备包仍可单独用于调试。
+Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹爪、双六轴力传感器、双相机和 Web 调试。生产入口由 `robot_bringup` 统一启动；各设备包仍可单独用于调试。
 
 | 模块 | 负责 |
 |---|---|
@@ -11,13 +11,38 @@ Unitree G1 的 ROS 2 Foxy 工作区，覆盖整机位置控制、IK、双夹爪�
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
 | `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
 
-常用入口：
+
+## 快速开始
+
+**开发和运行都在 Docker 容器里进行。** 宿主是 Jetson 的 Ubuntu 20.04（JetPack 5），上面只有 ROS 2 Foxy；Humble 由 `.devcontainer/` 下的镜像提供。工作区固定挂到容器里的 `/workspace`。
+
 ```bash
-source scripts/env.sh
+# 0) 首次使用需在 docker 组里；刚加完组要重新登录，或临时用 sg docker -c "..."
+sudo usermod -aG docker "$USER"
+
+# 1) 构建开发镜像（约 2 GB，只需做一次；改了 Dockerfile 再重跑）
+cd ~/Unitree_G1_Workspace
+.devcontainer/dev.sh build
+
+# 2) 进容器
+.devcontainer/dev.sh
+
+# 3) 以下都在容器里（工作目录 /workspace）
+colcon build --symlink-install --packages-ignore unitree_go unitree_ros2_example
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ```
 
-下面先说明各子系统的边界，再给出目录、安装和调试细节。
+ROS 环境由容器自动装配，**不需要手动 `source`**。只有当 `install/` 是这次新建出来的、当前 shell 还没加载到它时，才需要 `source scripts/env.sh` 刷一下。
+
+也可以不进交互 shell，直接一次性执行：
+```bash
+.devcontainer/dev.sh colcon build --symlink-install --packages-ignore unitree_go unitree_ros2_example
+.devcontainer/dev.sh ros2 control list_controllers
+```
+
+**用 VS Code 开发**：装 **Dev Containers** 扩展（`ms-vscode-remote.remote-containers`，跟 Docker/Containers 扩展不是一个东西），先跑一次上面的 `dev.sh build`，然后 "Reopen in Container"。VS Code Server 会装进容器，`/opt/ros/humble` 就是普通本地路径，补全直接可用。
+
+下面先说明各子系统的边界，再给出目录、容器和调试细节。
 
 ## 末端执行器与相机
 
@@ -36,7 +61,7 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 调试链                : can_sdk + can_bridge_ros + kwr57_ros，不与生产 bridge 同时运行
 ```
 
-消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；Foxy 对应系统包为 `ros-foxy-can-msgs`。
+消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；对应系统包为 `ros-humble-can-msgs`，已装在开发镜像里。
 
 
 ## 宇树 G1
@@ -58,101 +83,107 @@ Unitree_G1_Workspace/             一个 colcon workspace
 ├── README.md
 ├── .gitignore
 ├── .gitmodules
-├── scripts/                      env.sh（环境）/ run_end_effectors.sh（末端设备一键启动）
+├── .devcontainer/                Humble 开发容器（Dockerfile / docker-compose.yml / devcontainer.json / 脚本）
+├── scripts/                      env.sh（进入环境）
 ├── sdk/                          纯 Python SDK（不参与 colcon 构建）
 |   ├── CAN-SDK/                  通用 CAN 基础库（无 ROS、无设备协议）
 |   ├── KWR57-SDK/                力传感器 SDK（纯Python，pip 安装；非ROS可用）
 |   └── Gloria-M-SDK/             git submodule（云犀夹爪 SDK）
-└── src/                          colcon 扫描的 ROS 2 包
-    ├── can_bridge_ros/           通用 ROS 2 CAN bridge（多通道）
+└── src/                          colcon 扫描的 ROS2 包
+    ├── can_bridge_ros/           通用 ROS 2 CAN bridge（多通道）【已经被 canalystii_native_bridge 取代】
     ├── canalystii_native_bridge/ 生产用 C++ CANalyst-II/KWR57 bridge
     ├── camera_node/              左右 IP 相机 RTSP、ROS 图像与 Web 预览
-    ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）
+    ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）【已经被 canalystii_native_bridge 取代】
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
-    ├── inverse_kinematics_toolkit/ git submodule（Pinocchio IK、Pose Commander 与 Dashboard）
+    ├── inverse_kinematics_toolkit/ [git submodule] Pinocchio IK、Pose Commander 与 Dashboard
     ├── robot_bringup/            全身控制与末端设备的分层 launch 编排
-    ├── robot_test_dashboard/     git submodule（机器人测试 Dashboard）
+    ├── robot_test_dashboard/     [git submodule] 机器人测试 Dashboard
     ├── unitree_g1_description/   整机 description 包（model/ 为 URDF submodule）
     ├── arm_gravity_compensation/ 双臂重力参数采点、EM 标定与 Web 工作流
     ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和互斥 FPC/JTC
-    └── unitree_ros2/             git submodule（仅构建 unitree_api、unitree_hg）
+    └── unitree_ros2/             [git submodule] 官方消息结构（仅构建 unitree_api、unitree_hg）
 ```
 
 - SDK 保留：`CAN-SDK`（模块 `can_sdk`）、`KWR57-SDK`（模块 `kwr57_sensor`）和 `gloria_m_sdk` 均可脱离 ROS 使用；ROS 封装只复用基础 I/O 和设备协议，不重复实现。
 - 三个 SDK 均不作为 ROS 包，且不由 colcon 构建；`scripts/env.sh` 统一把它们的源码目录加入 `PYTHONPATH`。ROS 节点不需要先安装本地 SDK，也不在节点代码中修改 `sys.path`。
 - `can_sdk` 刻意不提供多订阅：直连 SDK 的 `recv()` 是单消费者语义；它和 `can_bridge_ros` 只用于独立调试，生产多设备系统由 `canalystii_native_bridge` 成为唯一 USB 所有者。
-- 夹爪 SDK 整体声明 Python≥3.11；本项目只使用其 `protocol_mit`/`types` 逻辑并已做 Python 3.8 静态语法检查，不打开 SDK 的串口转 CAN 传输层。由于 Python 导入包子模块时仍会执行上游 `gloria_m_sdk/__init__.py`，运行环境当前仍需提供上游依赖 `pyserial`。
+- 夹爪 SDK 整体声明 Python≥31.1；本项目只使用其 `protocol_mit`/`types` 逻辑，不打开 SDK 的串口转 CAN 传输层。由于 Python 导入包子模块时仍会执行上游 `gloria_m_sdk/__init__.py`，运行环境当前仍需提供上游依赖 `pyserial`。
 
 
-## 环境与安装
-ROS 2 节点跑在 **Foxy 系统 `python3`（3.8）**；运行用 **CycloneDDS**（默认 FastRTPS 会刷 `std::bad_alloc`）。机器人出厂环境已在 `~/cyclonedds_ws` 安装兼容版本，项目继续复用该环境；仓库内的 `src/unitree_ros2/cyclonedds_ws` 只用于构建 Unitree 消息包。
+## 开发容器
 
+宿主是 Jetson（JetPack 5 / L4T R35，Ubuntu 20.04 / Python 3.8），只带 ROS 2 Foxy。本项目跑在 **ROS 2 Humble + Python 3.10** 上，由 `.devcontainer/Dockerfile` 提供：基于官方 `ros:humble-ros-base`（arm64），apt 换 USTC 源。宿主的 Foxy 不受影响，也不再使用。
+
+`.devcontainer/` 的构成：
+
+| 文件 | 作用 |
+|---|---|
+| `Dockerfile` | 镜像定义 |
+| `docker-compose.yml` | **运行参数的唯一来源**，devcontainer 与 `dev.sh` 共用，不抄两份 |
+| `devcontainer.json` | 只写 `dockerComposeFile` + `service` + 扩展列表 |
+| `dev.sh` | `dev.sh build` 构建镜像，`dev.sh [命令]` 进容器；给普通 SSH 会话、开机自启和 CI 用，VS Code 里用不到 |
+
+ROS 环境不在这里：它定义在工作区的 [`scripts/env.sh`](scripts/env.sh)，镜像的 ENTRYPOINT 和 `~/.bashrc` 都引用它。那份文件**不 COPY 进镜像**，直接用挂载进来的那一份，改了立刻生效、不用重建镜像。
+
+### 构建镜像
 ```bash
-# ROS/Python 图像栈统一使用 Ubuntu 软件包，避免与 Foxy cv_bridge 产生 ABI 冲突；
-# ffprobe 和 ffplay 均由 ffmpeg 软件包提供。
-sudo apt-get install -y ros-foxy-can-msgs \
-    ros-foxy-cv-bridge ros-foxy-rmw-cyclonedds-cpp \
-    ros-foxy-controller-manager-msgs ros-foxy-ros2-control \
-    ros-foxy-ros2-controllers ros-foxy-joint-trajectory-controller \
-    ros-foxy-rosidl-generator-dds-idl \
-    ros-foxy-robot-state-publisher ros-foxy-xacro \
-    ffmpeg libusb-1.0-0-dev libyaml-cpp-dev \
-    python3-flask python3-opencv python3-numpy
-source /opt/ros/foxy/setup.bash
-# Foxy 使用 Python 3.8；固定 pip/NumPy/Pinocchio，避免 NumPy 2.x 覆盖 ROS 图像栈。
-python3 -m pip install --user 'pip==23.3.2'
-python3 -m pip install --user 'numpy<1.24' 'pin==2.6.21'
-# 仅 Python CAN/KWR57 调试入口需要这些依赖
-python3 -m pip install --user 'python-can>=4.0' canalystii 'libusb-package>=1.0.30' pyserial
-
-# 拉取含 submodule 的仓库
-git clone --recurse-submodules https://github.com/yizhongzhang1989/Unitree_G1_Workspace.git ~/Unitree_G1_Workspace
-# 已克隆则： git submodule update --init --recursive
+.devcontainer/dev.sh build       # 产出 g1-humble:latest，约 2 GB
 ```
+本机直连不到 `mirrors.ustc.edu.cn`，`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `socks5h://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
 
-### CycloneDDS
-先确认出厂自带的 CycloneDDS 环境存在：
+compose 里 `build.network: host` 是必需的——BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，`127.0.0.1` 不是宿主的 loopback，代理会连不上。
+
+VS Code 的 "Reopen in Container" 不会带这些代理变量，所以**必须先跑一次 `dev.sh build`** 把镜像做好。
+
+### 进容器
 ```bash
-test -f ~/cyclonedds_ws/install/setup.bash && echo "CycloneDDS 已安装"
+.devcontainer/dev.sh                # 交互 shell
+.devcontainer/dev.sh <命令...>      # 一次性执行，退出即销毁
 ```
+关键运行参数（都在 `docker-compose.yml` 里）：
 
-若文件存在，无需重复安装。检查 `~/cyclonedds_ws/cyclonedds.xml`，将其中的 `NetworkInterface name` 设置为连接 G1 的有线网卡名称（可用 `ip link` 查看）。
+| 参数 | 为什么 |
+|---|---|
+| `privileged: true` + `/dev:/dev` | USB（CANalyst-II）和相机设备直通 |
+| `network_mode: host` | 与机器人同一网络栈，DDS 能在 `eth0` 上发现 `/lowstate` |
+| `ipc: host` | DDS 共享内存 |
+| `ulimits: rtprio 99 / memlock -1` | 让 `ros2_control_node` 拿到 SCHED_FIFO 和 mlockall |
+| `..:/workspace` | 固定挂到 `/workspace`，不依赖宿主克隆路径 |
+| `~/.ros` 挂载 | 重力标定结果（`~/.ros/arm_gravity_compensation/`）持久化 |
+| 镜像内用户与宿主同 UID/GID | bind mount 里新建的文件不会变成 root 所有 |
 
-若 `~/cyclonedds_ws` 尚未安装，则按照 `unitree_ros2` 的 Foxy 安装方式，在一个**未 source ROS 2** 的新终端中编译官方要求的 CycloneDDS 0.10.x：
-```bash
-mkdir -p ~/cyclonedds_ws/src
-cd ~/cyclonedds_ws/src
-git clone -b foxy https://github.com/ros2/rmw_cyclonedds.git
-git clone -b releases/0.10.x https://github.com/eclipse-cyclonedds/cyclonedds.git
-cd ~/cyclonedds_ws
-export LD_LIBRARY_PATH="/opt/ros/foxy/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-colcon build --packages-select cyclonedds
-
-# env.sh 从该文件读取 G1 网卡配置；复制后修改 NetworkInterface name
-cp ~/Unitree_G1_Workspace/src/unitree_ros2/cyclonedds_ws/src/cyclonedds.xml \
-    ~/cyclonedds_ws/cyclonedds.xml
-```
-
-完整上游说明见 [`src/unitree_ros2/README.md`](src/unitree_ros2/README.md)。若 CycloneDDS 安装在其他位置，可在 source 环境前设置 `UNITREE_CYCLONEDDS_WS=/实际路径`。
+`build/`、`install/`、`log/` 都落在宿主工作区，容器销毁不丢。`devcontainer.json` 里设了 `shutdownAction: none`，关掉 VS Code 窗口**不会**停容器——机器人上不该因为关个编辑器就把控制栈杀了；要停用 `docker compose -f .devcontainer/docker-compose.yml down`。
 
 ### 构建项目
-SDK 位于根目录 `sdk/`，不参与 colcon 构建。必须保留 `--packages-select`，否则 colcon 还会发现不需要的 `unitree_go` 和官方示例。
+`sdk/` 下的纯 Python SDK 不参与 colcon 构建。必须排掉 `unitree_go` 和官方示例，否则 colcon 会发现并构建用不到的包：
 ```bash
-cd ~/Unitree_G1_Workspace
-source /opt/ros/foxy/setup.bash
-source ~/cyclonedds_ws/install/setup.bash
-colcon build --symlink-install --packages-select \
-    unitree_api unitree_hg \
-    ikt_common ikt_core ikt_interfaces ikt_inverse_kinematics ikt_pose_commander \
-    camera_node can_bridge_ros canalystii_native_bridge gloria_ros kwr57_ros robot_bringup \
-    robot_test_dashboard unitree_g1_description unitree_g1_ros2_control \
-    arm_gravity_compensation
-source scripts/env.sh
+# 容器内
+colcon build --symlink-install --packages-ignore unitree_go unitree_ros2_example
 ```
 
-CANalyst-II 需 udev 权限（VID:PID `04d8:0053`），见 `src/canalystii_native_bridge/README.md`。
+ROS 环境不用手动 source：[`scripts/env.sh`](scripts/env.sh) 会加载 Humble、工作区 `install/setup.bash`、三个 SDK 的 `PYTHONPATH`，以及 `RMW_IMPLEMENTATION` 和 `CYCLONEDDS_URI`。它同时挂在镜像的 ENTRYPOINT 和 `~/.bashrc` 上，因为 **VS Code 开的终端不走 ENTRYPOINT**。首次构建出 `install/` 后，当前 shell 需要 `source scripts/env.sh` 刷一次。
 
-`scripts/env.sh` 会依次加载 ROS 2 Foxy、`~/cyclonedds_ws` 和项目安装环境（其中包含 Unitree G1 消息），同时将 `CAN-SDK`、`KWR57-SDK` 与 Gloria submodule 的源码目录加入 `PYTHONPATH`。若要在仓库外独立使用 SDK，可选择安装：
+该文件可以被 source（只设环境），也可以被执行（设完环境再 exec 传入的命令），所以一份定义同时服务两种入口。
+
+### CycloneDDS
+运行必须用 **CycloneDDS**（默认 FastRTPS 会刷 `std::bad_alloc`）。**Humble 自带的 CycloneDDS 0.10.x 就是 Unitree 要求的版本**，不再需要官方那套从源码编译的 `~/cyclonedds_ws`。
+
+唯一要配的是网卡绑定：不指定时 Cyclone 会挑到 `wlan0`，表现为收不到 `/lowstate`。配置直接内联在 `CYCLONEDDS_URI` 里（Cyclone 接受 XML 文本，不只是 `file://`），省掉一个配置文件；默认 `eth0`，换网卡只需设环境变量：
+```bash
+G1_DDS_INTERFACE=enp1s0 source scripts/env.sh    # 网卡名用 ip -br addr 确认
+```
+
+验证连通性：
+```bash
+# 容器内，source scripts/env.sh 之后
+ros2 topic hz /lowstate        # 应约 1 kHz
+ros2 topic echo /secondary_imu --once --field rpy
+```
+
+### 其他
+`git clone --recurse-submodules` 拉取仓库（已克隆则 `git submodule update --init --recursive`）。CANalyst-II 需 udev 权限（VID:PID `04d8:0053`），见 `src/canalystii_native_bridge/README.md`；容器是 `--privileged` 且 `-v /dev:/dev`，规则写在宿主上即可。
+
+若要在仓库外独立使用 SDK，可选择安装：
 ```bash
 python3 -m pip install -e './sdk/CAN-SDK[canalystii]'
 python3 -m pip install -e ./sdk/KWR57-SDK
@@ -248,7 +279,7 @@ ros2 launch robot_bringup end_effectors_dashboard.launch.py topology:=dual
 
 8770 默认是监视模式：显示相机、KWR57 和 Gloria 反馈，但不创建 `MitCommand` publisher，也不调用夹爪 enable/disable。它可以和 8200 同时运行。仅在 `scope:=end_effectors`、没有任何 ros2_control 夹爪 controller 时，才可显式追加 `allow_gripper_control:=true` 恢复独立末端控制；不要在整机控制期间打开该参数。
 
-整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。Foxy 兼容 wrapper 仅映射 `SwitchController` 字段，并从 inactive controller 的 `joints` 参数补全页面所需接口元数据。
+整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放），并为不 claim 任何接口的重力补偿控制器补全页面所需的关节列表。
 
 Engage 会依次检查 31 轴反馈 freshness 与 PR mode、释放现有 MotionSwitcher 模式、等待外部 `/lowcmd` 静默、使能所 claim 的 Gloria-M，并在二次状态检查后才开放输出。Disengage 先阻止低层输出、失能夹爪，再恢复接管前的运动模式。任一步失败都保持输出关闭并返回切换失败。完整事务见 [unitree_g1_ros2_control/README.md](src/unitree_g1_ros2_control/README.md)。
 
@@ -286,7 +317,7 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 | `robot_bringup/end_effectors_*_bus.launch.py` | 单/双总线 bridge、KWR57、Gloria-M 和相机 | 末端拓扑底层入口 |
 | `robot_bringup/end_effectors_dashboard.launch.py` | 8770 末端监视网页；默认不创建夹爪命令源 | 可与 8200 同时运行 |
 | `robot_bringup/whole_body_dashboard.launch.py` | 仅 8200 controller Dashboard | 已有真实 manager 时联调 |
-| `robot_bringup/ikt_pose_commander.launch.py` | Foxy 兼容 Commander、可选 8180 Dashboard | FPC 连续跟踪、JTC Snap/return-to-start |
+| `robot_bringup/ikt_pose_commander.launch.py` | G1 适配 Commander、可选 8180 Dashboard | FPC 连续跟踪、JTC Snap/return-to-start |
 | `unitree_g1_ros2_control/control.launch.py` | 唯一 manager、硬件插件、RSP、broadcaster、inactive FPC/JTC | 独立整机控制入口 |
 | `unitree_g1_description/description.launch.py` | 仅模型、RSP 和 TF | 已有 `/joint_states` 时查看模型 |
 

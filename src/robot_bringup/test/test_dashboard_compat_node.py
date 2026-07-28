@@ -64,11 +64,14 @@ class _Client:
         return _Future(self.response)
 
 
-def _state(name, state, controller_type=""):
+def _state(name, state, controller_type="", interfaces=()):
     controller = ControllerState()
     controller.name = name
     controller.state = state
     controller.type = controller_type
+    # Humble reports this for active AND inactive controllers, which is how the
+    # bench knows a controller's joints before engaging it.
+    controller.required_command_interfaces = list(interfaces)
     return controller
 
 
@@ -94,43 +97,20 @@ def test_parameter_service_follows_manager_namespace():
         "/robot/forward_position_controller/get_parameters"
 
 
-def test_applies_joint_interfaces_to_dashboard_controller():
-    controller = {"cmd_ifaces": [], "joints": []}
-
-    G1RobotTestDashboard._apply_interfaces(
-        controller, ["joint_a/position", "joint_b/position"])
-
-    assert controller == {
-        "cmd_ifaces": ["joint_a/position", "joint_b/position"],
-        "joints": ["joint_a", "joint_b"],
-    }
-
-
-def test_gravity_filter_takes_joints_without_claiming_interfaces():
-    controller = {"type": GRAVITY_TYPE, "cmd_ifaces": [], "joints": []}
-
-    G1RobotTestDashboard._apply_interfaces(
-        controller, ["joint_a/position", "joint_b/position"])
-
-    assert controller["joints"] == ["joint_a", "joint_b"]
-    assert controller["cmd_ifaces"] == []
-
-
 def test_gravity_filter_is_offered_as_a_forward_position_controller():
     listed = ListControllers.Response()
     listed.controller = [
         _state("arm_gravity_compensation", "inactive", GRAVITY_TYPE),
-        _state("forward_position_controller", "active", FPC_TYPE),
+        _state("forward_position_controller", "active", FPC_TYPE, ["joint_a/position"]),
     ]
     dashboard = object.__new__(G1RobotTestDashboard)
     dashboard._lock = threading.Lock()
     dashboard._joint_meta_lock = threading.Lock()
     dashboard._controllers = []
     dashboard._cm_ok = False
-    dashboard._joint_cache = {
-        "arm_gravity_compensation": ["joint_a/position"],
-        "forward_position_controller": ["joint_a/position"],
-    }
+    # The gravity filter claims nothing, so ``required_command_interfaces`` is
+    # empty and its joint list can only come from its own ``joints`` parameter.
+    dashboard._joint_cache = {"arm_gravity_compensation": ["joint_a"]}
 
     dashboard._on_controllers(_Future(listed))
 
@@ -259,7 +239,7 @@ def test_parses_both_prefixed_grippers_from_assembled_model():
     assert all(spec.name in values for spec in specs)
 
 
-def test_switch_uses_foxy_fields_and_confirms_final_state():
+def test_switch_uses_humble_fields_and_confirms_final_state():
     switch_response = SwitchController.Response()
     switch_response.ok = True
     listed = ListControllers.Response()
@@ -280,9 +260,9 @@ def test_switch_uses_foxy_fields_and_confirms_final_state():
         ["joint_trajectory_controller"],
     ) is True
     request = switch_client.requests[0]
-    assert request.start_controllers == ["forward_position_controller"]
-    assert request.stop_controllers == ["joint_trajectory_controller"]
-    assert request.start_asap is True
+    assert request.activate_controllers == ["forward_position_controller"]
+    assert request.deactivate_controllers == ["joint_trajectory_controller"]
+    assert request.activate_asap is True
 
 
 def test_switch_rejects_best_effort_partial_success():

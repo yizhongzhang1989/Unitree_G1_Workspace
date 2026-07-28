@@ -101,7 +101,7 @@ def test_arm_stiffness_explicit_override_reaches_hardware_plugin():
     assert parameters["arm_stiffness_scale"] == "2.5"
 
 
-def test_control_launch_loads_both_motion_controllers_stopped():
+def test_control_launch_loads_both_motion_controllers_inactive():
     module = _load_control_launch()
     context = LaunchContext()
     context.launch_configurations.update({
@@ -117,8 +117,8 @@ def test_control_launch_loads_both_motion_controllers_stopped():
         str(node._Node__arguments[0]): node._Node__arguments
         for node in nodes
         if isinstance(node, Node) and
-        node._Node__node_executable == "spawner.py"
+        node._Node__node_executable == "spawner"
     }
 
-    assert "--stopped" in spawners["forward_position_controller"]
-    assert "--stopped" in spawners["joint_trajectory_controller"]
+    assert "--inactive" in spawners["forward_position_controller"]
+    assert "--inactive" in spawners["joint_trajectory_controller"]

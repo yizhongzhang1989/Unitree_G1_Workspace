@@ -8,7 +8,7 @@ setup(
     description="Device-agnostic python-can backend and single-consumer transport",
     packages=find_packages(include=["can_sdk", "can_sdk.*"]),
     python_requires=">=3.8",
-    install_requires=["python-can>=4.0"],
+    install_requires=["python-can>=3.3"],
     extras_require={
         "canalystii": [
             "canalystii>=0.1",

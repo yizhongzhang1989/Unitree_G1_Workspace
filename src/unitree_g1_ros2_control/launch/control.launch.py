@@ -1,4 +1,4 @@
-"""Start the real Foxy ros2_control stack for the assembled Unitree G1."""
+"""Start the real Humble ros2_control stack for the assembled Unitree G1."""
 
 from pathlib import Path
 from typing import cast
@@ -137,7 +137,7 @@ def _control_nodes(context):
         ),
         Node(
             package="controller_manager",
-            executable="spawner.py",
+            executable="spawner",
             arguments=[
                 "joint_state_broadcaster",
                 "--param-file", joint_state_parameters,
@@ -148,7 +148,7 @@ def _control_nodes(context):
         ),
         Node(
             package="controller_manager",
-            executable="spawner.py",
+            executable="spawner",
             arguments=[
                 "pelvis_imu_broadcaster",
                 "--param-file", imu_parameters,
@@ -159,11 +159,11 @@ def _control_nodes(context):
         ),
         Node(
             package="controller_manager",
-            executable="spawner.py",
+            executable="spawner",
             arguments=[
                 "forward_position_controller",
                 "--param-file", forward_position_parameters,
-                "--stopped",
+                "--inactive",
                 "--controller-manager", controller_manager,
                 "--controller-manager-timeout", "30",
             ],
@@ -171,11 +171,11 @@ def _control_nodes(context):
         ),
         Node(
             package="controller_manager",
-            executable="spawner.py",
+            executable="spawner",
             arguments=[
                 "joint_trajectory_controller",
                 "--param-file", joint_trajectory_parameters,
-                "--stopped",
+                "--inactive",
                 "--controller-manager", controller_manager,
                 "--controller-manager-timeout", "30",
             ],
@@ -183,11 +183,11 @@ def _control_nodes(context):
         ),
         Node(
             package="controller_manager",
-            executable="spawner.py",
+            executable="spawner",
             arguments=[
                 "arm_gravity_compensation",
                 "--param-file", arm_gravity_parameters,
-                "--stopped",
+                "--inactive",
                 "--controller-manager", controller_manager,
                 "--controller-manager-timeout", "30",
             ],

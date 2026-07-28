@@ -125,11 +125,7 @@ std::vector<double> read_doubles(
 
 }  // namespace
 
-controller_interface::return_type ArmGravityCompensationController::init(
-    const std::string& controller_name) {
-    const auto result = ControllerInterface::init(controller_name);
-    if (result != controller_interface::return_type::OK) return result;
-
+controller_interface::CallbackReturn ArmGravityCompensationController::on_init() {
     try {
         auto_declare<std::vector<std::string>>("joints", {});
         auto_declare<std::string>("gravity_table", "");
@@ -140,9 +136,9 @@ controller_interface::return_type ArmGravityCompensationController::init(
         auto_declare<double>("compensation_scale", 1.0);
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare parameters: %s", error.what());
-        return controller_interface::return_type::ERROR;
+        return CallbackReturn::ERROR;
     }
-    return controller_interface::return_type::OK;
+    return CallbackReturn::SUCCESS;
 }
 
 controller_interface::InterfaceConfiguration
@@ -330,7 +326,6 @@ ArmGravityCompensationController::on_activate(const rclcpp_lifecycle::State&) {
     // The steady-state offset reaches ~0.4 rad on a loaded shoulder, so
     // applying it at once would step the command by twice the current droop.
     ramp_ = 0.0;
-    last_update_ = Clock::now();
     target_buffer_.writeFromNonRT(std::shared_ptr<std::vector<double>>());
     return CallbackReturn::SUCCESS;
 }
@@ -431,13 +426,14 @@ void ArmGravityCompensationController::arm_offsets(
     }
 }
 
-controller_interface::return_type ArmGravityCompensationController::update() {
+controller_interface::return_type ArmGravityCompensationController::update(
+    const rclcpp::Time&, const rclcpp::Duration& period) {
     const auto sample = *target_buffer_.readFromRT();
     if (!sample) return controller_interface::return_type::OK;
 
-    const auto now = Clock::now();
-    const double elapsed = std::chrono::duration<double>(now - last_update_).count();
-    last_update_ = now;
+    // The control loop hands us its own measured period, so the filter and the
+    // ramp advance on the same clock the hardware is written with.
+    const double elapsed = period.seconds();
     ramp_ = ramp_duration_ > 0.0 ? std::min(1.0, ramp_ + elapsed / ramp_duration_) : 1.0;
     if (!update_torso_gravity(elapsed)) return controller_interface::return_type::OK;
 

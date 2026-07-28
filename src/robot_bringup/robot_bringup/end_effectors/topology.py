@@ -353,6 +353,6 @@ def build_bridge_parameters(
     return {
         "channel_ids": [bus.channel_id for bus in buses],
         "bus_names": [bus.name for bus in buses],
-        # Foxy 无法从空列表推断参数类型，空拓扑保留一个可忽略的字符串。
+        # rclpy 无法从空列表推断参数类型，空拓扑保留一个可忽略的字符串。
         "rx_routes": routes or [""],
     }

@@ -53,7 +53,7 @@ def _load_web_wrench_module() -> ModuleType:
     if spec is None or spec.loader is None:
         raise ImportError(f"could not load web viewer module from {web_path}")
     module = importlib.util.module_from_spec(spec)
-    # Register before exec: Python 3.8 @dataclass resolves field types via
+    # Register before exec: @dataclass resolves field types via
     # sys.modules[cls.__module__], which is None for an unregistered module.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

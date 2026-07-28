@@ -17,17 +17,20 @@ RUN set -eux; \
     printf '%s\n' 'APT::Install-Recommends "false";' 'APT::Install-Suggests "false";' \
       > /etc/apt/apt.conf.d/99no-recommends
 
-# 一层装完，失败时能从日志里一眼看出缺哪个包
+# 一层装完，失败时能从日志里一眼看出缺哪个包。pip 与 apt 同层：pip 走 socks5h 代理
+# 需要 PySocks（由 python3-socks 提供），分层写会让"先装依赖再用"这件事依赖层序，
+# 合在一起才是自洽的。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y \
       build-essential cmake git gdb \
       less vim nano sudo \
       iproute2 iputils-ping net-tools usbutils can-utils \
+      ffmpeg \
       libusb-1.0-0-dev libyaml-cpp-dev \
-      python3-colcon-common-extensions python3-pip \
+      python3-colcon-common-extensions python3-pip python3-socks \
       python3-flask python3-opencv python3-numpy python3-scipy \
-      python3-yaml python3-can python3-pytest \
+      python3-yaml python3-pytest \
       ros-humble-ros2-control \
       ros-humble-ros2-controllers \
       ros-humble-ros2controlcli \
@@ -57,7 +60,11 @@ RUN set -eux; \
       ros-humble-ament-index-python \
       ros-humble-rosidl-default-generators \
       ros-humble-rosidl-generator-dds-idl; \
+    pip3 install --no-cache-dir \
+      'python-can>=4.0' 'canalystii>=0.1' 'libusb-package>=1.0.30' pyserial; \
     rm -rf /var/lib/apt/lists/*
+# canalystii 与 libusb-package 是 CAN-SDK 的 [canalystii] extra，只供 Python 调试
+# 链路使用；生产链路是 C++ 的 canalystii_native_bridge，不依赖它们。
 
 # 与宿主同 UID/GID：工作区是 bind mount，不对齐会把源码文件写成 root 所有
 ARG USER_NAME=unitree
@@ -79,11 +86,16 @@ RUN set -eux; \
     echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USER_NAME}"; \
     chmod 0440 "/etc/sudoers.d/${USER_NAME}"
 
-COPY entrypoint.sh /usr/local/bin/g1-entrypoint
-RUN chmod +x /usr/local/bin/g1-entrypoint
+# 环境定义在工作区的 scripts/env.sh 里，不 COPY 进镜像：工作区总是挂在 /workspace，
+# 直接用那一份就只有一个定义，改了立刻生效、不用重建镜像。代价是这个镜像离开工作区
+# 挂载就跑不起来——本来也没意义。
+RUN printf '%s\n' \
+      '# VS Code "Reopen in Container" 开的终端不走 ENTRYPOINT，只读 ~/.bashrc。' \
+      '[ -f /workspace/scripts/env.sh ] && source /workspace/scripts/env.sh' \
+      >> "/home/${USER_NAME}/.bashrc"
 
 USER ${USER_NAME}
 ENV ROS_DISTRO=humble \
     RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ENTRYPOINT ["/usr/local/bin/g1-entrypoint"]
+ENTRYPOINT ["/workspace/scripts/env.sh"]
 CMD ["bash"]

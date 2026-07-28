@@ -16,22 +16,9 @@
 
 #include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "gloria_ros/msg/mit_command.hpp"
-#include "hardware_interface/base_interface.hpp"
 #include "hardware_interface/system_interface.hpp"
+#include "rclcpp_lifecycle/state.hpp"
 #include "unitree_api/msg/response.hpp"
-
-// Foxy detects any member named `header` as std_msgs/Header. Unitree's API
-// header carries an identity and status but intentionally has no timestamp.
-#include "libstatistics_collector/topic_statistics_collector/received_message_age.hpp"
-
-namespace libstatistics_collector {
-namespace topic_statistics_collector {
-
-template <>
-struct HasHeader<unitree_api::msg::Response, void> : public std::false_type {};
-
-}  // namespace topic_statistics_collector
-}  // namespace libstatistics_collector
 
 #include "rclcpp/client.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
@@ -45,19 +32,17 @@ struct HasHeader<unitree_api::msg::Response, void> : public std::false_type {};
 
 namespace unitree_g1_ros2_control {
 
-class G1TopicSystem :
-    public hardware_interface::BaseInterface<hardware_interface::SystemInterface> {
+class G1TopicSystem : public hardware_interface::SystemInterface {
 public:
     ~G1TopicSystem() override;
 
-    hardware_interface::return_type configure(
-        const hardware_interface::HardwareInfo& info) override;
+    hardware_interface::CallbackReturn on_init(const hardware_interface::HardwareInfo& info) override;
     std::vector<hardware_interface::StateInterface> export_state_interfaces() override;
     std::vector<hardware_interface::CommandInterface> export_command_interfaces() override;
-    hardware_interface::return_type start() override;
-    hardware_interface::return_type stop() override;
-    hardware_interface::return_type read() override;
-    hardware_interface::return_type write() override;
+    hardware_interface::CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
+    hardware_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
+    hardware_interface::return_type read(const rclcpp::Time& time, const rclcpp::Duration& period) override;
+    hardware_interface::return_type write(const rclcpp::Time& time, const rclcpp::Duration& period) override;
     hardware_interface::return_type prepare_command_mode_switch(
         const std::vector<std::string>& start_interfaces,
         const std::vector<std::string>& stop_interfaces) override;
@@ -154,6 +139,9 @@ private:
     mutable std::mutex state_mutex_;
     PendingState pending_state_;
 
+    // ros2_control tracks the lifecycle state itself, but the destructor still
+    // needs to know whether there is anything to unwind.
+    bool active_{false};
     std::atomic<bool> output_inhibited_{true};
     Clock::time_point next_gripper_publish_{};
 

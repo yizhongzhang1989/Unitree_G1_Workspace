@@ -12,9 +12,9 @@
 
 `from can_msgs.msg import Frame` 来自上游 ROS 2 **`can_msgs`** 消息包，不是 `python-can`、`can_sdk` 或本仓库定义的类型。源码位于 [`ros-industrial/ros_canopen`](https://github.com/ros-industrial/ros_canopen/tree/dashing-devel/can_msgs)。
 
-ROS2 Foxy 安装命令：
+ROS 2 Humble 安装命令（开发镜像已包含）：
 ```bash
-sudo apt-get install -y ros-foxy-can-msgs
+sudo apt-get install -y ros-humble-can-msgs
 ```
 
 依赖同时在 `package.xml` 中声明；`python-can`/`can_sdk` 负责物理总线，`can_msgs/Frame` 只负责 ROS 节点间传输。

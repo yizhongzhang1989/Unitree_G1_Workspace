@@ -1,0 +1,45 @@
+# 容器运行参数的唯一来源。.devcontainer/devcontainer.json 通过 dockerComposeFile
+# 引用本文件，build.sh / run.sh 也走它，所以参数只维护一份。
+services:
+  dev:
+    image: g1-humble:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，127.0.0.1 不是宿主的 loopback，
+      # 下面那个 SOCKS 代理就连不上。必须显式共享宿主网络栈。
+      network: host
+      args:
+        # 由 build.sh 导出。本机直连不到 USTC，构建期必须借宿主的 SOCKS 代理。
+        # "Reopen in Container" 不会带这些变量，所以要先跑一次 build.sh 把镜像做好。
+        http_proxy: ${G1_BUILD_PROXY:-}
+        https_proxy: ${G1_BUILD_PROXY:-}
+        all_proxy: ${G1_BUILD_PROXY:-}
+        no_proxy: localhost,127.0.0.1
+        USER_NAME: ${G1_USER_NAME:-unitree}
+        USER_UID: ${G1_USER_UID:-1000}
+        USER_GID: ${G1_USER_GID:-1000}
+
+    # USB（CANalyst-II）与相机直通
+    privileged: true
+    # 与机器人同一网络栈，DDS 才能在 eth0 上发现 /lowstate
+    network_mode: host
+    # DDS 共享内存
+    ipc: host
+    # 让 ros2_control_node 拿得到 SCHED_FIFO 和 mlockall——Humble 相对 Foxy 的主要实时收益
+    ulimits:
+      rtprio: 99
+      memlock: -1
+
+    volumes:
+      # 固定挂到 /workspace：不依赖任何环境变量，换台机器、换克隆路径都一样。
+      # 反正一切都在容器里跑，容器内的绝对路径自洽即可。
+      - ..:/workspace
+      - /dev:/dev
+      # 重力标定结果 ~/.ros/arm_gravity_compensation/ 要持久化。
+      # 容器侧用户名跟宿主走（build.sh 传 $(id -un)），两边都用同一个变量。
+      - ${HOME:-/home/unitree}/.ros:/home/${G1_USER_NAME:-unitree}/.ros
+    working_dir: /workspace
+
+    # devcontainer 需要容器常驻；run.sh 用 `compose run` 会覆盖掉这一条
+    command: sleep infinity

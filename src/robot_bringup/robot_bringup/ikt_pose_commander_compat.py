@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Foxy adapter for the G1 pose commander and its dashboard."""
+"""G1-specific adapter for the pose commander and its dashboard."""
 
 import os
 import threading
@@ -105,7 +105,7 @@ def _latest_qos(reliability: ReliabilityPolicy) -> QoSProfile:
 
 
 class G1PoseCommander(PoseCommander):
-    """Use fixed G1 controllers while adapting Foxy service fields."""
+    """Pin the commander to the two fixed G1 motion controllers."""
 
     def create_subscription(self, msg_type, topic, callback, qos_profile,
                             *args, **kwargs):
@@ -129,7 +129,6 @@ class G1PoseCommander(PoseCommander):
         self._compat_lock = threading.Lock()
         self._control_tick_lock = threading.Lock()
         self._joint_clients = {}
-        self._joint_cache: Dict[str, List[str]] = {}
         self._parameter_cache: Dict[Tuple[str, str], str] = {}
         self._joint_targets: Dict[str, float] = {}
         self._relay_pubs: Dict[str, Publisher] = {}
@@ -430,50 +429,6 @@ class G1PoseCommander(PoseCommander):
                 return links[0]
         return super()._model_root()
 
-    def _controller_joints(self, name: str) -> List[str]:
-        with self._compat_lock:
-            if name in self._joint_cache:
-                return list(self._joint_cache[name])
-            client = self._joint_clients.get(name)
-            if client is None:
-                client = self.create_client(
-                    GetParameters,
-                    _parameter_service(self._cm, name),
-                    callback_group=self._cbg,
-                )
-                self._joint_clients[name] = client
-        if not client.wait_for_service(timeout_sec=QUERY_TIMEOUT_S):
-            return []
-        request = GetParameters.Request()
-        request.names = ["joints"]
-        response = _wait_result(
-            client.call_async(request), QUERY_TIMEOUT_S + 1.0)
-        values = list(getattr(response, "values", []) or []) if response else []
-        joints = list(values[0].string_array_value) if values else []
-        if joints:
-            with self._compat_lock:
-                self._joint_cache[name] = list(joints)
-        return joints
-
-    def _controller_joint_map(self) -> Dict[str, List[str]]:
-        names = (self._fpc or FPC_NAME, self._jtc or JTC_NAME)
-        output = {}
-        for name in dict.fromkeys(names):
-            joints = self._controller_joints(name)
-            if joints:
-                output[name] = joints
-        return output
-
-    def _discover_controllers(self, joints) -> Dict[str, str]:
-        maps = self._controller_joint_map()
-        wanted = set(joints)
-        fpc = self._fpc or FPC_NAME
-        jtc = self._jtc or JTC_NAME
-        return {
-            "fpc": fpc if wanted.issubset(maps.get(fpc, [])) else "",
-            "jtc": jtc if wanted.issubset(maps.get(jtc, [])) else "",
-        }
-
     def _apply_structural(self, _request: dict):
         request = dict(_request)
         with self._lock:
@@ -532,10 +487,10 @@ class G1PoseCommander(PoseCommander):
             return self._switch_failed("switch_controller unavailable")
 
         request = SwitchController.Request()
-        request.start_controllers = required_activate
-        request.stop_controllers = required_deactivate
+        request.activate_controllers = required_activate
+        request.deactivate_controllers = required_deactivate
         request.strictness = SwitchController.Request.BEST_EFFORT
-        request.start_asap = True
+        request.activate_asap = True
         request.timeout.sec = int(SWITCH_TIMEOUT_S)
         response = _wait_result(
             self._cli_switch.call_async(request), SWITCH_TIMEOUT_S + 1.0)

@@ -598,8 +598,8 @@ def test_switch_omits_inactive_jtc_from_stop_request():
 
     assert G1PoseCommander._switch(cast(G1PoseCommander, commander), [FPC_NAME], [JTC_NAME]) is True
     request = commander._cli_switch.requests[0]
-    assert request.start_controllers == [FPC_NAME]
-    assert request.stop_controllers == []
+    assert request.activate_controllers == [FPC_NAME]
+    assert request.deactivate_controllers == []
 
 
 def test_switch_skips_service_if_target_states_already_hold():
