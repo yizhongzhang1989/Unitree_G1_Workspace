@@ -1,8 +1,8 @@
-"""Activate gravity compensation together with FPC and let the arms float.
+"""Activate the position controller and let the arms float weightlessly.
 
-`all_data.launch.py scope:=whole_body` already loads both controllers but leaves
-them inactive. This entry point only flips them on and starts the demo node, so
-it must be launched next to a running control stack, never instead of one.
+`all_data.launch.py scope:=whole_body` already loads the controller but leaves
+it inactive. This entry point only flips it on and starts the demo node, so it
+must be launched next to a running control stack, never instead of one.
 """
 
 from pathlib import Path
@@ -17,7 +17,7 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
-CONTROLLERS = ["arm_gravity_compensation", "forward_position_controller"]
+CONTROLLERS = ["forward_position_controller"]
 
 
 def _parameters(path: Path) -> dict:
@@ -39,7 +39,7 @@ def generate_launch_description() -> LaunchDescription:
     # from the same file the controller is configured with.
     controller = _parameters(
         Path(get_package_share_directory("unitree_g1_ros2_control")) /
-        "config" / "arm_gravity_compensation.yaml")
+        "config" / "forward_position_controller.yaml")
     joints = controller["joints"]
     # Only the joints the controller actually compensates may float; anything
     # else would be commanded to its own measurement and go limp.
@@ -68,8 +68,8 @@ def generate_launch_description() -> LaunchDescription:
             "controller_manager", default_value="/controller_manager"),
         DeclareLaunchArgument("publish_rate_hz", default_value="100.0"),
         activate,
-        # Only start streaming targets once both controllers are actually
-        # active, otherwise the first samples are dropped.
+        # Only start streaming targets once the controller is actually active,
+        # otherwise the first samples are dropped.
         RegisterEventHandler(
             OnProcessExit(target_action=activate, on_exit=[demo])),
     ])

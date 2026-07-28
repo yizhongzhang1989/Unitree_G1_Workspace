@@ -32,3 +32,20 @@
       - right_wrist_yaw_joint
       - left_eccentric_joint
       - right_eccentric_joint
+
+    # 重力前馈直接跑在这个 500 Hz 环路里：偏移量必须每拍跟随躯干姿态，
+    # 经话题转发一次就会被 executor 抖动重采样。
+    # 由 arm_gravity_compensation 标定后导出；留空即关闭补偿。
+    gravity_table: package://arm_gravity_compensation/config/gravity_table.yaml
+
+    # 重力方向取自躯干 IMU 的融合姿态（四元数），再经一阶低通。
+    gravity_filter_cutoff_hz: 2.0
+
+    # 激活时把偏移从 0 线性升到全量，避免命令阶跃造成力矩冲击。
+    offset_ramp_s: 2.0
+
+    # 整体补偿倍率，可运行时调整：
+    #   ros2 param set /forward_position_controller compensation_scale 0.95
+    # 标定残留的共模误差只有手臂浮起来后才看得出（表现为缓慢上飘或下沉），
+    # 靠手感拧到位比重新辨识快得多。0.0 就是纯转发行为。
+    compensation_scale: 1.0

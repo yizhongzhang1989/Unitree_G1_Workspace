@@ -105,8 +105,6 @@ def _control_nodes(context):
         package_share / "config" / "pelvis_imu_broadcaster.yaml")
     joint_state_parameters = str(
         package_share / "config" / "joint_state_broadcaster.yaml")
-    arm_gravity_parameters = str(
-        package_share / "config" / "arm_gravity_compensation.yaml")
 
     return [
         Node(
@@ -178,18 +176,6 @@ def _control_nodes(context):
             arguments=[
                 "joint_trajectory_controller",
                 "--param-file", joint_trajectory_parameters,
-                "--inactive",
-                "--controller-manager", controller_manager,
-                "--controller-manager-timeout", "30",
-            ],
-            output="screen",
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=[
-                "arm_gravity_compensation",
-                "--param-file", arm_gravity_parameters,
                 "--inactive",
                 "--controller-manager", controller_manager,
                 "--controller-manager-timeout", "30",

@@ -34,6 +34,8 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
 ROS 环境由容器自动装配，**不需要手动 `source`**。只有当 `install/` 是这次新建出来的、当前 shell 还没加载到它时，才需要 `source scripts/env.sh` 刷一下。
 
+编译优化由工作区根目录的 [`colcon_defaults.yaml`](colcon_defaults.yaml) 统一给到 `RelWithDebInfo`（`-O2 -g`）。colcon 默认不设 `CMAKE_BUILD_TYPE`，那样一个 `-O` 都没有——实测控制环上的代码差 24 倍。**命令行显式传 `--cmake-args` 会整体覆盖该文件而不是合并**，临时加参数时要把 build type 一起写全。
+
 也可以不进交互 shell，直接一次性执行：
 ```bash
 .devcontainer/dev.sh colcon build --symlink-install --packages-ignore unitree_go unitree_ros2_example
@@ -288,7 +290,7 @@ ros2 launch robot_bringup end_effectors_dashboard.launch.py topology:=dual
 
 8770 默认是监视模式：显示相机、KWR57 和 Gloria 反馈，但不创建 `MitCommand` publisher，也不调用夹爪 enable/disable。它可以和 8200 同时运行。仅在 `scope:=end_effectors`、没有任何 ros2_control 夹爪 controller 时，才可显式追加 `allow_gripper_control:=true` 恢复独立末端控制；不要在整机控制期间打开该参数。
 
-整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放），并为不 claim 任何接口的重力补偿控制器补全页面所需的关节列表。
+整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放）。
 
 Engage 会依次检查 31 轴反馈 freshness 与 PR mode、释放现有 MotionSwitcher 模式、等待外部 `/lowcmd` 静默、使能所 claim 的 Gloria-M，并在二次状态检查后才开放输出。Disengage 先阻止低层输出、失能夹爪，再恢复接管前的运动模式。任一步失败都保持输出关闭并返回切换失败。完整事务见 [unitree_g1_ros2_control/README.md](src/unitree_g1_ros2_control/README.md)。
 

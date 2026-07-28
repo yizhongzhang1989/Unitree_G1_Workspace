@@ -3,12 +3,10 @@
 Start ``all_data.launch.py scope:=whole_body`` first. The controller manager
 owns mutual exclusion between the forward-position and trajectory controllers.
 
-``command_topic`` picks what the whole-body position stream is fed into:
-``/arm_gravity_compensation/target`` (default) routes it through the gravity
-compensation controller, which folds the calibrated arm gravity into every
-setpoint before republishing it to the FPC; ``/forward_position_controller/
-commands`` bypasses it and lets the arms sag below each commanded pose. The
-controller owning the topic is activated together with the FPC.
+The whole-body position stream goes straight into
+``/forward_position_controller/commands``: that controller applies the
+calibrated arm gravity itself, so no relay sits in between. Set its
+``compensation_scale`` parameter to 0.0 to command raw positions instead.
 """
 
 from launch import LaunchDescription
@@ -26,7 +24,6 @@ _DEFAULTS = {
     "robot_description_topic": "/robot_description",
     "joint_states_topic": "/joint_states",
     "dashboard_port": "8180",
-    "command_topic": "/arm_gravity_compensation/target",
 
     "max_joint_speed": "2.0",
     "max_iters": "20",
@@ -57,7 +54,6 @@ def generate_launch_description() -> LaunchDescription:
             "command_mode": "fpc",
             "fpc_controller": "forward_position_controller",
             "jtc_controller": "joint_trajectory_controller",
-            "command_topic": LaunchConfiguration("command_topic"),
             "switch_controllers": True,
             "start_enabled": False,
             "max_joint_speed": ParameterValue(LaunchConfiguration("max_joint_speed"), value_type=float),

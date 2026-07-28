@@ -29,8 +29,5 @@ controller_manager:
     forward_position_controller:
       type: unitree_g1_forward_command_controller/ForwardCommandController
 
-    arm_gravity_compensation:
-      type: unitree_g1_controllers/ArmGravityCompensation
-
     joint_trajectory_controller:
-      type: joint_trajectory_controller/JointTrajectoryController
+      type: unitree_g1_joint_trajectory_controller/JointTrajectoryController

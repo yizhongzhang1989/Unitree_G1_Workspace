@@ -43,6 +43,15 @@
     action_monitor_rate: 20.0
     allow_partial_joints_goal: true
     open_loop_control: false
+
+    # 与 forward_position_controller 同一套重力前馈参数：轨迹点也是绝对位置，
+    # 不补偿的话手臂会稳定沉在每个途经点下方，从 FPC 切过来时肉眼可见地掉一下。
+    # 留空即关闭补偿；`compensation_scale: 0.0` 则是上游原版行为。
+    gravity_table: package://arm_gravity_compensation/config/gravity_table.yaml
+    gravity_filter_cutoff_hz: 2.0
+    offset_ramp_s: 2.0
+    compensation_scale: 1.0
+
     constraints:
       goal_time: 2.0
       stopped_velocity_tolerance: 0.05

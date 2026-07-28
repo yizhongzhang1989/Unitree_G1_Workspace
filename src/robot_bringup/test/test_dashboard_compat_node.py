@@ -1,7 +1,6 @@
-import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from controller_manager_msgs.msg import ControllerState
@@ -9,18 +8,12 @@ from controller_manager_msgs.srv import ListControllers, SwitchController
 
 from robot_bringup.dashboard_compat_node import (
     G1RobotTestDashboard,
-    RobotTestDashboard,
     _collapse_joint_tree,
     _correct_mimic_transforms,
     _is_internal_name,
     _mimic_values,
-    _parameter_service,
     _parse_mimic_joints,
 )
-
-
-GRAVITY_TYPE = "unitree_g1_controllers/ArmGravityCompensation"
-FPC_TYPE = "unitree_g1_forward_command_controller/ForwardCommandController"
 
 
 GLORIA_URDF = (
@@ -73,104 +66,6 @@ def _state(name, state, controller_type="", interfaces=()):
     # bench knows a controller's joints before engaging it.
     controller.required_command_interfaces = list(interfaces)
     return controller
-
-
-def _gravity_dashboard(gravity_state="inactive", fpc_state="inactive"):
-    dashboard = object.__new__(G1RobotTestDashboard)
-    dashboard._lock = threading.Lock()
-    dashboard._cm_ns = "/controller_manager"
-    dashboard._cmd_pubs = {}
-    dashboard._controllers = [
-        {"name": "arm_gravity_compensation", "state": gravity_state,
-         "type": GRAVITY_TYPE, "kind": "forward_position",
-         "cmd_ifaces": [], "joints": ["joint_a"]},
-        {"name": "forward_position_controller", "state": fpc_state,
-         "type": FPC_TYPE, "kind": "forward_position",
-         "cmd_ifaces": ["joint_a/position"], "joints": ["joint_a"]},
-    ]
-    return dashboard
-
-
-def test_parameter_service_follows_manager_namespace():
-    assert _parameter_service(
-        "/robot/controller_manager", "forward_position_controller") == \
-        "/robot/forward_position_controller/get_parameters"
-
-
-def test_gravity_filter_is_offered_as_a_forward_position_controller():
-    listed = ListControllers.Response()
-    listed.controller = [
-        _state("arm_gravity_compensation", "inactive", GRAVITY_TYPE),
-        _state("forward_position_controller", "active", FPC_TYPE, ["joint_a/position"]),
-    ]
-    dashboard = object.__new__(G1RobotTestDashboard)
-    dashboard._lock = threading.Lock()
-    dashboard._joint_meta_lock = threading.Lock()
-    dashboard._controllers = []
-    dashboard._cm_ok = False
-    # The gravity filter claims nothing, so ``required_command_interfaces`` is
-    # empty and its joint list can only come from its own ``joints`` parameter.
-    dashboard._joint_cache = {"arm_gravity_compensation": ["joint_a"]}
-
-    dashboard._on_controllers(_Future(listed))
-
-    gravity, fpc = dashboard._controllers
-    assert gravity["kind"] == "forward_position"
-    assert gravity["joints"] == ["joint_a"]
-    assert gravity["cmd_ifaces"] == []
-    assert fpc["cmd_ifaces"] == ["joint_a/position"]
-
-
-def test_gravity_setpoints_go_to_the_filter_target_topic():
-    dashboard = _gravity_dashboard()
-    created = []
-    cast(Any, dashboard).create_publisher = (
-        lambda msg_type, topic, depth: created.append(topic) or "publisher")
-
-    assert dashboard._cmd_pub("arm_gravity_compensation") == "publisher"
-    assert created == ["/arm_gravity_compensation/target"]
-
-
-def test_engaging_the_gravity_filter_brings_up_the_controller_it_feeds(
-        monkeypatch):
-    dashboard = _gravity_dashboard()
-    activated = []
-    monkeypatch.setattr(
-        G1RobotTestDashboard, "_command_topic",
-        lambda self, name: "/forward_position_controller/commands")
-    monkeypatch.setattr(
-        G1RobotTestDashboard, "_activate_exclusive",
-        lambda self, info: bool(activated.append(info["name"])) or True)
-    monkeypatch.setattr(
-        RobotTestDashboard, "engage", lambda self, name: {"ok": True})
-
-    assert dashboard.engage("arm_gravity_compensation") == {"ok": True}
-    assert activated == ["forward_position_controller"]
-
-
-def test_engaging_the_gravity_filter_needs_its_command_topic(monkeypatch):
-    dashboard = _gravity_dashboard()
-    monkeypatch.setattr(
-        G1RobotTestDashboard, "_command_topic", lambda self, name: "")
-
-    assert dashboard.engage("arm_gravity_compensation")["ok"] is False
-
-
-def test_driving_the_fed_controller_releases_the_gravity_filter(monkeypatch):
-    dashboard = _gravity_dashboard(gravity_state="active", fpc_state="active")
-    switched = []
-    monkeypatch.setattr(
-        G1RobotTestDashboard, "_command_topic",
-        lambda self, name: "/forward_position_controller/commands")
-    monkeypatch.setattr(
-        G1RobotTestDashboard, "_switch",
-        lambda self, activate, deactivate, timeout=0.0:
-            bool(switched.append((activate, deactivate))) or True)
-    monkeypatch.setattr(
-        RobotTestDashboard, "engage", lambda self, name: {"ok": True})
-
-    assert dashboard.engage("forward_position_controller") == {"ok": True}
-    assert switched == [([], ["arm_gravity_compensation"])]
 
 
 def test_clamps_piecewise_mimics_at_two_thirds_gripper_travel():

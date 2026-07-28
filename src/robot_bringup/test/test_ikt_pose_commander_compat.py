@@ -23,12 +23,11 @@ from robot_bringup.ikt_dashboard_compat import (
     G1CommanderDashboard,
     patch_viewer_target_sender,
 )
-from robot_bringup.ikt_pose_commander_compat import DEFAULT_COMMAND_TOPIC, EXECUTOR_THREADS, FPC_NAME, JTC_NAME, G1PoseCommander, _filter_switch, _joint_map_error, _parameter_service, _topic_owner
+from robot_bringup.ikt_pose_commander_compat import EXECUTOR_THREADS, FPC_NAME, JTC_NAME, G1PoseCommander, _filter_switch, _joint_map_error
 from robot_bringup.dashboard_compat_node import _correct_mimic_transforms, _filter_mimic_snapshot, _hidden_mimic_names, _parse_mimic_joints
 
 
 FINAL_URDF = Path(__file__).parents[2] / "unitree_g1_description" / "model" / "final.urdf"
-GRAVITY_NAME = _topic_owner(DEFAULT_COMMAND_TOPIC)
 ikt_core = importlib.import_module("ikt_core")
 RobotModel = ikt_core.RobotModel
 SolveParams = ikt_core.SolveParams
@@ -103,78 +102,6 @@ def _fake_commander(before, after=None, switch_ok=True):
     commander._controller_states = lambda: G1PoseCommander._controller_states(pose_commander)
     commander._switch_failed = lambda message: G1PoseCommander._switch_failed(pose_commander, message)
     return commander
-
-
-def test_parameter_service_follows_manager_namespace():
-    assert _parameter_service("/robot/controller_manager", FPC_NAME) == "/robot/forward_position_controller/get_parameters"
-
-
-def _gravity_commander(command_topic):
-    owner = _topic_owner(command_topic)
-    commander = object.__new__(G1PoseCommander)
-    commander._lock = threading.Lock()
-    commander._compat_lock = threading.Lock()
-    commander._cm = "/controller_manager"
-    commander._fpc = FPC_NAME
-    commander._command_topic = command_topic
-    commander._relay = "" if owner == FPC_NAME else owner
-    commander._relay_pubs = {}
-    commander._parameter_cache = {}
-    commander._joint_clients = {}
-    return commander
-
-
-def test_topic_owner_names_the_controller_that_reads_it():
-    assert _topic_owner(DEFAULT_COMMAND_TOPIC) == GRAVITY_NAME
-    assert _topic_owner("/forward_position_controller/commands") == FPC_NAME
-    assert _topic_owner("/commands") == ""
-
-
-def test_streams_into_the_configured_relay_topic():
-    commander = _gravity_commander(DEFAULT_COMMAND_TOPIC)
-    created = []
-    cast(Any, commander)._fpc_pub = None
-    cast(Any, commander).create_publisher = (
-        lambda msg_type, topic, depth: created.append(topic) or _Publisher())
-    with patch.object(PoseCommander, "_rebuild_clients", lambda self: None):
-        commander._rebuild_clients()
-        first = commander._fpc_pub
-        commander._rebuild_clients()
-
-    assert created == [DEFAULT_COMMAND_TOPIC]
-    assert commander._fpc_pub is first
-
-
-def test_engages_the_relay_only_when_it_republishes_into_the_fpc():
-    commander = _gravity_commander(DEFAULT_COMMAND_TOPIC)
-    switched = []
-    cast(Any, commander)._string_parameter = (
-        lambda controller, name: "/forward_position_controller/commands")
-    cast(Any, commander)._switch = (
-        lambda activate, deactivate:
-            bool(switched.append((activate, deactivate))) or True)
-
-    assert commander._engage_relay()[0] is True
-    assert switched == [([GRAVITY_NAME], [])]
-
-
-def test_refuses_a_relay_that_feeds_a_different_controller():
-    commander = _gravity_commander(DEFAULT_COMMAND_TOPIC)
-    cast(Any, commander)._string_parameter = (
-        lambda controller, name: "/some_other_controller/commands")
-    cast(Any, commander)._switch = lambda activate, deactivate: pytest.fail(
-        "must not switch a relay that feeds another controller")
-
-    ok, message = commander._engage_relay()
-
-    assert ok is False
-    assert "some_other_controller" in message
-
-
-def test_bypassing_the_relay_streams_straight_into_the_fpc():
-    commander = _gravity_commander("/forward_position_controller/commands")
-
-    assert commander._relay == ""
 
 
 def test_executor_has_workers_for_services_and_control():
@@ -288,7 +215,6 @@ def test_enable_republishes_cached_full_target_after_controller_switch():
     dynamic = cast(Any, commander)
     commander._lock = threading.Lock()
     commander._mode = "fpc"
-    commander._relay = ""
     commander._fpc_joints = ["left_arm", "right_arm"]
     commander._joints = ["right_arm"]
     commander._joint_pos = {"left_arm": 0.2, "right_arm": -0.1}
@@ -311,32 +237,6 @@ def test_enable_republishes_cached_full_target_after_controller_switch():
 
     assert result == (True, "enabled")
     assert dynamic._fpc_pub.messages == [[1.1, 0.6]]
-
-
-def test_enable_rolls_the_fpc_back_when_the_relay_cannot_be_engaged():
-    commander = object.__new__(G1PoseCommander)
-    dynamic = cast(Any, commander)
-    commander._lock = threading.Lock()
-    commander._mode = "fpc"
-    commander._fpc = FPC_NAME
-    commander._relay = GRAVITY_NAME
-    switches = []
-    dynamic._engage_relay = lambda: (False, "cannot activate " + GRAVITY_NAME)
-    dynamic._pause_targets = lambda: None
-    dynamic._switch = lambda activate, deactivate: switches.append(
-        (activate, deactivate)) or True
-    dynamic._command_fpc = lambda *args, **kwargs: pytest.fail(
-        "must not stream into an unengaged relay")
-    dynamic._set_msg = lambda msg: setattr(dynamic, "message", msg)
-
-    with patch.object(
-            PoseCommander, "_try_enable", autospec=True,
-            return_value=(True, "enabled")):
-        ok, message = commander._try_enable()
-
-    assert ok is False
-    assert GRAVITY_NAME in message
-    assert switches == [([], [FPC_NAME])]
 
 
 def test_return_to_start_keeps_other_joint_targets():
@@ -623,11 +523,9 @@ def test_disable_is_idempotent_and_releases_active_controller():
     switches = []
     commander = SimpleNamespace(
         _lock=threading.Lock(), _fpc=FPC_NAME, _jtc=JTC_NAME,
-        _relay=GRAVITY_NAME,
         _goal_handle=None, _pause_targets=lambda: None,
         _controller_states=lambda: {
-            FPC_NAME: "inactive", JTC_NAME: "inactive",
-            GRAVITY_NAME: "inactive"},
+            FPC_NAME: "inactive", JTC_NAME: "inactive"},
         _switch=lambda activate, deactivate: switches.append(
             (activate, deactivate)) or True,
         _set_msg=lambda message: setattr(commander, "message", message),
@@ -641,12 +539,12 @@ def test_disable_is_idempotent_and_releases_active_controller():
     assert switches == []
 
     commander._controller_states = lambda: {
-        FPC_NAME: "active", JTC_NAME: "inactive", GRAVITY_NAME: "active"}
+        FPC_NAME: "active", JTC_NAME: "inactive"}
     result = G1PoseCommander._srv_disable(
         cast(G1PoseCommander, commander), None, response)
 
     assert result.success is True
-    assert switches == [([], [FPC_NAME, GRAVITY_NAME])]
+    assert switches == [([], [FPC_NAME])]
 
 
 class _GoalHandle:

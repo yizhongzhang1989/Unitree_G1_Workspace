@@ -5,6 +5,16 @@ if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 
+# colcon leaves CMAKE_BUILD_TYPE empty, which means no -O at all. Measured on
+# the Jetson: one gravity feed-forward evaluation costs 21.7 us unoptimised and
+# 0.89 us at -O2, i.e. 1.1% versus 0.05% of a 500 Hz cycle - and the same factor
+# applies to the hardware plugin on that loop. RelWithDebInfo keeps the frame
+# pointers and symbols needed to profile it. An explicit -DCMAKE_BUILD_TYPE on
+# the colcon command line still wins.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(controller_interface REQUIRED)
@@ -13,20 +23,23 @@ find_package(gloria_ros REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(imu_sensor_broadcaster REQUIRED)
 find_package(joint_state_broadcaster REQUIRED)
+find_package(joint_trajectory_controller REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
 find_package(unitree_api REQUIRED)
 find_package(unitree_hg REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
-  src/arm_gravity_compensation_controller.cpp
   src/forward_position_controller.cpp
+  src/gravity_feedforward.cpp
+  src/gravity_joint_trajectory_controller.cpp
   src/g1_topic_system.cpp
   src/throttled_broadcasters.cpp
 )
@@ -42,6 +55,7 @@ ament_target_dependencies(${PROJECT_NAME}
   hardware_interface
   imu_sensor_broadcaster
   joint_state_broadcaster
+  joint_trajectory_controller
   pluginlib
   rclcpp
   realtime_tools
@@ -99,18 +113,27 @@ if(BUILD_TESTING)
     std_msgs
   )
   ament_add_gtest(
-    test_arm_gravity_compensation_controller
-    test/test_arm_gravity_compensation_controller.cpp
+    test_gravity_feedforward
+    test/test_gravity_feedforward.cpp
   )
   target_link_libraries(
-    test_arm_gravity_compensation_controller
+    test_gravity_feedforward
+    ${PROJECT_NAME}
+  )
+  ament_add_gtest(
+    test_gravity_joint_trajectory_controller
+    test/test_gravity_joint_trajectory_controller.cpp
+  )
+  target_link_libraries(
+    test_gravity_joint_trajectory_controller
     ${PROJECT_NAME}
   )
   ament_target_dependencies(
-    test_arm_gravity_compensation_controller
+    test_gravity_joint_trajectory_controller
     hardware_interface
+    joint_trajectory_controller
     rclcpp
-    std_msgs
+    trajectory_msgs
   )
   ament_add_pytest_test(
     test_default_controller_config
@@ -128,6 +151,7 @@ ament_export_dependencies(
   hardware_interface
   imu_sensor_broadcaster
   joint_state_broadcaster
+  joint_trajectory_controller
   pluginlib
   rclcpp
   realtime_tools

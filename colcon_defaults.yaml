@@ -1,0 +1,13 @@
+# colcon 默认不设 CMAKE_BUILD_TYPE，于是 CMake 一个 -O 都不给。实测（Jetson）本仓库的重力前馈求值 21.7 µs → 0.89 µs；
+# 同样的倍数作用在 G1TopicSystem 的 500 Hz read()/write() 和 unitree_hg 的 LowCmd/LowState 序列化上。
+#
+# 自有 C++ 包（unitree_g1_ros2_control、canalystii_native_bridge、gloria_ros）在各自
+# CMakeLists.txt 里也留了同一个默认值，所以单独构建它们时不依赖本文件。submodule 里的消息包（unitree_hg、unitree_api、ikt_interfaces）改不了，只能靠这里。
+#
+# 注意：命令行显式传 --cmake-args 会整体覆盖下面这段，不是合并。需要临时加 CMake 参数
+# 时请连 build type 一起写全：
+#   colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# 选 RelWithDebInfo 而不是 Release，是为了保留符号和行号——控制环上出问题时需要能 profile 和看栈
+build:
+  cmake-args:
+    - -DCMAKE_BUILD_TYPE=RelWithDebInfo

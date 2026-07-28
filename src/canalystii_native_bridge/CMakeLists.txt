@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.8)
 project(canalystii_native_bridge)
 
+# colcon 不设 CMAKE_BUILD_TYPE，CMake 就一个 -O 都不给（实测差 24 倍，依据见 unitree_g1_ros2_control/README.md）
+# 命令行显式传 -DCMAKE_BUILD_TYPE 仍优先
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+endif()
+
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
 endif()

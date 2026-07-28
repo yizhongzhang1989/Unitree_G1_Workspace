@@ -16,9 +16,7 @@ from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import ListControllers, SwitchController
 from geometry_msgs.msg import PoseStamped
 from ikt_pose_commander.commander_node import PoseCommander
-from rcl_interfaces.srv import GetParameters
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.publisher import Publisher
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -33,14 +31,6 @@ QUERY_TIMEOUT_S = 3.0
 SWITCH_TIMEOUT_S = 30.0
 RETURN_TIMEOUT_S = 50.0
 EXECUTOR_THREADS = 3
-# Where the whole-body position stream is published. The gravity-compensation
-# controller claims no command interface: it takes the target on ``~/target``,
-# folds in the calibrated arm gravity as a stiffness-scaled position offset and
-# republishes it into the topic its ``command_topic`` parameter names. Streaming
-# through it is the default because the arms otherwise settle BELOW every
-# commanded pose; set ``command_topic`` to the FPC's own ``commands`` to bypass
-# it. Whichever controller owns the configured topic is activated on enable.
-DEFAULT_COMMAND_TOPIC = "/arm_gravity_compensation/target"
 
 
 def _wait_result(future, timeout_s: float):
@@ -53,25 +43,6 @@ def _wait_result(future, timeout_s: float):
         return future.result()
     except Exception:  # noqa: BLE001
         return None
-
-
-def _parameter_service(controller_manager: str, controller: str) -> str:
-    return _controller_path(controller_manager, controller) + "/get_parameters"
-
-
-def _controller_path(controller_manager: str, controller: str) -> str:
-    manager = "/" + controller_manager.strip("/")
-    namespace = manager.rpartition("/")[0]
-    path = "/" + controller.strip("/")
-    if namespace and not path.startswith(namespace + "/"):
-        path = namespace + path
-    return path
-
-
-def _topic_owner(topic: str) -> str:
-    """Controller node that owns ``/<controller>/<endpoint>``."""
-    segments = topic.strip("/").split("/")
-    return segments[-2] if len(segments) >= 2 else ""
 
 
 def _filter_switch(states: Dict[str, str], activate: List[str],
@@ -116,98 +87,18 @@ class G1PoseCommander(PoseCommander):
             msg_type, topic, callback, qos_profile, *args, **kwargs)
 
     def create_publisher(self, msg_type, topic, qos_profile, *args, **kwargs):
-        # The gravity-compensation filter's ``~/target`` carries the same
-        # setpoint stream as ``~/commands`` and its subscription is best-effort
-        # depth 1, so both endpoints get the same latest-sample profile.
+        # The whole-body setpoint stream is a latest-sample stream: a queued
+        # backlog of stale poses is worse than a dropped one.
         if (msg_type is Float64MultiArray and
-                str(topic).rstrip("/").endswith(("/commands", "/target"))):
+                str(topic).rstrip("/").endswith("/commands")):
             qos_profile = _latest_qos(ReliabilityPolicy.BEST_EFFORT)
         return super().create_publisher(
             msg_type, topic, qos_profile, *args, **kwargs)
 
     def __init__(self) -> None:
-        self._compat_lock = threading.Lock()
         self._control_tick_lock = threading.Lock()
-        self._joint_clients = {}
-        self._parameter_cache: Dict[Tuple[str, str], str] = {}
         self._joint_targets: Dict[str, float] = {}
-        self._relay_pubs: Dict[str, Publisher] = {}
         super().__init__()
-        self.declare_parameter("command_topic", DEFAULT_COMMAND_TOPIC)
-        self._command_topic = str(
-            self.get_parameter("command_topic").value or "").rstrip("/") \
-            or _controller_path(self._cm, FPC_NAME) + "/commands"
-        owner = _topic_owner(self._command_topic)
-        # Empty when we publish straight to the FPC; otherwise the controller
-        # stacked in front of it, which has to be active for anything to reach
-        # the hardware.
-        self._relay = "" if owner == FPC_NAME else owner
-        self._rebuild_clients()
-
-    # ------------------------------------------------------------------ #
-    # Command relay (gravity compensation stacked in front of the FPC)
-    # ------------------------------------------------------------------ #
-    def _rebuild_clients(self) -> None:
-        super()._rebuild_clients()
-        with self._lock:
-            fpc = self._fpc
-        if not fpc or not getattr(self, "_command_topic", ""):
-            return
-        publisher = self._relay_pubs.get(self._command_topic)
-        if publisher is None:
-            publisher = self.create_publisher(
-                Float64MultiArray, self._command_topic, 10)
-            self._relay_pubs[self._command_topic] = publisher
-        self._fpc_pub = publisher
-
-    def _engage_relay(self) -> Tuple[bool, str]:
-        """Activate the controller that owns ``command_topic``.
-
-        It claims no command interface, so it runs ALONGSIDE the FPC. Its
-        ``command_topic`` is verified against the FPC first: pointing the stream
-        at a relay that republishes somewhere else would leave the FPC active
-        and claiming the hardware while nothing ever moves.
-        """
-        with self._lock:
-            fpc = self._fpc
-        expected = _controller_path(self._cm, fpc) + "/commands"
-        downstream = self._string_parameter(self._relay, "command_topic")
-        if not downstream:
-            return False, ("cannot read %s/command_topic; is the controller "
-                           "loaded?" % self._relay)
-        if downstream != expected:
-            return False, ("%s republishes to %s, not %s"
-                           % (self._relay, downstream, expected))
-        if not self._switch(activate=[self._relay], deactivate=[]):
-            return False, "cannot activate " + self._relay
-        return True, "streaming through " + self._relay
-
-    def _string_parameter(self, controller: str, name: str) -> str:
-        key = (controller, name)
-        with self._compat_lock:
-            cached = self._parameter_cache.get(key)
-            if cached is not None:
-                return cached
-            client = self._joint_clients.get(controller)
-            if client is None:
-                client = self.create_client(
-                    GetParameters,
-                    _parameter_service(self._cm, controller),
-                    callback_group=self._cbg,
-                )
-                self._joint_clients[controller] = client
-        if not client.wait_for_service(timeout_sec=QUERY_TIMEOUT_S):
-            return ""
-        request = GetParameters.Request()
-        request.names = [name]
-        response = _wait_result(
-            client.call_async(request), QUERY_TIMEOUT_S + 1.0)
-        values = list(getattr(response, "values", []) or []) if response else []
-        value = str(values[0].string_value).rstrip("/") if values else ""
-        if value:
-            with self._compat_lock:
-                self._parameter_cache[key] = value
-        return value
 
     def _solve(self, model, seed, xyz, quat):
         with self._lock:
@@ -406,17 +297,6 @@ class G1PoseCommander(PoseCommander):
         if mode != "fpc":
             self._command_jtc({}, 0.0)
             return result
-        if self._relay:
-            # Bring the relay up right before the first setpoint: its offset
-            # ramp runs from activation, so a long gap would apply the whole
-            # gravity offset in one command.
-            ok, message = self._engage_relay()
-            if not ok:
-                self._pause_targets()
-                self._switch(activate=[], deactivate=[self._fpc])
-                self._set_msg(message)
-                return False, message
-            self._set_msg(message)
         self._command_fpc({})
         return result
 
@@ -518,7 +398,7 @@ class G1PoseCommander(PoseCommander):
             handle = self._goal_handle
             self._goal_handle = None
             controllers = list(dict.fromkeys(
-                name for name in (self._fpc, self._jtc, self._relay) if name))
+                name for name in (self._fpc, self._jtc) if name))
         if handle is not None:
             try:
                 handle.cancel_goal_async()
