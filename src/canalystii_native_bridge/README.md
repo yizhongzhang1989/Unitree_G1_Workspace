@@ -105,8 +105,11 @@ KWR57 只有连续的 `base -> base+1 -> base+2` 才能组成一个六轴样本�
 | `native_rx_transfers_per_channel` | `8` | 每通道并行异步 USB RX transfer 数，范围 `1..64` |
 | `native_rx_queue_capacity` | `8192` | 每通道 transport RX packet 队列容量 |
 | `native_tx_queue_capacity` | `2000` | 所有启用通道共享的 transport TX frame 总容量 |
+| `shutdown_grace_period_s` | `2.0` | 收到关闭请求后保持总线可用的上限，范围 `0..60`；TX 连续 200 ms 无新帧即提前收尾 |
 
 `rx_queue_depth` 是 ROS publisher QoS 深度，和 transport 的 `native_rx_queue_capacity` 不是同一层队列。参数都只在节点构造时读取，运行中修改不会重建 transport、路由或 KWR57 设备。
+
+节点用 `rclcpp` 的 pre-shutdown 回调延后 context 失效：Ctrl+C 时终端把 SIGINT 同时发给进程组内所有进程，夹爪等设备节点的退出帧仍要经本节点转发才能上总线，因此关闭请求到达后总线保持可用，直到 TX 静默或宽限期用尽。
 
 每个 `kwr57_device_specs` 对象支持以下字段：
 

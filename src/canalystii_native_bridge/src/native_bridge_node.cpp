@@ -6,6 +6,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace canalystii_native_bridge
@@ -48,6 +49,7 @@ NativeBridgeNode::NativeBridgeNode(const rclcpp::NodeOptions & options)
   declare_parameter<std::int64_t>("native_rx_transfers_per_channel", 8);
   declare_parameter<std::int64_t>("native_rx_queue_capacity", 8192);
   declare_parameter<std::int64_t>("native_tx_queue_capacity", 2000);
+  declare_parameter<double>("shutdown_grace_period_s", 2.0);
 
   channel_ids_ = integer_channels(get_parameter("channel_ids").as_integer_array());
   bus_names_ = get_parameter("bus_names").as_string_array();
@@ -56,6 +58,7 @@ NativeBridgeNode::NativeBridgeNode(const rclcpp::NodeOptions & options)
   const std::int64_t rx_transfers = get_parameter("native_rx_transfers_per_channel").as_int();
   const std::int64_t rx_capacity = get_parameter("native_rx_queue_capacity").as_int();
   const std::int64_t tx_capacity = get_parameter("native_tx_queue_capacity").as_int();
+  const double shutdown_grace = get_parameter("shutdown_grace_period_s").as_double();
 
   if (bus_names_.size() != channel_ids_.size() ||
     std::set<std::string>(bus_names_.begin(), bus_names_.end()).size() != bus_names_.size())
@@ -65,6 +68,10 @@ NativeBridgeNode::NativeBridgeNode(const rclcpp::NodeOptions & options)
   if (rx_depth < 1 || rx_transfers < 1 || rx_capacity < rx_transfers || tx_capacity < 1) {
     throw std::invalid_argument("native bridge queue and transfer sizes must be positive");
   }
+  if (!(shutdown_grace >= 0.0) || shutdown_grace > 60.0) {
+    throw std::invalid_argument("shutdown_grace_period_s must be within [0, 60]");
+  }
+  shutdown_grace_ = std::chrono::milliseconds(static_cast<int>(shutdown_grace * 1000.0));
 
   const auto routes = parse_rx_routes(
     get_parameter("rx_routes").as_string_array(), channel_ids_);
@@ -137,6 +144,10 @@ NativeBridgeNode::NativeBridgeNode(const rclcpp::NodeOptions & options)
     statistics_timer_ = create_wall_timer(
       std::chrono::seconds(1), std::bind(&NativeBridgeNode::report_statistics, this));
   }
+  // pre-shutdown 回调在 context 失效之前、执行器仍在运行时被调用，是唯一还能继续
+  // 转发 CAN TX 的时机：设备节点的退出失能帧要靠它才能真正上总线。
+  pre_shutdown_handle_ = get_node_base_interface()->get_context()->add_pre_shutdown_callback(
+    [this]() {wait_for_can_clients();});
   RCLCPP_INFO(
     get_logger(), "native CANalyst-II bridge started with %zu symmetric RX transfers per channel",
     static_cast<std::size_t>(rx_transfers));
@@ -144,6 +155,7 @@ NativeBridgeNode::NativeBridgeNode(const rclcpp::NodeOptions & options)
 
 NativeBridgeNode::~NativeBridgeNode()
 {
+  get_node_base_interface()->get_context()->remove_pre_shutdown_callback(pre_shutdown_handle_);
   shutdown_transport();
 }
 
@@ -221,6 +233,42 @@ void NativeBridgeNode::transport_error(const std::string & message)
   if (rclcpp::ok()) {
     rclcpp::shutdown();
   }
+}
+
+void NativeBridgeNode::wait_for_can_clients()
+{
+  // 设备节点收到信号后会发退出帧（夹爪失能、传感器停流），总线要活到它们发完为止；
+  // 连续 kQuiet 没有新的 TX 就说明没人再用总线了。
+  constexpr auto kPoll = std::chrono::milliseconds(20);
+  constexpr auto kQuiet = std::chrono::milliseconds(200);
+  if (transport_ == nullptr || shutdown_grace_ <= kQuiet) {
+    return;
+  }
+  const auto tx_frames = [this]() {
+      const TransportStats stats = transport_->stats();
+      std::uint64_t total = 0;
+      for (const int channel : channel_ids_) {
+        total += stats.tx_frames[channel];
+      }
+      return total;
+    };
+  RCLCPP_INFO(
+    get_logger(), "shutdown requested, keeping the CAN buses open for up to %.1f s",
+    std::chrono::duration<double>(shutdown_grace_).count());
+  const auto deadline = std::chrono::steady_clock::now() + shutdown_grace_;
+  auto quiet_since = std::chrono::steady_clock::now();
+  std::uint64_t last = tx_frames();
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(kPoll);
+    const std::uint64_t current = tx_frames();
+    if (current != last) {
+      last = current;
+      quiet_since = std::chrono::steady_clock::now();
+    } else if (std::chrono::steady_clock::now() - quiet_since >= kQuiet) {
+      return;
+    }
+  }
+  RCLCPP_WARN(get_logger(), "CAN TX was still busy when the shutdown grace period ran out");
 }
 
 void NativeBridgeNode::report_statistics()

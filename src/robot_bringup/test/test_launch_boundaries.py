@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 from pathlib import Path
 from typing import Any, Dict, List, cast
@@ -186,7 +187,9 @@ def test_ikt_pose_commander_uses_named_position_controllers():
         "forward_position_controller"
     assert yaml.safe_load(_perform(context, parameters["jtc_controller"])) == \
         "joint_trajectory_controller"
-    assert yaml.safe_load(_perform(context, parameters["max_iters"])) == 20
+    # Pinned to INTEGER: rclpy rejects a DOUBLE override against an int declaration.
+    assert parameters["max_iters"].evaluate(context) == 20
+    assert parameters["max_iters"].value_type is int
     assert "max_joint_accel" not in module._DEFAULTS
     assert "max_joint_accel" not in parameters
     dashboard = by_executable["ikt_pose_commander_dashboard"]
@@ -326,3 +329,80 @@ def test_ft_sensor_debug_owns_bridge_and_reuses_fallback_launch(
             "autostart": "true",
             "tare_on_start": "false",
         }
+
+def _numeric_defaults(tree: ast.Module) -> Dict[str, str]:
+    """Launch-argument defaults that look like numbers, by argument name.
+
+    Covers both spellings used here: an explicit ``DeclareLaunchArgument`` call
+    and a module-level ``{name: default}`` table fed into one in a loop.
+    """
+    found: Dict[str, str] = {}
+
+    def remember(name: object, default: object) -> None:
+        if not isinstance(name, str) or not isinstance(default, str):
+            return
+        try:
+            float(default)
+        except ValueError:
+            return
+        found[name] = default
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
+                    remember(key.value, value.value)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and
+                node.func.id == "DeclareLaunchArgument"):
+            name = node.args[0].value if (
+                node.args and isinstance(node.args[0], ast.Constant)) else None
+            default = next(
+                (kw.value.value for kw in node.keywords
+                 if kw.arg == "default_value" and isinstance(kw.value, ast.Constant)),
+                None)
+            remember(name, default)
+    return found
+
+
+def _bare_launch_configuration_parameters(tree: ast.Module) -> List[str]:
+    """Node ``parameters=`` entries whose value is a bare ``LaunchConfiguration``.
+
+    Only node parameters are typed by rclpy. ``IncludeLaunchDescription``'s
+    ``launch_arguments`` stay strings all the way down, so they must not be
+    flagged.
+    """
+    bare: List[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.keyword) and node.arg == "parameters"):
+            continue
+        for inner in ast.walk(node.value):
+            if not isinstance(inner, ast.Dict):
+                continue
+            for key, value in zip(inner.keys, inner.values):
+                if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                    continue
+                if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and
+                        value.func.id == "LaunchConfiguration"):
+                    bare.append(key.value)
+    return bare
+
+
+@pytest.mark.parametrize("launch_file", sorted(LAUNCH_DIR.glob("*.launch.py")))
+def test_numeric_parameters_pin_their_type(launch_file):
+    """Numeric node parameters must never be a bare ``LaunchConfiguration``.
+
+    Launch arguments are always strings and rclpy infers the parameter type from
+    the literal, so ``max_joint_speed:=3`` becomes an INTEGER and the node dies
+    with ``InvalidParameterTypeException`` against a DOUBLE declaration. Foxy
+    accepted the mismatch silently; Humble does not. Wrapping the substitution
+    in ``ParameterValue(..., value_type=...)`` pins the type whatever the
+    operator types.
+    """
+    tree = ast.parse(launch_file.read_text())
+    numeric = _numeric_defaults(tree)
+    offenders = sorted(
+        name for name in _bare_launch_configuration_parameters(tree)
+        if name in numeric)
+    assert offenders == [], (
+        f"{launch_file.name}: wrap these in ParameterValue(value_type=...): "
+        f"{offenders}")

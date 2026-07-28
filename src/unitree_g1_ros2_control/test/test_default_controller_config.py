@@ -46,7 +46,10 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     assert trajectory_parameters["joints"] == joints
     assert trajectory_parameters["command_interfaces"] == ["position"]
     assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
-    assert trajectory_parameters["state_publish_rate"] == 0.0
+    # Humble 的 JTC 没有“不发布状态”这个概念（校验下限 0.1 Hz），也没有理由
+    # 偏离默认值，所以干脆不覆盖。
+    assert "state_publish_rate" not in trajectory_parameters
+    assert trajectory_parameters["allow_nonzero_velocity_at_trajectory_end"] is False
     assert trajectory_parameters["allow_partial_joints_goal"] is True
     constraints = trajectory_parameters["constraints"]
     assert constraints["goal_time"] == 2.0

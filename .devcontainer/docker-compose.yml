@@ -26,14 +26,29 @@ services:
     network_mode: host
     # DDS 共享内存
     ipc: host
+    # 运行期代理必须显式传入，VS Code Server/Copilot 不会读取构建期 ARG，也不会继承宿主 shell。
+    environment:
+      HTTP_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      HTTPS_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      ALL_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      NO_PROXY: localhost,127.0.0.1,::1
+      http_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      https_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      all_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      no_proxy: localhost,127.0.0.1,::1
     # 让 ros2_control_node 拿得到 SCHED_FIFO 和 mlockall——Humble 相对 Foxy 的主要实时收益
     ulimits:
       rtprio: 99
       memlock: -1
+    # 宿主内核开了 CONFIG_RT_GROUP_SCHED，非根 cgroup 的实时带宽默认为 0，此时 sched_setscheduler() 一律返回 EPERM——privileged 和 RLIMIT_RTPRIO 都救不了。
+    # 需要 /etc/docker/daemon.json 里配 "cpu-rt-runtime"（见 README），dockerd 才会在建容器时把配额递归写到 /docker 父 cgroup；缺了它这一行会让容器直接起不来。
+    #
+    # 这是静态预算：每个容器都从父级的 950000 里扣，扣完下一个容器就起不来。
+    # 实测控制环那个 FIFO 线程只占 3% CPU（45% 是 DDS executor 线程，不吃 RT 配额），
+    # 200000 留了约 6 倍余量，同时允许 4 个容器并存（devcontainer + 控制栈 + 若干一次性命令）。怀疑被限流时看 `dmesg | grep "RT throttling"`。
+    cpu_rt_runtime: 200000
 
     volumes:
-      # 固定挂到 /workspace：不依赖任何环境变量，换台机器、换克隆路径都一样。
-      # 反正一切都在容器里跑，容器内的绝对路径自洽即可。
       - ..:/workspace
       - /dev:/dev
       # 重力标定结果 ~/.ros/arm_gravity_compensation/ 要持久化。

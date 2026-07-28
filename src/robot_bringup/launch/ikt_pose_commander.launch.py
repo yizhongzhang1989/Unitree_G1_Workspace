@@ -16,6 +16,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 _DEFAULTS = {
@@ -27,7 +28,7 @@ _DEFAULTS = {
     "dashboard_port": "8180",
     "command_topic": "/arm_gravity_compensation/target",
 
-    "max_joint_speed": "2",
+    "max_joint_speed": "2.0",
     "max_iters": "20",
     "control_rate_hz": "200.0",
     "stream_rate_hz": "100.0",
@@ -59,9 +60,9 @@ def generate_launch_description() -> LaunchDescription:
             "command_topic": LaunchConfiguration("command_topic"),
             "switch_controllers": True,
             "start_enabled": False,
-            "max_joint_speed": LaunchConfiguration("max_joint_speed"),
-            "max_iters": LaunchConfiguration("max_iters"),
-            "control_rate_hz": LaunchConfiguration("control_rate_hz"),
+            "max_joint_speed": ParameterValue(LaunchConfiguration("max_joint_speed"), value_type=float),
+            "max_iters": ParameterValue(LaunchConfiguration("max_iters"), value_type=int),
+            "control_rate_hz": ParameterValue(LaunchConfiguration("control_rate_hz"), value_type=float),
         }],
     )
 
@@ -71,10 +72,10 @@ def generate_launch_description() -> LaunchDescription:
         name="ikt_pose_commander_dashboard",
         output="screen",
         parameters=[{
-            "port": LaunchConfiguration("dashboard_port"),
+            "port": ParameterValue(LaunchConfiguration("dashboard_port"), value_type=int),
             "commander_ns": "/ikt_pose_commander",
             "base_frame": LaunchConfiguration("base_frame"),
-            "stream_rate_hz": LaunchConfiguration("stream_rate_hz"),
+            "stream_rate_hz": ParameterValue(LaunchConfiguration("stream_rate_hz"), value_type=float),
         }],
         condition=IfCondition(LaunchConfiguration("enable_dashboard")),
     )

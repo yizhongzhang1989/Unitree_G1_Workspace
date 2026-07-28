@@ -148,20 +148,39 @@ VS Code 的 "Reopen in Container" 不会带这些代理变量，所以**必须�
 | `network_mode: host` | 与机器人同一网络栈，DDS 能在 `eth0` 上发现 `/lowstate` |
 | `ipc: host` | DDS 共享内存 |
 | `ulimits: rtprio 99 / memlock -1` | 让 `ros2_control_node` 拿到 SCHED_FIFO 和 mlockall |
+| `cpu_rt_runtime: 200000` | cgroup 实时带宽。**依赖下一节的宿主配置，没配就得删掉这行，否则容器起不来** |
 | `..:/workspace` | 固定挂到 `/workspace`，不依赖宿主克隆路径 |
 | `~/.ros` 挂载 | 重力标定结果（`~/.ros/arm_gravity_compensation/`）持久化 |
 | 镜像内用户与宿主同 UID/GID | bind mount 里新建的文件不会变成 root 所有 |
 
 `build/`、`install/`、`log/` 都落在宿主工作区，容器销毁不丢。`devcontainer.json` 里设了 `shutdownAction: none`，关掉 VS Code 窗口**不会**停容器——机器人上不该因为关个编辑器就把控制栈杀了；要停用 `docker compose -f .devcontainer/docker-compose.yml down`。
 
+### 实时调度（一次性宿主配置）
+宿主内核开了 `CONFIG_RT_GROUP_SCHED`（cgroup v1），**非根 cgroup 的实时带宽默认为 0**，此时 `sched_setscheduler()` 一律返回 EPERM——`privileged` 和 `RLIMIT_RTPRIO` 都救不了。`ros2_control_node` 会因此退回 SCHED_OTHER，500 Hz 控制环和 Flask、IK、相机编码抢同一批时间片。
+
+dockerd 必须先拿到实时带宽，它才会在建容器时把配额递归写到 `/docker` 父 cgroup：
+```bash
+sudo cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
+# 往 daemon.json 里加 "cpu-rt-period": 1000000 与 "cpu-rt-runtime": 950000
+sudo systemctl restart docker
+```
+
+验证：
+```bash
+.devcontainer/dev.sh chrt -f 50 true && echo OK
+# 起控制栈后应看到：Successful set up FIFO RT scheduling policy with priority 50.
+```
+
+注意 `cpu_rt_runtime` 是**静态预算**，每个容器都从父级的 950000 里扣，扣完下一个容器就起不来。实测控制环那个 FIFO 线程只占 3% CPU（整进程 45% 是 DDS executor 线程，不吃 RT 配额），所以配了 200000，可并存 4 个容器。怀疑被限流时看 `dmesg | grep "RT throttling"`。
+
 ### 构建项目
-`sdk/` 下的纯 Python SDK 不参与 colcon 构建。必须排掉 `unitree_go` 和官方示例，否则 colcon 会发现并构建用不到的包：
+`sdk/` 下的纯 Python SDK 不参与 colcon 构建。`unitree_go` 和官方示例是没用的包，被排除在外：
 ```bash
 # 容器内
 colcon build --symlink-install --packages-ignore unitree_go unitree_ros2_example
 ```
 
-ROS 环境不用手动 source：[`scripts/env.sh`](scripts/env.sh) 会加载 Humble、工作区 `install/setup.bash`、三个 SDK 的 `PYTHONPATH`，以及 `RMW_IMPLEMENTATION` 和 `CYCLONEDDS_URI`。它同时挂在镜像的 ENTRYPOINT 和 `~/.bashrc` 上，因为 **VS Code 开的终端不走 ENTRYPOINT**。首次构建出 `install/` 后，当前 shell 需要 `source scripts/env.sh` 刷一次。
+Docker下 ROS 环境不用手动 source：[`scripts/env.sh`](scripts/env.sh) 会加载 Humble、工作区 `install/setup.bash`、三个 SDK 的 `PYTHONPATH`，以及 `RMW_IMPLEMENTATION` 和 `CYCLONEDDS_URI`。它同时挂在镜像的 ENTRYPOINT 和 `~/.bashrc` 上，因为 **VS Code 开的终端不走 ENTRYPOINT**。首次构建出 `install/` 后，当前 shell 需要 `source scripts/env.sh` 刷一次。
 
 该文件可以被 source（只设环境），也可以被执行（设完环境再 exec 传入的命令），所以一份定义同时服务两种入口。
 
@@ -197,28 +216,19 @@ source scripts/env.sh
 ```
 
 ### 推荐整机启动
-终端 A 启动全部硬件、唯一 controller manager 和两个 inactive motion controller：
+终端 A 启动全部硬件、唯一 controller manager 和 motion controller：
 ```bash
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ```
+已经包含 `unitree_g1_ros2_control/control.launch.py`。不要再单独启动第二个 `control.launch.py`，也不要单独重复启动 Gloria-M、KWR57 或 CAN bridge。
 
-终端 B 按需启动 Dashboard：
+终端 B 按需启动 Dashboard，只连接已有 `/controller_manager`：
 ```bash
 ros2 launch robot_bringup whole_body_dashboard.launch.py
 # http://<机器人 IP>:8200
 ```
 
-第一条命令已经包含 `unitree_g1_ros2_control/control.launch.py`。不要再单独启动第二个 `control.launch.py`，也不要单独重复启动 Gloria-M、KWR57 或 CAN bridge。Dashboard 只连接已有 `/controller_manager`，不会创建第二套 manager。
-
-启动后先检查 controller 保持 inactive：
-```bash
-ros2 control list_controllers --controller-manager /controller_manager
-ros2 control list_hardware_interfaces --controller-manager /controller_manager
-```
-
-应看到 `joint_state_broadcaster`、`pelvis_imu_broadcaster` 为 `active`，`forward_position_controller`（FPC）和 `joint_trajectory_controller`（JTC）均为 `inactive`，31 个 position command interface 均为 `unclaimed`。Engage 后只允许一个 motion controller 为 `active`，31 个接口都应显示 `claimed`。确认现场安全、反馈正常且外部 `/lowcmd` 已停止后，才可 Engage。
-
-终端 C 可启动 IKT Pose Commander 与 8180 Dashboard：
+终端 C 可启动 IKT Pose Commander Dashboard：
 ```bash
 ros2 launch robot_bringup ikt_pose_commander.launch.py
 # http://<机器人 IP>:8180
@@ -260,10 +270,9 @@ ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual
 | `require_pr_mode` | `true` / `false` | `true` | Engage 时要求 `mode_pr == 0` |
 | `use_sim_time` | `true` / `false` | `false` | 是否使用仿真时钟 |
 
-两种 scope 都不启动 8770/8200 Dashboard。相机链保持原设计，左右 `camera_node` 随末端拓扑启动并继续提供 ROS Image 与 8010/8011 内置页面。
+相机链保持原设计，左右 `camera_node` 随末端拓扑启动并继续提供 ROS Image 与 8010/8011 内置页面。
 
 已有匹配 `topology` 的 CAN bridge、Gloria-M 和 KWR57 节点时，才单独启动控制栈：
-
 ```bash
 ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 ```

@@ -1267,6 +1267,9 @@ void G1TopicSystem::start_release_channel() {
     // publishes on a shut-down context, so the release would go nowhere.
     rclcpp::InitOptions options;
     options.shutdown_on_signal = false;
+    // 全局上下文已经建过日志系统，再初始化一次只会招来 rclcpp 的
+    // "logging was initialized more than once" 警告。
+    options.auto_initialize_logging(false);
     release_context_ = std::make_shared<rclcpp::Context>();
     release_context_->init(0, nullptr, options);
     rclcpp::NodeOptions node_options;

@@ -115,10 +115,13 @@ def _control_nodes(context):
             namespace=manager_namespace,
             output="screen",
             parameters=[controllers, {
-                "robot_description": description_parameter,
                 "use_sim_time": ParameterValue(
                     LaunchConfiguration("use_sim_time"), value_type=bool),
             }],
+            remappings=[
+                ("~/robot_description",
+                 LaunchConfiguration("robot_description_topic")),
+            ],
         ),
         Node(
             package="robot_state_publisher",
