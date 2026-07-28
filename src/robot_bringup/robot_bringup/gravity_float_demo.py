@@ -50,6 +50,7 @@ class GravityFloatDemo(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
         self._target = None
+        self._message = Float64MultiArray()
         self._publisher = self.create_publisher(
             Float64MultiArray, target_topic, stream_qos)
         self.create_subscription(
@@ -77,9 +78,10 @@ class GravityFloatDemo(Node):
     def _publish(self) -> None:
         if self._target is None:
             return
-        message = Float64MultiArray()
-        message.data = list(self._target)
-        self._publisher.publish(message)
+        # The message is reused: rclpy serialises inside publish() and the
+        # executor is single threaded, so nothing can observe a torn buffer.
+        self._message.data = self._target
+        self._publisher.publish(self._message)
 
 
 def main(args=None) -> None:

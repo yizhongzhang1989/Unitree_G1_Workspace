@@ -8,6 +8,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -34,6 +35,7 @@ private:
   void publish_can_frame(int channel_id, const CanFrame & frame);
   void transport_error(const std::string & message);
   void report_statistics();
+  void wait_for_can_clients();
 
   std::vector<int> channel_ids_;
   std::vector<std::string> bus_names_;
@@ -44,6 +46,8 @@ private:
   std::vector<std::shared_ptr<Kwr57DeviceNode>> device_nodes_;
   std::unique_ptr<CanalystiiTransport> transport_;
   rclcpp::TimerBase::SharedPtr statistics_timer_;
+  rclcpp::PreShutdownCallbackHandle pre_shutdown_handle_;
+  std::chrono::milliseconds shutdown_grace_{0};
   std::atomic<bool> shutting_down_{false};
 };
 

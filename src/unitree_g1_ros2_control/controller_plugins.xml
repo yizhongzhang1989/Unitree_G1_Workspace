@@ -22,7 +22,7 @@
     type="unitree_g1_ros2_control::ThrottledJointStateBroadcaster"
     base_class_type="controller_interface::ControllerInterface">
     <description>
-      Standard Foxy joint-state broadcaster with a configurable publish-rate gate.
+      Standard joint-state broadcaster with a configurable publish-rate gate.
     </description>
   </class>
   <class
@@ -30,7 +30,7 @@
     type="unitree_g1_ros2_control::ThrottledImuSensorBroadcaster"
     base_class_type="controller_interface::ControllerInterface">
     <description>
-      Standard Foxy IMU broadcaster with a configurable publish-rate gate.
+      Standard IMU broadcaster with a configurable publish-rate gate.
     </description>
   </class>
 </library>

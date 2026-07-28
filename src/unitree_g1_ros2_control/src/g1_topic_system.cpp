@@ -162,26 +162,25 @@ namespace unitree_g1_ros2_control {
 
 G1TopicSystem::~G1TopicSystem() {
     if (executor_) {
-        stop();
+        on_deactivate(rclcpp_lifecycle::State());
     }
 }
 
-hardware_interface::return_type G1TopicSystem::configure(
-    const hardware_interface::HardwareInfo& info) {
-    if (configure_default(info) != hardware_interface::return_type::OK) {
-        return hardware_interface::return_type::ERROR;
+hardware_interface::CallbackReturn G1TopicSystem::on_init(const hardware_interface::HardwareInfo& info) {
+    if (hardware_interface::SystemInterface::on_init(info) != hardware_interface::CallbackReturn::SUCCESS) {
+        return hardware_interface::CallbackReturn::ERROR;
     }
     try {
         if (!configure_interfaces()) {
-            return hardware_interface::return_type::ERROR;
+            return hardware_interface::CallbackReturn::ERROR;
         }
         configure_parameters();
         create_ros_interfaces();
     } catch (const std::exception& error) {
         RCLCPP_ERROR(rclcpp::get_logger("G1TopicSystem"), "Configuration failed: %s", error.what());
-        return hardware_interface::return_type::ERROR;
+        return hardware_interface::CallbackReturn::ERROR;
     }
-    return hardware_interface::return_type::OK;
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 bool G1TopicSystem::configure_interfaces() {
@@ -557,26 +556,26 @@ std::vector<hardware_interface::CommandInterface> G1TopicSystem::export_command_
     return interfaces;
 }
 
-hardware_interface::return_type G1TopicSystem::start() {
-    if (status_ == hardware_interface::status::STARTED) {
-        return hardware_interface::return_type::OK;
+hardware_interface::CallbackReturn G1TopicSystem::on_activate(const rclcpp_lifecycle::State&) {
+    if (active_) {
+        return hardware_interface::CallbackReturn::SUCCESS;
     }
     executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     executor_->add_node(node_);
     executor_thread_ = std::thread([executor = executor_]() { executor->spin(); });
     start_release_channel();
-    status_ = hardware_interface::status::STARTED;
+    active_ = true;
     RCLCPP_INFO(node_->get_logger(), "G1 topic system started with output disabled");
-    return hardware_interface::return_type::OK;
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
-hardware_interface::return_type G1TopicSystem::stop() {
-    if (status_ == hardware_interface::status::STARTED) {
+hardware_interface::CallbackReturn G1TopicSystem::on_deactivate(const rclcpp_lifecycle::State&) {
+    if (active_) {
         release_body();
         clear_output();
         if (control_acquired_.load(std::memory_order_acquire)) {
             // Not release_control(): that waits for service replies, and by the
-            // time stop() runs the executor is gone so none can arrive.
+            // time deactivation runs the executor is gone so none can arrive.
             // restore_motion_mode() alone would retry for
             // motion_select_timeout_s_, far past the point where launch gives up
             // waiting and sends SIGTERM. The gripper nodes disable themselves
@@ -592,8 +591,8 @@ hardware_interface::return_type G1TopicSystem::stop() {
         executor_.reset();
     }
     stop_release_channel();
-    status_ = hardware_interface::status::STOPPED;
-    return hardware_interface::return_type::OK;
+    active_ = false;
+    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 void G1TopicSystem::on_lowstate(const unitree_hg::msg::LowState::SharedPtr message) {
@@ -727,7 +726,7 @@ void G1TopicSystem::on_motion_response(const unitree_api::msg::Response::SharedP
     motion_condition_.notify_all();
 }
 
-hardware_interface::return_type G1TopicSystem::read() {
+hardware_interface::return_type G1TopicSystem::read(const rclcpp::Time&, const rclcpp::Duration&) {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         for (std::size_t index = 0; index < kControlledJointCount; ++index) {
@@ -765,7 +764,7 @@ hardware_interface::return_type G1TopicSystem::read() {
     return hardware_interface::return_type::OK;
 }
 
-hardware_interface::return_type G1TopicSystem::write() {
+hardware_interface::return_type G1TopicSystem::write(const rclcpp::Time&, const rclcpp::Duration&) {
     if (output_inhibited_.load(std::memory_order_acquire)) {
         return hardware_interface::return_type::OK;
     }
@@ -1263,11 +1262,14 @@ void G1TopicSystem::release_body() {
 }
 
 void G1TopicSystem::start_release_channel() {
-    // Deliberately a second context with shutdown_on_sigint disabled. The global
-    // one is already down by the time stop() runs, and rclcpp silently drops
+    // Deliberately a second context with signal handling disabled. The global one
+    // is already down by the time deactivation runs, and rclcpp silently drops
     // publishes on a shut-down context, so the release would go nowhere.
     rclcpp::InitOptions options;
-    options.shutdown_on_sigint = false;
+    options.shutdown_on_signal = false;
+    // 全局上下文已经建过日志系统，再初始化一次只会招来 rclcpp 的
+    // "logging was initialized more than once" 警告。
+    options.auto_initialize_logging(false);
     release_context_ = std::make_shared<rclcpp::Context>();
     release_context_->init(0, nullptr, options);
     rclcpp::NodeOptions node_options;

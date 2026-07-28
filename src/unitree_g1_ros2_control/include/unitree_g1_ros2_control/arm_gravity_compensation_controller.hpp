@@ -12,8 +12,8 @@
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
-#include "realtime_tools/realtime_buffer.h"
-#include "realtime_tools/realtime_publisher.h"
+#include "realtime_tools/realtime_buffer.hpp"
+#include "realtime_tools/realtime_publisher.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
 namespace unitree_g1_ros2_control {
@@ -32,7 +32,7 @@ class ArmGravityCompensationController : public controller_interface::Controller
 public:
     static constexpr std::size_t kArmJointCount = 7;
 
-    controller_interface::return_type init(const std::string& controller_name) override;
+    controller_interface::CallbackReturn on_init() override;
 
     controller_interface::InterfaceConfiguration command_interface_configuration() const override;
     controller_interface::InterfaceConfiguration state_interface_configuration() const override;
@@ -44,12 +44,12 @@ public:
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_deactivate(
         const rclcpp_lifecycle::State& previous_state) override;
 
-    controller_interface::return_type update() override;
+    controller_interface::return_type update(
+        const rclcpp::Time& time, const rclcpp::Duration& period) override;
 
 private:
     using CallbackReturn =
         rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
-    using Clock = std::chrono::steady_clock;
     using Vector3 = std::array<double, 3>;
     using Matrix3 = std::array<double, 9>;
 
@@ -86,7 +86,6 @@ private:
 
     Vector3 gravity_{};
     bool gravity_valid_{false};
-    Clock::time_point last_update_{};
 
     realtime_tools::RealtimeBuffer<std::shared_ptr<std::vector<double>>> target_buffer_;
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr target_subscription_;

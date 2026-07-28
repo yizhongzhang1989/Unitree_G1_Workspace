@@ -10,7 +10,7 @@ LOWCMD_PAYLOAD_SIZE = 1000
 CRC_POLYNOMIAL = 0x04C11DB7
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MotorSetpoint:
     """One motor slot of ``tau + kp * (q - q_meas) - kd * dq_meas``."""
 

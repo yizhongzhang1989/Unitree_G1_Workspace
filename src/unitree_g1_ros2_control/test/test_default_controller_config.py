@@ -46,7 +46,10 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     assert trajectory_parameters["joints"] == joints
     assert trajectory_parameters["command_interfaces"] == ["position"]
     assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
-    assert trajectory_parameters["state_publish_rate"] == 0.0
+    # Humble 的 JTC 没有“不发布状态”这个概念（校验下限 0.1 Hz），也没有理由
+    # 偏离默认值，所以干脆不覆盖。
+    assert "state_publish_rate" not in trajectory_parameters
+    assert trajectory_parameters["allow_nonzero_velocity_at_trajectory_end"] is False
     assert trajectory_parameters["allow_partial_joints_goal"] is True
     constraints = trajectory_parameters["constraints"]
     assert constraints["goal_time"] == 2.0
@@ -101,7 +104,7 @@ def test_arm_stiffness_explicit_override_reaches_hardware_plugin():
     assert parameters["arm_stiffness_scale"] == "2.5"
 
 
-def test_control_launch_loads_both_motion_controllers_stopped():
+def test_control_launch_loads_both_motion_controllers_inactive():
     module = _load_control_launch()
     context = LaunchContext()
     context.launch_configurations.update({
@@ -117,8 +120,8 @@ def test_control_launch_loads_both_motion_controllers_stopped():
         str(node._Node__arguments[0]): node._Node__arguments
         for node in nodes
         if isinstance(node, Node) and
-        node._Node__node_executable == "spawner.py"
+        node._Node__node_executable == "spawner"
     }
 
-    assert "--stopped" in spawners["forward_position_controller"]
-    assert "--stopped" in spawners["joint_trajectory_controller"]
+    assert "--inactive" in spawners["forward_position_controller"]
+    assert "--inactive" in spawners["joint_trajectory_controller"]

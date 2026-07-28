@@ -68,7 +68,7 @@ class _FakeNode:
 
     # 辅助函数测试覆盖进入 ROS 消息层前的输入边界
 class WebHelpersTest(unittest.TestCase):
-    def test_diagnostic_level_accepts_foxy_bytes_and_integer(self) -> None:
+    def test_diagnostic_level_accepts_bytes_and_integer(self) -> None:
         self.assertEqual(_diagnostic_level(b"\x02"), 2)
         self.assertEqual(_diagnostic_level(3), 3)
         with self.assertRaises(ValueError):

@@ -37,7 +37,9 @@
     state_interfaces:
       - position
       - velocity
-    state_publish_rate: 0.0
+    # 轨迹末点只给 positions，不给 velocities，末速度本就是零。显式写成 false 取
+    # 消 JTC 的弃用警告，并锁定上游即将切换的新默认值。
+    allow_nonzero_velocity_at_trajectory_end: false
     action_monitor_rate: 20.0
     allow_partial_joints_goal: true
     open_loop_control: false

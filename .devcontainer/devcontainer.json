@@ -1,0 +1,53 @@
+{
+    // 运行参数全部在 docker-compose.yml 里，这里不重复。
+    "name": "G1 Humble",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "dev",
+    "workspaceFolder": "/workspace",
+    "remoteUser": "unitree",
+    // 用 compose 里的 `command: sleep infinity` 保持容器常驻
+    "overrideCommand": false,
+    // 远程扩展宿主（包括 Copilot）由 VS Code Server 启动，必须用 remoteEnv 注入代理
+    "remoteEnv": {
+        "HTTP_PROXY": "socks5h://127.0.0.1:1080",
+        "HTTPS_PROXY": "socks5h://127.0.0.1:1080",
+        "ALL_PROXY": "socks5h://127.0.0.1:1080",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "http_proxy": "socks5h://127.0.0.1:1080",
+        "https_proxy": "socks5h://127.0.0.1:1080",
+        "all_proxy": "socks5h://127.0.0.1:1080",
+        "no_proxy": "localhost,127.0.0.1,::1"
+    },
+    // 默认的 stopCompose 会在关掉 VS Code 窗口时停容器——机器人上这等于
+    // 随手关个编辑器就把控制栈杀了。手动 `docker compose down` 才停。
+    "shutdownAction": "none",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "http.proxy": "socks5h://127.0.0.1:1080",
+                "http.proxySupport": "override"
+            },
+            "extensions": [
+                "formulahendry.code-runner",
+                "morningfrog.urdf-visualizer",
+                "ms-ceintl.vscode-language-pack-zh-hans",
+                "ms-python.debugpy",
+                "ms-python.isort",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.vscode-python-envs",
+                "ms-vscode.cpptools-extension-pack",
+                "ms-vscode.cpp-devtools",
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-themes",
+                "ms-vscode.cmake-tools",
+                "mtsmfm.vscode-stl-viewer",
+                "ranch-hand-robotics.rde-ros-2",
+                "smilerobotics.urdf",
+                "tamasfe.even-better-toml"
+            ]
+            // 补全路径写在 .vscode/settings.json 与 c_cpp_properties.json 里：
+            // workspace 作用域优先级高于这里的 machine 作用域，写两份只会互相覆盖。
+        }
+    }
+}

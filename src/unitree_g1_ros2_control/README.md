@@ -91,8 +91,8 @@ flowchart TB
 |---|---|---|
 | `ros2_control_node`（含 manager + 全部 controller + `G1TopicSystem`） | [control.launch.py](launch/control.launch.py)，被 `robot_bringup/all_data.launch.py scope:=whole_body` include | 唯一 manager，500 Hz |
 | `robot_state_publisher` | 同上 | 发 `/robot_description` 与 TF |
-| `joint_state_broadcaster`、`pelvis_imu_broadcaster` | 同上，`spawner.py` | **active**，各 100 Hz |
-| `forward_position_controller`、`joint_trajectory_controller`、`arm_gravity_compensation` | 同上，`spawner.py --stopped` | **inactive**，用谁激活谁 |
+| `joint_state_broadcaster`、`pelvis_imu_broadcaster` | 同上，`spawner` | **active**，各 100 Hz |
+| `forward_position_controller`、`joint_trajectory_controller`、`arm_gravity_compensation` | 同上，`spawner --inactive` | **inactive**，用谁激活谁 |
 | `left_ft_broadcaster`、`right_ft_broadcaster` | 已在 `controllers.yaml` 注册，默认不 spawn | 未加载（KWR57 raw 话题已存在，避免 1 kHz 重复发布） |
 | CAN bridge、KWR57、Gloria-M、相机 | `robot_bringup/all_data.launch.py`（两个 scope 都启动） | 独立进程 |
 | 8200 控制器测试网页 | `robot_bringup/whole_body_dashboard.launch.py` | 独立进程，纯客户端 |
@@ -104,7 +104,7 @@ flowchart TB
 
 | | `forward_position_controller`（FPC） | `joint_trajectory_controller`（JTC） | `arm_gravity_compensation` |
 |---|---|---|---|
-| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `joint_trajectory_controller/JointTrajectoryController`（Foxy 官方） | `unitree_g1_controllers/ArmGravityCompensation` |
+| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `joint_trajectory_controller/JointTrajectoryController`（上游官方） | `unitree_g1_controllers/ArmGravityCompensation` |
 | **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) | 话题 `~/joint_trajectory`<br/>+ action `~/follow_joint_trajectory`<br/>（`control_msgs/FollowJointTrajectory`） | 话题 `~/target`<br/>格式与 FPC 的 `~/commands` 完全相同<br/>BEST_EFFORT · KEEP_LAST(1) |
 | **输出** | 写 command interface | 写 command interface | **发话题**：参数 `command_topic`，默认 `/forward_position_controller/commands` |
 | claim 的 command interface | 31 × `<joint>/position` | 31 × `<joint>/position`（同一组） | **无**（`interface_configuration_type::NONE`） |
@@ -234,7 +234,7 @@ ros2 param set /arm_gravity_compensation compensation_scale 0.95
 
 订阅回调由 controller_manager 的 `MultiThreadedExecutor` 派发，不在 500 Hz 控制线程上，因此**无论如何赶不上同一拍**。`update_rate: 500` 下这是固定 2 ms。
 
-开进程内通信解决不了这个问题：Foxy 的 IPC 仍然是“写进订阅端 ring buffer + 触发 guard condition”，回调照样由 executor 派发，三次交接一次不少；省下的只有 31 个 `double`（248 B）的序列化，微秒级。而且 `RealtimePublisher` 按 const-ref 发 `Float64MultiArray`（不是 `unique_ptr` move），连零拷贝也拿不到。
+开进程内通信解决不了这个问题：IPC 仍然是“写进订阅端 ring buffer + 触发 guard condition”，回调照样由 executor 派发，三次交接一次不少；省下的只有 31 个 `double`（248 B）的序列化，微秒级。而且 `RealtimePublisher` 按 const-ref 发 `Float64MultiArray`（不是 `unique_ptr` move），连零拷贝也拿不到。
 
 **为什么可以接受**：重力偏移的带宽被 `gravity_filter_cutoff_hz`（默认 2.0）限死，2 Hz 信号上 2 ms 只相当于 $2\pi \cdot 2 \cdot 0.002 = 0.025$ rad $= 1.4°$ 相位滞后，远小于标定残差本身。补偿量又是在**目标位置**求值的，本就领先于测量，这一拍不会变成负阻尼。丢帧同样无害：两端都是 `best_effort` + `KeepLast(1)`，而它每拍都重发（不看上游是否更新——躯干姿态和激活斜坡一直在变），FPC 最多多持一拍旧命令。
 
@@ -261,11 +261,11 @@ $$\tau_i = -\,a_i \cdot \Big[\Big(\textstyle\sum_{j\ge i} p_j - t_i \sum_{j\ge i
 7 次 3×3 矩阵乘加 7 次叉积。该实现与 Pinocchio 在 50 组随机姿态 + 随机重力方向下对拍，最大偏差 $10^{-15}$ N·m（即双精度舍入）。
 
 #### 为什么不在 controller 里链 Pinocchio
-不是因为没有 C++ 版。本机的 Pinocchio 2.6.21 是 pip/cmeel 装的，`include/pinocchio/`、`lib/libpinocchio.so` 和 `lib/cmake/pinocchio/pinocchioConfig.cmake` 都在，实测可以编译链接并运行。真正的理由是：
+不是因为没有 C++ 版。开发镜像里的 `ros-humble-pinocchio` 4.0.0 是正经系统包，rosdep 解析得到，`libpinocchio_*.so` 就在 `/opt/ros/humble/lib/aarch64-linux-gnu/` 下，链起来没有任何障碍。真正的理由是：
 
-- **部署脆弱**。它装在 `~/.local/lib/python3.8/site-packages/cmeel.prefix/` 下，不是系统包、rosdep 解析不到。链它就意味着构建依赖一个用户家目录下的 pip 安装，换台机器或进 CI 就构建不了，而且 `controller_manager` 进程还得带对 `LD_LIBRARY_PATH`。
 - **文件无论如何都要导**。标定出的参数总得有个载体传给 controller。既然已经在写文件，写归并后的形式不多花任何代价，反而省掉运行时重做一遍解析和归并。
 - **规模差得多**。完整模型 108 link，归并后每侧 7 体；后者在 500 Hz 循环里只是几十次浮点运算，也不引入 Boost / urdfdom / Eigen 的依赖链。
+- **运行时不该依赖标定输入**。链 Pinocchio 就意味着 controller 要在启动时读 URDF 并重建模型，等于把标定期的输入拖进实时路径；而它真正需要的只是标定的**输出**。
 
 Pinocchio 仍然用在**导出那一步**：标定包里用它读 `final.urdf`、`buildReducedModel` 做归并、写出表。这和“源码 → 编译产物”是一回事，controller 拿到的是编译好的东西。
 
@@ -351,7 +351,7 @@ ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 - `joint_trajectory_controller`：已配置但 inactive；
 - `left_ft_broadcaster`、`right_ft_broadcaster`：已注册但默认不启动。
 
-`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。`joint_trajectory_controller` 类型为 Foxy 标准 `joint_trajectory_controller/JointTrajectoryController`，动作接口为 `/joint_trajectory_controller/follow_joint_trajectory`。两者的 31 个 `joints` 顺序完全相同，并请求同一组 position command interface；controller_manager 的 resource claim 保证它们互斥 active。两者都只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
+`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。`joint_trajectory_controller` 类型为上游标准 `joint_trajectory_controller/JointTrajectoryController`，动作接口为 `/joint_trajectory_controller/follow_joint_trajectory`。两者的 31 个 `joints` 顺序完全相同，并请求同一组 position command interface；controller_manager 的 resource claim 保证它们互斥 active。两者都只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
 
 FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也只暴露最新样本；短暂调度繁忙后不会依次执行过时 setpoint。可靠发布者仍可与该订阅匹配，G1 Pose Commander 则直接使用相同的 BEST_EFFORT latest-only 配置。
 
@@ -419,7 +419,7 @@ ros2 topic hz /pelvis_imu_broadcaster/imu
 未 Engage 时，31 个 position command interface 应全部显示 `unclaimed`；Engage 后 31 个接口应全部为 `claimed`。标准 FT 输出如有需要可按侧手动启动：
 
 ```bash
-ros2 run controller_manager spawner.py left_ft_broadcaster \
+ros2 run controller_manager spawner left_ft_broadcaster \
   --param-file install/unitree_g1_ros2_control/share/unitree_g1_ros2_control/config/left_ft_broadcaster.yaml \
   --controller-manager /controller_manager
 ```

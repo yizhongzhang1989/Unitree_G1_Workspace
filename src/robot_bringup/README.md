@@ -11,7 +11,7 @@
 | `whole_body_dashboard.launch.py` | 仅端口 `8200` 的 controller 测试网页；连接已有 manager，不启动数据或控制节点 |
 | `gravity_float_demo.launch.py` | 激活重力补偿 + FPC，让双臂进入可徒手推动的失重状态；连接已有 manager |
 
-末端设备实现集中在 `robot_bringup/end_effectors/`。`unitree_g1_description` 只提供模型资源；`unitree_g1_ros2_control` 提供真实 Foxy `SystemInterface`、C++ controller 与 broadcaster。
+末端设备实现集中在 `robot_bringup/end_effectors/`。`unitree_g1_description` 只提供模型资源；`unitree_g1_ros2_control` 提供真实的 ros2_control `SystemInterface`、C++ controller 与 broadcaster。
 
 ## 末端设备结构
 `all_data.launch.py scope:=end_effectors topology:=dual` 的实际数据流如下；8770 Dashboard 是独立进程，用户需要时再手动启动：
@@ -178,7 +178,7 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 
 第一条命令启动唯一 `/controller_manager`，将 `/lowstate`、双 Gloria-M、双 KWR57 和 pelvis IMU 接入 `hardware_interface`，发布 `/robot_description`、TF 与统一 `/joint_states`；第二条命令只在 `http://<机器人 IP>:8200` 提供网页。`forward_position_controller`（FPC）和 `joint_trajectory_controller`（JTC）均已加载但保持 `inactive`，且 claim 相同的 29 个 G1 关节和两只 Gloria，因此只能由 controller_manager 激活其中一个。夹爪采用独立、更宽的 `0.75 s` feedback timeout，单侧 stale 只停止该侧，不切断本体 LowCmd。
 
-Dashboard wrapper 处理 Foxy 字段兼容、inactive controller 关节元数据发现和 30 秒切换等待，不代理任何 controller-manager 服务。Web 快照还会按 URDF joint limit 一次性重算 Gloria-M 的受限分段 mimic FK，并隐藏 `internal_*` 虚拟 link/joint；浏览器中的夹爪部分只显示物理连杆和两个 `eccentric_joint`，不改变 `/joint_states`、TF 或 ros2_control 控制链。Engage/Disengage 的 MotionSwitcher、夹爪生命周期、状态 freshness 和回滚由 C++ 硬件插件执行，详见 [`unitree_g1_ros2_control/README.md`](../unitree_g1_ros2_control/README.md)。实机 Disengage 后仍建议独立确认 controller 为 `inactive`、命令接口为 `unclaimed`、两只夹爪已失能且 MotionSwitcher 模式已恢复。
+Dashboard wrapper 只把切换超时放宽到 30 秒并做切换后状态校验，并为不 claim 任何接口的重力补偿控制器补全关节列表，不代理任何 controller-manager 服务。Web 快照还会按 URDF joint limit 一次性重算 Gloria-M 的受限分段 mimic FK，并隐藏 `internal_*` 虚拟 link/joint；浏览器中的夹爪部分只显示物理连杆和两个 `eccentric_joint`，不改变 `/joint_states`、TF 或 ros2_control 控制链。Engage/Disengage 的 MotionSwitcher、夹爪生命周期、状态 freshness 和回滚由 C++ 硬件插件执行，详见 [`unitree_g1_ros2_control/README.md`](../unitree_g1_ros2_control/README.md)。实机 Disengage 后仍建议独立确认 controller 为 `inactive`、命令接口为 `unclaimed`、两只夹爪已失能且 MotionSwitcher 模式已恢复。
 
 `arm_gravity_compensation` 也出现在控制器列表里，按前向位置控制器的方式驱动：它不 claim 任何 command interface，wrapper 因此只给它填关节列表（取自它自己的 `joints` 参数）而不填 command interface，否则页面会把它要喂的 FPC 停掉。Engage 它会先把它 `command_topic` 指向的 FPC 一起拉起来，setpoint 发到 `<name>/target`；直接 Engage 那个 FPC 则会先停掉它，两者不会同时往一个命令话题发。
 
@@ -194,7 +194,7 @@ Gloria-M 使用 `kp=10`、`kd=5`。`kd=5` 是 SDK `pack_mit_command()` 将 12 bi
 ros2 launch robot_bringup ikt_pose_commander.launch.py
 ```
 
-该入口连接两个真实 ros2_control controller：自定义 `forward_position_controller`（FPC）用于 **Track robot** 连续跟踪，Foxy 标准 `joint_trajectory_controller`（JTC）用于 **Snap robot**、Disable 后持位和 `return_to_start`。两者配置完全相同的 31 个 position command interface；Commander 通过 `/controller_manager/switch_controller` 一启一停，manager 的资源 claim 保证它们不能同时 active。JTC 和 FPC 最终都只写 `G1TopicSystem` 的 position command interface，实际 G1/Gloria MIT 命令仍由现有硬件插件生成，没有第二条底层下发通道。
+该入口连接两个真实 ros2_control controller：自定义 `forward_position_controller`（FPC）用于 **Track robot** 连续跟踪，上游标准 `joint_trajectory_controller`（JTC）用于 **Snap robot**、Disable 后持位和 `return_to_start`。两者配置完全相同的 31 个 position command interface；Commander 通过 `/controller_manager/switch_controller` 一启一停，manager 的资源 claim 保证它们不能同时 active。JTC 和 FPC 最终都只写 `G1TopicSystem` 的 position command interface，实际 G1/Gloria MIT 命令仍由现有硬件插件生成，没有第二条底层下发通道。
 
 `command_topic` 决定 FPC 那条全量位置流发给谁，同时决定 Engage 时要额外激活哪个 controller（话题的属主）：
 
@@ -213,7 +213,7 @@ G1 入口的默认跟踪参数为 `control_rate_hz=200`、`stream_rate_hz=100`�
 
 不可达或奇异目标保持 `best-effort`：IK 每次只从当前实测关节 seed 求解并发送最接近配置，不切换中立 seed、不保存“最后可达解”，也不需要恢复服务。后续目标回到可达区域时会在同一控制周期链上自然恢复为普通跟踪。
 
-适配入口只处理动态模型视图、Foxy 的 controller-manager 字段、inactive controller 关节元数据和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为 `right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于 `http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，`command_topic:=/forward_position_controller/commands` 关闭重力补偿，或传入 `enable_dashboard:=false` 仅启动 Commander。
+适配入口只处理动态模型视图、固定的 G1 控制器名和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为 `right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于 `http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，`command_topic:=/forward_position_controller/commands` 关闭重力补偿，或传入 `enable_dashboard:=false` 仅启动 Commander。
 
 8180 Dashboard 复用整机测试页面的 Gloria-M 受限分段 mimic FK 与虚拟节点过滤；`internal_*` link/joint 不进入 3D 标签、关节面板、控制帧下拉框或 fixed-joint 列表，但仍作为计算中间量保证物理 slider 和 connecting rod 的模型联动。
 
@@ -300,5 +300,5 @@ CAN 设备部署只修改 `robot_bringup/end_effectors/topology.py` 中的
 | `launch/end_effectors_*_bus.launch.py` | 选择单/双总线部署并生成硬件 actions |
 | `launch/end_effectors_dashboard.launch.py` | 纯末端 Web Dashboard |
 | `launch/whole_body_dashboard.launch.py` | 纯整机控制器测试 Dashboard |
-| `launch/ikt_pose_commander.launch.py` | 对接互斥 FPC/JTC 的 Foxy IK Commander 入口 |
+| `launch/ikt_pose_commander.launch.py` | 对接互斥 FPC/JTC 的 IK Commander 入口 |
 | `test/test_end_effectors_*.py` | 末端设备无硬件回归测试 |

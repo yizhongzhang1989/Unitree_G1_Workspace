@@ -15,18 +15,14 @@
 
 namespace unitree_g1_ros2_control {
 
-controller_interface::return_type ForwardPositionController::init(
-    const std::string& controller_name) {
-    const auto result = ControllerInterface::init(controller_name);
-    if (result != controller_interface::return_type::OK) return result;
-
+controller_interface::CallbackReturn ForwardPositionController::on_init() {
     try {
         auto_declare<std::vector<std::string>>("joints", {});
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare parameters: %s", error.what());
-        return controller_interface::return_type::ERROR;
+        return CallbackReturn::ERROR;
     }
-    return controller_interface::return_type::OK;
+    return CallbackReturn::SUCCESS;
 }
 
 controller_interface::InterfaceConfiguration
@@ -105,7 +101,8 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_deactiva
     return CallbackReturn::SUCCESS;
 }
 
-controller_interface::return_type ForwardPositionController::update() {
+controller_interface::return_type ForwardPositionController::update(
+    const rclcpp::Time&, const rclcpp::Duration&) {
     const auto command = *command_buffer_.readFromRT();
     if (!command || command->sequence == processed_sequence_) {
         return controller_interface::return_type::OK;

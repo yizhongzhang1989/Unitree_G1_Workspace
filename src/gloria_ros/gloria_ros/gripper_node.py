@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import signal
 import struct
 import threading
 import time
@@ -21,6 +22,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.logging import get_logger
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool, Trigger
 
@@ -773,25 +775,38 @@ class GloriaGripperNode(Node):
         message.status = [status]
         self._diag_pub.publish(message)
 
-    def destroy_node(self) -> bool:
+    def shutdown_device(self) -> None:
+        """失能设备并确认，必须在 context 关闭前、执行器仍在运行时调用"""
         with self._lock:
+            if self._shutting_down:
+                return
             self._shutting_down = True
             self._auto_enable_pending = False
             should_disable = self._enabled_requested or self._enable_in_progress
         if self._enable_timer is not None:
             self._enable_timer.cancel()
-        if self._disable_on_shutdown and should_disable:
-            try:
-                # 同时覆盖已使能状态和尚未完成的在途使能流程
-                self._request_disable()
-                self.get_logger().info("disable sent during shutdown")
-            except Exception as exc:  # noqa: BLE001
-                self.get_logger().warn(f"shutdown disable failed: {exc}")
-        return super().destroy_node()
+        if not (self._disable_on_shutdown and should_disable):
+            return
+        try:
+            # 同时覆盖已使能状态和尚未完成的在途使能流程
+            self._request_disable()
+            wait_after = time.monotonic()
+            self._request_state()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"shutdown disable failed: {exc}")
+            return
+        # 失能后设备仍会回状态帧，收到即说明失能帧确实已经过 bridge 上了总线
+        if self._wait_for_feedback_after(wait_after):
+            self.get_logger().info("disable confirmed during shutdown")
+        else:
+            self.get_logger().warn(
+                "disable sent during shutdown but the device did not answer")
 
 
 def main() -> None:
-    rclpy.init()
+    # 退出失能必须在 context 还活着时发出，所以接管信号而不是让 rclpy 的默认
+    # 处理器在 SIGINT 到达时立刻关闭 context
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node: Optional[GloriaGripperNode] = None
     try:
         node = GloriaGripperNode()
@@ -804,16 +819,28 @@ def main() -> None:
     # 服务回调会等待 CAN 应答，第二个线程负责继续处理反馈订阅
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
+    stopped = threading.Event()
+
+    def spin() -> None:
+        try:
+            executor.spin()
+        finally:
+            # 执行器自行退出（异常或 shutdown）时同样唤醒主线程
+            stopped.set()
+
+    spin_thread = threading.Thread(target=spin, name="gripper_executor", daemon=True)
+    signal.signal(signal.SIGINT, lambda *_: stopped.set())
+    signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+    spin_thread.start()
     try:
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
+        stopped.wait()
     finally:
-        executor.remove_node(node)
-        node.destroy_node()
+        # 执行器仍在处理 CAN 反馈，此时失能才能等到设备应答
+        node.shutdown_device()
         executor.shutdown()
-        if rclpy.ok():
-            rclpy.shutdown()
+        spin_thread.join(timeout=5.0)
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

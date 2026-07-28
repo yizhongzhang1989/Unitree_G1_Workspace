@@ -10,8 +10,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PvCommand.msg"
 )
 
-# Foxy 中 rosidl_generate_interfaces() 与 ament_python_install_package()
-# 使用同一项目名会创建重名 CMake target。消息生成器已负责 Python 环境 hook，
+# rosidl_generate_interfaces() 与 ament_python_install_package() 用同一项目名时
+# 会创建重名 CMake target。消息生成器已负责 Python 环境 hook，
 # 这里直接安装同名包内的节点源码，与生成的 gloria_ros/msg 目录合并。
 install(DIRECTORY
   gloria_ros/

@@ -146,7 +146,7 @@ protected:
         for (int attempt = 0; attempt < 60 && !got; ++attempt) {
             publisher->publish(target);
             executor.spin_some();
-            controller.update();
+            controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
             executor.spin_some();
         }
         EXPECT_TRUE(got);

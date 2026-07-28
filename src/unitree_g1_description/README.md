@@ -38,7 +38,7 @@ ros2 launch unitree_g1_description description.launch.py \
 这一路径不会打开 CAN、订阅 `/lowstate`、创建 controller manager 或发送任何运动命令。
 
 ## 整机控制
-推荐由 bringup 一次启动设备和真实 Foxy ros2_control 栈：
+推荐由 bringup 一次启动设备和真实 ros2_control 栈：
 ```bash
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ```

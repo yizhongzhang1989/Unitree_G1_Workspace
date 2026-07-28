@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import can
 import rclpy
-# ROS 2 标准 CAN 消息包 can_msgs 提供；Foxy: apt install ros-foxy-can-msgs
+# ROS 2 标准 CAN 消息包 can_msgs 提供；apt install ros-humble-can-msgs
 from can_msgs.msg import Frame
 from can_sdk import open_bus
 from rclpy.executors import SingleThreadedExecutor

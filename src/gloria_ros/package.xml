@@ -19,7 +19,7 @@
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
-  <!-- 上游 ROS 2 can_msgs 包提供 can_msgs/msg/Frame；Foxy 二进制包：ros-foxy-can-msgs。 -->
+  <!-- 上游 ROS 2 can_msgs 包提供 can_msgs/msg/Frame；二进制包：ros-humble-can-msgs。 -->
   <exec_depend>can_msgs</exec_depend>
   <exec_depend>ros2launch</exec_depend>
   <!-- gloria_m_sdk 由 scripts/env.sh 从 submodule 源码目录提供。 -->

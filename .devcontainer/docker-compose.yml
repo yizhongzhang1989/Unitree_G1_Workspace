@@ -1,0 +1,60 @@
+# 容器运行参数的唯一来源。.devcontainer/devcontainer.json 通过 dockerComposeFile
+# 引用本文件，build.sh / run.sh 也走它，所以参数只维护一份。
+services:
+  dev:
+    image: g1-humble:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，127.0.0.1 不是宿主的 loopback，
+      # 下面那个 SOCKS 代理就连不上。必须显式共享宿主网络栈。
+      network: host
+      args:
+        # 由 build.sh 导出。本机直连不到 USTC，构建期必须借宿主的 SOCKS 代理。
+        # "Reopen in Container" 不会带这些变量，所以要先跑一次 build.sh 把镜像做好。
+        http_proxy: ${G1_BUILD_PROXY:-}
+        https_proxy: ${G1_BUILD_PROXY:-}
+        all_proxy: ${G1_BUILD_PROXY:-}
+        no_proxy: localhost,127.0.0.1
+        USER_NAME: ${G1_USER_NAME:-unitree}
+        USER_UID: ${G1_USER_UID:-1000}
+        USER_GID: ${G1_USER_GID:-1000}
+
+    # USB（CANalyst-II）与相机直通
+    privileged: true
+    # 与机器人同一网络栈，DDS 才能在 eth0 上发现 /lowstate
+    network_mode: host
+    # DDS 共享内存
+    ipc: host
+    # 运行期代理必须显式传入，VS Code Server/Copilot 不会读取构建期 ARG，也不会继承宿主 shell。
+    environment:
+      HTTP_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      HTTPS_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      ALL_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      NO_PROXY: localhost,127.0.0.1,::1
+      http_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      https_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      all_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      no_proxy: localhost,127.0.0.1,::1
+    # 让 ros2_control_node 拿得到 SCHED_FIFO 和 mlockall——Humble 相对 Foxy 的主要实时收益
+    ulimits:
+      rtprio: 99
+      memlock: -1
+    # 宿主内核开了 CONFIG_RT_GROUP_SCHED，非根 cgroup 的实时带宽默认为 0，此时 sched_setscheduler() 一律返回 EPERM——privileged 和 RLIMIT_RTPRIO 都救不了。
+    # 需要 /etc/docker/daemon.json 里配 "cpu-rt-runtime"（见 README），dockerd 才会在建容器时把配额递归写到 /docker 父 cgroup；缺了它这一行会让容器直接起不来。
+    #
+    # 这是静态预算：每个容器都从父级的 950000 里扣，扣完下一个容器就起不来。
+    # 实测控制环那个 FIFO 线程只占 3% CPU（45% 是 DDS executor 线程，不吃 RT 配额），
+    # 200000 留了约 6 倍余量，同时允许 4 个容器并存（devcontainer + 控制栈 + 若干一次性命令）。怀疑被限流时看 `dmesg | grep "RT throttling"`。
+    cpu_rt_runtime: 200000
+
+    volumes:
+      - ..:/workspace
+      - /dev:/dev
+      # 重力标定结果 ~/.ros/arm_gravity_compensation/ 要持久化。
+      # 容器侧用户名跟宿主走（build.sh 传 $(id -un)），两边都用同一个变量。
+      - ${HOME:-/home/unitree}/.ros:/home/${G1_USER_NAME:-unitree}/.ros
+    working_dir: /workspace
+
+    # devcontainer 需要容器常驻；run.sh 用 `compose run` 会覆盖掉这一条
+    command: sleep infinity

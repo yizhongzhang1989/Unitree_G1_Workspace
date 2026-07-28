@@ -1,34 +1,43 @@
 #!/usr/bin/env bash
-# source 本文件配置 Unitree G1 工作区的 ROS 2 运行环境（CycloneDDS）
-#   source scripts/env.sh
+# Unitree G1 工作区的 ROS 2 运行环境，唯一定义。一个文件两种用法：
+#   - 被 source：只设环境变量。
+#       source scripts/env.sh
+#     容器里的 ~/.bashrc 也走这条——VS Code "Reopen in Container" 开的终端不经过
+#     ENTRYPOINT，没有它就是个没有 ROS 的裸 shell。
+#   - 被执行：设完环境再 exec 传进来的命令。
+#       scripts/env.sh ros2 topic list
+#     容器的 ENTRYPOINT 走这条，因为 `dev.sh <命令>` 这种一次性调用不经过 bash，
+#     也就读不到 ~/.bashrc。
+# 可重复 source，不产生输出。
 
-# 工作区根目录（相对本脚本定位）
 _EE_WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export G1_WORKSPACE="$_EE_WS"
 export END_EFFECTOR_ROS_ROOT="$_EE_WS"
 
-# 根目录 sdk 下的纯 Python SDK 保持独立，不交给 colcon 构建。ROS 节点直接从源码目录导入；
-# 用户若已用 pip 安装 SDK，该设置仍确保当前工作区源码优先，便于联调。
-_EE_SDK_PYTHONPATH="$_EE_WS/sdk/CAN-SDK:$_EE_WS/sdk/KWR57-SDK:$_EE_WS/sdk/Gloria-M-SDK/src"
-export PYTHONPATH="$_EE_SDK_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
+source /opt/ros/humble/setup.bash
 
-source /opt/ros/foxy/setup.bash
-
-_CYCLONEDDS_WS="${UNITREE_CYCLONEDDS_WS:-$HOME/cyclonedds_ws}"
-if [ ! -f "$_CYCLONEDDS_WS/install/setup.bash" ]; then
-	echo "未找到 Unitree CycloneDDS 环境：$_CYCLONEDDS_WS/install/setup.bash" >&2
-	echo "请按 README 中的 Unitree ROS 2 官方步骤安装 CycloneDDS" >&2
-	return 1 2>/dev/null || exit 1
-fi
-source "$_CYCLONEDDS_WS/install/setup.bash"
-
-_PROJECT_SETUP="$_EE_WS/install/setup.bash"
-if [ ! -f "$_PROJECT_SETUP" ]; then
-	echo "未找到项目构建环境：$_PROJECT_SETUP" >&2
-	echo "请先按 README 构建项目包" >&2
-	return 1 2>/dev/null || exit 1
+if [ -f "$_EE_WS/install/setup.bash" ]; then
+	source "$_EE_WS/install/setup.bash"
 fi
 
+# 根目录 sdk 下的纯 Python SDK 保持独立，不交给 colcon 构建，直接从源码目录导入。
+case ":${PYTHONPATH:-}:" in
+	*":$_EE_WS/sdk/CAN-SDK:"*) ;;
+	*) export PYTHONPATH="$_EE_WS/sdk/CAN-SDK:$_EE_WS/sdk/KWR57-SDK:$_EE_WS/sdk/Gloria-M-SDK/src${PYTHONPATH:+:$PYTHONPATH}" ;;
+esac
+
+# 运行必须用 CycloneDDS：默认的 FastRTPS 会刷 std::bad_alloc。Humble 自带的 0.10.x
+# 就是 Unitree 要求的版本，不需要官方那套源码编译的 cyclonedds_ws。
+#
+# 必须限定网卡：不指定时 Cyclone 会挑到 wlan0，表现为收不到 /lowstate。配置直接内联
+# 在 CYCLONEDDS_URI 里（Cyclone 接受 XML 文本，不只是 file://），省掉一个配置文件；
+# 换网卡时设 G1_DDS_INTERFACE 即可，不用编辑 XML。
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="${CYCLONEDDS_URI:-$_CYCLONEDDS_WS/cyclonedds.xml}"
-export LD_LIBRARY_PATH="/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-source "$_PROJECT_SETUP"
+export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${G1_DDS_INTERFACE:-eth0}\" priority=\"default\" multicast=\"default\"/></Interfaces><AllowMulticast>spdp</AllowMulticast></General></Domain></CycloneDDS>}"
+
+unset _EE_WS
+
+# 被执行（而不是被 source）时，继续跑传进来的命令。
+if ! (return 0 2>/dev/null); then
+	exec "$@"
+fi

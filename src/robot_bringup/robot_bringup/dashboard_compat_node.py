@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Foxy adapter for the G1 controller test dashboard."""
+"""G1-specific adapter for the controller test dashboard."""
 
 from dataclasses import dataclass
 import importlib
@@ -22,7 +22,6 @@ RobotTestDashboard = importlib.import_module(
 
 JOINT_KINDS = ("forward_position", "joint_trajectory")
 SWITCH_TIMEOUT_S = 30.0
-QUERY_TIMEOUT_S = 3.0
 # The gravity-compensation controller claims NO command interface: it consumes
 # a whole-body position target on ``~/target`` and republishes it -- with the
 # calibrated arm gravity folded in as a stiffness-scaled offset -- into the
@@ -33,6 +32,7 @@ QUERY_TIMEOUT_S = 3.0
 # controller, only the setpoints go to ``~/target``.
 GRAVITY_TYPE_HINT = "gravitycompensation"
 GRAVITY_TARGET_SUFFIX = "/target"
+QUERY_TIMEOUT_S = 3.0
 
 
 Matrix = List[List[float]]
@@ -394,32 +394,24 @@ class G1RobotTestDashboard(RobotTestDashboard):
             cached = dict(self._joint_cache)
         with self._lock:
             for controller in self._controllers:
+                if not _is_gravity(controller):
+                    continue
                 # Stacks on the forward-position controller rather than
                 # replacing it, so the bench drives it with the very same
                 # joint-space panel (its ``joints`` parameter is that same
                 # whole-body list, in the same order).
-                if _is_gravity(controller):
-                    controller["kind"] = "forward_position"
-                if controller["cmd_ifaces"]:
-                    continue
-                interfaces = cached.get(controller["name"])
-                if interfaces:
-                    self._apply_interfaces(controller, interfaces)
-                elif controller["kind"] in JOINT_KINDS:
+                controller["kind"] = "forward_position"
+                # It claims no command interface, so ``required_command_interfaces``
+                # is empty and the panel would come up with no joints. Filling
+                # ``cmd_ifaces`` instead would make the bench deactivate the very
+                # controller this one feeds, so only ``joints`` is set.
+                joints = cached.get(controller["name"])
+                if joints:
+                    controller["joints"] = list(joints)
+                else:
                     pending.append(controller["name"])
         for name in pending:
             self._request_joints(name)
-
-    @staticmethod
-    def _apply_interfaces(controller: dict, interfaces: List[str]) -> None:
-        joints = [interface.rpartition("/")[0] for interface in interfaces]
-        if _is_gravity(controller):
-            # Claiming interfaces it does not own would make the bench
-            # deactivate the very controller this one feeds.
-            controller["joints"] = joints
-            return
-        controller["cmd_ifaces"] = list(interfaces)
-        controller["joints"] = joints
 
     def _request_joints(self, name: str) -> None:
         with self._joint_meta_lock:
@@ -454,18 +446,16 @@ class G1RobotTestDashboard(RobotTestDashboard):
         except Exception:  # noqa: BLE001
             response = None
         values = list(getattr(response, "values", []) or []) if response else []
-        interfaces = [
-            f"{joint}/position" for joint in
-            (values[0].string_array_value if values else []) if joint]
+        joints = [joint for joint in (values[0].string_array_value if values else []) if joint]
         with self._joint_meta_lock:
             self._joint_pending.discard(name)
-            if interfaces:
-                self._joint_cache[name] = interfaces
-        if interfaces:
+            if joints:
+                self._joint_cache[name] = joints
+        if joints:
             with self._lock:
                 for controller in self._controllers:
-                    if controller["name"] == name and not controller["cmd_ifaces"]:
-                        self._apply_interfaces(controller, interfaces)
+                    if controller["name"] == name:
+                        controller["joints"] = list(joints)
                         break
 
     # ------------------------------------------------------------------ #
@@ -571,10 +561,10 @@ class G1RobotTestDashboard(RobotTestDashboard):
         if not self._cli_switch.wait_for_service(timeout_sec=timeout):
             return False
         request = SwitchController.Request()
-        request.start_controllers = list(activate)
-        request.stop_controllers = list(deactivate)
+        request.activate_controllers = list(activate)
+        request.deactivate_controllers = list(deactivate)
         request.strictness = SwitchController.Request.BEST_EFFORT
-        request.start_asap = True
+        request.activate_asap = True
         response = self._wait(
             self._cli_switch.call_async(request), timeout)
         if response is None or not response.ok:

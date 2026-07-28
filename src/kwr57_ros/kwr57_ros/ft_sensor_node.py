@@ -37,12 +37,13 @@ Parameters
 
 from __future__ import annotations
 
+import signal
 import threading
 import time
 from typing import Any, Callable, List, Optional, Union
 
 import rclpy
-# ROS 2 包 can_msgs 提供的标准 CAN 帧消息；Foxy: apt install ros-foxy-can-msgs
+# ROS 2 包 can_msgs 提供的标准 CAN 帧消息；apt install ros-humble-can-msgs
 # 它与负责物理总线 I/O 的 python-can/can_sdk 是不同层次的依赖。
 from can_msgs.msg import Frame
 from geometry_msgs.msg import WrenchStamped
@@ -51,6 +52,7 @@ from rclpy.logging import get_logger
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -357,17 +359,17 @@ class KWR57DeviceNode(Node):
         self._pub.publish(msg)
 
     def destroy_node(self) -> bool:
-        self._streaming = False
-        self._cancel_start_sequence()
         try:
-            self._send_cmd(self._cmd_id, protocol.build_stop_command())
+            self.stop_device()
         except Exception:  # noqa: BLE001
             pass
         return super().destroy_node()
 
 
 def main() -> None:
-    rclpy.init()
+    # 退出停流命令必须在 context 还活着时发出，所以接管信号而不是让 rclpy 的
+    # 默认处理器在 SIGINT 到达时立刻关闭 context
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node: Optional[KWR57DeviceNode] = None
     try:
         node = KWR57DeviceNode()
@@ -380,14 +382,27 @@ def main() -> None:
     # 单个高频订阅使用线程池只会增加 CPython 的 GIL 竞争与任务调度开销。
     executor = SingleThreadedExecutor()
     executor.add_node(node)
+    stopped = threading.Event()
+
+    def spin() -> None:
+        try:
+            executor.spin()
+        finally:
+            # 执行器自行退出（异常或 shutdown）时同样唤醒主线程
+            stopped.set()
+
+    spin_thread = threading.Thread(target=spin, name="kwr57_executor", daemon=True)
+    signal.signal(signal.SIGINT, lambda *_: stopped.set())
+    signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+    spin_thread.start()
     try:
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
+        stopped.wait()
     finally:
+        executor.shutdown()
+        spin_thread.join(timeout=5.0)
+        # destroy_node() 里的停流命令要在 context 关闭前发出
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

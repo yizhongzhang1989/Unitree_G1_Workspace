@@ -14,6 +14,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventH
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 CONTROLLERS = ["arm_gravity_compensation", "forward_position_controller"]
@@ -59,7 +60,7 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             "joints": joints,
             "floating_joints": floating,
-            "publish_rate_hz": LaunchConfiguration("publish_rate_hz"),
+            "publish_rate_hz": ParameterValue(LaunchConfiguration("publish_rate_hz"), value_type=float),
         }],
     )
     return LaunchDescription([

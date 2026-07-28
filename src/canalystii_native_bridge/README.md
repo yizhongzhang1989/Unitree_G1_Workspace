@@ -1,5 +1,5 @@
 # canalystii_native_bridge
-`canalystii_native_bridge` 是面向 CANalyst-II（USB VID:PID `04d8:0053`）的 ROS 2 Foxy 原生 C++ bridge。生产末端拓扑通过 `robot_bringup` 启动本包；原有 `can_bridge_ros/bridge_node` 只保留为通用 Python 调试和单设备回退入口，不能与本节点同时打开同一台适配器。
+`canalystii_native_bridge` 是面向 CANalyst-II（USB VID:PID `04d8:0053`）的 ROS 2 原生 C++ bridge。生产末端拓扑通过 `robot_bringup` 启动本包；原有 `can_bridge_ros/bridge_node` 只保留为通用 Python 调试和单设备回退入口，不能与本节点同时打开同一台适配器。
 
 > 本包的最终目标是消除共享 CAN 链路在夹爪使能和运动时出现的长断流，并把左右两侧作为同等重要的实时数据路径。
 
@@ -99,14 +99,17 @@ KWR57 只有连续的 `base -> base+1 -> base+2` 才能组成一个六轴样本�
 | `channel_ids` | `[0]` | 启用的 CANalyst-II 物理通道，只允许 `0`、`1` 且不能重复 |
 | `bus_names` | `["can0"]` | 与 `channel_ids` 一一对应的 ROS 总线名 |
 | `rx_queue_depth` | `128` | 默认 RX 和专属路由 publisher 的 `KEEP_LAST` 深度 |
-| `rx_routes` | `[""]` | `channel:can_id:/absolute/topic` 字符串数组；空字符串为 Foxy 类型占位符 |
+| `rx_routes` | `[""]` | `channel:can_id:/absolute/topic` 字符串数组；空字符串为 rclcpp 类型占位符 |
 | `kwr57_device_specs` | `[""]` | 内建 KWR57 配置对象的 JSON 字符串数组 |
 | `io_diagnostics` | `false` | 每秒输出各通道 RX/TX packet、frame 和 RX queue drop 基础计数；生产和时延验收保持关闭 |
 | `native_rx_transfers_per_channel` | `8` | 每通道并行异步 USB RX transfer 数，范围 `1..64` |
 | `native_rx_queue_capacity` | `8192` | 每通道 transport RX packet 队列容量 |
 | `native_tx_queue_capacity` | `2000` | 所有启用通道共享的 transport TX frame 总容量 |
+| `shutdown_grace_period_s` | `2.0` | 收到关闭请求后保持总线可用的上限，范围 `0..60`；TX 连续 200 ms 无新帧即提前收尾 |
 
 `rx_queue_depth` 是 ROS publisher QoS 深度，和 transport 的 `native_rx_queue_capacity` 不是同一层队列。参数都只在节点构造时读取，运行中修改不会重建 transport、路由或 KWR57 设备。
+
+节点用 `rclcpp` 的 pre-shutdown 回调延后 context 失效：Ctrl+C 时终端把 SIGINT 同时发给进程组内所有进程，夹爪等设备节点的退出帧仍要经本节点转发才能上总线，因此关闭请求到达后总线保持可用，直到 TX 静默或宽限期用尽。
 
 每个 `kwr57_device_specs` 对象支持以下字段：
 
@@ -193,10 +196,10 @@ KWR57 只有连续的 `base -> base+1 -> base+2` 才能组成一个六轴样本�
 
 ## 构建与测试
 ```bash
-sudo apt-get install -y libusb-1.0-0-dev libyaml-cpp-dev ros-foxy-can-msgs
+sudo apt-get install -y libusb-1.0-0-dev libyaml-cpp-dev ros-humble-can-msgs
 
 cd ~/Unitree_G1_Workspace
-source /opt/ros/foxy/setup.bash
+source /opt/ros/humble/setup.bash
 colcon build --symlink-install --packages-select canalystii_native_bridge
 source install/setup.bash
 colcon test --packages-select canalystii_native_bridge --event-handlers console_direct+
