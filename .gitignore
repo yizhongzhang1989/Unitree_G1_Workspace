@@ -11,3 +11,5 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+
+/unitree_sdk2/
