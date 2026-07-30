@@ -61,10 +61,12 @@ RUN set -eux; \
       ros-humble-rosidl-default-generators \
       ros-humble-rosidl-generator-dds-idl; \
     pip3 install --no-cache-dir \
-      'python-can>=4.0' 'canalystii>=0.1' 'libusb-package>=1.0.30' pyserial; \
+      'python-can>=4.0' 'canalystii>=0.1' 'libusb-package>=1.0.30' pyserial \
+      'onnxruntime>=1.16'; \
     rm -rf /var/lib/apt/lists/*
 # canalystii 与 libusb-package 是 CAN-SDK 的 [canalystii] extra，只供 Python 调试
 # 链路使用；生产链路是 C++ 的 canalystii_native_bridge，不依赖它们。
+# onnxruntime 供 g1_lower_body_policy 的下肢策略层推理用。CPU 版就够：57->512->256->128->15 的 MLP 在 50 Hz 上不到 0.1 ms。
 
 # 与宿主同 UID/GID：工作区是 bind mount，不对齐会把源码文件写成 root 所有
 ARG USER_NAME=unitree

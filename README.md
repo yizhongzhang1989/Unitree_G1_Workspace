@@ -6,6 +6,7 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 |---|---|
 | `robot_bringup` | 组合整机或末端设备的生产 launch |
 | `unitree_g1_ros2_control` | 把 FPC/JTC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
+| `g1_lower_body_policy` | FPC 之上的下肢 ONNX 策略层：输入 `vx/vy/w/h`，50 Hz 推理出 15 轴腿腰目标保持平衡，上肢写固定位姿交给 VLA |
 | `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
@@ -102,6 +103,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── robot_test_dashboard/     [git submodule] 机器人测试 Dashboard
     ├── unitree_g1_description/   整机 description 包（model/ 为 URDF submodule）
     ├── arm_gravity_compensation/ 双臂重力参数采点、EM 标定与 Web 工作流
+    ├── g1_lower_body_policy/     下肢 ONNX 策略层 + 键盘遥控台（在 FPC 之上）
     ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和互斥 FPC/JTC
     └── unitree_ros2/             [git submodule] 官方消息结构（仅构建 unitree_api、unitree_hg）
 ```

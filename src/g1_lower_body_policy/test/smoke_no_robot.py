@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""无真机联调：假状态源 + 假 controller_manager，把状态机从头到尾走一遍。
+
+真机不在手边的时候，这是唯一能验证"改完配置还能不能安全接管"的手段。它拉起真正的
+``policy_node``（跑真正的 ONNX），只把机器人那一侧换成假的：
+
+* 假 ``/joint_states`` + ``/pelvis_imu_broadcaster/imu``，100 Hz，姿态笔直、关节全 0
+* 假 ``/controller_manager/switch_controller``，记录每次激活/反激活请求
+* 录 ``/forward_position_controller/commands``，逐帧检查
+
+跑法（先 ``source install/setup.bash``）：
+
+    python3 src/g1_lower_body_policy/test/smoke_no_robot.py
+
+假状态源放在独立进程里不是讲究：放在同一个进程里，主线程的忙等会把发布定时器压到
+100 ms 以上，然后策略层的状态超时看门狗就会被自己人误触发。实机上这两个广播也确实
+在 ros2_control_node 里，不在策略层进程内。
+"""
+
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from controller_manager_msgs.srv import SwitchController
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import Imu, JointState
+from std_msgs.msg import Empty, Float64MultiArray, String
+from std_srvs.srv import Trigger
+
+STREAM = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                    reliability=ReliabilityPolicy.BEST_EFFORT)
+RESULTS: list[bool] = []
+
+
+def check(label, condition) -> bool:
+    RESULTS.append(bool(condition))
+    print(f'{"PASS" if condition else "FAIL"}  {label}', flush=True)
+    return bool(condition)
+
+
+# --------------------------------------------------------------------------- 假状态源
+
+class FakeState(Node):
+    def __init__(self, joints):
+        super().__init__('fake_state')
+        self._js = self.create_publisher(JointState, '/joint_states', STREAM)
+        self._imu = self.create_publisher(Imu, '/pelvis_imu_broadcaster/imu', STREAM)
+        self._message = JointState()
+        self._message.name = list(joints)
+        self._message.position = [0.0] * len(joints)
+        self._message.velocity = [0.0] * len(joints)
+        self._imu_message = Imu()
+        self._imu_message.orientation.w = 1.0
+        self._paused = False
+        self.create_subscription(Empty, '/fake_state/pause', self._pause, 10)
+        self.create_timer(0.01, self._publish)
+
+    def _pause(self, _message):
+        self._paused = True
+
+    def _publish(self):
+        if self._paused:
+            return
+        stamp = self.get_clock().now().to_msg()
+        self._message.header.stamp = stamp
+        self._imu_message.header.stamp = stamp
+        self._js.publish(self._message)
+        self._imu.publish(self._imu_message)
+
+
+def run_fake_state(params_path):
+    joints = yaml.safe_load(Path(params_path).read_text(encoding='utf-8'))
+    joints = joints['/lower_body_policy']['ros__parameters']['joints']
+    rclpy.init()
+    try:
+        rclpy.spin(FakeState(joints))
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+
+
+# --------------------------------------------------------------------------- 测试台
+
+class Harness(Node):
+    def __init__(self):
+        super().__init__('smoke_harness')
+        self.command = self.create_publisher(
+            Float64MultiArray, '/lower_body_policy/command', STREAM)
+        self.pause = self.create_publisher(Empty, '/fake_state/pause', 10)
+        self.create_subscription(
+            Float64MultiArray, '/forward_position_controller/commands',
+            self._on_target, STREAM)
+        self.create_subscription(String, '/lower_body_policy/status', self._on_status, 10)
+        self.create_service(
+            SwitchController, '/controller_manager/switch_controller', self._on_switch)
+        self.engage = self.create_client(Trigger, '/lower_body_policy/engage')
+        self.start = self.create_client(Trigger, '/lower_body_policy/start')
+        self.estop = self.create_client(Trigger, '/lower_body_policy/estop')
+        self.targets, self.stamps, self.switches = [], [], []
+        self.status, self.status_log = {}, []
+
+    def _on_target(self, message):
+        self.targets.append(np.asarray(message.data))
+        self.stamps.append(time.monotonic())
+
+    def _on_status(self, message):
+        self.status = json.loads(message.data)
+        self.status_log.append((time.monotonic(), self.status))
+
+    def _on_switch(self, request, response):
+        self.switches.append((list(request.activate_controllers),
+                              list(request.deactivate_controllers)))
+        response.ok = True
+        return response
+
+    def call(self, client, label):
+        assert client.wait_for_service(timeout_sec=15.0), f'{label} 服务没出现'
+        future = client.call_async(Trigger.Request())
+        deadline = time.monotonic() + 25.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert future.done(), f'{label} 超时'
+        print(f'  {label}: success={future.result().success} '
+              f'"{future.result().message}"', flush=True)
+        return future.result()
+
+
+def scenario(node, config):
+    joints = config['joints']
+    policy_slots = [joints.index(name) for name in config['policy_joints']]
+    passive_slots = [i for i in range(len(joints)) if i not in set(policy_slots)]
+
+    deadline = time.monotonic() + 30.0
+    while not node.status and time.monotonic() < deadline:
+        time.sleep(0.1)
+    check('节点起来了且处于 idle', node.status.get('state') == 'idle')
+    check('idle 下不发目标', not node.targets)
+
+    print('\n-- engage --', flush=True)
+    node.call(node.engage, 'engage')
+    check('请求激活 FPC', node.switches[-1][0] == ['forward_position_controller'])
+    time.sleep(0.5)
+    check('站立第一帧贴近实测位姿', np.abs(node.targets[0]).max() < 0.05)
+    check('站立未完成时拒绝 start', not node.call(node.start, 'start(早)').success)
+
+    time.sleep(config['stand_s'] + 0.3)
+    expected = np.zeros(len(joints))
+    expected[policy_slots] = config['stand_pose']
+    expected[passive_slots] = config['passive_targets']
+    check('站立终点 = 策略默认位姿', np.abs(node.targets[-1] - expected).max() < 1e-6)
+    check('站立是渐变不是阶跃',
+          np.abs(node.targets[10] - node.targets[0]).max() < 0.05)
+    check('status 报告可以 start 了', node.status.get('ready_to_start'))
+
+    print('\n-- start --', flush=True)
+    node.call(node.start, 'start')
+    node.targets.clear()
+    node.stamps.clear()
+    node.status_log.clear()
+    message = Float64MultiArray()
+    target_height = config['command_limits'][6]        # 高度下界，行程最长
+    message.data = [0.4, 0.0, 0.0, target_height]
+    for _ in range(100):
+        node.command.publish(message)
+        time.sleep(0.02)
+
+    run = np.asarray(node.targets)
+    gaps = np.diff(node.stamps)
+    check('running 在发目标', len(run) > 50)
+    check(f'目标流没断（最大间隔 {gaps.max() * 1e3:.0f} ms）', gaps.max() < 0.1)
+    check('下肢在动（策略真的在跑）', np.ptp(run[:, policy_slots], axis=0).max() > 0.02)
+    check('上肢/夹爪恒等于 passive_targets',
+          np.abs(run[:, passive_slots] - config['passive_targets']).max() < 1e-9)
+    check('输出全部有限', np.all(np.isfinite(run)))
+    lo = np.asarray(config['target_lower_limits'])
+    hi = np.asarray(config['target_upper_limits'])
+    check('下肢目标在 ctrlrange 内',
+          np.all(run[:, policy_slots] >= lo - 1e-9)
+          and np.all(run[:, policy_slots] <= hi + 1e-9))
+
+    # status 只有 10 Hz，首尾样本的相位未知，所以只取过渡"内部"的样本量斜率。
+    rate = config['height_rate_limit']
+    inside = [(t, s['command'][3]) for t, s in node.status_log
+              if target_height + 0.001 < s['command'][3] < config['initial_height'] - 0.001]
+    slope = abs(inside[-1][1] - inside[0][1]) / (inside[-1][0] - inside[0][0])
+    check(f'高度指令限速生效（实测 {slope:.3f} m/s，限 {rate}）',
+          0.6 * rate < slope < 1.05 * rate)
+    check('高度最终走到位', abs(node.status['command'][3] - target_height) < 1e-3)
+
+    print('\n-- estop --', flush=True)
+    node.call(node.estop, 'estop')
+    check('请求反激活 FPC', node.switches[-1][1] == ['forward_position_controller'])
+    node.targets.clear()
+    time.sleep(0.5)
+    check('急停后不再发目标', not node.targets)
+    check('状态是 estop', node.status.get('state') == 'estop')
+
+    print('\n-- 急停后重新接管必须重走 STAND --', flush=True)
+    node.call(node.engage, 'engage(急停后)')
+    time.sleep(0.3)
+    check('重新 engage 回到 stand', node.status.get('state') == 'stand')
+    check('不能跳过 STAND 直接 start', not node.call(node.start, 'start(早)').success)
+
+    print('\n-- 看门狗：断掉状态源 --', flush=True)
+    node.pause.publish(Empty())
+    time.sleep(1.0)
+    check('状态断流触发急停', node.status.get('state') == 'estop')
+    check('急停原因是超时', '超时' in node.status.get('reason', ''))
+    check('看门狗也走了反激活', node.switches[-1][1] == ['forward_position_controller'])
+
+
+# --------------------------------------------------------------------------- 入口
+
+def build_params(path: Path) -> dict:
+    """把包配置和 FPC 的 31 轴顺序拼成一个 params 文件，和 launch 做的事一样。"""
+    share = Path(get_package_share_directory('g1_lower_body_policy'))
+    document = yaml.safe_load(
+        (share / 'config' / 'lower_body_policy.yaml').read_text(encoding='utf-8'))
+    config = document['/lower_body_policy']['ros__parameters']
+    controller = yaml.safe_load(
+        (Path(get_package_share_directory('unitree_g1_ros2_control')) /
+         'config' / 'forward_position_controller.yaml').read_text(encoding='utf-8'))
+    config['joints'] = controller['/forward_position_controller']['ros__parameters']['joints']
+    path.write_text(yaml.safe_dump(document, allow_unicode=True), encoding='utf-8')
+    return config
+
+
+def main() -> int:
+    if len(sys.argv) > 2 and sys.argv[1] == '--fake-state':
+        run_fake_state(sys.argv[2])
+        return 0
+
+    params = Path('/tmp/lower_body_policy_smoke.yaml')
+    config = build_params(params)
+    # 独立的 domain，免得撞上真的控制栈——这个测试会发目标，绝不能漏到真机上。
+    environment = dict(os.environ, ROS_DOMAIN_ID=os.environ.get('SMOKE_DOMAIN_ID', '77'))
+    children = [
+        subprocess.Popen([sys.executable, __file__, '--fake-state', str(params)],
+                         env=environment, stdout=subprocess.DEVNULL),
+        subprocess.Popen(['ros2', 'run', 'g1_lower_body_policy', 'policy_node',
+                          '--ros-args', '--params-file', str(params)],
+                         env=environment, stdout=subprocess.DEVNULL),
+    ]
+    os.environ['ROS_DOMAIN_ID'] = environment['ROS_DOMAIN_ID']
+    time.sleep(6.0)
+
+    # 站立位姿的期望值来自 ONNX metadata，测试自己再读一遍，和节点独立取数。
+    from g1_lower_body_policy.policy_runtime import load_policy
+    _, spec = load_policy(str(Path(
+        get_package_share_directory('g1_lower_body_policy')) / 'config' / 'policy.onnx'))
+    config['stand_pose'] = spec.default_pos
+
+    rclpy.init()
+    node = Harness()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    threading.Thread(target=executor.spin, daemon=True).start()
+    try:
+        scenario(node, config)
+    finally:
+        rclpy.shutdown()
+        for child in children:
+            child.terminate()
+        for child in children:
+            child.wait(timeout=5)
+    failed = RESULTS.count(False)
+    print(f'\n{len(RESULTS)} 项检查，失败 {failed} 项', flush=True)
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

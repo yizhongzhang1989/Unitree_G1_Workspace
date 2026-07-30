@@ -1,0 +1,91 @@
+/lower_body_policy:
+  ros__parameters:
+    # `joints`（FPC 的 31 轴顺序）由 launch 从
+    # unitree_g1_ros2_control/config/forward_position_controller.yaml 读取后注入，
+    # 不在这里抄第二份——两份不同步就是左右腿指令互换级别的事故。
+
+    # 策略权重。训练侧 scripts/train.py 每次存档都会重新导出 policy.onnx，
+    # 换策略只要覆盖这个文件；关节顺序、默认位姿、动作缩放都从它的 metadata 里读，
+    # 和下面的 policy_joints 对不上会直接拒绝启动。
+    policy_path: package://g1_lower_body_policy/config/policy.onnx
+
+    # 策略控制的 15 轴，顺序必须与 ONNX metadata 的 joint_names 前 15 项一致。
+    # 正好是真机电机索引 0..14。
+    policy_joints:
+      - left_hip_pitch_joint
+      - left_hip_roll_joint
+      - left_hip_yaw_joint
+      - left_knee_joint
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+      - right_hip_pitch_joint
+      - right_hip_roll_joint
+      - right_hip_yaw_joint
+      - right_knee_joint
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+      - waist_yaw_joint
+      - waist_roll_joint
+      - waist_pitch_joint
+
+    # 失控保护边界，取自训练模型里 MuJoCo 自己算的 informational ctrlrange，
+    # 即 jnt_range ± effort_limit / stiffness。
+    #
+    # 注意这里**不是**关节行程限位，故意不是。底层是 PD：tau = kp*(q_target - q) - kd*dq，
+    # 关节靠到行程边上还想要力，就只能把目标顶到行程之外。mjlab 建 <position> 执行器时
+    # 显式设了 ctrllimited=False + inheritrange=0，注释原文：“clamping ctrl to the joint
+    # range would produce zero force when the joint is at its limit”。
+    #
+    # CPU MuJoCo 闭环重跑实测，目标位置超出硬 jnt_range 的比例：
+    #   站立 2.0% / 前进 0.5 m/s 9.8% / 前进 1.0 m/s 18.6% / 蹲行 10.2% / 转身 1.8%
+    #   越界最多的正是 waist_roll、ankle_roll、ankle_pitch —— 撑平衡最吃力的那几个。
+    #   waist_roll 目标能到 -0.763 rad，而行程只有 ±0.520。
+    # 同一批数据里超出下面这组 ctrlrange 的比例是 0%：越过它力矩已经饱和，再大的目标也
+    # 换不来额外的力，所以裁在这儿物理上是空操作，纯粹用来拦真正跑飞的输出。
+    target_lower_limits: [-4.721, -1.926, -4.948, -1.490, -2.627, -2.016,
+                          -4.721, -4.370, -4.948, -1.490, -2.627, -2.016,
+                          -4.808, -2.274, -2.274]
+    target_upper_limits: [+5.070, +4.370, +4.948, +4.282, +2.278, +2.016,
+                          +5.070, +1.926, +4.948, +4.282, +2.278, +2.016,
+                          +4.808, +2.274, +2.274]
+
+    # 策略不管的 16 轴（14 臂 + 2 夹爪偏心轴），按 joints 里的剩余顺序排。
+    # 全 0 = 手臂垂下伸直，由 FPC 的重力补偿托住。
+    # 注意：训练时手臂被随机摆在 elbow ∈ [0.3, 1.6]、shoulder_roll ∈ ±[0.25, 1.20]，
+    # 目的是避开 Gloria-M 夹爪撞大腿。elbow=0 且 shoulder_roll=0 落在那个区间之外，
+    # 首次上电请先在吊架上确认夹爪不蹭髋部；要更保险就用下面这组：
+    #   [0.0, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0,  0.0, -0.25, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+    passive_targets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0]
+
+    # 训练是 sim dt 0.005 × decimation 4 = 50 Hz，实机必须一致：这个频率同时决定
+    # 步态相位的推进速度。FPC 和硬件仍在 500 Hz 上跑，中间的保持由 FPC 负责。
+    control_rate_hz: 50.0
+
+    # 站立插值时长，对应官方 deploy 的 FSM.FixStand.ts=[0,2]。这里给到 3 s，因为
+    # 除了腿还要把手臂收到 passive_targets。
+    stand_s: 3.0
+
+    # 指令限幅 [vx_lo, vx_hi, vy_lo, vy_hi, wz_lo, wz_hi, h_lo, h_hi]。
+    # 训练分布是 vx[-0.5,1.0] vy[-0.5,0.5] wz[-0.5,0.5] h[0.55,0.76]（play 模式），
+    # 下面这组是首次上机用的保守子集，实机调稳之后可以逐档放开到训练分布。
+    command_limits: [-0.3, 0.5, -0.3, 0.3, -0.5, 0.5, 0.62, 0.76]
+
+    # 指令限速。高度这一项不是"可选的平滑"：训练里高度指令按 0.15 m/s 缓变
+    # （BaseHeightCommandCfg.max_rate），策略从没见过高度阶跃。
+    linear_accel_limit: 1.5
+    angular_accel_limit: 3.0
+    height_rate_limit: 0.15
+    initial_height: 0.74
+
+    # 看门狗。tilt_limit_rad 与官方 mdp::bad_orientation 的默认 limit_angle 一致。
+    state_timeout_s: 0.1
+    command_timeout_s: 0.5
+    tilt_limit_rad: 1.0
+
+    imu_topic: /pelvis_imu_broadcaster/imu
+    target_topic: /forward_position_controller/commands
+    controller_name: forward_position_controller
+    controller_manager: /controller_manager
+    switch_timeout_s: 15.0
