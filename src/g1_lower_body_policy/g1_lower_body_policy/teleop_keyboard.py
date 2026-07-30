@@ -12,11 +12,14 @@
 from __future__ import annotations
 
 import json
+import os
 import select
+import shutil
 import sys
 import termios
 import time
 import tty
+import unicodedata
 
 import rclpy
 from rclpy.node import Node
@@ -31,14 +34,11 @@ HELP = """\
 
   W / S     前进 / 后退      (vx)
   A / D     左移 / 右移      (vy)
-  <- / ->   左转 / 右转      (wz)
-  Up / Dn   升高 / 蹲低      (h)
+  J / L     左转 / 右转      (wz)
+  I / K     升高 / 蹲低      (h)
   X         速度指令清零（高度保持）
   Q         退出（退出前自动急停）
 """
-
-# 方向键是 ESC [ A/B/C/D 三字节序列。
-ARROWS = {'A': 'up', 'B': 'down', 'C': 'right', 'D': 'left'}
 
 
 class Teleop(Node):
@@ -56,16 +56,16 @@ class Teleop(Node):
         )
         self._limit = (
             float(p('vx_max', 0.5).get_parameter_value().double_value),
-            float(p('vy_max', 0.3).get_parameter_value().double_value),
-            float(p('wz_max', 0.5).get_parameter_value().double_value),
+            float(p('vy_max', 0.4).get_parameter_value().double_value),
+            float(p('wz_max', 1.5).get_parameter_value().double_value),
         )
         self._h_step = float(p('height_step', 0.01).get_parameter_value().double_value)
         self._h_range = (
-            float(p('height_min', 0.62).get_parameter_value().double_value),
-            float(p('height_max', 0.76).get_parameter_value().double_value),
+            float(p('height_min', 0.50).get_parameter_value().double_value),
+            float(p('height_max', 0.80).get_parameter_value().double_value),
         )
         self._height = min(max(
-            float(p('initial_height', 0.74).get_parameter_value().double_value),
+            float(p('initial_height', 0.75).get_parameter_value().double_value),
             self._h_range[0]), self._h_range[1])
         self._hold_timeout = float(
             p('hold_timeout_s', 0.4).get_parameter_value().double_value)
@@ -92,14 +92,14 @@ class Teleop(Node):
         """处理一个按键，返回 False 表示要退出。"""
         self._idle = 0.0
         axis = {'w': (0, 1), 's': (0, -1), 'a': (1, 1), 'd': (1, -1),
-                'left': (2, 1), 'right': (2, -1)}.get(name)
+                'j': (2, 1), 'l': (2, -1)}.get(name)
         if axis is not None:
             index, sign = axis
             value = self._vel[index] + sign * self._step[index]
             self._vel[index] = min(max(value, -self._limit[index]), self._limit[index])
-        elif name == 'up':
+        elif name == 'i':
             self._height = min(self._height + self._h_step, self._h_range[1])
-        elif name == 'down':
+        elif name == 'k':
             self._height = max(self._height - self._h_step, self._h_range[0])
         elif name == ' ':
             self._vel = [0.0, 0.0, 0.0]
@@ -158,26 +158,43 @@ class Teleop(Node):
 
     def render(self) -> str:
         vx, vy, wz = self._vel
-        return (f'\r\033[Kvx {vx:+.2f}  vy {vy:+.2f}  w {wz:+.2f}  h {self._height:.3f}'
-                f'  | {self._status}  | {self.notice}')
+        line = (f'vx{vx:+.2f} vy{vy:+.2f} w{wz:+.2f} h{self._height:.3f}'
+                f' | {self._status} | {self.notice}')
+        return f'\r\033[K{_clip(line, shutil.get_terminal_size().columns - 1)}'
 
     def estop_client(self):
         return self._estop_client
 
 
+def _clip(text: str, columns: int) -> str:
+    """按显示宽度截断。状态行一旦溢出终端宽度就会折行，``\\r`` 只能回到最后
+    一行的行首，改不掉上一行——于是每刷新一帧屏幕就往下滚一行。不确定宽度的
+    （east_asian_width 为 A）一律当 2 列算，宁可多截也不能折行。
+    """
+    used = 0
+    for index, char in enumerate(text):
+        used += 2 if unicodedata.east_asian_width(char) in 'WFA' else 1
+        if used > columns:
+            return text[:index]
+    return text
+
+
+_pending = b''
+
+
 def read_key(timeout: float) -> str | None:
-    """读一个按键。方向键返回 'up'/'down'/'left'/'right'。"""
-    if not select.select([sys.stdin], [], [], timeout)[0]:
+    """读一个按键。
+
+    走 ``os.read`` 而不是 ``sys.stdin.read(1)``：后者会把内核里的一整批字节吸进
+    Python 自己的缓冲区，而随后的 ``select`` 只看 fd，没取走的字节就卡在那儿了。
+    """
+    global _pending
+    if not _pending and select.select([sys.stdin], [], [], timeout)[0]:
+        _pending = os.read(sys.stdin.fileno(), 64)
+    if not _pending:
         return None
-    char = sys.stdin.read(1)
-    if char != '\x1b':
-        return char.lower()
-    # ESC 序列的后续字节已经在缓冲里，不会阻塞。
-    if not select.select([sys.stdin], [], [], 0.01)[0]:
-        return '\x1b'
-    if sys.stdin.read(1) != '[':
-        return '\x1b'
-    return ARROWS.get(sys.stdin.read(1), '\x1b')
+    char, _pending = _pending[:1], _pending[1:]
+    return char.decode('utf-8', 'replace').lower()
 
 
 def main(args=None) -> None:
@@ -191,11 +208,15 @@ def main(args=None) -> None:
     settings = termios.tcgetattr(sys.stdin)
     try:
         tty.setcbreak(sys.stdin.fileno())
+        last = time.monotonic()
         while rclpy.ok():
             key = read_key(dt)
             if key is not None and not node.key(key):
                 break
-            node.tick(dt)
+            # 缓冲里还有字节时 read_key 会立刻返回，节拍不再等于 dt，按实测走。
+            now = time.monotonic()
+            node.tick(now - last)
+            last = now
             rclpy.spin_once(node, timeout_sec=0.0)
             sys.stdout.write(node.render())
             sys.stdout.flush()

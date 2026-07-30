@@ -71,7 +71,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("enable_grippers_on_start", default_value="true"),
         DeclareLaunchArgument("controller_manager", default_value="/controller_manager"),
         DeclareLaunchArgument("lowstate_topic", default_value="/lowstate"),
-        DeclareLaunchArgument("arm_stiffness_scale", default_value="2"),
+        DeclareLaunchArgument("arm_stiffness_scale", default_value="1.0"),
         DeclareLaunchArgument("joint_states_topic", default_value="/joint_states"),
         DeclareLaunchArgument("robot_description_topic", default_value="/robot_description"),
         DeclareLaunchArgument("require_pr_mode", default_value="true"),

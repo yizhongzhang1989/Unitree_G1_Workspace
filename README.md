@@ -11,6 +11,7 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
 | `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
+| `g1_lower_body_policy` | 下肢 ONNX 策略层 + 键盘遥控台（在 FPC 之上） |
 
 
 ## 快速开始
@@ -133,11 +134,11 @@ ROS 环境不在这里：它定义在工作区的 [`scripts/env.sh`](scripts/env
 ```bash
 .devcontainer/dev.sh build       # 产出 g1-humble:latest，约 2 GB
 ```
-本机直连不到 `mirrors.ustc.edu.cn`，`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `socks5h://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
+本机直连不到镜像站（`mirrors.aliyun.com` 只能经代理访问，`mirrors.ustc.edu.cn` 和 `pypi.org` 则完全不可达），`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `socks5h://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
 
 compose 里 `build.network: host` 是必需的——BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，`127.0.0.1` 不是宿主的 loopback，代理会连不上。
 
-VS Code 的 "Reopen in Container" 不会带这些代理变量，所以**必须先跑一次 `dev.sh build`** 把镜像做好。
+VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY`，所以 compose 里把默认值写成了 `socks5h://127.0.0.1:1080`；代理地址不是这个的话，先跑一次 `dev.sh build` 把镜像做好再进容器。
 
 ### 进容器
 ```bash

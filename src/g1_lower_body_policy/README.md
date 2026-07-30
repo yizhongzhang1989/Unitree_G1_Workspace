@@ -72,21 +72,7 @@ interface，`G1TopicSystem::write()` 补上 `default_29dof_param.yaml` 的 kp/kd
 
 ---
 
-## 1. 先做的三件事
-```bash
-# 1) ROS 2 环境（已经写进 ~/.bashrc）
-source /opt/ros/humble/setup.bash
-
-# 2) 容器里要有 onnxruntime。.devcontainer/Dockerfile 已经加了 pip3 install 'onnxruntime>=1.16'
-python3 -c "import onnxruntime; print(onnxruntime.__version__)"
-
-# 3) 构建
-cd /workspace   # 或本工作区根目录
-colcon build --symlink-install --packages-ignore unitree_go unitree_ros2_example
-source scripts/env.sh
-```
-
-## 2. 启动顺序
+## 启动顺序
 ```bash
 # 1.控制栈（会把 FPC 加载成 inactive，本层在 engage 时才激活它）
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
@@ -108,8 +94,8 @@ ros2 run g1_lower_body_policy teleop_keyboard
 | `空格` | **急停**：反激活 FPC → kp 斜坡降到 0（阻尼模式）→ 最后一帧 kd 归零（零力矩模式） |
 | `W`/`S` | 前进 / 后退 `vx` |
 | `A`/`D` | 左移 / 右移 `vy` |
-| `←`/`→` | 左转 / 右转 `wz` |
-| `↑`/`↓` | 升高 / 蹲低 `h` |
+| `J`/`L` | 左转 / 右转 `wz` |
+| `I`/`K` | 升高 / 蹲低 `h` |
 | `X` | 速度指令清零（高度保持） |
 | `Q` | 退出（退出前自动急停） |
 

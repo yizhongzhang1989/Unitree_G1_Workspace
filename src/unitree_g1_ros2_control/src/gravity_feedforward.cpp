@@ -106,6 +106,22 @@ std::string resolve_path(const std::string& path) {
     return std::string(home) + path.substr(1);
 }
 
+/// A controller declares every parameter of its YAML from the overrides, and
+/// those declarations are dynamically typed, so `ros2 param set ...
+/// compensation_scale 0` passes the type check and arrives here as an integer -
+/// where `as_double()` would throw out of the parameter service and abort the
+/// whole process. Anything that is not a number becomes NaN and is rejected by
+/// the finiteness check the value goes through anyway.
+double as_number(const rclcpp::Parameter& parameter) {
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+        return static_cast<double>(parameter.as_int());
+    }
+    if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+        return parameter.as_double();
+    }
+    return std::nan("");
+}
+
 std::vector<double> read_doubles(
     const YAML::Node& node, const std::string& key, std::size_t expected) {
     const YAML::Node entry = node[key];
@@ -182,10 +198,10 @@ bool GravityFeedforward::configure(
             result.successful = true;
             for (const auto& parameter : parameters) {
                 if (parameter.get_name() != "compensation_scale") continue;
-                const double value = parameter.as_double();
+                const double value = as_number(parameter);
                 if (!std::isfinite(value) || value < 0.0) {
                     result.successful = false;
-                    result.reason = "compensation_scale must be finite and non-negative";
+                    result.reason = "compensation_scale must be a finite non-negative number";
                     break;
                 }
                 compensation_scale_.store(value, std::memory_order_relaxed);

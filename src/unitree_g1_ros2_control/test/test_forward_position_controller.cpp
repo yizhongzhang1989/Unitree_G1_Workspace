@@ -258,5 +258,36 @@ TEST_F(ForwardPositionControllerTest, reapplies_gravity_offset_without_a_new_com
     std::remove(table.c_str());
 }
 
+/// `ros2 param set /forward_position_controller compensation_scale 0` sends an
+/// integer, and controller_manager declares every parameter of the controller
+/// YAML from the overrides, i.e. dynamically typed, so the integer reaches the
+/// callback instead of being rejected by the type check. Reading it as a double
+/// there aborted the whole ros2_control_node, hardware included.
+TEST_F(ForwardPositionControllerTest, accepts_an_integer_compensation_scale) {
+    const std::string table = write_single_body_table();
+    ForwardPositionController controller;
+    ASSERT_EQ(
+        controller.init(
+            "integer_scale_controller", "",
+            // The node options controller_manager hands to every controller.
+            rclcpp::NodeOptions()
+                .allow_undeclared_parameters(true)
+                .automatically_declare_parameters_from_overrides(true)
+                .parameter_overrides({
+                    rclcpp::Parameter("joints", kGravityJoints),
+                    rclcpp::Parameter("gravity_table", table),
+                    rclcpp::Parameter("compensation_scale", 1.0),
+                })),
+        controller_interface::return_type::OK);
+    ASSERT_TRUE(controller.get_node()->describe_parameter("compensation_scale").dynamic_typing);
+    ASSERT_EQ(controller.on_configure(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
+
+    auto node = controller.get_node();
+    EXPECT_TRUE(node->set_parameter(rclcpp::Parameter("compensation_scale", 0)).successful);
+    // Anything that is not a number still has to come back as a failed request.
+    EXPECT_FALSE(node->set_parameter(rclcpp::Parameter("compensation_scale", "off")).successful);
+    std::remove(table.c_str());
+}
+
 }  // namespace
 }  // namespace unitree_g1_ros2_control
