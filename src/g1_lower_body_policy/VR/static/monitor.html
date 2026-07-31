@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VR 数据监控</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      font: 14px/1.5 system-ui, sans-serif;
+      background: #14161a;
+      color: #e6e6e6;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 12px 0 0;
+    }
+
+    .badge {
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: #23272e;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .badge.ok {
+      background: #14532d;
+      color: #86efac;
+    }
+
+    .badge.bad {
+      background: #4c1d1d;
+      color: #fca5a5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: #1b1e24;
+      border: 1px solid #2a2f37;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .card h2 {
+      font-size: 14px;
+      margin: 0 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #555;
+    }
+
+    .dot.on {
+      background: #4ade80;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 86px 1fr auto;
+      align-items: center;
+      gap: 8px;
+      margin: 5px 0;
+    }
+
+    label {
+      color: #8b95a3;
+      font-size: 12px;
+    }
+
+    code {
+      font: 12px/1.4 ui-monospace, Consolas, monospace;
+      white-space: pre;
+      color: #cfe3ff;
+      grid-column: 2 / 4;
+    }
+
+    .bar {
+      height: 8px;
+      background: #2a2f37;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bar i {
+      display: block;
+      height: 100%;
+      width: 0;
+      background: #3b82f6;
+    }
+
+    .val {
+      font: 12px ui-monospace, Consolas, monospace;
+      color: #9fb4d0;
+      min-width: 34px;
+      text-align: right;
+    }
+
+    .btns {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .chip {
+      padding: 2px 9px;
+      border-radius: 5px;
+      background: #2a2f37;
+      color: #6b7480;
+      font-size: 12px;
+    }
+
+    .chip.on {
+      background: #1d4ed8;
+      color: #fff;
+    }
+
+    button {
+      margin-top: 10px;
+      padding: 6px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #2f6feb;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    details {
+      margin-top: 16px;
+    }
+
+    pre {
+      background: #0d0f12;
+      padding: 12px;
+      border-radius: 8px;
+      max-height: 40vh;
+      overflow: auto;
+      font-size: 11px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>VR 数据监控</h1>
+    <span class="badge" id="conn">连接中…</span>
+    <span class="badge" id="hz">-- Hz</span>
+    <span class="badge" id="seq">seq --</span>
+    <span class="badge" id="sess">未进入 VR</span>
+  </header>
+
+  <div class="grid">
+    <section class="card" data-part="head">
+      <h2><span class="dot" data-f="dot"></span>头显</h2>
+      <div class="row"><label>position</label><code data-f="pos">—</code></div>
+      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+    </section>
+
+    <section class="card" data-part="left">
+      <h2><span class="dot" data-f="dot"></span>左手柄</h2>
+      <div class="row"><label>position</label><code data-f="pos">—</code></div>
+      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+      <div class="row"><label>trigger</label>
+        <div class="bar"><i data-f="triggerBar"></i></div><span class="val" data-f="trigger">0.00</span>
+      </div>
+      <div class="row"><label>squeeze</label>
+        <div class="bar"><i data-f="squeezeBar"></i></div><span class="val" data-f="squeeze">0.00</span>
+      </div>
+      <div class="row"><label>thumbstick</label><code data-f="stick">—</code></div>
+      <div class="btns" data-f="chips"></div>
+      <button data-haptic="left">震动测试</button>
+    </section>
+
+    <section class="card" data-part="right">
+      <h2><span class="dot" data-f="dot"></span>右手柄</h2>
+      <div class="row"><label>position</label><code data-f="pos">—</code></div>
+      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
+      <div class="row"><label>trigger</label>
+        <div class="bar"><i data-f="triggerBar"></i></div><span class="val" data-f="trigger">0.00</span>
+      </div>
+      <div class="row"><label>squeeze</label>
+        <div class="bar"><i data-f="squeezeBar"></i></div><span class="val" data-f="squeeze">0.00</span>
+      </div>
+      <div class="row"><label>thumbstick</label><code data-f="stick">—</code></div>
+      <div class="btns" data-f="chips"></div>
+      <button data-haptic="right">震动测试</button>
+    </section>
+  </div>
+
+  <details>
+    <summary>原始 JSON</summary>
+    <pre id="raw">—</pre>
+  </details>
+
+  <script>
+    const token = new URLSearchParams(location.search).get('token');
+    const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+    const connEl = document.getElementById('conn');
+    const hzEl = document.getElementById('hz');
+    const seqEl = document.getElementById('seq');
+    const sessEl = document.getElementById('sess');
+    const rawEl = document.getElementById('raw');
+
+    const cards = {};
+    for (const el of document.querySelectorAll('[data-part]')) {
+      const fields = {};
+      for (const n of el.querySelectorAll('[data-f]')) fields[n.dataset.f] = n;
+      cards[el.dataset.part] = fields;
+    }
+
+    const fmt = (a, n = 3) => Array.isArray(a)
+      ? a.map(v => (v < 0 ? '' : ' ') + v.toFixed(n)).join('  ')
+      : '—';
+
+    const CHIPS = [
+      ['a_x', 'A/X'], ['b_y', 'B/Y'], ['thumbstick_pressed', '摇杆按下'],
+    ];
+
+    function renderHand(key, d) {
+      const c = cards[key];
+      const on = !!(d && d.grip);
+      c.dot.classList.toggle('on', on);
+      c.pos.textContent = on ? fmt(d.grip.position) : '—';
+      c.quat.textContent = on ? fmt(d.grip.orientation) : '—';
+      const b = (d && d.buttons) || {};
+      for (const k of ['trigger', 'squeeze']) {
+        const v = b[k] || 0;
+        c[k].textContent = v.toFixed(2);
+        c[k + 'Bar'].style.width = (v * 100) + '%';
+      }
+      c.stick.textContent = d && d.thumbstick ? fmt(d.thumbstick, 2) : '—';
+      if (c.chips.childElementCount !== CHIPS.length) {
+        c.chips.innerHTML = CHIPS.map(([, label]) => `<span class="chip">${label}</span>`).join('');
+      }
+      CHIPS.forEach(([k], i) => c.chips.children[i].classList.toggle('on', !!b[k]));
+    }
+
+    let latest = null, frames = 0;
+
+    function render() {
+      requestAnimationFrame(render);
+      if (!latest) return;
+      const d = latest;
+      seqEl.textContent = 'seq ' + d.seq;
+      sessEl.textContent = d.session_active ? 'VR 会话进行中' : '未进入 VR';
+      sessEl.className = 'badge ' + (d.session_active ? 'ok' : '');
+      const h = cards.head;
+      h.dot.classList.toggle('on', !!d.head);
+      h.pos.textContent = d.head ? fmt(d.head.position) : '—';
+      h.quat.textContent = d.head ? fmt(d.head.orientation) : '—';
+      renderHand('left', d.left);
+      renderHand('right', d.right);
+      rawEl.textContent = JSON.stringify(d, null, 1);
+    }
+    render();
+
+    setInterval(() => {
+      hzEl.textContent = frames + ' Hz';
+      frames = 0;
+    }, 1000);
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws/subscribe${qs}`);
+      ws.onopen = () => { connEl.textContent = '已连接'; connEl.className = 'badge ok'; };
+      ws.onmessage = (e) => { latest = JSON.parse(e.data); frames++; };
+      ws.onclose = () => {
+        connEl.textContent = '断开，重连中…';
+        connEl.className = 'badge bad';
+        setTimeout(connect, 1000);
+      };
+    }
+    connect();
+
+    for (const btn of document.querySelectorAll('[data-haptic]')) {
+      btn.onclick = () => fetch('/haptic' + qs, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hand: btn.dataset.haptic, intensity: 0.8, duration: 150 }),
+      });
+    }
+  </script>
+</body>
+
+</html>

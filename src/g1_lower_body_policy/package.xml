@@ -4,9 +4,10 @@
   <name>g1_lower_body_policy</name>
   <version>0.1.0</version>
   <description>
-    ONNX 下肢平衡/行走策略层。位于 forward_position_controller 之上：输入
-    vx/vy/w/h 四个高层指令，输出 31 轴位置目标（下肢 15 轴由策略给出，上肢与夹爪
-    保持固定目标），由 forward_position_controller 带重力补偿写到硬件。
+    ONNX 下肢平衡/行走策略 + 双臂 IK。位于 forward_position_controller 之上：输入
+    vx/vy/w/h、两个末端位姿和两个夹爪角度，在同一个 50 Hz 定时器里算齐 31 轴位置
+    目标（下肢 15 轴走策略，上肢 14 轴走 IK，夹爪 2 轴透传），
+    由 forward_position_controller 带重力补偿写到硬件。
   </description>
   <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
   <license>Apache-2.0</license>
@@ -19,6 +20,9 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <!-- 双臂 IK 的运动学后端（.devcontainer/Dockerfile 里的 ros-humble-pinocchio）。 -->
+  <exec_depend>pinocchio</exec_depend>
+  <!-- vr_teleop 订 WebXR 桥的 WebSocket 用；没有 rosdep key，同样由 Dockerfile 提供。 -->
   <!-- onnxruntime 没有 rosdep key，由 .devcontainer/Dockerfile 的 pip3 install 提供。 -->
 
   <exec_depend>unitree_g1_ros2_control</exec_depend>

@@ -32,13 +32,16 @@ from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import SwitchController
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Empty, Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 STREAM = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                     reliability=ReliabilityPolicy.BEST_EFFORT)
+LATCHED = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                     reliability=ReliabilityPolicy.RELIABLE,
+                     durability=DurabilityPolicy.TRANSIENT_LOCAL)
 RESULTS: list[bool] = []
 
 
@@ -48,6 +51,10 @@ def check(label, condition) -> bool:
     return bool(condition)
 
 
+URDF_PATH = (Path(get_package_share_directory('unitree_g1_description'))
+             / 'model' / 'final.urdf')
+
+
 # --------------------------------------------------------------------------- 假状态源
 
 class FakeState(Node):
@@ -55,6 +62,9 @@ class FakeState(Node):
         super().__init__('fake_state')
         self._js = self.create_publisher(JointState, '/joint_states', STREAM)
         self._imu = self.create_publisher(Imu, '/pelvis_imu_broadcaster/imu', STREAM)
+        # 策略节点靠它建手臂 IK 模型；真机上这份由 ros2_control_node 发。
+        self._description = self.create_publisher(String, '/robot_description', LATCHED)
+        self._description.publish(String(data=URDF_PATH.read_text(encoding='utf-8')))
         self._message = JointState()
         self._message.name = list(joints)
         self._message.position = [0.0] * len(joints)
@@ -178,8 +188,9 @@ def scenario(node, config):
     check('running 在发目标', len(run) > 50)
     check(f'目标流没断（最大间隔 {gaps.max() * 1e3:.0f} ms）', gaps.max() < 0.1)
     check('下肢在动（策略真的在跑）', np.ptp(run[:, policy_slots], axis=0).max() > 0.02)
-    check('上肢/夹爪恒等于 passive_targets',
-          np.abs(run[:, passive_slots] - config['passive_targets']).max() < 1e-9)
+    # 手臂从实测位形（假状态源全 0）接管，没人发上肢指令就该一直停在那儿。
+    check('没有上肢指令时手臂/夹爪保持接管姿态',
+          np.abs(run[:, passive_slots]).max() < 1e-3)
     check('输出全部有限', np.all(np.isfinite(run)))
     lo = np.asarray(config['target_lower_limits'])
     hi = np.asarray(config['target_upper_limits'])
@@ -195,6 +206,71 @@ def scenario(node, config):
     check(f'高度指令限速生效（实测 {slope:.3f} m/s，限 {rate}）',
           0.6 * rate < slope < 1.05 * rate)
     check('高度最终走到位', abs(node.status['command'][3] - target_height) < 1e-3)
+
+    print('\n-- ~/command 分块：各发布者只更新自己那一段 --', flush=True)
+    from g1_lower_body_policy.arm_ik import ArmIK
+    ik = ArmIK(URDF_PATH.read_text(encoding='utf-8'), config['arm_joints'],
+               {'left': config['left_tip_frame'], 'right': config['right_tip_frame']},
+               base_frame=config['base_frame'])
+    arm_slots = [joints.index(name) for name in ik.joint_names]
+    left_slots = [joints.index(n) for n in ik.joint_names if n.startswith('left')]
+    right_slots = [joints.index(n) for n in ik.joint_names if n.startswith('right')]
+    grip_slots = [joints.index(name) for name in config['gripper_joints']]
+    home = ik.fk(np.zeros(len(ik.joint_names)))
+
+    def publish(values, repeat=20):
+        message = Float64MultiArray()
+        message.data = [float(v) for v in values]
+        node.targets.clear()
+        for _ in range(repeat):
+            node.command.publish(message)
+            time.sleep(0.02)
+        return np.asarray(node.targets)[-1]
+
+    check('status 报告 IK 就绪', node.status.get('ik_ready'))
+
+    last = publish([1.0, 1.0])
+    check('长度 2 只动夹爪',
+          np.abs(last[grip_slots] - 1.0).max() < 1e-9
+          and np.abs(last[arm_slots]).max() < 1e-3)
+
+    right_up = home['right'].copy()
+    right_up[2] += 0.05
+    last = publish(right_up)
+    reached = ik.fk(last[arm_slots])['right']
+    error = float(np.linalg.norm(reached[:3] - right_up[:3]))
+    check(f'长度 7 右手末端到位（残差 {error * 1e3:.2f} mm）', error < 3e-3)
+    check('长度 7 不碰左臂，也不碰夹爪',
+          np.abs(last[left_slots]).max() < 1e-3
+          and np.abs(last[grip_slots] - 1.0).max() < 1e-9)
+
+    left_up = home['left'].copy()
+    left_up[2] += 0.05
+    last = publish(np.concatenate([left_up, right_up]))
+    check('长度 14 双臂同时跟随',
+          np.abs(last[left_slots]).max() > 0.01
+          and np.abs(last[right_slots]).max() > 0.01)
+
+    arm_before = last[arm_slots].copy()
+    last = publish([0.0, 0.0, 0.0, config['initial_height']])
+    check('长度 4 完全不动上肢（teleop_keyboard.py 的回归）',
+          np.abs(last[arm_slots] - arm_before).max() < 1e-9
+          and np.abs(last[grip_slots] - 1.0).max() < 1e-9)
+
+    last = publish([0.0] * 5, repeat=10)
+    check('非法长度整帧丢弃',
+          np.abs(last[arm_slots] - arm_before).max() < 1e-9
+          and np.abs(last[grip_slots] - 1.0).max() < 1e-9)
+
+    last = publish(np.concatenate([[0.0, 0.0, 0.0, config['initial_height']],
+                                   home['left'], home['right'], [0.0, 0.0]]))
+    # 契约是末端位姿，不是关节值：7 自由度冗余 + 零空间姿态偏置，同一个末端位姿会
+    # 落在不同的关节位形上，这是设计如此。
+    back = ik.fk(last[arm_slots])
+    worst = max(float(np.linalg.norm(back[side][:3] - home[side][:3]))
+                for side in ('left', 'right'))
+    check(f'长度 20 全量：双臂末端回到原位（残差 {worst * 1e3:.2f} mm）、夹爪归零',
+          worst < 3e-3 and np.abs(last[grip_slots]).max() < 1e-9)
 
     print('\n-- estop --', flush=True)
     node.call(node.estop, 'estop')

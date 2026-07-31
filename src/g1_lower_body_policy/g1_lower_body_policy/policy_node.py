@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""下肢 ONNX 策略层：forward_position_controller 之上的一层。
+"""下肢 ONNX 策略 + 上肢 IK：forward_position_controller 之上唯一的一层。
 
-    键盘/VLA --(vx, vy, w, h)--> [ 本节点 50 Hz ONNX ] --31 轴位置--> FPC(500 Hz,
-                                                                    含手臂重力补偿)
-                                                                        |
-                                                            G1TopicSystem --> /lowcmd
+    键盘/VLA --指令--> [ 本节点 50 Hz：ONNX 推理 + 双臂 IK ] --31 轴位置--> FPC(500 Hz,
+                                                                     含手臂重力补偿)
+                                                                          |
+                                                              G1TopicSystem --> /lowcmd
 
-本节点只负责下肢 15 轴（12 腿 + 3 腰）；上肢 14 轴和 2 个夹爪偏心轴写固定目标
-（默认 0），由 FPC 的重力补偿托住。策略的职责是在上肢被别人（VLA）随意摆布时
-保持平衡并跟随速度/高度指令。
+一个定时器算齐 31 轴：下肢 15 轴（12 腿 + 3 腰）由 ONNX 策略给出，上肢 14 轴由双臂
+IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终开启，没有开关。
+
+``~/command`` 一个话题按长度分块，各发布者只更新自己那部分，互不干扰：
+
+    长度  2   [左夹爪, 右夹爪]
+    长度  4   [vx, vy, wz, h]                      —— teleop_keyboard.py 发的就是它
+    长度  7   右臂位姿 [x, y, z, qx, qy, qz, qw]
+    长度 14   双臂位姿（先左后右）
+    长度 20   全量，布局是 下肢 4 + 左臂 7 + 右臂 7 + 夹爪 2
+
+末端位姿指 ``*_gripper_base`` 相对 ``torso_link``。参考系选 torso_link 而不是 pelvis，
+是为了让手臂目标和策略摆腰彻底解耦——腰怎么动手臂都跟着躯干走，IK 链里根本没有腰。
 
 状态机照搬 ``deploy/`` 里官方的 Passive -> FixStand -> RLBase 三段式，这是实机上
 唯一被验证过的接管顺序：
@@ -20,15 +30,18 @@
 * ``STAND``：激活 FPC，用 ``stand_s`` 秒把 31 轴从"当前实测位姿"线性插值到策略的
   默认位姿（对应官方 ``State_FixStand`` 的 ``ts: [0, 2]`` + ``qs``），插完就停在
   那儿等人确认。策略绝不能从任意位姿冷启动——训练里它只见过默认位姿附近的开局。
-* ``RUNNING``：策略接管。进入时清零 ``last_action`` 和步态相位，等价于官方
-  ``env->reset()``。
+  这一段手臂仍走 ``passive_targets``，IK 还没接管。
+* ``RUNNING``：策略与手臂 IK 同时接管。进入时清零 ``last_action`` 和步态相位，
+  等价于官方 ``env->reset()``；手臂目标位姿用当前实测位形正解播种，所以没人发上肢
+  指令时手臂就停在接管那一刻的姿态。
 * ``ESTOP``：停止发目标并反激活 FPC。反激活会触发 G1TopicSystem 的卸力斜坡——
   kp 在 ``release_ramp_s`` 内降到 0（只剩 kd，阻尼模式），最后一帧 kd 也归零
   （零力矩模式）。
 
 看门狗：状态超时、姿态倾覆（对应官方 ``mdp::bad_orientation``，阈值同为 1.0 rad）、
 推理异常、输出非有限值，任一触发即急停。指令超时只把速度归零、保持高度，不急停
-——遥控手松手不该让机器人卸力。
+——遥控手松手不该让机器人卸力。上肢够不着或求解异常同样不急停，保持上一帧手臂目标
+即可：正在平衡的下肢不该被上肢的问题拖下水。
 """
 
 from __future__ import annotations
@@ -47,17 +60,32 @@ from controller_manager_msgs.srv import SwitchController
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
+from g1_lower_body_policy.arm_ik import ArmIK
 from g1_lower_body_policy.policy_runtime import (
     LowerBodyPolicy,
     load_policy,
     projected_gravity,
     spec_matches,
 )
+
+# ``~/command`` 按长度分块。全量 20 值的布局是 下肢 4 + 左臂 7 + 右臂 7 + 夹爪 2，
+# 其余长度都是它的连续子块——发多长就只覆写对应那几个字段，别的原样保留。
+# _LAYOUT 的键由块大小相加得出（依次为 2 / 4 / 7 / 14 / 20），而不是另拄一份，
+# 这样改了块大小也不会出现两张表对不上的情况。
+_BLOCK = {'base': 4, 'left': 7, 'right': 7, 'grip': 2}
+_LAYOUT = {sum(_BLOCK[name] for name in fields): fields for fields in (
+    ('grip',), ('base',), ('right',), ('left', 'right'),
+    ('base', 'left', 'right', 'grip'))}
 
 
 class State(Enum):
@@ -110,6 +138,46 @@ class LowerBodyPolicyNode(Node):
             .get_parameter_value().double_array_value)
         if self._passive_values.shape != (len(self._passive_slots),):
             raise ValueError(f'passive_targets 长度必须是 {len(self._passive_slots)}')
+
+        # -- 上肢 --------------------------------------------------------------
+        # 手臂 14 轴走 IK，夹爪偏心轴不进 IK 模型、直接透传。手臂的槽位要等
+        # /robot_description 到了、缩减模型建好才能定（顺序以模型为准）。
+        self._arm_names = list(
+            p('arm_joints', ['']).get_parameter_value().string_array_value)
+        grippers = list(
+            p('gripper_joints', ['']).get_parameter_value().string_array_value)
+        if sorted(self._arm_names + grippers) != sorted(
+                self._joints[i] for i in self._passive_slots):
+            raise ValueError('arm_joints + gripper_joints 必须正好是策略之外的全部关节')
+        self._gripper_slots = [self._joints.index(name) for name in grippers]
+        grip_limits = p('gripper_limits', [0.0, 2.7638]) \
+            .get_parameter_value().double_array_value
+        if len(grip_limits) != 2:
+            raise ValueError('gripper_limits 必须是 2 个数：下界、上界')
+        self._grip_lo, self._grip_hi = float(grip_limits[0]), float(grip_limits[1])
+        rest = p('ik_rest_posture', [0.0] * len(self._arm_names)) \
+            .get_parameter_value().double_array_value
+        if len(rest) != len(self._arm_names):
+            raise ValueError(
+                f'ik_rest_posture 长度必须等于 arm_joints ({len(self._arm_names)})')
+        self._ik_kwargs = dict(
+            tip_frames={
+                'left': p('left_tip_frame', 'left_gripper_base')
+                .get_parameter_value().string_value,
+                'right': p('right_tip_frame', 'right_gripper_base')
+                .get_parameter_value().string_value,
+            },
+            base_frame=p('base_frame', 'torso_link')
+            .get_parameter_value().string_value,
+            max_iters=p('ik_max_iters', 10).get_parameter_value().integer_value,
+            damping=p('ik_damping', 0.05).get_parameter_value().double_value,
+            tol_pos=p('ik_tol_pos', 0.001).get_parameter_value().double_value,
+            tol_ori=p('ik_tol_ori', 0.0035).get_parameter_value().double_value,
+            # 按名字传，ArmIK 内部排成缩减模型的 q 顺序，不依赖这里的书写顺序。
+            rest_posture=dict(zip(self._arm_names, rest)),
+            posture_weight=p('ik_posture_weight', 0.05)
+            .get_parameter_value().double_value,
+        )
 
         n = len(self._policy_joints)
         lower = np.asarray(p('target_lower_limits', [0.0] * n)
@@ -194,10 +262,26 @@ class LowerBodyPolicyNode(Node):
         self._stand_start = 0.0
         self._reason = ''
         self._spinning = True
+        # 上肢：_pose 是末端位姿指令的缓存（唯一真值），_arm_target 是 IK 解出、
+        # 实际发给 FPC 的关节目标，同时充当下一帧的热启动种子。
+        self._ik: ArmIK | None = None
+        self._arm_slots: list[int] = []
+        self._arm_target = np.zeros(len(self._arm_names))
+        self._pose: dict[str, np.ndarray] = {}
+        self._arm_seed = False
+        self._grip = np.zeros(len(self._gripper_slots))
+        self._ik_stat = (0.0, 0.0, 0, 0.0)
 
         # -- ROS 接口 ----------------------------------------------------------
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
+        # 上下肢共用 ~/command，两个发布者并存时 depth=1 会让后到的挤掉先到的，
+        # 于是下肢和上肢的指令互相吞。这里单独给 4。
+        command_qos = QoSProfile(depth=4, history=HistoryPolicy.KEEP_LAST,
+                                 reliability=ReliabilityPolicy.BEST_EFFORT)
+        latched = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._message = Float64MultiArray()
         self._publisher = self.create_publisher(
             Float64MultiArray,
@@ -206,15 +290,26 @@ class LowerBodyPolicyNode(Node):
         self._status_publisher = self.create_publisher(String, '~/status', 10)
 
         control = MutuallyExclusiveCallbackGroup()
+        # 状态订阅必须自己一组，不能和 50 Hz 的 _control 挤在一个互斥组里。
+        # 看门狗量的是「我的回调上次跑在什么时候」，共用一组的话 _control 一旦变慢
+        # （比如 IK 不收敛跑满迭代）就会把状态回调饿死，数据明明在到却报超时——
+        # 实测过：IK 卡 95 ms，/joint_states 发布侧完好无损（100.0 Hz），照样急停。
+        # 分组之后两者在 MultiThreadedExecutor 上并行，时间戳才真的反映数据到达。
+        state = MutuallyExclusiveCallbackGroup()
         services = ReentrantCallbackGroup()
         self.create_subscription(JointState, '/joint_states', self._on_joint_states,
-                                 stream, callback_group=control)
+                                 stream, callback_group=state)
         self.create_subscription(
             Imu, p('imu_topic', '/pelvis_imu_broadcaster/imu')
             .get_parameter_value().string_value,
-            self._on_imu, stream, callback_group=control)
+            self._on_imu, stream, callback_group=state)
         self.create_subscription(Float64MultiArray, '~/command', self._on_command,
-                                 stream, callback_group=control)
+                                 command_qos, callback_group=control)
+        # 建 IK 模型要几百毫秒，必须避开控制环所在的互斥组。
+        self.create_subscription(
+            String, p('robot_description_topic', '/robot_description')
+            .get_parameter_value().string_value,
+            self._on_description, latched, callback_group=services)
         self.create_timer(self._dt, self._control, callback_group=control)
         self.create_timer(0.1, self._publish_status, callback_group=control)
 
@@ -259,13 +354,49 @@ class LowerBodyPolicyNode(Node):
             self._imu_stamp = self._now()
 
     def _on_command(self, message: Float64MultiArray) -> None:
-        data = np.asarray(message.data, dtype=np.float64)
-        if data.shape != (4,) or not np.all(np.isfinite(data)):
-            self.get_logger().warning('丢弃非法指令，需要 4 个有限值 [vx, vy, wz, h]')
+        """按长度分块，只覆写本次带来的字段，其余保持——上下肢发布者因此互不干扰。"""
+        data = np.array(message.data, dtype=np.float64)
+        fields = _LAYOUT.get(data.size)
+        if fields is None or not np.all(np.isfinite(data)):
+            self.get_logger().warning(
+                f'丢弃非法指令：长度 {data.size} 不在 {sorted(_LAYOUT)} 里，或含非有限值')
+            return
+        chunk, offset = {}, 0
+        for name in fields:
+            chunk[name] = data[offset:offset + _BLOCK[name]]
+            offset += _BLOCK[name]
+        for name in ('left', 'right'):
+            pose = chunk.get(name)
+            if pose is None:
+                continue
+            norm = float(np.linalg.norm(pose[3:]))
+            if not 0.5 < norm < 2.0:
+                self.get_logger().warning(f'丢弃指令：{name} 四元数模长 {norm:.3f} 异常')
+                return
+            pose[3:] /= norm
+        with self._lock:
+            if 'base' in chunk:
+                self._request = np.clip(chunk['base'], self._cmd_lo, self._cmd_hi)
+                self._command_stamp = self._now()
+            for name in ('left', 'right'):
+                if name in chunk:
+                    self._pose[name] = chunk[name]
+            if 'grip' in chunk:
+                self._grip = np.clip(chunk['grip'], self._grip_lo, self._grip_hi)
+
+    def _on_description(self, message: String) -> None:
+        """/robot_description 是 latched 的，正常只会进来一次。"""
+        if self._ik is not None:
+            return
+        try:
+            ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs)
+            slots = [self._joints.index(name) for name in ik.joint_names]
+        except Exception as error:  # 建模失败不能拖垮节点，但 ~/start 会拒绝。
+            self.get_logger().error(f'手臂 IK 建模失败，上肢不可用: {error}')
             return
         with self._lock:
-            self._request = np.clip(data, self._cmd_lo, self._cmd_hi)
-            self._command_stamp = self._now()
+            self._ik, self._arm_slots = ik, slots
+        self.get_logger().info(f'手臂 IK 就绪（{ik.model.nq} 轴，限位取自 URDF）')
 
     # -- 服务 ------------------------------------------------------------------
 
@@ -312,10 +443,19 @@ class LowerBodyPolicyNode(Node):
             if self._now() - self._stand_start < self._stand_s:
                 response.success, response.message = False, '站立插值还没走完'
                 return response
+            if self._ik is None:
+                response.success = False
+                response.message = '手臂 IK 未就绪，在等 /robot_description'
+                return response
             self._policy.reset()
             self._request = np.array([0.0, 0.0, 0.0, self._initial_height])
             self._command = self._request.copy()
             self._command_stamp = self._now()
+            # 手臂从当前实测位形接管；目标位姿的正解播种放到控制线程里做，
+            # 这样 ArmIK 内部的 pinocchio data 缓存只被一个线程碰，不用额外加锁。
+            self._arm_target = self._q[self._arm_slots].copy()
+            self._grip = self._q[self._gripper_slots].copy()
+            self._pose, self._arm_seed = {}, True
             self._state = State.RUNNING
         self.get_logger().info('策略接管')
         response.success, response.message = True, 'running'
@@ -395,6 +535,13 @@ class LowerBodyPolicyNode(Node):
                                             -self._cmd_rate, self._cmd_rate),
                     self._cmd_lo, self._cmd_hi)
                 command = self._command.copy()
+                if self._arm_seed:
+                    # 没人发上肢指令时就停在接管那一刻的姿态；setdefault 让
+                    # ~/start 与首帧之间已经收到的指令优先。
+                    for side, pose in self._ik.fk(self._arm_target).items():
+                        self._pose.setdefault(side, pose)
+                    self._arm_seed = False
+                poses, grip = dict(self._pose), self._grip.copy()
 
         if stale:
             self._estop(stale)
@@ -410,10 +557,22 @@ class LowerBodyPolicyNode(Node):
                 target[self._policy_slots] = self._policy.step(
                     joint_pos=joint_pos, joint_vel=joint_vel, ang_vel=ang_vel,
                     quat_xyzw=quat, command=command)
-                target[self._passive_slots] = self._passive_values
             except Exception as error:  # 推理链路任何异常都当失效处理。
                 self._estop(f'推理失败: {error}')
                 return
+            # IK 本身不抛异常（够不着就返回尽力而为的解），这个 try 是最后一道保险：
+            # 上肢出什么事都只保持上一帧手臂目标，绝不能把正在平衡的下肢一起急停。
+            try:
+                clock = time.monotonic()
+                self._arm_target, pos_err, ori_err, iters = self._ik.solve(
+                    self._arm_target, poses)
+                self._ik_stat = (pos_err, ori_err, iters,
+                                 (time.monotonic() - clock) * 1e3)
+            except Exception as error:
+                self.get_logger().warning(f'手臂 IK 异常，保持上一帧: {error}',
+                                          throttle_duration_sec=1.0)
+            target[self._arm_slots] = self._arm_target
+            target[self._gripper_slots] = grip
         if not np.all(np.isfinite(target)):
             self._estop('输出出现非有限值')
             return
@@ -433,6 +592,7 @@ class LowerBodyPolicyNode(Node):
         with self._lock:
             ready = (self._state is State.STAND
                      and self._now() - self._stand_start >= self._stand_s)
+            pos_err, ori_err, iters, solve_ms = self._ik_stat
             payload = {
                 'state': self._state.value,
                 'ready_to_start': ready,
@@ -440,6 +600,12 @@ class LowerBodyPolicyNode(Node):
                 'request': [round(float(v), 3) for v in self._request],
                 'reason': self._reason,
                 'stale': self._stale(),
+                'ik_ready': self._ik is not None,
+                'ik_pos_err': round(pos_err, 4),
+                'ik_ori_err': round(ori_err, 4),
+                'ik_iters': iters,
+                'ik_ms': round(solve_ms, 2),
+                'grip': [round(float(v), 3) for v in self._grip],
             }
         self._status_publisher.publish(String(data=json.dumps(payload)))
 

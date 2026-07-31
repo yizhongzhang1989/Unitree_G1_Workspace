@@ -24,6 +24,13 @@ def _parameters(path: Path) -> dict:
     return next(iter(document.values()))['ros__parameters']
 
 
+# IK 解的是 6x6 / 7x7 的小矩阵，OpenBLAS 多线程在这个尺度上是纯开销：每次
+# np.linalg.solve 都要调度整个线程池，一次 IK 有 20 次 solve。实测机器有负载时
+# 跑满 10 次迭代要 8.29 ms，锁成单线程只要 2.58 ms（3.2 倍），而且省下 8 个
+# 自旋线程——它们本来还在和 100 Hz 的状态回调抢 CPU。
+_SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
+
+
 def _nodes(context):
     share = Path(get_package_share_directory('g1_lower_body_policy'))
     config = share / 'config' / 'lower_body_policy.yaml'
@@ -44,6 +51,7 @@ def _nodes(context):
         name='lower_body_policy',
         output='screen',
         parameters=[str(config), overrides],
+        additional_env=_SINGLE_THREADED_BLAS,
         emulate_tty=True,
     )]
 

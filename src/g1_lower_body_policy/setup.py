@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'policy_node = g1_lower_body_policy.policy_node:main',
             'teleop_keyboard = g1_lower_body_policy.teleop_keyboard:main',
+            'vr_teleop = g1_lower_body_policy.vr_teleop:main',
         ],
     },
 )

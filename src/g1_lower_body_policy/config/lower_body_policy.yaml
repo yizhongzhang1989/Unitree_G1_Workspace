@@ -59,6 +59,59 @@
                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                       0.0, 0.0]
 
+    # -- 上肢 ----------------------------------------------------------------
+    # 手臂 14 轴走 IK，夹爪 2 轴直接透传；两者合起来必须正好盖满策略之外的
+    # 16 轴，否则节点拒绝启动。这里的先后顺序不重要：真正的 q 顺序由 pinocchio
+    # 缩减模型自己定，节点按 ArmIK.joint_names 反查 31 轴槽位。
+    arm_joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+    gripper_joints: [left_eccentric_joint, right_eccentric_joint]
+
+    # 夹爪偏心轴的行程，取自 URDF 的 <limit lower/upper>。透传前只做这一道裁剪。
+    gripper_limits: [0.0, 2.76377472169236]
+
+    # IK 参考系与末端帧。选 torso_link 而不是 pelvis：缩减模型把腰和腿全锁死，
+    # torso_link 就是个常量位姿，IK 链里根本没有腰——策略怎么摆腰都不影响求解。
+    base_frame: torso_link
+    left_tip_frame: left_gripper_base
+    right_tip_frame: right_gripper_base
+    robot_description_topic: /robot_description
+
+    # DLS 迭代参数。没有线搜索、没有 SVD、次数硬上限，成本可预测。
+    # 50 Hz 下用上一帧的解做种子，实测双臂热启动 ~0.3 ms、跑满 10 次也只要 ~1.1 ms，
+    # 相对 20 ms 周期完全够用。到了上限不报错，直接发尽力而为的解。
+    # 关节限位直接取 URDF，不额外收紧。
+    ik_max_iters: 10
+    ik_damping: 0.05
+    ik_tol_pos: 0.001
+    ik_tol_ori: 0.0035
+
+    # 手臂是 7 自由度、末端任务只有 6 维，多出来的那一维**必须管**。纯最小范数 DLS 对
+    # 零空间没有任何约束：实测让右手画一个 6 cm 的圆，shoulder_yaw 会一路漂到 -1.23 rad，
+    # 然后在某一帧被迫重构、单帧跳 0.23 rad。上肢不限速，这一下就是电机全权限的弹动。
+    # 把姿态偏置投影到任务零空间里就能钉住它：同一条圆的单帧最大跳变 0.234 -> 0.073 rad，
+    # 漂移 -1.228 -> +0.049 rad，且不可达目标下的残留抖动 1.4e-2 -> 1e-7 rad。
+    # 它在零空间里，不影响末端精度（残差 p50 仍是 0.45 mm）。
+    ik_posture_weight: 0.05
+
+    # 参考位形，顺序同 arm_joints。顺带避开大腿：elbow 0.5、shoulder_roll ±0.25 正是
+    # 训练时手臂随机区间的下界，目的就是让细长的 Gloria-M 夹爪不蹭髋部。
+    ik_rest_posture: [0.0, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0,
+                      0.0, -0.25, 0.0, 0.5, 0.0, 0.0, 0.0]
+
     # 训练是 sim dt 0.005 × decimation 4 = 50 Hz，实机必须一致：这个频率同时决定
     # 步态相位的推进速度。FPC 和硬件仍在 500 Hz 上跑，中间的保持由 FPC 负责。
     control_rate_hz: 50.0
