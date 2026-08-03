@@ -15,6 +15,8 @@ setup(
         ('share/' + package_name + '/config', glob('config/*.yaml')),
         # 策略权重跟着包一起安装，部署机上不需要再拷贝一次。
         ('share/' + package_name + '/config', glob('config/*.onnx')),
+        # WebXR 采集页与监控页，由 vr_teleop 节点内嵌的 aiohttp 直接托管。
+        ('share/' + package_name + '/vr', glob('vr/*.html')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,6 +29,7 @@ setup(
             'policy_node = g1_lower_body_policy.policy_node:main',
             'teleop_keyboard = g1_lower_body_policy.teleop_keyboard:main',
             'vr_teleop = g1_lower_body_policy.vr_teleop:main',
+            'make_vr_cert = g1_lower_body_policy.make_vr_cert:main',
         ],
     },
 )

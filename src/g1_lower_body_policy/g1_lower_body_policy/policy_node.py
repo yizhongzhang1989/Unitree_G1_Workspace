@@ -246,15 +246,13 @@ class LowerBodyPolicyNode(Node):
         self._lock = threading.Lock()
         self._state = State.IDLE
         self._q = np.zeros(len(self._joints))
-        self._q_policy = np.zeros(n)
-        self._dq_policy = np.zeros(n)
+        self._dq = np.zeros(len(self._joints))
         self._joint_stamp = 0.0
         self._quat = (0.0, 0.0, 0.0, 1.0)
         self._ang_vel = (0.0, 0.0, 0.0)
         self._imu_stamp = 0.0
         self._js_names: list[str] = []
         self._js_index: list[int] = []
-        self._js_policy_index: list[int] = []
         self._request = np.array([0.0, 0.0, 0.0, self._initial_height])
         self._command = self._request.copy()
         self._command_stamp = 0.0
@@ -332,17 +330,17 @@ class LowerBodyPolicyNode(Node):
                 return  # 广播还没收齐，等下一帧。
             self._js_names = names
             self._js_index = [names.index(name) for name in self._joints]
-            self._js_policy_index = [names.index(name) for name in self._policy_joints]
         if len(message.position) != len(names):
             return
         position = np.asarray(message.position)
         velocity = (np.asarray(message.velocity)
                     if len(message.velocity) == len(names) else None)
         with self._lock:
+            # 一律存成 FPC 顺序的 31 轴，策略的 15 轴用 _policy_slots 现取（花式索引
+            # 本就会拷贝）。另存一份 15 轴等于多一张会和它跑掉的表。
             self._q = position[self._js_index]
-            self._q_policy = position[self._js_policy_index]
             if velocity is not None:
-                self._dq_policy = velocity[self._js_policy_index]
+                self._dq = velocity[self._js_index]
             self._joint_stamp = self._now()
 
     def _on_imu(self, message: Imu) -> None:
@@ -525,7 +523,8 @@ class LowerBodyPolicyNode(Node):
                          min((self._now() - self._stand_start) / self._stand_s, 1.0))
                 target = self._stand_from + alpha * (self._stand_pose - self._stand_from)
             else:
-                joint_pos, joint_vel = self._q_policy.copy(), self._dq_policy.copy()
+                joint_pos = self._q[self._policy_slots]
+                joint_vel = self._dq[self._policy_slots]
                 ang_vel = self._ang_vel
                 request = self._request.copy()
                 if self._now() - self._command_stamp > self._command_timeout:
@@ -606,6 +605,10 @@ class LowerBodyPolicyNode(Node):
                 'ik_iters': iters,
                 'ik_ms': round(solve_ms, 2),
                 'grip': [round(float(v), 3) for v in self._grip],
+                # 当前生效的末端位姿目标。遥操侧接管时直接拿它当原点，就不必自己
+                # 再建一份 IK 模型算正解——两边的起点由构造保证完全一致。
+                'pose': {side: [round(float(v), 5) for v in pose]
+                         for side, pose in self._pose.items()},
             }
         self._status_publisher.publish(String(data=json.dumps(payload)))
 

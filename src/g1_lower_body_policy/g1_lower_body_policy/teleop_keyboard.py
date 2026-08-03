@@ -156,14 +156,14 @@ class Teleop(Node):
     def stop(self) -> None:
         self._vel = [0.0, 0.0, 0.0]
 
+    def estop(self, label: str) -> None:
+        self.request(self._estop_client, label)
+
     def render(self) -> str:
         vx, vy, wz = self._vel
         line = (f'vx{vx:+.2f} vy{vy:+.2f} w{wz:+.2f} h{self._height:.3f}'
                 f' | {self._status} | {self.notice}')
         return f'\r\033[K{_clip(line, shutil.get_terminal_size().columns - 1)}'
-
-    def estop_client(self):
-        return self._estop_client
 
 
 def _clip(text: str, columns: int) -> str:
@@ -228,7 +228,7 @@ def main(args=None) -> None:
         # 退出即急停：终端一关就没人再发指令，机器人不能停在最后一帧目标上。
         node.stop()
         node.tick(dt)
-        node.request(node.estop_client(), '退出急停')
+        node.estop('退出急停')
         deadline = time.monotonic() + 20.0
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)

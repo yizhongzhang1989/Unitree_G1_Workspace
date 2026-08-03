@@ -12,4 +12,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 
+# VR 自签名证书。make_vr_cert 默认签到 ~/.ros/g1_vr/（仓库外），这条是防手滑
+# 用 -o 签进源码树——私钥绝不能入库。
+*.pem
+
 /unitree_sdk2/

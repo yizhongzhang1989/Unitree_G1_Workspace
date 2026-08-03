@@ -22,7 +22,10 @@
   <exec_depend>python3-yaml</exec_depend>
   <!-- 双臂 IK 的运动学后端（.devcontainer/Dockerfile 里的 ros-humble-pinocchio）。 -->
   <exec_depend>pinocchio</exec_depend>
-  <!-- vr_teleop 订 WebXR 桥的 WebSocket 用；没有 rosdep key，同样由 Dockerfile 提供。 -->
+  <!-- vr_teleop 内嵌的 WebXR 服务用。 -->
+  <exec_depend>python3-aiohttp</exec_depend>
+  <!-- make_vr_cert 签局域网自签证书用（WebXR 要求安全上下文）。 -->
+  <exec_depend>python3-cryptography</exec_depend>
   <!-- onnxruntime 没有 rosdep key，由 .devcontainer/Dockerfile 的 pip3 install 提供。 -->
 
   <exec_depend>unitree_g1_ros2_control</exec_depend>

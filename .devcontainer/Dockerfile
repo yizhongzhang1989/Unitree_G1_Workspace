@@ -72,13 +72,16 @@ RUN set -eux; \
     pip3 install --no-cache-dir \
       'python-can>=4.0' 'canalystii>=0.1' 'libusb-package>=1.0.30' pyserial \
       'onnxruntime>=1.16' 'numpy>=1.21.6,<1.25' \
-      'aiohttp>=3.9'; \
+      'aiohttp>=3.9' 'cryptography'; \
     rm -rf /var/lib/apt/lists/*
 # canalystii 与 libusb-package 是 CAN-SDK 的 [canalystii] extra，只供 Python 调试
 # 链路使用；生产链路是 C++ 的 canalystii_native_bridge，不依赖它们。
-# adb + aiohttp 供 src/g1_lower_body_policy/VR 的 WebXR 桥接用：容器是 network_mode: host，
-# `adb reverse tcp:8000` 建在容器里就等价于建在宿主上，头显访问 http://localhost:8000 即可
-# 满足 WebXR 的安全上下文要求，省掉自签证书。
+# adb + aiohttp + cryptography 供 src/g1_lower_body_policy/vr 的 WebXR 桥接用。WebXR 只在
+# 安全上下文里可用，所以头显接入有两条并存的路：
+#   - HTTPS 直连 https://<本机IP>:8443，证书由 `ros2 run g1_lower_body_policy make_vr_cert`
+#     签（用 cryptography），不经过 adb，适合长时间使用；
+#   - `adb reverse tcp:8000` 后头显访问 http://localhost:8000。容器是 network_mode: host，
+#     规则建在容器里就等价于建在宿主上。
 # onnxruntime 供 g1_lower_body_policy 的下肢策略层推理用。CPU 版就够：57->512->256->128->15 的 MLP 在 50 Hz 上不到 0.1 ms。
 # numpy 的上下界都是被逼出来的，不能放开：
 #   上界 <1.25 —— apt 的 python3-opencv、python3-scipy 和 ros-humble-cv-bridge 都是

@@ -46,7 +46,7 @@ class ArmIK:
     def __init__(self, urdf_xml: str, arm_joints, tip_frames: dict,
                  base_frame: str = 'torso_link', max_iters: int = 10,
                  damping: float = 0.05, tol_pos: float = 1e-3,
-                 tol_ori: float = 3.5e-3, rest_posture: dict = None,
+                 tol_ori: float = 3.5e-3, rest_posture: dict | None = None,
                  posture_weight: float = 0.05) -> None:
         full = pin.buildModelFromXML(urdf_xml)
         missing = [name for name in arm_joints if not full.existJointName(name)]

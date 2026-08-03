@@ -68,39 +68,30 @@ flowchart TD
 | 14 | 双臂位姿（先左后右） | 双臂遥操 |
 | 20 | 以上全部 | 全身 VLA |
 
-**只覆写本次带来的字段，其余保持**。因此多个发布者可以同时存在且互不干扰：
-键盘遥控台只发长度 4，上肢遥操只发长度 14，两者不需要知道对方存在。
+**只覆写本次带来的字段，其余保持**，所以多个发布者可以同时存在且互不干扰。
 不在 `{2, 4, 7, 14, 20}` 里的长度、含非有限值、四元数模长不在 `(0.5, 2.0)` —— **整帧丢弃**，
 上一帧的目标继续生效。模长合法的四元数会先归一化再用。
 
-> 订阅队列 depth = 4（不是 1）。单发布者时“只要最新”是对的；**多发布者并存时
-> depth=1 会让同一个执行器周期内后到的消息挤掉先到的**，下肢和上肢的指令互相吞。
+> 订阅队列 depth = 4（不是 1）。**多发布者并存时 depth=1 会让同一个执行器周期内
+> 后到的消息挤掉先到的**，下肢和上肢的指令互相吞。
 
-### 输入：每一维观测从哪来
+### 输入：数据从哪来
 
-| 观测项 | 维 | 话题 | 类型 | 频率 | 发布者 | 再上游 |
-|---|---|---|---|---|---|---|
-| `base_ang_vel` | 3 | `/pelvis_imu_broadcaster/imu` → `angular_velocity` | `sensor_msgs/Imu` | 100 Hz | `pelvis_imu_broadcaster` | `G1TopicSystem` 从 `/lowstate.imu_state.gyroscope` 原样透传（盆骨系） |
-| `projected_gravity` | 3 | 同上 → `orientation` | `sensor_msgs/Imu` | 100 Hz | `pelvis_imu_broadcaster` | `/lowstate.imu_state.quaternion`，`G1TopicSystem` 把 Unitree 的 `(w,x,y,z)` 转成 ROS 的 `(x,y,z,w)`；本节点再算 `R(q)ᵀ·[0,0,−1]` |
-| `command_twist` | 3 | `/lower_body_policy/command` `[0:3]` | `std_msgs/Float64MultiArray` | 任意（建议 ≥10 Hz） | 键盘遥控台或 VLA | 超过 `command_timeout_s`(0.5 s) 无更新则速度归零 |
-| `command_height` | 1 | `/lower_body_policy/command` `[3]` | 同上 | 同上 | 同上 | 节点内按 `height_rate_limit`(0.15 m/s) 限速后才进观测 |
-| `phase` | 2 | 无（节点内计时） | — | 50 Hz | 本节点 | `进入 RUNNING 后的拍数 × 0.02 s`，周期 0.6 s；`‖[vx,vy,wz]‖<0.1` 时置零 |
-| `joint_pos` | 15 | `/joint_states` → `position` | `sensor_msgs/JointState` | 100 Hz | `joint_state_broadcaster` | `G1TopicSystem::read()` ← `/lowstate.motor_state[i].q`（500 Hz）；本节点按名字取 15 个下肢关节再减默认位姿 |
-| `joint_vel` | 15 | `/joint_states` → `velocity` | 同上 | 100 Hz | 同上 | `/lowstate.motor_state[i].dq` |
-| `actions` | 15 | 无（节点内部） | — | 50 Hz | 本节点 | 上一拍策略的**原始**（未裁剪）输出 |
+| 话题 | 类型 | 频率 | 再上游 |
+|---|---|---|---|
+| `/pelvis_imu_broadcaster/imu` | `sensor_msgs/Imu` | 100 Hz | `G1TopicSystem` ← `/lowstate.imu_state`。陀螺仪原样透传（盆骨系）；四元数已从 Unitree 的 `(w,x,y,z)` 转成 ROS 的 `(x,y,z,w)` |
+| `/joint_states` | `sensor_msgs/JointState` | 100 Hz | `G1TopicSystem::read()` ← `/lowstate.motor_state[i].q/dq`（500 Hz） |
+| `~/command` | `std_msgs/Float64MultiArray` | 任意（建议 ≥10 Hz） | 键盘遥控台 / VR / VLA。超 `command_timeout_s`(0.5 s) 无更新则速度归零 |
+| `/robot_description` | `std_msgs/String`（latched） | 一次 | 建 IK 缩减模型用 |
 
-注意 `/joint_states` 里是**全部 31 轴**（29 本体 + 2 夹爪偏心轴），节点按 `policy_joints`
-的名字取其中 15 个；名字对不上就等下一帧，不会拿错位的数据去推理。
+每一维观测怎么从这些话题装配出来，见第 4 节。注意 `/joint_states` 里是**全部 31 轴**
+（29 本体 + 2 夹爪偏心轴），节点按 `policy_joints` 的名字取其中 15 个；名字对不上就等
+下一帧，不会拿错位的数据去推理。
 
-上肢的输入不进观测，它们直接驱动 IK：
+上肢的输入不进观测，直接驱动 IK：`~/command` 的臂位姿块是 `*_gripper_base` 相对
+`torso_link` 的 `[x,y,z,qx,qy,qz,qw]`；夹爪块直接透传到槽位 29/30，只按 `gripper_limits` 裁剪。
 
-| 输入 | 来源 | 说明 |
-|---|---|---|
-| 双臂末端位姿 | `~/command` 的臂位姿块 | `*_gripper_base` 相对 `torso_link`，`[x,y,z,qx,qy,qz,qw]` |
-| 夹爪角度 | `~/command` 的夹爪块 | 直接透传到槽位 29/30，只按 `gripper_limits` 裁剪 |
-| 机器人模型 | `/robot_description`（latched） | 建 IK 缩减模型用，启动后只读一次 |
-
-上肢指令**不设超时**：没人发就一直保持上一个位姿目标。手臂停在原地才是安全行为，
+上肢指令**不设超时**：没人发就保持上一个位姿目标。手臂停在原地才是安全行为，
 归零或回零位都不是。
 
 ### 输出：结果送到哪
@@ -112,14 +103,16 @@ flowchart TD
 | 使能 / 启动 / 急停 | `/lower_body_policy/engage`、`/start`、`/estop` | `std_srvs/Trigger` | 按需 | 遥控台或人工 `ros2 service call` |
 | 控制器开关 | `/controller_manager/switch_controller` | `controller_manager_msgs/SwitchController` | 按需 | 本节点**调用**它，用来激活 / 反激活 FPC |
 
-`~/status` 的 JSON 除了原有的 `state / ready_to_start / command / request / reason / stale`，
-现在还包含上肢的：`ik_ready`（模型建好了没）、`ik_pos_err` / `ik_ori_err`（最近一帧两臂
-的最大残差，米 / 弧度）、`ik_iters`、`ik_ms`（求解耗时）、`grip`。现场排查先看这几项。
+`~/status`（JSON）字段：`state / ready_to_start / command / request / reason / stale`，
+加上上肢的 `ik_ready`、`ik_pos_err` / `ik_ori_err`（最近一帧两臂的最大残差，米 / 弧度）、
+`ik_iters`、`ik_ms`、`grip`，以及 `pose`（当前生效的两个末端位姿目标）。现场排查先看这几项。
 
-再往下游（不归本包管，列出来是为了知道链路终点）：FPC 把 31 个位置写进 command
-interface，`G1TopicSystem::write()` 补上 `default_29dof_param.yaml` 的 kp/kd，
-生成 `/lowcmd`（`unitree_hg/LowCmd`，500 Hz，前 29 轴）和左右
-`/grip_arm0/mit_command` 与 `/grip_arm1/mit_command`（100 Hz，第 30/31 轴）。
+> `pose` 不只是给人看的：遥操源接管时直接拿它当原点，就**不必自己再建一份
+> IK 模型算正解**。`vr_teleop` 走的就是这条路。
+
+再往下游（不归本包管）：FPC 写 command interface → `G1TopicSystem::write()` 补上
+`default_29dof_param.yaml` 的 kp/kd → `/lowcmd`（500 Hz，前 29 轴）与
+`/grip_arm{0,1}/mit_command`（100 Hz，第 30/31 轴）。
 
 ---
 
@@ -138,60 +131,57 @@ ros2 run g1_lower_body_policy teleop_keyboard
 
 ### 遥控台按键
 
-遥控台**只发长度 4**，因此只管下半身；上肢保持在接管时的姿态不动。
-上肢遥操 / VLA 可以同时向同一个话题发长度 2 / 7 / 14，两者互不干扰。
+遥控台**只发长度 4**，只管下半身；上肢保持在接管时的姿态不动。完整键位启动时会打印，
+关键的三个：
 
 | 键 | 作用 |
 |---|---|
-| `G` | **站立**：激活 FPC，3s 内从当前实测位姿插值到策略默认位姿 |
-| `Enter` | **启动策略**：站立插值走完后按，策略正式接管 |
-| `空格` | **急停**：反激活 FPC → kp 斜坡降到 0（阻尼模式）→ 最后一帧 kd 归零（零力矩模式） |
-| `W`/`S` | 前进 / 后退 `vx` |
-| `A`/`D` | 左移 / 右移 `vy` |
-| `J`/`L` | 左转 / 右转 `wz` |
-| `I`/`K` | 升高 / 蹲低 `h` |
-| `X` | 速度指令清零（高度保持） |
-| `Q` | 退出（退出前自动急停） |
+| `G` | **站立**：激活 FPC，3 s 内从当前实测位姿插值到策略默认位姿 |
+| `Enter` | **启动策略**：站立插值走完后按 |
+| `空格` | **急停**：反激活 FPC → kp 斜坡降到 0（阻尼）→ 最后一帧 kd 归零（零力矩） |
 
-速度是"按住才走"：终端读不到抬键事件，所以超过 `hold_timeout_s`(0.4 s) 没有按键就
-在 `decay_s`(0.5 s) 内衰减到零。按住 `W` 时终端自动重复会持续刷新，手感和游戏一致。
-高度不衰减——它是绝对量，调到哪停在哪。
+其余：`W`/`S`/`A`/`D` 走、`J`/`L` 转、`I`/`K` 升降、`X` 清零速度、`Q` 退出（自动急停）。
+
+速度是"按住才走"：终端读不到抬键事件，所以超过 `hold_timeout_s`(0.4 s) 没按键就在
+`decay_s`(0.5 s) 内衰减到零。高度不衰减——它是绝对量，调到哪停哪。
 
 ### VR 头显遥操（可选，代替键盘）
 
-先按 [VR/README.md](VR/README.md) 把链路跑通（`adb reverse` → `python3 VR/server.py`
-→ 头显里打开采集页并 **Enter VR**），确认 `curl localhost:8000/state` 里 `seq` 在涨，
-再起桥接节点：
+WebXR 采集页由 `vr_teleop` 节点**自己托管**（内嵌 aiohttp），头显直连节点。节点
+**同时**听明文口和 TLS 口，两条接入路径并存：`https://<机器人IP>:8443`（自签证书，
+不经过 adb）和 `http://localhost:8000`（需 `adb reverse`）。WebXR 只在安全上下文里
+可用，所以只有这两种进法；`adb reverse` 的规则会**静默失效**，所以两条都开着。
 
 ```bash
+ros2 run g1_lower_body_policy make_vr_cert     # 签自签证书，只需一次
 ros2 launch g1_lower_body_policy vr_teleop.launch.py
-#   改站立高度：  height:=0.78
-#   手部位移缩放：arm_scale:=1.0
-#   改离合阈值：  squeeze_threshold:=0.5
 ```
+
+完整上机流程、证书、排查清单见 [vr/README.md](vr/README.md)。已验证 Meta Quest 2/3、
+PICO 4；手柄读的是 `xr-standard` 标准映射。
 
 | VR 输入 | 机器人 |
 |---|---|
-| 头显水平速度 | `vx` / `vy`（`wz` 恒 0，高度恒 `height`） |
-| 手柄 **squeeze** 按住 | 该侧手臂跟随；松开即**冻结**在最后一帧 |
-| 手柄位移 | 末端位置增量（只传位置，姿态保持离合那一刻的值） |
-| 手柄 **trigger** | 夹爪：0 = 完全打开，1 = 夹紧 |
+| **左摇杆** | 水平速度 `vx` / `vy` |
+| **右摇杆** | 转向 `wz`（左右）与盆骨高度 `h`（前后，绝对量，松手不回弹） |
+| **squeeze** 按住 | 该侧手臂跟随手柄的位移**与转角**；松开即冻结在最后一帧 |
+| **trigger** | 夹爪：0 = 完全打开，1 = 夹紧 |
+| **A/X** | 把手柄此刻所指的水平方向标定为机器人正前方 |
+| **双手同时 B/Y** | 推进状态机：站立 → 启动策略 → 急停（戴着头显摸不到终端） |
 
 几个必须知道的点：
 
-* **本节点只在策略层进入 `running` 之后才发指令**，进入那一刻用实测位形正解播种双臂
-  位姿，和策略层自己的播种对齐。所以顺序是：先 `G` 站立、再 `Enter` 启动策略，才轮到 VR。
-* **离合接合的瞬间位移恒为 0**（同时锁手柄和末端两个原点）。上肢不限速，这是唯一的
-  防跳保护，已经锁进单测。
+* **本节点只在策略层进入 `running` 之后才发指令**，接管的原点直接取策略层在
+  `~/status` 里发布的 `pose`，两边的起点是同一个值。所以顺序是：先站立、再启动策略，
+  才轮到 VR。
+* **离合接合的瞬间位移与转角都恒为 0**（手柄位置、手柄姿态、末端位姿三个原点一起锁）。
+  上肢不限速，这是唯一的防跳保护，已经锁进单测。
 * **VR 帧超时（`frame_timeout_s` 0.3 s）或退出 VR 会话**：速度立刻归零、双臂冻结、
   夹爪保持。不会卸力——要卸力请用策略层的 `~/estop`。
-* **头显不上报速度**。WebXR 的 `linearVelocity` 是可选字段，PICO 实测 `head` 里根本没有、
-  手柄里恒为 `[0,0,0]`，所以速度是对头显位置差分 + 一阶低通（`velocity_cutoff_hz` 2 Hz）
-  算出来的。实测静止时噪声底约 ±0.003 m/s。
 * **刚进 `running` 时夹爪会弹到全开**。trigger 松开就是 0、对应完全打开，这是定义使然；
-  如果接管前夹爪是合的，它会张开。手里有东西时先把 trigger 扣住再进 `running`。
-* 坐标系：WebXR 右手系、Y 向上、-Z 朝前；机器人 X 前、Y 左、Z 上。速度和位移都在
-  **参考空间的世界系**里映射，不跟头显朝向转（`wz` 恒 0，机器人也不会自己转向）。
+  手里有东西时先把 trigger 扣住再进 `running`。
+* 坐标系：WebXR 右手系、Y 向上、-Z 朝前；机器人 X 前、Y 左、Z 上。手部位移在
+  **标定后的世界系**里映射，不跟头显朝向转。
 
 ---
 
@@ -204,7 +194,7 @@ ros2 launch g1_lower_body_policy vr_teleop.launch.py
 ```
 IDLE ──~/engage──► STAND ──~/start──► RUNNING
   ▲                  │                   │
-  └────────── ~/estop ┴───────────────────┘
+  └───────── ~/estop ┴───────────────────┘
 ```
 
 | 状态 | 行为 |
@@ -255,10 +245,6 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 
 归一化已经在导出时折进 ONNX 图里（`Sub`/`Div`），**不要**在外面再减均值。
 
-`G1TopicSystem` 已经把 Unitree 的四元数 `(w,x,y,z)` 转成 ROS 的 `(x,y,z,w)`，陀螺仪
-原样透传，所以这一层拿到的和 `deploy/include/unitree_articulation.h` 里官方用的是同
-一份数。
-
 ### 动作（15 维）
 
 ```
@@ -272,25 +258,13 @@ q_target = clip(q_target, target_lower_limits, target_upper_limits)   # 见下�
 
 > *clamping ctrl to the joint range would produce zero force when the joint is at its limit*
 
-官方 `deploy/robots/g1` 的 `deploy.yaml` 里 `JointPositionAction.clip` 同样是 `null`。
+用 CPU MuJoCo 闭环重跑（站立 / 0.5、1.0 m/s 前进 / 蹲行 / 原地转），目标位置越出硬
+`jnt_range` 的比例是 **2%~18.6%**，越界最多的正是 `waist_roll`、`ankle_roll`、
+`ankle_pitch`——撑平衡最吃力的那几个。`waist_roll` 的目标能到 −0.763 rad，而行程只有
+±0.520。**按行程裁剪等于把这几个关节在最需要出力的时刻掉掉。**
 
-用 CPU MuJoCo 把这个策略闭环重跑一遍，目标位置**超出硬 `jnt_range`** 的比例：
-
-| 场景 | 越 0.9 软限位 | 越硬 `jnt_range` | 越 `ctrlrange` |
-|---|---|---|---|
-| 站立 h=0.74 | 8.0% | 2.0% | **0%** |
-| 前进 0.5 m/s | 17.8% | 9.8% | **0%** |
-| 前进 1.0 m/s | 24.0% | 18.6% | **0%** |
-| 蹲行 0.3 m/s h=0.62 | 18.0% | 10.2% | **0%** |
-| 原地转 1.0 rad/s | 6.2% | 1.8% | **0%** |
-
-越界最多的正是 `waist_roll`、`ankle_roll`、`ankle_pitch`——撑平衡最吃力的那几个。
-`waist_roll` 的目标能到 −0.763 rad，而行程只有 ±0.520。**按行程裁剪等于把这几个关节
-在最需要出力的时刻掐掉。**
-
-所以实际裁的是 MuJoCo 自己算的 informational `ctrlrange`，即
-`jnt_range ± effort_limit / stiffness`：越过它力矩已经饱和，再大的目标也换不来额外的力，
-裁在这儿物理上是空操作（上表越界率 0%），纯粹用来拦真正跑飞的输出。
+实际裁的是 MuJoCo 算的 informational `ctrlrange`（`jnt_range ± effort_limit / stiffness`）：
+越过它力矩已饱和，裁在这儿物理上是空操作（同样五个场景越界率 **0%**），纯粹用来拦跑飞的输出。
 
 关节顺序正好是真机电机索引 0..14：
 
@@ -307,18 +281,13 @@ q_target = clip(q_target, target_lower_limits, target_upper_limits)   # 见下�
 | hip_pitch / hip_yaw / waist_yaw | 0.548 | hip_roll / knee | 0.351 |
 | ankle_pitch / ankle_roll / waist_roll / waist_pitch | 0.439 | | |
 
-### PD 增益
+### PD 增益与频率
 
-训练用的 kp/kd 就是 `unitree_g1_ros2_control/config/default_29dof_param.yaml`
-（ONNX metadata 里的 `joint_stiffness/joint_damping` 与之逐项相同：腿 40.2/99.1/28.5，
-腰 40.2/28.5/28.5）。硬件侧由 `G1TopicSystem` 从同一个文件加载，**两边天然一致，
-不需要额外配置**。
-
-### 频率
+kp/kd 就是 `unitree_g1_ros2_control/config/default_29dof_param.yaml`（ONNX metadata 里的
+`joint_stiffness/joint_damping` 与之逐项相同），硬件侧从同一个文件加载，**两边天然一致**。
 
 训练是 sim dt 0.005 × decimation 4 = **50 Hz**，实机必须一致——这个频率同时决定步态
-相位的推进速度。FPC 和硬件仍在 500 Hz 上跑，两拍之间的保持由 FPC 负责。单拍推理实测
-**0.084 ms**，占 20 ms 预算的 0.4%。
+相位的推进速度。单拍推理实测 **0.084 ms**，占 20 ms 预算的 0.4%。
 
 ---
 
@@ -333,11 +302,9 @@ q_target = clip(q_target, target_lower_limits, target_upper_limits)   # 见下�
 * **`torso_link` 在模型世界系里是个常量位姿**，构造时算一次 `oMb` 就够。求解时完全
   不必关心策略把腰摆到了哪儿 —— 这正是参考系选 `torso_link` 而不是 `pelvis` 的理由。
 
-建模放在 `ReentrantCallbackGroup` 里跑，避开控制环所在的互斥组：它要几百毫秒，
-放进 50 Hz 那一组会直接把控制环顶掉一拍。
-
-`ArmIK.joint_names` 由缩减模型自己报出，节点按它反查 31 轴槽位 —— 代码不假设
-“左 7 + 右 7 正好是 15..28”，虽然当前 URDF 下确实如此。
+建模要几百毫秒，放在 `ReentrantCallbackGroup` 里跑，避开控制环所在的互斥组。
+`ArmIK.joint_names` 由缩减模型自己报出，节点按它反查 31 轴槽位，不假设“左 7 + 右 7
+正好是 15..28”。
 
 ### 求解：定阻尼 DLS + 零空间姿态偏置，无线搜索、无 SVD、迭代数硬上限
 
@@ -360,10 +327,9 @@ q  ← clip(q + dq, URDF 下限, URDF 上限)
 6 cm 的圆（每帧才走 1.9 mm），纯最小范数 DLS 会让 `shoulder_yaw` 一路漂到 **-1.23 rad**，
 然后在第 196 帧被迫重构、**单帧跳 0.23 rad**。上肢不限速，这一下就是电机全权限的弹动。
 
-| | 画圆单帧最大跳变 | 绕回原点后 yaw 漂移 | 不可达目标保持时的抖动 | 残差 p50 |
-|---|---|---|---|---|
-| 无偏置 | 0.234 rad | **-1.228 rad** | 1.4e-2 rad（肃眼可见的嗡动） | 0.45 mm |
-| **w=0.05** | **0.073 rad** | **+0.049 rad** | **1.1e-7 rad** | **0.45 mm** |
+加上 `w=0.05` 的零空间偏置后：单帧最大跳变 0.234 → **0.073 rad**，绕回原点后的 yaw
+漂移 −1.228 → **+0.049 rad**，不可达目标下的残留抖动 1.4e-2 → **1.1e-7 rad**（肉眼可见
+的嗡动消失），而残差 p50 **不变**（0.45 mm）——它在零空间里，不影响末端精度。
 
 提高迭代上限治不了这个问题（60 次迭代仍然跳 0.247 rad），降阻尼只会更糟
 （阻尼 0.01 时跳 1.79 rad）——它不是精度问题，是冗余自由度没人管的问题。
@@ -376,38 +342,26 @@ q  ← clip(q + dq, URDF 下限, URDF 上限)
 
 #### 收敛判据按侧算
 
-已经到位的那一侧当轮**完全不碰**。否则它的任务项虽然是 0，零空间偏置却照样推着它的胘部走
-—— 只发右臂指令时左臂会逗惄惄改位形（末端不动但关节在动），违反第 1 节“只覆写本次
-字段”的契约。
+已经到位的那一侧当轮**完全不碰**。否则它的任务项虽然是 0，零空间偏置却照样推着它的肘部走
+—— 只发右臂指令时左臂会悄悄改位形，违反第 1 节“只覆写本次字段”的契约。
 
-**不插值、不限速**：算出来的关节位置直接进 31 轴向量发给 FPC。
-
-**够不着就尽力而为**：到了迭代上限直接返回当前迭代值，不抛异常、不报错。
+**不插值、不限速**；**够不着就尽力而为**（到迭代上限直接返回当前值，不抛异常）。
 
 ### 种子与连续性
 
-`solve()` 的种子是**上一帧已发布的手臂目标**，不是实测值。这是有意的：手臂被卡住时，
-用实测值做种子会产生积分饱和式的追赶。
+`solve()` 的种子是**上一帧已发布的手臂目标**，不是实测值——手臂被卡住时，用实测值
+做种子会产生积分饱和式的追赶。
 
-`~/start` 时用当前实测位形做正解，把两个末端位姿目标播种成“此刻的位姿”，
-所以**没人发上肢指令时手臂就停在接管那一刻的姿态**。
-
-播种的正解放在**控制线程**里做（`~/start` 只置一个标志）：`ArmIK` 内部有 pinocchio 的
-`data` 缓存，只让一个线程碰它就不需要额外加锁。
+`~/start` 时用当前实测位形做正解播种两个末端位姿目标，所以**没人发上肢指令时手臂
+就停在接管那一刻的姿态**。这个正解放在**控制线程**里做（`~/start` 只置一个标志）：
+`ArmIK` 内部有 pinocchio 的 `data` 缓存，只让一个线程碰它就不需要额外加锁。
 
 ### 关节限位
 
-直接取 URDF 的 `<limit lower/upper>`，不额外收紧：
-
-```
-shoulder_pitch [-3.089, 2.670]   shoulder_roll   左[-1.588, 2.252] 右[-2.252, 1.588]
-shoulder_yaw   [-2.618, 2.618]   elbow           [-1.047, 2.094]
-wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
-夹爪偏心轴     [0, 2.7638]
-```
+直接取 URDF 的 `<limit lower/upper>`，不额外收紧。
 
 > 这和下肢的 `target_lower/upper_limits` 是**两回事**。下肢故意裁在 MuJoCo 的
-> `ctrlrange` 而不是行程（原因见第 4 节）；上肢没有那个诉求，IK 求出的解本来就该在行程内。
+> `ctrlrange` 而不是行程（原因见第 4 节）；上肢没有那个诉求。
 
 ### 实测性能（aarch64，50 Hz = 20 ms 预算）
 
@@ -476,55 +430,7 @@ wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
 
 ---
 
-## 7. 首次上机检查清单
-
-### 7.1 上机之前（不需要机器人）
-
-```bash
-# ① 训练仓库里：CPU 闭环重跑整条部署链路（观测装配 → ONNX → 目标位置 → MuJoCo）
-#    换了策略一定要先跑这个。不占 GPU，训练在跑也能用。
-#    --arms limp（默认）不给手臂加力矩、自然下垂；--arms hold 才是复现 passive_targets。
-#    --video 需要 MUJOCO_GL=egl。
-cd ~/unitree_rl_mjlab
-python scripts/check_deploy_policy.py Unitree_G1_Workspace/src/g1_lower_body_policy/config/policy.onnx
-MUJOCO_GL=egl python scripts/check_deploy_policy.py --video /tmp/check.mp4
-
-# ② ROS 工作区里：假状态源 + 假 controller_manager，把状态机从头走一遍
-#    （engage → stand → start → 分块指令 → 急停 → 看门狗），32 项检查
-python3 src/g1_lower_body_policy/test/smoke_no_robot.py
-
-# ③ 纯逻辑单测（策略运行时 13 项 + 双臂 IK 8 项 + VR 5 项）
-cd src/g1_lower_body_policy && PYTHONPATH=$PWD python3 -m pytest test/ -q
-```
-
-> 跑完联调记得确认进程没残留：
-> `ps -ef | grep policy_node`。上一轮残留的节点会在同一个 `ROS_DOMAIN_ID`（默认 77）
-> 上继续发 `status`，下一轮会读到它的旧状态，表现为第一项检查莫名失败。
-
-### 7.2 上机（吊架上做，按顺序）
-
-1. **不接策略层**，先确认控制栈本身正常：`ros2 topic hz /joint_states` 应该 ~100 Hz，
-   `/pelvis_imu_broadcaster/imu` 同理。
-2. 起策略层，看日志里 `策略已加载: policy.onnx obs=57 act=15 @ 50 Hz` 与
-   `手臂 IK 就绪（14 轴，限位取自 URDF）`。对不上会直接抛异常退出，不会带病启动。
-3. `ros2 topic echo /lower_body_policy/status` 确认 `state: idle` 且 `ik_ready: true`。
-4. 按 `G` → 观察机器人**缓慢**走到默认位姿（腿微屈：hip_pitch −0.1、knee +0.3、
-   ankle_pitch −0.2；手臂垂下）。**这一段完全不涉及神经网络**，如果这一步就抖，
-   问题在控制栈不在策略。
-5. **确认 Gloria-M 夹爪没有蹭到大腿**（见下方风险提示）。
-6. 按 `空格`，确认卸力：kp 斜坡降到 0 后手能推动关节。这一步要在放策略之前先验一遍，
-   急停必须是可靠的。
-7. 再 `G` → `Enter`，零指令下站着。观察是否有高频抖动。
-8. 小幅 `W` 试走，随时准备按空格。
-9. 上肢：先确认**不发上肢指令时手臂纹丝不动**，再发一个等于当前 `ik_pos_err≈0`
-   的位姿（自洽性检查），最后才试**小幅**平移（一次 1~2 cm）。
-
-> ⚠️ **上肢不限速**。发一个离当前很远的位姿，手臂会在一拍（20 ms）内把目标跳到位，
-> 实际运动速度只受电机 kp/kd 限制。遥操源上线前必须先把目标对齐到当前位姿。
-
----
-
-## 8. 已知风险与取舍
+## 7. 已知风险与取舍
 
 ### 手臂在 STAND 阶段写 0 与自碰撞
 
@@ -534,9 +440,9 @@ cd src/g1_lower_body_policy && PYTHONPATH=$PWD python3 -m pytest test/ -q
 目的就是**避开细长的 Gloria-M 夹爪撞大腿**（`elbow` 下界 0.0 时随机位姿自碰撞率 11%，
 0.3 时降到 7.5%）。`elbow=0` 且 `shoulder_roll=0` 落在那个区间之外。
 
-第 5 步务必目视确认。CPU 闭环重跑里手臂写 0 并**没有**让下肢站不住（0.5/1.0 m/s 前进、
-蹲行三个场景都没摔，速度还比“训练分布中值”的手臂位姿略高一点），所以主要风险是几何
-干涉而不是平衡。要更保险就把 `passive_targets` 换成：
+站立那一步务必目视确认夹爪没蹭到大腿。CPU 闭环重跑里手臂写 0 并**没有**让下肢站不住，
+所以主要风险是几何干涉而不是平衡。要更保险就把 `passive_targets` 换成（顺序是左臂 7 轴
+→ 右臂 7 轴 → 左右夹爪偏心轴）：
 
 ```yaml
 passive_targets: [0.0, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0,
@@ -544,63 +450,41 @@ passive_targets: [0.0, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0,
                   0.0, 0.0]
 ```
 
-顺序是 `joints` 里除去 15 个策略关节后剩下的顺序，即
-左臂 7 轴 → 右臂 7 轴 → 左右夹爪偏心轴。
-
-
 ### 策略当前水平
 
-训练还在跑（写这份文档时第 5500/8800 轮）。训练脚本每 100 轮存档时会重新导出
-`policy.onnx`，直接覆盖 `config/policy.onnx` 就能换新策略。
+训练还在跑（写这份文档时第 5500/8800 轮），每 100 轮重新导出一次，直接覆盖
+`config/policy.onnx` 就能换新策略。
 
-**包里装的不是最新的那个，是 `logs/rsl_rl/g1_gloria_lower_body/2026-07-30_07-09-08/`
-（约第 2800 轮）**，因为最新的那个前进速度跟随已经塌掉了。用
-`scripts/check_deploy_policy.py` 在 CPU 上闭环重跑（手臂不加力矩、自然下垂），
-同样的 8 个场景：
+**包里装的不是最新的那个，是 `2026-07-30_07-09-08/`（约第 2800 轮）**，因为最新的
+那个前进速度跟随已经塌掉了。两版都是正常的交替步态、8/8 不摔，差别全在**前进速度**：
 
-| 场景 | iter≈2800（**包里这个**） | iter≈5500（最新） |
+| 前进指令 | iter≈2800（**包里这个**） | iter≈5500（最新） |
 |---|---|---|
-| 前进 0.5 m/s | **+0.35** m/s（70%） | −0.00 m/s（0%） |
-| 前进 1.0 m/s | **+0.67** m/s（67%） | −0.05 m/s（0%） |
-| 后退 0.3 m/s | −0.29 m/s（97%） | −0.25 m/s（83%） |
-| 侧移 0.3 m/s | +0.10 m/s（33%） | +0.10 m/s（33%） |
-| 蹲行 0.3 m/s h=0.62 | **+0.18** m/s（60%） | +0.03 m/s（10%） |
-| 原地转 1.0 rad/s | +0.12 rad/s（12%） | +0.20 rad/s（20%） |
-| 站立漂移 | −0.02 m/s | −0.00 m/s |
-| 高度跟随误差 | 0.007~0.035 m | 0.005~0.024 m |
-| 摆动占比（每只脚） | 23~36% | 33~37% |
-| 摔倒 | 0/8 | 0/8 |
+| 0.5 m/s | **+0.35** m/s（70%） | −0.00 m/s（0%） |
+| 1.0 m/s | **+0.67** m/s（67%） | −0.05 m/s（0%） |
+| 蹲行 0.3 m/s | **+0.18** m/s（60%） | +0.03 m/s（10%） |
 
-两个都有正常的交替步态（摆动占比 25~35% 是健康的步态占空比），高度跟随、站立、
-抗摔都没问题；差别全在**前进速度**：新的那个在原地踏步。训练日志里
-`track_linear_velocity` 从第 2950 轮的 0.81 一路掉到第 5650 轮的 0.27，和这里对得上——
-上肢扰动课程在 2600/3700 轮拉到满档（手臂力矩 5 N·m、外力 30 N）之后，策略拿前进速度
-换了抗扰动，越来越保守。
+训练日志里 `track_linear_velocity` 从第 2950 轮的 0.81 掉到第 5650 轮的 0.27：上肢扰动
+课程拉到满档后，策略拿前进速度换了抗扰动。
 
 **已知不足**（两个版本都有）：
 
-* 横移和转向的跟随增益都很低（30% 和 15%），实机上会表现为"横着挪不动、转得慢"。
-* 策略**没有航向反馈**。`wz=0` 的含义是"不要主动转"，不是"保持航向"；实测 12 s 直行
-  会侧偏 2.6 m。航向环得由操作员或 VLA 在外面闭。
-
-视频在 `logs/deploy_check/`（训练仓库里）：`iter2800.mp4` / `latest.mp4` 是 8 个场景
-的跟拍，`forward_compare.mp4` 是固定机位的前进对比（上=2800，下=最新）。
+* 横移和转向的跟随增益很低（约 30% 和 15%），实机上表现为"横着挪不动、转得慢"。
+* 策略**没有航向反馈**。`wz=0` 是"不要主动转"，不是"保持航向"；实测 12 s 直行会侧偏
+  2.6 m。航向环得由操作员或 VLA 在外面闭。
 
 ### 没做的事
 
-* 没有做 `/cmd_vel`(Twist) 接口。VLA 侧接进来时直接向 `/lower_body_policy/command`
-  发对应长度的 `Float64MultiArray` 即可（见第 1 节），节点内部的限幅、限速、超时
-  保护对任何指令源都一视同仁。
-* **上肢没有限速、没有插值、没有轨迹规划**。IK 算出什么就发什么，平滑性由发布者
-  自己负责。目标位姿要连续变化，不要跳变。
+* 没有 `/cmd_vel`(Twist) 接口。VLA 直接向 `~/command` 发对应长度的 `Float64MultiArray`
+  即可，节点内部的限幅、限速、超时保护对任何指令源一视同仁。
+* **上肢没有限速、插值、轨迹规划**。平滑性由发布者自己负责，目标位姿要连续变化。
 * **没有自碰撞检测**。IK 只管关节限位，不知道两只手会不会撞到一起、会不会撞腿。
-* **没有臂角（arm-angle）冗余优化**。7 自由度的冗余维度由 DLS 的最小范数解隐式决定，
-  不能指定肘2朝向。
-* 只在平地策略上验证过。粗糙地形的变体训练侧还没做。
+* **没有臂角（arm-angle）冗余优化**，不能指定肘部朝向。
+* 只在平地策略上验证过。
 
 ---
 
-## 9. 故障排查
+## 8. 故障排查
 
 | 现象 | 原因 |
 |---|---|
@@ -621,7 +505,7 @@ passive_targets: [0.0, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0,
 
 ---
 
-## 10. 文件导航
+## 9. 文件导航
 
 ```
 g1_lower_body_policy/
@@ -630,17 +514,38 @@ g1_lower_body_policy/
 │   └── policy.onnx              # 策略权重（自带元数据：关节顺序/默认位姿/动作缩放）
 ├── g1_lower_body_policy/
 │   ├── policy_runtime.py        # 下肢：观测装配 + 推理 + 契约校验，不依赖 ROS
-│   ├── arm_ik.py               # 上肢：缩减模型 + DLS 求解，不依赖 ROS
+│   ├── arm_ik.py                # 上肢：缩减模型 + DLS 求解，不依赖 ROS
 │   ├── policy_node.py           # ROS 节点 + 状态机 + 看门狗 + 指令分块
 │   ├── teleop_keyboard.py       # 键盘遥控台（只发长度 4，只管下半身）
-│   └── vr_teleop.py             # VR 桥接（发长度 20，上下肢全管）
+│   ├── vr_teleop.py             # VR 桥接（内嵌 WebXR 服务，发长度 20，上下肢全管）
+│   └── make_vr_cert.py          # 签局域网自签证书，兼作证书路径/端口的唯一定义
 ├── launch/
 │   ├── lower_body_policy.launch.py
 │   └── vr_teleop.launch.py
-├── VR/                          # WebXR 桥（非 ROS），先跑它再起 vr_teleop
+├── vr/                          # WebXR 采集页 + 监控页（装到 share/）+ adb 守护脚本
+│   └── README.md                # VR 上机流程、证书、排查清单
 └── test/
     ├── test_policy_runtime.py   # 13 个纯逻辑用例，pytest
     ├── test_arm_ik.py           # 8 个 IK 用例（正逆往返 / 不可达 / 单侧求解 / 零空间不漂移）
-    ├── test_vr_teleop.py        # 5 个 VR 用例（离合零跳变 / 轴映射 / 夹爪方向）
+    ├── test_vr_teleop.py        # 22 个 VR 用例（离合零跳变 / 轴映射 / 标定 / 摇杆 / 夹爪方向）
     └── smoke_no_robot.py        # 无真机联调，32 项检查，直接 python3 跑
 ```
+
+> 数据（`config/*`、`vr/*.html`）走 `data_files` 装到 `share/`，运行时用
+> `get_package_share_directory` 解析；代码在模块目录里。**别把页面挪进模块目录**——
+> 那样 `Path(__file__).parent` 在 `--symlink-install` 下能跑通、在干净安装下会 404，
+> 是个只在部署机上暴露的坑。
+
+### 上机前的自检
+
+```bash
+# 假状态源 + 假 controller_manager，把状态机从头走一遍，32 项检查
+python3 src/g1_lower_body_policy/test/smoke_no_robot.py
+
+# 纯逻辑单测 43 项
+cd src/g1_lower_body_policy && PYTHONPATH=$PWD python3 -m pytest test/ -q
+```
+
+换了策略还要在训练仓库里跑 `scripts/check_deploy_policy.py`（CPU 闭环重跑整条部署
+链路，不占 GPU）。跑完确认没有残留进程：上一轮的节点会在同一个 `ROS_DOMAIN_ID` 上
+继续发 `status`，下一轮会读到旧状态。

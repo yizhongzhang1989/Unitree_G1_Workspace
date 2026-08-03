@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """VR 头显遥操作桥：WebXR 帧 -> lower_body_policy 的 ``~/command``。
 
-    头显 / 双手柄 --WebXR--> VR/server.py --WS--> [ 本节点 50 Hz ] --20 值--> lower_body_policy
+    头显 / 双手柄 --WebXR--WS--> [ 本节点：aiohttp + 50 Hz 定时器 ] --20 值--> lower_body_policy
 
-先按 ``VR/README.md`` 把三步跑通（adb reverse + server.py + 头显里打开采集页并
-Enter VR），再起本节点。
+**采集页由本节点自己托管**（默认 ``0.0.0.0:8000``），头显直连过来，中间没有独立的
+桥接进程。所以上机只要两步：``adb reverse tcp:8000 tcp:8000``，然后在头显里打开
+``http://localhost:8000`` 点 Enter VR。详见 ``vr/README.md``。
 
 映射
 ----
@@ -34,8 +35,9 @@ Enter VR），再起本节点。
 
 安全
 ----
-* 只在策略层进入 ``running`` 之后才发指令；进入那一刻用实测位形正解播种双臂位姿，
-  和策略层自己的播种对齐。
+* 只在策略层进入 ``running`` 之后才发指令；接管的原点直接取策略层在 ``~/status``
+  里发布的末端位姿目标，所以两边的起点是同一个值——本节点不再自己建一份
+  IK 模型算正解。
 * VR 帧超时（``frame_timeout_s``）或退出 VR 会话：速度立刻归零、双臂冻结、高度保持。
 * 离合按下瞬间位移与转角都恒为 0，所以接管不会跳——上肢不限速，这是唯一的防跳保护。
 """
@@ -43,22 +45,26 @@ Enter VR），再起本节点。
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import math
+import ssl
 import threading
+from pathlib import Path
 
 import numpy as np
 import pinocchio as pin
 import rclpy
+from aiohttp import WSMsgType, web
+from ament_index_python.packages import get_package_share_directory
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import JointState
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
-from g1_lower_body_policy.arm_ik import ArmIK
+from g1_lower_body_policy.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
 
 SIDES = ('left', 'right')
 # 策略层当前状态 -> 双手 B/Y 按下时该调哪个服务。看实际状态而不是本地计数，
@@ -81,13 +87,31 @@ def _quat(matrix: np.ndarray) -> np.ndarray:
     return coeffs / np.linalg.norm(coeffs)
 
 
+async def _safe_send(ws, text: str) -> None:
+    try:
+        await ws.send_str(text)
+    except (ConnectionResetError, RuntimeError, OSError):
+        pass
+
+
 class VRTeleop(Node):
 
     def __init__(self) -> None:
         super().__init__('vr_teleop')
         p = self.declare_parameter
-        self._url = p('vr_url', 'ws://localhost:8000/ws/subscribe') \
-            .get_parameter_value().string_value
+        # adb reverse 把头显的 localhost:8000 转到本机，所以只用头显时可以把
+        # bind_host 收成 127.0.0.1；默认 0.0.0.0 是为了让别的机器能开 /monitor。
+        self._host = p('bind_host', '0.0.0.0').get_parameter_value().string_value
+        self._port = int(p('bind_port', 8000).get_parameter_value().integer_value)
+        # HTTPS 另开一个口，和明文口**同时**听。两条链路服务的是同一份采集页，
+        # 互不影响：adb reverse 只能转明文，而局域网直连只能走 HTTPS（WebXR 要求安全上下文）。设成 0 就不开 TLS 口。
+        self._tls_port = int(p('tls_port', DEFAULT_TLS_PORT).get_parameter_value().integer_value)
+        # 非空则所有 HTTP/WS 入口都要带 ?token=；服务暴露在局域网上时务必设。
+        self._token = p('token', '').get_parameter_value().string_value
+        # 默认指向 make_vr_cert 的输出位置，所以签过证书之后直接 ros2 run 也是
+        # 双口，不必非走 launch。
+        self._cert = p('tls_cert', str(DEFAULT_DIR / 'cert.pem')).get_parameter_value().string_value
+        self._key = p('tls_key', str(DEFAULT_DIR / 'key.pem')).get_parameter_value().string_value
         self._rate = float(p('rate_hz', 50.0).get_parameter_value().double_value)
         # 限幅与 teleop_keyboard.py 同一组。高度上界取 0.78 而不是键盘的 0.80：
         # 策略层 command_limits 就是裁到 0.78，写 0.80 只会让摇杆顶端摸起来像卡住了。
@@ -119,29 +143,13 @@ class VRTeleop(Node):
         self._button_cooldown = float(
             p('button_cooldown_s', 1.0).get_parameter_value().double_value)
 
-        self._arm_names = list(
-            p('arm_joints', ['']).get_parameter_value().string_array_value)
-        self._grip_names = list(
-            p('gripper_joints', ['']).get_parameter_value().string_array_value)
-        if len(self._arm_names) != 14 or len(self._grip_names) != 2:
-            raise ValueError('arm_joints 需要 14 个、gripper_joints 需要 2 个关节名')
-        self._ik_kwargs = dict(
-            tip_frames={side: p(f'{side}_tip_frame', f'{side}_gripper_base')
-                        .get_parameter_value().string_value for side in SIDES},
-            base_frame=p('base_frame', 'torso_link')
-            .get_parameter_value().string_value,
-        )
-
         self._lock = threading.Lock()
         self._frame: dict | None = None
         self._frame_stamp = 0.0
-        self._ik: ArmIK | None = None
-        self._arm_q: np.ndarray | None = None
-        self._grip_meas = np.zeros(2)
-        self._state = ''
-        self._js_names: list[str] = []
-        self._js_index: list[int] = []
-        self._grip_index: list[int] = []
+        # 下面两个只在 aiohttp 那个事件循环里读写，不需要加锁。
+        self._device = None
+        self._monitors: set = set()
+        self._status: dict = {}
         # 下面这几个只在控制线程里读写，不需要加锁。
         self._seeded = False
         self._pose: dict[str, np.ndarray] = {}
@@ -158,9 +166,6 @@ class VRTeleop(Node):
 
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
-        latched = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
-                             reliability=ReliabilityPolicy.RELIABLE,
-                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
         control = MutuallyExclusiveCallbackGroup()
         slow = ReentrantCallbackGroup()
         self._message = Float64MultiArray()
@@ -168,129 +173,223 @@ class VRTeleop(Node):
             Float64MultiArray,
             p('command_topic', '/lower_body_policy/command')
             .get_parameter_value().string_value, stream)
-        self.create_subscription(JointState, '/joint_states', self._on_joint_states,
-                                 stream, callback_group=control)
         self.create_subscription(
             String, p('status_topic', '/lower_body_policy/status')
-            .get_parameter_value().string_value, self._on_status, 10,
-            callback_group=control)
-        # 建模要几百毫秒，避开控制环所在的互斥组。
-        self.create_subscription(
-            String, p('robot_description_topic', '/robot_description')
-            .get_parameter_value().string_value,
-            self._on_description, latched, callback_group=slow)
+            .get_parameter_value().string_value, self._on_status, 10, callback_group=control)
         self.create_timer(1.0 / self._rate, self._tick, callback_group=control)
         # 服务得用 Reentrant 组 + call_async：engage/estop 里的 switch_controller 会阻塞
         # 好几秒（硬件卸力斜坡），同步等会把 50 Hz 定时器一起冻住。
         policy = p('policy_node', '/lower_body_policy') \
             .get_parameter_value().string_value.rstrip('/')
         self._trigger = {
-            name: self.create_client(Trigger, f'{policy}/{name}',
-                                     callback_group=slow)
-            for name in ('engage', 'start', 'estop')}
+            name: self.create_client(Trigger, f'{policy}/{name}', callback_group=slow)
+            for name in ('engage', 'start', 'estop')
+        }
 
         self._alive = True
-        self._thread = threading.Thread(target=self._stream, daemon=True)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
         self.get_logger().info(
-            f'等待 VR 帧（{self._url}）。双手同时按 B/Y 推进：站立 -> 启动策略 -> 急停；'
-            f'A/X 把手柄所指方向标定为机器人正前方；'
-            f'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）。')
+            '头显里打开采集页并 Enter VR。'
+            '双手同时按 B/Y 推进：站立 -> 启动策略 -> 急停；'
+            'A/X 把手柄所指方向标定为机器人正前方；'
+            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）。')
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
 
-    # -- 数据源 ----------------------------------------------------------------
+    # -- WebXR 桥：头显直连本节点，中间没有独立进程 -------------------------------
 
-    def _stream(self) -> None:
-        """后台线程收 WS，只往 _frame 里放最新一帧；断了就重连。"""
-        import aiohttp
+    def _serve(self) -> None:
+        """后台线程里跑 aiohttp：托管采集页、收头显上行帧。
+
+        ``web.run_app`` 要装信号处理器、只能在主线程跑，所以用低层的 ``AppRunner``。
+        帧只覆盖 ``_frame`` 的最新一份、不排队：头显是 72~90 Hz、控制环 50 Hz，
+        多出来的帧本来就该丢，排队只会积压延迟。
+        """
+        static = Path(get_package_share_directory('g1_lower_body_policy')) / 'vr'
+
+        def page(name: str):
+            async def handler(_: web.Request) -> web.StreamResponse:
+                return web.FileResponse(static / name)
+            return handler
+
+        app = web.Application()
+        app.add_routes([
+            web.get('/', page('index.html')),
+            web.get('/monitor', page('monitor.html')),
+            web.get('/state', self._on_state),
+            web.post('/haptic', self._on_haptic),
+            web.get('/ws/device', self._on_device),
+            web.get('/ws/subscribe', self._on_monitor),
+        ])
+        context = None
+        if self._tls_port and self._cert and self._key:
+            if all(Path(f).is_file() for f in (self._cert, self._key)):
+                context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+                context.load_cert_chain(self._cert, self._key)
+            else:
+                # 不静默：以为在跑 HTTPS 而实际没有，比直接起不来更坏。
+                self.get_logger().warning(
+                    f'证书不在 {Path(self._cert).parent}，只开明文口。签一张：'
+                    f'ros2 run g1_lower_body_policy make_vr_cert')
 
         async def run() -> None:
-            while self._alive:
+            runner = web.AppRunner(app, handle_signals=False)
+            await runner.setup()
+            # 明文口：adb reverse 把头显的 localhost:8000 转到这里。它是基础路径，
+            # 任何情况下都要起来。
+            await web.TCPSite(runner, self._host, self._port).start()
+            # 等真的绑上了再报地址：在 __init__ 里打这行的话，端口被占着也照样说
+            # “已就绪”，反而把人往错处引。
+            self.get_logger().info(
+                f'WebXR 明文口已就绪：http://{self._host}:{self._port}'
+                f'（配 adb reverse tcp:{self._port} tcp:{self._port} 用）')
+            if context is not None:
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.ws_connect(self._url, heartbeat=5.0) as ws:
-                            self.get_logger().info(f'已连上 VR 桥 {self._url}')
-                            async for message in ws:
-                                if message.type is not aiohttp.WSMsgType.TEXT:
-                                    continue
-                                with self._lock:
-                                    self._frame = json.loads(message.data)
-                                    self._frame_stamp = self._now()
-                except Exception as error:  # 网络/解析全按断线处理，重连即可。
-                    self.get_logger().warning(
-                        f'VR 桥断开，1 s 后重连: {error}', throttle_duration_sec=5.0)
-                if self._alive:
-                    await asyncio.sleep(1.0)
+                    await web.TCPSite(runner, self._host, self._tls_port,
+                                      ssl_context=context).start()
+                except OSError as error:
+                    # TLS 口起不来不能连带把明文口拉下水，adb 那条路得继续能用。
+                    self.get_logger().error(
+                        f'HTTPS 口 {self._tls_port} 起不来：{error}')
+                else:
+                    self.get_logger().info(
+                        f'WebXR HTTPS 口已就绪：https://<本机局域网IP>:{self._tls_port}'
+                        f'（自签证书，头显里点「高级 → 继续前往」）')
+            while self._alive:
+                await asyncio.sleep(0.25)
+            await runner.cleanup()
 
-        asyncio.run(run())
-
-    def _on_description(self, message: String) -> None:
-        if self._ik is not None:
-            return
         try:
-            ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs)
-        except Exception as error:
-            self.get_logger().error(f'正解模型建立失败，上肢不可用: {error}')
-            return
-        with self._lock:
-            self._ik = ik
-        self.get_logger().info('正解模型就绪')
+            asyncio.run(run())
+        except OSError as error:
+            # 最常见的是明文口被占：上一轮节点没退干净。
+            self.get_logger().error(
+                f'WebXR 桥起不来（{self._host}:{self._port}）：{error}。'
+                f'查一下 `ss -lptn "sport = :{self._port}"`')
 
-    def _on_joint_states(self, message: JointState) -> None:
-        ik = self._ik
-        if ik is None:
+    def _authorize(self, request: web.Request) -> None:
+        if not self._token:
             return
-        names = list(message.name)
-        if names != self._js_names:
-            wanted = list(ik.joint_names) + self._grip_names
-            if any(name not in names for name in wanted):
-                return  # 广播还没收齐，等下一帧。
-            self._js_names = names
-            self._js_index = [names.index(name) for name in ik.joint_names]
-            self._grip_index = [names.index(name) for name in self._grip_names]
-        if len(message.position) != len(names):
-            return
-        position = np.asarray(message.position)
+        got = request.query.get('token') or request.headers.get('X-Auth-Token', '')
+        if not hmac.compare_digest(got, self._token):
+            raise web.HTTPUnauthorized(text='invalid token')
+
+    async def _on_device(self, request: web.Request) -> web.StreamResponse:
+        """头显上行：WebXR 帧。断线立刻把 _frame 清掉，不用等 frame_timeout_s。"""
+        self._authorize(request)
+        ws = web.WebSocketResponse(max_msg_size=1 << 20, heartbeat=20)
+        await ws.prepare(request)
+        self._device = ws
+        self.get_logger().info('头显已连接')
+        try:
+            async for message in ws:
+                if message.type is not WSMsgType.TEXT:
+                    continue
+                try:
+                    frame = json.loads(message.data)
+                except ValueError:
+                    continue
+                with self._lock:
+                    self._frame = frame
+                    self._frame_stamp = self._now()
+                self._fanout(message.data)
+        finally:
+            if self._device is ws:      # 刷新页面时新连接已经建好了，别把它清掉。
+                self._device = None
+                with self._lock:
+                    self._frame = None
+                self.get_logger().warning('头显已断开，已停车并冻结上肢')
+        return ws
+
+    async def _on_monitor(self, request: web.Request) -> web.StreamResponse:
+        """``/monitor`` 页面下行。没人开监控页时这条路径完全不产生开销。"""
+        self._authorize(request)
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+        self._monitors.add(ws)
+        try:
+            async for _ in ws:
+                pass
+        finally:
+            self._monitors.discard(ws)
+        return ws
+
+    def _fanout(self, text: str) -> None:
+        for ws in list(self._monitors):
+            if ws.closed:
+                self._monitors.discard(ws)
+            else:
+                # 不 await：监控页跟不上是它自己的事，绝不能拖住头显这条链路。
+                asyncio.create_task(_safe_send(ws, text))
+
+    async def _on_state(self, request: web.Request) -> web.StreamResponse:
+        """``curl localhost:8000/state`` 的自检口：seq 在涨就说明帧在流。"""
+        self._authorize(request)
         with self._lock:
-            self._arm_q = position[self._js_index]
-            self._grip_meas = position[self._grip_index]
+            frame = self._frame
+        return web.json_response(frame or {'seq': 0, 'session_active': False})
+
+    async def _on_haptic(self, request: web.Request) -> web.StreamResponse:
+        """POST ``{"hand": "right", "intensity": 0.6, "duration": 80}`` -> 手柄震动。"""
+        self._authorize(request)
+        body = await request.json()
+        if body.get('hand') not in SIDES:
+            raise web.HTTPBadRequest(text="hand must be 'left' or 'right'")
+        device = self._device
+        if device is None or device.closed:
+            return web.json_response({'delivered': False})
+        await _safe_send(device, json.dumps(
+            {'type': 'haptic', 'hand': body['hand'],
+             'intensity': float(body.get('intensity', 0.6)),
+             'duration': float(body.get('duration', 80))}, separators=(',', ':')))
+        return web.json_response({'delivered': True})
+
+    # -- ROS 输入 --------------------------------------------------------------
 
     def _on_status(self, message: String) -> None:
         try:
-            state = json.loads(message.data).get('state', '')
+            status = json.loads(message.data)
         except ValueError:
             return
         with self._lock:
-            self._state = state
+            self._status = status
 
     # -- 控制环 ----------------------------------------------------------------
 
     def _tick(self) -> None:
         with self._lock:
             frame, stamp = self._frame, self._frame_stamp
-            ik, arm_q, grip_meas = self._ik, self._arm_q, self._grip_meas.copy()
-            state = self._state
-        fresh = (frame is not None and frame.get('session_active')
-                 and self._now() - stamp <= self._timeout)
+            status = self._status
+        # 不新鲜的帧一律当成没有帧：往下就只剩"有帧 / 没帧"两种情况，不必再把
+        # `frame if fresh else None` 到处传一遍。
+        if frame is not None and not (frame.get('session_active')
+                                      and self._now() - stamp <= self._timeout):
+            frame = None
         # 状态机按键和标定任何状态下都要响应——idle / stand 里还没开始发指令就得能按。
-        self._check_button(frame if fresh else None)
-        self._check_calibration(frame if fresh else None)
-        if ik is None or arm_q is None or state != 'running':
+        self._check_button(frame)
+        self._check_calibration(frame)
+        if status.get('state') != 'running':
             self._seeded = False        # 退出 running 后重新播种，不留旧目标。
             return
         if not self._seeded:
-            # 和策略层 ~/start 用的是同一份正解、同一份实测位形，两边目标天然对齐。
-            self._pose = ik.fk(arm_q)
-            self._grip = grip_meas
+            pose = status.get('pose') or {}
+            if not all(side in pose for side in SIDES):
+                return                  # 策略层刚接管，正解播种还没落到 status 上。
+            # 直接用策略层已发布的末端目标当原点：本节点不再自己建一份 IK 模型
+            # 算正解，两边的起点由构造保证是同一个值，不会因取数时刻不同而错开。
+            self._pose = {side: np.asarray(pose[side], dtype=np.float64)
+                          for side in SIDES}
+            self._grip = np.asarray(status.get('grip') or (0.0, 0.0),
+                                    dtype=np.float64)
             self._clutch = {side: None for side in SIDES}
             self._twist = np.zeros(3)
             self._height = self._height0
             self._seeded = True
-            self.get_logger().info('策略层已 running，双臂目标已按当前位形播种')
+            self.get_logger().info('策略层已 running，双臂目标已按其发布的位姿播种')
 
-        if not fresh:
+        if frame is None:
             # 掉帧/退出 VR：立刻停车，手臂、夹爪和高度都冻结在最后一帧。
             self._twist = np.zeros(3)
             self.get_logger().warning('VR 帧不新鲜，已停车并冻结上肢',
@@ -327,7 +426,7 @@ class VRTeleop(Node):
 
     def _advance(self) -> None:
         with self._lock:
-            state = self._state
+            state = self._status.get('state', '')
         name, label = _ADVANCE.get(state, (None, ''))
         if name is None:
             self.get_logger().warning(
@@ -420,14 +519,16 @@ class VRTeleop(Node):
             buttons = hand.get('buttons') or {}
             grip = hand.get('grip')
             squeeze = float(buttons.get('squeeze', 0.0))
+            clutch = self._clutch[side]
             if grip and squeeze >= self._squeeze_on:
                 position = np.asarray(grip['position'], dtype=np.float64)
                 rotation = _matrix(grip['orientation'])
-                if self._clutch[side] is None:
+                if clutch is None:
                     # 三个原点一起锁：接管瞬间位移和转角都恒为 0，所以不会跳。
-                    self._clutch[side] = (position, rotation, self._pose[side].copy())
+                    clutch = (position, rotation, self._pose[side].copy())
+                    self._clutch[side] = clutch
                     self.get_logger().info(f'{side} 离合接合')
-                origin, origin_rot, anchor = self._clutch[side]
+                origin, origin_rot, anchor = clutch
                 pose = self._pose[side]
                 pose[:3] = anchor[:3] + self._arm_scale * (
                     self._map @ (position - origin))
@@ -435,7 +536,7 @@ class VRTeleop(Node):
                 # _map 正交且 det=+1，所以共轭出来仍是旋转、转角不变。
                 turn = self._map @ rotation @ origin_rot.T @ self._map.T
                 pose[3:] = _quat(turn @ _matrix(anchor[3:]))
-            elif self._clutch[side] is not None:
+            elif clutch is not None:
                 self._clutch[side] = None       # 松开就冻结在最后一帧。
                 self.get_logger().info(f'{side} 离合断开，手臂冻结')
             # trigger: 0 -> 完全打开、1 -> 夹紧。eccentric 是 0 闭合、2.76 打开，反向。

@@ -184,14 +184,6 @@ class LowerBodyPolicy:
         self._last_action = np.zeros(spec.action_dim)
         self._steps = 0
 
-    @property
-    def spec(self) -> PolicySpec:
-        return self._spec
-
-    @property
-    def last_action(self) -> np.ndarray:
-        return self._last_action.copy()
-
     def reset(self) -> None:
         """回到刚复位的状态：上一拍动作清零，相位从 0 重新计时。"""
         self._last_action[:] = 0.0
