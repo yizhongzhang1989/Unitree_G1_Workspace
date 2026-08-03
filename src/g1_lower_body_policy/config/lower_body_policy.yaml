@@ -120,6 +120,11 @@
     # 除了腿还要把手臂收到 passive_targets。
     stand_s: 3.0
 
+    # STAND 的前 stand_clear_s 秒**只把 shoulder_roll 往外张**（腿和其余关节原地不动）之后才全身走向站立位姿。
+    # 目的是避免夹爪打到躯干
+    stand_clear_roll: 0.7
+    stand_clear_s: 0.4
+
     # 指令限幅 [vx_lo, vx_hi, vy_lo, vy_hi, wz_lo, wz_hi, h_lo, h_hi]。
     # 训练分布是 vx[-0.5,1.0] vy[-0.5,0.5] wz[-1.57,1.57] h[0.52,0.78]（play 模式），
     # 下面这组是首次上机用的保守子集，实机调稳之后可以逐档放开到训练分布。

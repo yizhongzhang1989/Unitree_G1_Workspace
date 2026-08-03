@@ -27,10 +27,13 @@ IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终
       ^                 |               |
       +------- estop ---+---------------+
 
-* ``STAND``：激活 FPC，用 ``stand_s`` 秒把 31 轴从"当前实测位姿"线性插值到策略的
-  默认位姿（对应官方 ``State_FixStand`` 的 ``ts: [0, 2]`` + ``qs``），插完就停在
-  那儿等人确认。策略绝不能从任意位姿冷启动——训练里它只见过默认位姿附近的开局。
-  这一段手臂仍走 ``passive_targets``，IK 还没接管。
+* ``STAND``：激活 FPC，分两段把 31 轴从"当前实测位姿"插值到策略的默认位姿
+  （对应官方 ``State_FixStand`` 的 ``ts: [0, 2]`` + ``qs``），插完就停在那儿等人确认。
+  策略绝不能从任意位姿冷启动——训练里它只见过默认位姿附近的开局。
+  第一段（``stand_clear_s``）**只把 shoulder_roll 往外张**：关节空间直线不避障，
+  手臂贴着身体从背后摆回来时夹爪会扫进大腿（实测 ``shoulder_pitch`` 在 +60° 附近
+  ``gripper_base`` 与 ``hip_pitch_link`` 间距 0.0 mm）。这一段手臂仍走
+  ``passive_targets``，IK 还没接管。
 * ``RUNNING``：策略与手臂 IK 同时接管。进入时清零 ``last_action`` 和步态相位，
   等价于官方 ``env->reset()``；手臂目标位姿用当前实测位形正解播种，所以没人发上肢
   指令时手臂就停在接管那一刻的姿态。
@@ -125,19 +128,20 @@ class LowerBodyPolicyNode(Node):
         self._joints = list(p('joints', ['']).get_parameter_value().string_array_value)
         if len(self._joints) < 16 or any(not name for name in self._joints):
             raise ValueError('joints 必须按 FPC 的顺序列出全部关节')
-        self._policy_joints = list(
+        # 下面这几个只在构造期用到（校验 + 算槽位），不是运行期状态，所以不挂到 self 上。
+        policy_joints = list(
             p('policy_joints', ['']).get_parameter_value().string_array_value)
-        unknown = [name for name in self._policy_joints if name not in self._joints]
-        if not self._policy_joints or unknown:
+        unknown = [name for name in policy_joints if name not in self._joints]
+        if not policy_joints or unknown:
             raise ValueError(f'policy_joints 必须是 joints 的子集: {unknown}')
-        self._policy_slots = [self._joints.index(name) for name in self._policy_joints]
+        self._policy_slots = [self._joints.index(name) for name in policy_joints]
         owned = set(self._policy_slots)
-        self._passive_slots = [i for i in range(len(self._joints)) if i not in owned]
-        self._passive_values = np.asarray(
-            p('passive_targets', [0.0] * len(self._passive_slots))
+        passive_slots = [i for i in range(len(self._joints)) if i not in owned]
+        passive_values = np.asarray(
+            p('passive_targets', [0.0] * len(passive_slots))
             .get_parameter_value().double_array_value)
-        if self._passive_values.shape != (len(self._passive_slots),):
-            raise ValueError(f'passive_targets 长度必须是 {len(self._passive_slots)}')
+        if passive_values.shape != (len(passive_slots),):
+            raise ValueError(f'passive_targets 长度必须是 {len(passive_slots)}')
 
         # -- 上肢 --------------------------------------------------------------
         # 手臂 14 轴走 IK，夹爪偏心轴不进 IK 模型、直接透传。手臂的槽位要等
@@ -147,7 +151,7 @@ class LowerBodyPolicyNode(Node):
         grippers = list(
             p('gripper_joints', ['']).get_parameter_value().string_array_value)
         if sorted(self._arm_names + grippers) != sorted(
-                self._joints[i] for i in self._passive_slots):
+                self._joints[i] for i in passive_slots):
             raise ValueError('arm_joints + gripper_joints 必须正好是策略之外的全部关节')
         self._gripper_slots = [self._joints.index(name) for name in grippers]
         grip_limits = p('gripper_limits', [0.0, 2.7638]) \
@@ -179,7 +183,7 @@ class LowerBodyPolicyNode(Node):
             .get_parameter_value().double_value,
         )
 
-        n = len(self._policy_joints)
+        n = len(policy_joints)
         lower = np.asarray(p('target_lower_limits', [0.0] * n)
                            .get_parameter_value().double_array_value)
         upper = np.asarray(p('target_upper_limits', [0.0] * n)
@@ -188,11 +192,23 @@ class LowerBodyPolicyNode(Node):
             raise ValueError('target_{lower,upper}_limits 长度必须等于 policy_joints')
 
         # -- 时序与阈值 --------------------------------------------------------
-        self._rate = float(p('control_rate_hz', 50.0).get_parameter_value().double_value)
-        if self._rate <= 0.0:
+        rate = float(p('control_rate_hz', 50.0).get_parameter_value().double_value)
+        if rate <= 0.0:
             raise ValueError('control_rate_hz 必须为正')
-        self._dt = 1.0 / self._rate
+        dt = 1.0 / rate
         self._stand_s = float(p('stand_s', 3.0).get_parameter_value().double_value)
+
+        # 先让手张开再到前面
+        self._clear_roll = float(p('stand_clear_roll', 0.7).get_parameter_value().double_value)
+        self._clear_s = float(p('stand_clear_s', 0.4).get_parameter_value().double_value)
+        if self._clear_s > 0.0 and self._clear_s >= self._stand_s:
+            raise ValueError('stand_clear_s 必须小于 stand_s（它是总时长里的第一段）')
+        # 向外张开的符号：左臂 +、右臂 −，URDF 里 shoulder_roll 的行程就是这么定的
+        # （左 [-1.588, 2.252]、右 [-2.252, 1.588]）。没有这两个关节就自然退化成单段。
+        self._clear_slots = [
+            (index, 1.0 if name.startswith('left') else -1.0)
+            for index, name in enumerate(self._joints) if 'shoulder_roll' in name]
+
         self._state_timeout = float(
             p('state_timeout_s', 0.1).get_parameter_value().double_value)
         self._command_timeout = float(
@@ -217,7 +233,7 @@ class LowerBodyPolicyNode(Node):
         accel = float(p('linear_accel_limit', 1.5).get_parameter_value().double_value)
         # 训练时高度指令按 BaseHeightCommandCfg.max_rate 缓变，策略没见过高度阶跃；
         # 实机上必须复现这个限速，否则遥控每按一下都是分布外输入。
-        self._cmd_rate = self._dt * np.array([
+        self._cmd_rate = dt * np.array([
             accel, accel,
             float(p('angular_accel_limit', 3.0).get_parameter_value().double_value),
             float(p('height_rate_limit', 0.15).get_parameter_value().double_value),
@@ -230,17 +246,17 @@ class LowerBodyPolicyNode(Node):
         if not policy_path.is_file():
             raise ValueError(f'找不到策略文件: {policy_path}')
         session, spec = load_policy(str(policy_path))
-        spec_matches(spec, self._policy_joints)
-        self._policy = LowerBodyPolicy(session, spec, control_dt=self._dt,
+        spec_matches(spec, policy_joints)
+        self._policy = LowerBodyPolicy(session, spec, control_dt=dt,
                                        target_lower=lower, target_upper=upper)
         # 站立位姿 = 策略的默认位姿 + 被动关节目标，直接取自 ONNX metadata：这和
         # 训练里 reset 后的开局位姿是同一份数，不另抄一遍。
         self._stand_pose = np.empty(len(self._joints))
         self._stand_pose[self._policy_slots] = spec.default_pos
-        self._stand_pose[self._passive_slots] = self._passive_values
+        self._stand_pose[passive_slots] = passive_values
         self.get_logger().info(
             f'策略已加载: {policy_path.name} obs={spec.obs_dim} act={spec.action_dim} '
-            f'@ {self._rate:.0f} Hz')
+            f'@ {rate:.0f} Hz')
 
         # -- 运行期状态（全部在 _lock 下访问）----------------------------------
         self._lock = threading.Lock()
@@ -257,6 +273,7 @@ class LowerBodyPolicyNode(Node):
         self._command = self._request.copy()
         self._command_stamp = 0.0
         self._stand_from = np.zeros(len(self._joints))
+        self._stand_via = np.zeros(len(self._joints))
         self._stand_start = 0.0
         self._reason = ''
         self._spinning = True
@@ -308,7 +325,7 @@ class LowerBodyPolicyNode(Node):
             String, p('robot_description_topic', '/robot_description')
             .get_parameter_value().string_value,
             self._on_description, latched, callback_group=services)
-        self.create_timer(self._dt, self._control, callback_group=control)
+        self.create_timer(dt, self._control, callback_group=control)
         self.create_timer(0.1, self._publish_status, callback_group=control)
 
         self._switch = self.create_client(
@@ -387,7 +404,7 @@ class LowerBodyPolicyNode(Node):
         if self._ik is not None:
             return
         try:
-            ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs)
+            ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs) # type: ignore
             slots = [self._joints.index(name) for name in ik.joint_names]
         except Exception as error:  # 建模失败不能拖垮节点，但 ~/start 会拒绝。
             self.get_logger().error(f'手臂 IK 建模失败，上肢不可用: {error}')
@@ -421,6 +438,7 @@ class LowerBodyPolicyNode(Node):
             return response
         with self._lock:
             self._stand_from = start
+            self._stand_via = self._clearance_pose(start)
             self._stand_start = self._now()
             self._reason = ''
             self._state = State.STAND
@@ -428,6 +446,18 @@ class LowerBodyPolicyNode(Node):
         response.success = True
         response.message = f'standing ({self._stand_s:.1f}s)'
         return response
+
+    def _clearance_pose(self, start: np.ndarray) -> np.ndarray:
+        """中转位姿：只把 shoulder_roll 往外张，其余关节原地不动
+
+        只张不收：手臂本来就比 ``stand_clear_roll`` 更开时不能把它合回去，否则反而把它送进碰撞带。
+        """
+        via = start.copy()
+        if self._clear_s <= 0.0:
+            return via              # 关掉侧开：退化成原来的单段直插。
+        for index, sign in self._clear_slots:
+            via[index] = sign * max(sign * start[index], self._clear_roll)
+        return via
 
     def _on_start(self, _request, response):
         """STAND -> RUNNING：策略接管，等价于官方的 env->reset() + 启动策略线程。"""
@@ -519,9 +549,18 @@ class LowerBodyPolicyNode(Node):
             stale = self._stale()
             quat = self._quat
             if state is State.STAND:
-                alpha = (1.0 if self._stand_s <= 0.0 else
-                         min((self._now() - self._stand_start) / self._stand_s, 1.0))
-                target = self._stand_from + alpha * (self._stand_pose - self._stand_from)
+                # 两段：先把手臂侧开（腿不动），再全身走向站立位姿。理由见
+                # stand_clear_roll 旁边那段注释。
+                elapsed = self._now() - self._stand_start
+                if elapsed < self._clear_s:
+                    alpha = elapsed / self._clear_s
+                    origin, goal = self._stand_from, self._stand_via
+                else:
+                    span = self._stand_s - self._clear_s
+                    alpha = (1.0 if span <= 0.0 else
+                             min((elapsed - self._clear_s) / span, 1.0))
+                    origin, goal = self._stand_via, self._stand_pose
+                target = origin + alpha * (goal - origin)
             else:
                 joint_pos = self._q[self._policy_slots]
                 joint_vel = self._dq[self._policy_slots]
@@ -530,8 +569,7 @@ class LowerBodyPolicyNode(Node):
                 if self._now() - self._command_stamp > self._command_timeout:
                     request[:3] = 0.0  # 松手只停车，不卸力。
                 self._command = np.clip(
-                    self._command + np.clip(request - self._command,
-                                            -self._cmd_rate, self._cmd_rate),
+                    self._command + np.clip(request - self._command, -self._cmd_rate, self._cmd_rate),
                     self._cmd_lo, self._cmd_hi)
                 command = self._command.copy()
                 if self._arm_seed:
@@ -563,10 +601,8 @@ class LowerBodyPolicyNode(Node):
             # 上肢出什么事都只保持上一帧手臂目标，绝不能把正在平衡的下肢一起急停。
             try:
                 clock = time.monotonic()
-                self._arm_target, pos_err, ori_err, iters = self._ik.solve(
-                    self._arm_target, poses)
-                self._ik_stat = (pos_err, ori_err, iters,
-                                 (time.monotonic() - clock) * 1e3)
+                self._arm_target, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
+                self._ik_stat = (pos_err, ori_err, iters, (time.monotonic() - clock) * 1e3)
             except Exception as error:
                 self.get_logger().warning(f'手臂 IK 异常，保持上一帧: {error}',
                                           throttle_duration_sec=1.0)

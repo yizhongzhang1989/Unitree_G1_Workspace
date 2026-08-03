@@ -167,8 +167,14 @@ def scenario(node, config):
     expected[policy_slots] = config['stand_pose']
     expected[passive_slots] = config['passive_targets']
     check('站立终点 = 策略默认位姿', np.abs(node.targets[-1] - expected).max() < 1e-6)
-    check('站立是渐变不是阶跃',
-          np.abs(node.targets[10] - node.targets[0]).max() < 0.05)
+    # "不是阶跃"要看**逐帧增量**，而它的上界由配置本身决定：侧开那一段（stand_clear_roll / stand_clear_s）是整个 STAND 里最快的运动。写死阈值的话
+    # 一调参就误报；按配置推导才既跟得上调参、又卡得住真正的阶跃——阶跃是一帧走完全程，和这个上界差几十倍。
+    increments = np.abs(np.diff(np.asarray(node.targets), axis=0))
+    clear_s = config['stand_clear_s']
+    bound = (config['stand_clear_roll'] / clear_s / config['control_rate_hz']
+             if clear_s > 0 else 0.02)
+    check(f'站立是渐变不是阶跃（逐帧 ≤ {bound * 1.2:.3f} rad）',
+          increments.max() <= bound * 1.2)
     check('status 报告可以 start 了', node.status.get('ready_to_start'))
 
     print('\n-- start --', flush=True)
