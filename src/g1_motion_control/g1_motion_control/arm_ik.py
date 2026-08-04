@@ -2,7 +2,7 @@
 """双臂逆运动学：URDF -> 锁死非臂关节的 14 轴缩减模型 -> 阻尼最小二乘。
 
 只依赖 pinocchio + numpy，不 import rclpy，可以脱离 ROS 直接单测。
-参数取值的实测依据写在 config/lower_body_policy.yaml，这里只讲模块自身的契约。
+参数取值的实测依据写在 config/motion_control.yaml，这里只讲模块自身的契约。
 
 末端位姿相对 ``base_frame``（torso_link）。缩减模型锁死了腰和腿，torso_link 是常量
 位姿，构造时算一次 ``_oMb`` 就够——求解时不必关心策略把腰摆到了哪儿。

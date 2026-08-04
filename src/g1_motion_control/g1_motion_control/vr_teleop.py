@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""VR 头显遥操作桥：WebXR 帧 -> lower_body_policy 的 ``~/command``。
+"""VR 头显遥操作桥：WebXR 帧 -> motion_control 的 ``~/command``。
 
-    头显 / 双手柄 --WebXR--WS--> [ 本节点：aiohttp + 50 Hz 定时器 ] --20 值--> lower_body_policy
+    头显 / 双手柄 --WebXR--WS--> [ 本节点：aiohttp + 50 Hz 定时器 ] --20 值--> motion_control
 
 **采集页由本节点自己托管**（默认 ``0.0.0.0:8000``），头显直连过来，中间没有独立的
 桥接进程。所以上机只要两步：``adb reverse tcp:8000 tcp:8000``，然后在头显里打开
@@ -65,7 +65,7 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
-from g1_lower_body_policy.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
+from g1_motion_control.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
 
 SIDES = ('left', 'right')
 # 策略层当前状态 -> 双手 B/Y 按下时该调哪个服务。看实际状态而不是本地计数，
@@ -172,15 +172,15 @@ class VRTeleop(Node):
         self._message = Float64MultiArray()
         self._publisher = self.create_publisher(
             Float64MultiArray,
-            p('command_topic', '/lower_body_policy/command')
+            p('command_topic', '/motion_control/command')
             .get_parameter_value().string_value, stream)
         self.create_subscription(
-            String, p('status_topic', '/lower_body_policy/status')
+            String, p('status_topic', '/motion_control/status')
             .get_parameter_value().string_value, self._on_status, 10, callback_group=control)
         self.create_timer(1.0 / self._rate, self._tick, callback_group=control)
         # 服务得用 Reentrant 组 + call_async：engage/estop 里的 switch_controller 会阻塞
         # 好几秒（硬件卸力斜坡），同步等会把 50 Hz 定时器一起冻住。
-        policy = p('policy_node', '/lower_body_policy') \
+        policy = p('policy_node', '/motion_control') \
             .get_parameter_value().string_value.rstrip('/')
         self._trigger = {
             name: self.create_client(Trigger, f'{policy}/{name}', callback_group=slow)
@@ -208,7 +208,7 @@ class VRTeleop(Node):
         帧只覆盖 ``_frame`` 的最新一份、不排队：头显是 72~90 Hz、控制环 50 Hz，
         多出来的帧本来就该丢，排队只会积压延迟。
         """
-        static = Path(get_package_share_directory('g1_lower_body_policy')) / 'vr'
+        static = Path(get_package_share_directory('g1_motion_control')) / 'vr'
 
         def page(name: str):
             async def handler(_: web.Request) -> web.StreamResponse:
@@ -233,7 +233,7 @@ class VRTeleop(Node):
                 # 不静默：以为在跑 HTTPS 而实际没有，比直接起不来更坏。
                 self.get_logger().warning(
                     f'证书不在 {Path(self._cert).parent}，只开明文口。签一张：'
-                    f'ros2 run g1_lower_body_policy make_vr_cert')
+                    f'ros2 run g1_motion_control make_vr_cert')
 
         async def run() -> None:
             runner = web.AppRunner(app, handle_signals=False)

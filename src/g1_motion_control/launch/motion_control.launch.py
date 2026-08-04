@@ -1,4 +1,4 @@
-"""启动下肢 ONNX 策略层。
+"""启动整机运动控制层。
 
 只启这一层。控制栈要先起来：
 
@@ -32,8 +32,8 @@ _SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
 
 
 def _nodes(context):
-    share = Path(get_package_share_directory('g1_lower_body_policy'))
-    config = share / 'config' / 'lower_body_policy.yaml'
+    share = Path(get_package_share_directory('g1_motion_control'))
+    config = share / 'config' / 'motion_control.yaml'
     # 31 轴的顺序只能有一个来源，就是控制器自己的参数文件；抄一份到本包的 config
     # 里，早晚会有一次改了这边忘了那边。
     controller = _parameters(
@@ -46,9 +46,9 @@ def _nodes(context):
         overrides['policy_path'] = policy_path
 
     return [Node(
-        package='g1_lower_body_policy',
+        package='g1_motion_control',
         executable='policy_node',
-        name='lower_body_policy',
+        name='motion_control',
         output='screen',
         parameters=[str(config), overrides],
         additional_env=_SINGLE_THREADED_BLAS,
@@ -58,7 +58,7 @@ def _nodes(context):
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
-        # 留空则用 config/lower_body_policy.yaml 里的 policy_path，即本包自带的
+        # 留空则用 config/motion_control.yaml 里的 policy_path，即本包自带的
         # config/policy.onnx。换策略时可以直接指到 logs/ 里的绝对路径试跑。
         DeclareLaunchArgument('policy_path', default_value=''),
         OpaqueFunction(function=_nodes),

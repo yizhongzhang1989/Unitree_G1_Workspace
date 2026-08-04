@@ -1,13 +1,13 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>g1_lower_body_policy</name>
+  <name>g1_motion_control</name>
   <version>0.1.0</version>
   <description>
-    ONNX 下肢平衡/行走策略 + 双臂 IK。位于 forward_position_controller 之上：输入
+    G1 整机 31 轴运动控制层。位于 forward_position_controller 之上：输入
     vx/vy/w/h、两个末端位姿和两个夹爪角度，在同一个 50 Hz 定时器里算齐 31 轴位置
-    目标（下肢 15 轴走策略，上肢 14 轴走 IK，夹爪 2 轴透传），
-    由 forward_position_controller 带重力补偿写到硬件。
+    目标（下肢 15 轴走 ONNX 策略，上肢 14 轴走双臂 IK，夹爪 2 轴透传），
+    由 forward_position_controller 带重力补偿写到硬件。内附 VR / 键盘两套遥操。
   </description>
   <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
   <license>Apache-2.0</license>

@@ -10,7 +10,7 @@
 
 跑法（先 ``source install/setup.bash``）：
 
-    python3 src/g1_lower_body_policy/test/smoke_no_robot.py
+    python3 src/g1_motion_control/test/smoke_no_robot.py
 
 假状态源放在独立进程里不是讲究：放在同一个进程里，主线程的忙等会把发布定时器压到
 100 ms 以上，然后策略层的状态超时看门狗就会被自己人误触发。实机上这两个广播也确实
@@ -90,7 +90,7 @@ class FakeState(Node):
 
 def run_fake_state(params_path):
     joints = yaml.safe_load(Path(params_path).read_text(encoding='utf-8'))
-    joints = joints['/lower_body_policy']['ros__parameters']['joints']
+    joints = joints['/motion_control']['ros__parameters']['joints']
     rclpy.init()
     try:
         rclpy.spin(FakeState(joints))
@@ -104,17 +104,17 @@ class Harness(Node):
     def __init__(self):
         super().__init__('smoke_harness')
         self.command = self.create_publisher(
-            Float64MultiArray, '/lower_body_policy/command', STREAM)
+            Float64MultiArray, '/motion_control/command', STREAM)
         self.pause = self.create_publisher(Empty, '/fake_state/pause', 10)
         self.create_subscription(
             Float64MultiArray, '/forward_position_controller/commands',
             self._on_target, STREAM)
-        self.create_subscription(String, '/lower_body_policy/status', self._on_status, 10)
+        self.create_subscription(String, '/motion_control/status', self._on_status, 10)
         self.create_service(
             SwitchController, '/controller_manager/switch_controller', self._on_switch)
-        self.engage = self.create_client(Trigger, '/lower_body_policy/engage')
-        self.start = self.create_client(Trigger, '/lower_body_policy/start')
-        self.estop = self.create_client(Trigger, '/lower_body_policy/estop')
+        self.engage = self.create_client(Trigger, '/motion_control/engage')
+        self.start = self.create_client(Trigger, '/motion_control/start')
+        self.estop = self.create_client(Trigger, '/motion_control/estop')
         self.targets, self.stamps, self.switches = [], [], []
         self.status, self.status_log = {}, []
 
@@ -216,7 +216,7 @@ def scenario(node, config):
     check('高度最终走到位', abs(node.status['command'][3] - target_height) < 1e-3)
 
     print('\n-- ~/command 分块：各发布者只更新自己那一段 --', flush=True)
-    from g1_lower_body_policy.arm_ik import ArmIK
+    from g1_motion_control.arm_ik import ArmIK
     ik = ArmIK(URDF_PATH.read_text(encoding='utf-8'), config['arm_joints'],
                {'left': config['left_tip_frame'], 'right': config['right_tip_frame']},
                base_frame=config['base_frame'])
@@ -308,10 +308,10 @@ def scenario(node, config):
 
 def build_params(path: Path) -> dict:
     """把包配置和 FPC 的 31 轴顺序拼成一个 params 文件，和 launch 做的事一样。"""
-    share = Path(get_package_share_directory('g1_lower_body_policy'))
+    share = Path(get_package_share_directory('g1_motion_control'))
     document = yaml.safe_load(
-        (share / 'config' / 'lower_body_policy.yaml').read_text(encoding='utf-8'))
-    config = document['/lower_body_policy']['ros__parameters']
+        (share / 'config' / 'motion_control.yaml').read_text(encoding='utf-8'))
+    config = document['/motion_control']['ros__parameters']
     controller = yaml.safe_load(
         (Path(get_package_share_directory('unitree_g1_ros2_control')) /
          'config' / 'forward_position_controller.yaml').read_text(encoding='utf-8'))
@@ -325,14 +325,14 @@ def main() -> int:
         run_fake_state(sys.argv[2])
         return 0
 
-    params = Path('/tmp/lower_body_policy_smoke.yaml')
+    params = Path('/tmp/motion_control_smoke.yaml')
     config = build_params(params)
     # 独立的 domain，免得撞上真的控制栈——这个测试会发目标，绝不能漏到真机上。
     environment = dict(os.environ, ROS_DOMAIN_ID=os.environ.get('SMOKE_DOMAIN_ID', '77'))
     children = [
         subprocess.Popen([sys.executable, __file__, '--fake-state', str(params)],
                          env=environment, stdout=subprocess.DEVNULL),
-        subprocess.Popen(['ros2', 'run', 'g1_lower_body_policy', 'policy_node',
+        subprocess.Popen(['ros2', 'run', 'g1_motion_control', 'policy_node',
                           '--ros-args', '--params-file', str(params)],
                          env=environment, stdout=subprocess.DEVNULL),
     ]
@@ -340,9 +340,9 @@ def main() -> int:
     time.sleep(6.0)
 
     # 站立位姿的期望值来自 ONNX metadata，测试自己再读一遍，和节点独立取数。
-    from g1_lower_body_policy.policy_runtime import load_policy
+    from g1_motion_control.policy_runtime import load_policy
     _, spec = load_policy(str(Path(
-        get_package_share_directory('g1_lower_body_policy')) / 'config' / 'policy.onnx'))
+        get_package_share_directory('g1_motion_control')) / 'config' / 'policy.onnx'))
     config['stand_pose'] = spec.default_pos
 
     rclpy.init()

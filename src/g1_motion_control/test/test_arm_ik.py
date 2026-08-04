@@ -12,7 +12,7 @@ import pytest
 import yaml
 from ament_index_python.packages import get_package_share_directory
 
-from g1_lower_body_policy.arm_ik import ArmIK
+from g1_motion_control.arm_ik import ArmIK
 
 ARM_JOINTS = [f'{side}_{joint}_joint'
               for side in ('left', 'right')
@@ -29,9 +29,9 @@ def ik():
 
 
 def _config():
-    share = Path(get_package_share_directory('g1_lower_body_policy'))
-    return yaml.safe_load((share / 'config' / 'lower_body_policy.yaml')
-                          .read_text(encoding='utf-8'))['/lower_body_policy']['ros__parameters']
+    share = Path(get_package_share_directory('g1_motion_control'))
+    return yaml.safe_load((share / 'config' / 'motion_control.yaml')
+                          .read_text(encoding='utf-8'))['/motion_control']['ros__parameters']
 
 
 def STAND_POSTURE(ik):
@@ -43,7 +43,7 @@ def STAND_POSTURE(ik):
 
 @pytest.fixture(scope='module')
 def configured_ik():
-    """按 config/lower_body_policy.yaml 里实际发布的参数建，用来卡住部署值本身。
+    """按 config/motion_control.yaml 里实际发布的参数建，用来卡住部署值本身。
 
     库默认值和实际跑的那一套不是一回事，只测默认值等于没测。
     """

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下肢 ONNX 策略 + 上肢 IK：forward_position_controller 之上唯一的一层。
+"""整机运动控制：下肢 ONNX 策略 + 上肢 IK，forward_position_controller 之上唯一的一层。
 
     键盘/VLA --指令--> [ 本节点 50 Hz：ONNX 推理 + 双臂 IK ] --31 轴位置--> FPC(500 Hz,
                                                                      含手臂重力补偿)
@@ -74,9 +74,9 @@ from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
-from g1_lower_body_policy.arm_ik import ArmIK
-from g1_lower_body_policy.policy_runtime import (
-    LowerBodyPolicy,
+from g1_motion_control.arm_ik import ArmIK
+from g1_motion_control.policy_runtime import (
+    LocomotionPolicy,
     load_policy,
     projected_gravity,
     spec_matches,
@@ -119,10 +119,10 @@ def _tilt(quat) -> float:
         return math.pi
 
 
-class LowerBodyPolicyNode(Node):
+class MotionControlNode(Node):
 
     def __init__(self) -> None:
-        super().__init__('lower_body_policy')
+        super().__init__('motion_control')
         p = self.declare_parameter
 
         # -- 关节 --------------------------------------------------------------
@@ -259,8 +259,8 @@ class LowerBodyPolicyNode(Node):
             raise ValueError(f'找不到策略文件: {policy_path}')
         session, spec = load_policy(str(policy_path))
         spec_matches(spec, policy_joints)
-        self._policy = LowerBodyPolicy(session, spec, control_dt=dt,
-                                       target_lower=lower, target_upper=upper)
+        self._policy = LocomotionPolicy(session, spec, control_dt=dt,
+                                        target_lower=lower, target_upper=upper)
         # 站立位姿 = 策略的默认位姿 + 被动关节目标，直接取自 ONNX metadata：这和
         # 训练里 reset 后的开局位姿是同一份数，不另抄一遍。
         self._stand_pose = np.empty(len(self._joints))
@@ -691,7 +691,7 @@ class LowerBodyPolicyNode(Node):
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = LowerBodyPolicyNode()
+    node = MotionControlNode()
     # 多线程：使能/急停里的 switch_controller 会阻塞数秒（硬件卸力斜坡），单线程
     # 执行器会连带把控制环和状态订阅一起冻住。
     executor = MultiThreadedExecutor()

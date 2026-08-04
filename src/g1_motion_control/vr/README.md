@@ -1,12 +1,12 @@
 # VR 头显遥操作 —— 启动流程
 WebXR 桥接：头显浏览器读手柄/头部位姿 → WebSocket 直推给 `vr_teleop` 节点 → ROS 话题。
 不需要 Unity，不需要装 APK，**也不再有独立的桥接进程**——采集页由 ROS 节点自己托管
-（`g1_lower_body_policy/vr_teleop.py` 内嵌 aiohttp）。
+（`g1_motion_control/vr_teleop.py` 内嵌 aiohttp）。
 
 本目录里只剩下这些：`index.html`（头显里打开的采集页）、`monitor.html`（监控面板）——
-两个页随包安装到 `share/g1_lower_body_policy/vr/`；加上 `adb_reverse_watch.sh` 守护
+两个页随包安装到 `share/g1_motion_control/vr/`；加上 `adb_reverse_watch.sh` 守护
 脚本和这份说明（这两个不安装，只在源码树里用）。签证书的脚本是个 ROS 命令：
-`ros2 run g1_lower_body_policy make_vr_cert`。
+`ros2 run g1_motion_control make_vr_cert`。
 
 **以下命令全部在 devcontainer 内执行**。
 容器是 `network_mode: host`，容器内的 `localhost` 就是宿主的 `localhost`，
@@ -57,7 +57,7 @@ chmod +x adb_reverse_watch.sh
 ### A1. 签一张自签名证书（只需一次，有效期 825 天）
 
 ```bash
-ros2 run g1_lower_body_policy make_vr_cert
+ros2 run g1_motion_control make_vr_cert
 ```
 
 它会自动把**本机所有网卡的 IPv4** 写进证书 SAN，输出到 `~/.ros/g1_vr/`（私钥 0600），
@@ -67,7 +67,7 @@ ros2 run g1_lower_body_policy make_vr_cert
 
 ```bash
 ip -4 -o addr show                                    # 查本机在头显网段的地址
-ros2 run g1_lower_body_policy make_vr_cert 192.168.137.149
+ros2 run g1_motion_control make_vr_cert 192.168.137.149
 ```
 
 > 证书里**必须包含头显实际输入的那个 IP**。不包含的话浏览器报的是
@@ -76,7 +76,7 @@ ros2 run g1_lower_body_policy make_vr_cert 192.168.137.149
 ### A2. 起节点，头显里直接打开
 
 ```bash
-ros2 launch g1_lower_body_policy vr_teleop.launch.py
+ros2 launch g1_motion_control vr_teleop.launch.py
 ```
 
 日志里会同时出现两行，两个口都开着：
@@ -137,7 +137,7 @@ adb -s 192.168.137.82:5555 reverse tcp:8000 tcp:8000
 adb -s 192.168.137.82:5555 reverse --list    # 应输出 host-N tcp:8000 tcp:8000
 
 # reverse 守护，断连自动重建（走这条路就必开，见下方"已知坑"）
-cd /workspace/src/g1_lower_body_policy/vr && ./adb_reverse_watch.sh 192.168.137.82:5555
+cd /workspace/src/g1_motion_control/vr && ./adb_reverse_watch.sh 192.168.137.82:5555
 ```
 
 ### B3. 在头显里拉起采集页
@@ -166,7 +166,7 @@ curl -sk https://192.168.137.149:8443/state      # TLS 口（-k 跳过自签证�
 
 ---
 
-## [节点](../g1_lower_body_policy/vr_teleop.py)提供的接口
+## [节点](../g1_motion_control/vr_teleop.py)提供的接口
 
 两个端口上都是这一套（`:8000` 明文、`:8443` TLS）：
 

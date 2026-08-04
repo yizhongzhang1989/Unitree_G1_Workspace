@@ -10,7 +10,7 @@ ROS 图、也不想连 VR 桥。
 import numpy as np
 import pytest
 
-from g1_lower_body_policy.vr_teleop import _BASE_MAP, VRTeleop, _matrix
+from g1_motion_control.vr_teleop import _BASE_MAP, VRTeleop, _matrix
 
 OPEN = 2.76377472169236       # eccentric 全开
 CLOSED = 0.0                  # eccentric 闭合
@@ -309,7 +309,7 @@ def test_stale_frames_cannot_fake_a_press(buttons):
 
 def test_advance_table_covers_the_whole_cycle():
     """idle/estop -> engage、stand -> start、running -> estop，绕回来能重开。"""
-    from g1_lower_body_policy.vr_teleop import _ADVANCE
+    from g1_motion_control.vr_teleop import _ADVANCE
     assert _ADVANCE['idle'][0] == 'engage'
     assert _ADVANCE['stand'][0] == 'start'
     assert _ADVANCE['running'][0] == 'estop'

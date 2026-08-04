@@ -2,7 +2,7 @@ from glob import glob
 
 from setuptools import find_packages, setup
 
-package_name = 'g1_lower_body_policy'
+package_name = 'g1_motion_control'
 
 setup(
     name=package_name,
@@ -22,14 +22,14 @@ setup(
     zip_safe=True,
     maintainer='ruigangli',
     maintainer_email='ruigangli@microsoft.com',
-    description='ONNX 下肢平衡策略层，位于 forward_position_controller 之上。',
+    description='G1 整机 31 轴运动控制层（下肢策略 + 上肢 IK + 遥操），位于 forward_position_controller 之上。',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
-            'policy_node = g1_lower_body_policy.policy_node:main',
-            'teleop_keyboard = g1_lower_body_policy.teleop_keyboard:main',
-            'vr_teleop = g1_lower_body_policy.vr_teleop:main',
-            'make_vr_cert = g1_lower_body_policy.make_vr_cert:main',
+            'policy_node = g1_motion_control.policy_node:main',
+            'teleop_keyboard = g1_motion_control.teleop_keyboard:main',
+            'vr_teleop = g1_motion_control.vr_teleop:main',
+            'make_vr_cert = g1_motion_control.make_vr_cert:main',
         ],
     },
 )

@@ -161,7 +161,7 @@ def gait_phase(elapsed_s: float, command: Sequence[float],
     return np.array([math.sin(angle), math.cos(angle)])
 
 
-class LowerBodyPolicy:
+class LocomotionPolicy:
     """一拍策略推理。持有上一拍动作和相位计时器，所以是有状态的。"""
 
     def __init__(self, session, spec: PolicySpec, *,

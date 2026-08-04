@@ -46,7 +46,7 @@ class Teleop(Node):
     def __init__(self) -> None:
         super().__init__('lower_body_teleop')
         p = self.declare_parameter
-        target = p('policy_node', '/lower_body_policy') \
+        target = p('policy_node', '/motion_control') \
             .get_parameter_value().string_value.rstrip('/')
         self.rate = float(p('publish_rate_hz', 50.0).get_parameter_value().double_value)
         self._step = (
@@ -200,7 +200,7 @@ def read_key(timeout: float) -> str | None:
 def main(args=None) -> None:
     if not sys.stdin.isatty():
         raise SystemExit(
-            '遥控台要在终端里跑：ros2 run g1_lower_body_policy teleop_keyboard')
+            '遥控台要在终端里跑：ros2 run g1_motion_control teleop_keyboard')
     rclpy.init(args=args)
     node = Teleop()
     dt = 1.0 / node.rate

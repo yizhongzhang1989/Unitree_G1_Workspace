@@ -5,14 +5,14 @@
 
 前置条件：
 
-1. 控制栈已经起来（``all_data.launch.py`` + ``lower_body_policy.launch.py``）。
+1. 控制栈已经起来（``all_data.launch.py`` + ``motion_control.launch.py``）。
    不需要先手动 engage/start——戴上头显后用 B/Y 推就行。
 2. ``adb reverse tcp:8000 tcp:8000`` 已建（见 ``vr/README.md``），头显里打开
    ``http://localhost:8000`` 点 Enter VR。``curl localhost:8000/state`` 里 ``seq`` 在涨。
 
 启动：
 
-    ros2 launch g1_lower_body_policy vr_teleop.launch.py
+    ros2 launch g1_motion_control vr_teleop.launch.py
     #   换端口：      bind_port:=8001
     #   只收本机：    bind_host:=127.0.0.1     （不开 /monitor 时更安全）
     #   加共享密钥：  token:=xxxx             （所有接口都要带 ?token=）
@@ -24,7 +24,7 @@
 ``ros2 service call``，也不需要另起 ``teleop_keyboard``。
 
 本节点不做 IK：接管原点直接取策略层 ``~/status`` 里发布的末端位姿，所以不需要
-从 ``lower_body_policy.yaml`` 里继承关节名与末端帧。
+从 ``motion_control.yaml`` 里继承关节名与末端帧。
 """
 
 from launch import LaunchDescription
@@ -32,7 +32,7 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from g1_lower_body_policy.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
+from g1_motion_control.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
 
 _ARGUMENTS = {
     'bind_host': '0.0.0.0',
@@ -53,9 +53,9 @@ _ARGUMENTS = {
     'arm_scale': '1.0',
     'frame_timeout_s': '0.3',
     'button_cooldown_s': '1.0',
-    'policy_node': '/lower_body_policy',
-    'command_topic': '/lower_body_policy/command',
-    'status_topic': '/lower_body_policy/status',
+    'policy_node': '/motion_control',
+    'command_topic': '/motion_control/command',
+    'status_topic': '/motion_control/status',
 }
 
 _FLOATS = ('vx_max', 'vy_max', 'wz_max', 'height', 'height_min', 'height_max',
@@ -64,7 +64,7 @@ _FLOATS = ('vx_max', 'vy_max', 'wz_max', 'height', 'height_min', 'height_max',
 
 _INTS = ('bind_port', 'tls_port')
 
-# 同 lower_body_policy.launch.py：小矩阵上 OpenBLAS 多线程是纯开销，还会多出
+# 同 motion_control.launch.py：小矩阵上 OpenBLAS 多线程是纯开销，还会多出
 # 一堆自旋线程和实时链路抢 CPU。
 _SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
 
@@ -81,7 +81,7 @@ def _nodes(context):
             overrides[name] = value
 
     return [Node(
-        package='g1_lower_body_policy',
+        package='g1_motion_control',
         executable='vr_teleop',
         name='vr_teleop',
         output='screen',

@@ -1,4 +1,4 @@
-# g1_lower_body_policy —— 下肢 ONNX 策略 + 上肢 IK（真机部署交接文档）
+# g1_motion_control —— 整机 31 轴运动控制层（真机部署交接文档）
 
 在 `forward_position_controller`（下称 FPC）之上加的**唯一一层**。一个 50 Hz 定时器算齐 31 轴：
 
@@ -15,10 +15,10 @@
 flowchart TD
     OP["键盘遥控台（发长度 4）"]
     VLA["上肢遥操 / VLA（发长度 2 / 7 / 14 / 20）"]
-    OP -- "/lower_body_policy/command" --> POL
-    VLA -- "/lower_body_policy/command" --> POL
+    OP -- "/motion_control/command" --> POL
+    VLA -- "/motion_control/command" --> POL
 
-    subgraph POLICY["lower_body_policy 节点（本包，50 Hz 单定时器）"]
+    subgraph POLICY["motion_control 节点（本包，50 Hz 单定时器）"]
         POL["观测装配 → ONNX → 下肢 15 轴<br/>双臂 DLS IK → 上肢 14 轴<br/>夹爪 2 轴透传"]
     end
 
@@ -27,7 +27,7 @@ flowchart TD
     RD["/robot_description<br/>std_msgs/String · latched"] --> POL
 
     POL -- "/forward_position_controller/commands<br/>Float64MultiArray[31]" --> FPC
-    POL -- "/lower_body_policy/status<br/>String(JSON) · 10 Hz" --> OP
+    POL -- "/motion_control/status<br/>String(JSON) · 10 Hz" --> OP
     POL -. "engage / start / estop<br/>经 /controller_manager/switch_controller" .-> CM
 
     subgraph RC["ros2_control_node（500 Hz 实时环）"]
@@ -99,8 +99,8 @@ flowchart TD
 | 内容 | 话题 / 服务 | 类型 | 频率 | 消费者 |
 |---|---|---|---|---|
 | 31 轴位置目标 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray[31]` | 50 Hz | FPC。下肢 15 槽来自策略，上肢 14 槽来自 IK，夹爪 2 槽透传 |
-| 层状态 | `/lower_body_policy/status` | `std_msgs/String`（JSON） | 10 Hz | 遥控台；要接 dashboard 也从这里取 |
-| 使能 / 启动 / 急停 | `/lower_body_policy/engage`、`/start`、`/estop` | `std_srvs/Trigger` | 按需 | 遥控台或人工 `ros2 service call` |
+| 层状态 | `/motion_control/status` | `std_msgs/String`（JSON） | 10 Hz | 遥控台；要接 dashboard 也从这里取 |
+| 使能 / 启动 / 急停 | `/motion_control/engage`、`/start`、`/estop` | `std_srvs/Trigger` | 按需 | 遥控台或人工 `ros2 service call` |
 | 控制器开关 | `/controller_manager/switch_controller` | `controller_manager_msgs/SwitchController` | 按需 | 本节点**调用**它，用来激活 / 反激活 FPC |
 
 `~/status`（JSON）字段：`state / ready_to_start / command / request / reason / stale`，
@@ -122,11 +122,11 @@ flowchart TD
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
 # 2.策略层
-ros2 launch g1_lower_body_policy lower_body_policy.launch.py
+ros2 launch g1_motion_control motion_control.launch.py
 #   换策略试跑：  policy_path:=/abs/path/to/policy.onnx
 
 # 3.遥控台（需要真终端，不要用 launch 包）
-ros2 run g1_lower_body_policy teleop_keyboard
+ros2 run g1_motion_control teleop_keyboard
 ```
 
 ### 遥控台按键
@@ -153,8 +153,8 @@ WebXR 采集页由 `vr_teleop` 节点**自己托管**（内嵌 aiohttp），头�
 可用，所以只有这两种进法；`adb reverse` 的规则会**静默失效**，所以两条都开着。
 
 ```bash
-ros2 run g1_lower_body_policy make_vr_cert     # 签自签证书，只需一次
-ros2 launch g1_lower_body_policy vr_teleop.launch.py
+ros2 run g1_motion_control make_vr_cert     # 签自签证书，只需一次
+ros2 launch g1_motion_control vr_teleop.launch.py
 ```
 
 完整上机流程、证书、排查清单见 [vr/README.md](vr/README.md)。已验证 Meta Quest 2/3、
@@ -228,7 +228,7 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 
 ## 4. 下肢观测与动作契约
 
-这一节是整个部署里最要命的部分：错一位就是错一个策略。层内的 `policy_runtime.py` 把关节顺序、默认位姿、动作缩放**全部从 ONNX 的 metadata 里读**，不在代码里抄第二份；启动时再和 `config/lower_body_policy.yaml` 的 `policy_joints` 逐个比对，对不上直接拒绝启动。
+这一节是整个部署里最要命的部分：错一位就是错一个策略。层内的 `policy_runtime.py` 把关节顺序、默认位姿、动作缩放**全部从 ONNX 的 metadata 里读**，不在代码里抄第二份；启动时再和 `config/motion_control.yaml` 的 `policy_joints` 逐个比对，对不上直接拒绝启动。
 
 ### 观测（57 维，顺序即拼接顺序）
 
@@ -491,11 +491,11 @@ wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
 
 ---
 
-## 6. 参数速查（`config/lower_body_policy.yaml`）
+## 6. 参数速查（`config/motion_control.yaml`）
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `policy_path` | `package://g1_lower_body_policy/config/policy.onnx` | 换策略只要覆盖这个文件 |
+| `policy_path` | `package://g1_motion_control/config/policy.onnx` | 换策略只要覆盖这个文件 |
 | `policy_joints` | 15 个下肢关节 | 必须与 ONNX metadata 的前 15 项完全一致 |
 | `passive_targets` | 16 × 0.0 | 14 臂 + 2 夹爪偏心轴。**只在 STAND 阶段生效**；进 RUNNING 后上肢改由 IK 与透传接管。见下方风险提示 |
 | `target_lower/upper_limits` | MuJoCo `ctrlrange` | **不是关节行程**，见第 4 节；物理上是空操作，只拦跑飞 |
@@ -667,11 +667,11 @@ CPU 闭环重跑里手臂写 0 并**没有**让下肢站不住，所以这一项
 ## 9. 文件导航
 
 ```
-g1_lower_body_policy/
+g1_motion_control/
 ├── config/
-│   ├── lower_body_policy.yaml   # 节点参数，每一项都有注释
+│   ├── motion_control.yaml   # 节点参数，每一项都有注释
 │   └── policy.onnx              # 策略权重（自带元数据：关节顺序/默认位姿/动作缩放）
-├── g1_lower_body_policy/
+├── g1_motion_control/
 │   ├── policy_runtime.py        # 下肢：观测装配 + 推理 + 契约校验，不依赖 ROS
 │   ├── arm_ik.py                # 上肢：缩减模型 + DLS 求解，不依赖 ROS
 │   ├── policy_node.py           # ROS 节点 + 状态机 + 看门狗 + 指令分块
@@ -679,7 +679,7 @@ g1_lower_body_policy/
 │   ├── vr_teleop.py             # VR 桥接（内嵌 WebXR 服务，发长度 20，上下肢全管）
 │   └── make_vr_cert.py          # 签局域网自签证书，兼作证书路径/端口的唯一定义
 ├── launch/
-│   ├── lower_body_policy.launch.py
+│   ├── motion_control.launch.py
 │   └── vr_teleop.launch.py
 ├── vr/                          # WebXR 采集页 + 监控页（装到 share/）+ adb 守护脚本
 │   └── README.md                # VR 上机流程、证书、排查清单
@@ -699,10 +699,10 @@ g1_lower_body_policy/
 
 ```bash
 # 假状态源 + 假 controller_manager，把状态机从头走一遍，32 项检查
-python3 src/g1_lower_body_policy/test/smoke_no_robot.py
+python3 src/g1_motion_control/test/smoke_no_robot.py
 
 # 纯逻辑单测 43 项
-cd src/g1_lower_body_policy && PYTHONPATH=$PWD python3 -m pytest test/ -q
+cd src/g1_motion_control && PYTHONPATH=$PWD python3 -m pytest test/ -q
 ```
 
 换了策略还要在训练仓库里跑 `scripts/check_deploy_policy.py`（CPU 闭环重跑整条部署

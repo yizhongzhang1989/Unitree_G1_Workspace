@@ -9,9 +9,9 @@ import math
 import numpy as np
 import pytest
 
-from g1_lower_body_policy.policy_runtime import (
+from g1_motion_control.policy_runtime import (
     EXPECTED_OBS_TERMS,
-    LowerBodyPolicy,
+    LocomotionPolicy,
     PolicySpec,
     gait_phase,
     projected_gravity,
@@ -49,7 +49,7 @@ def make_policy(session=None, control_dt=0.02):
         obs_dim=OBS_DIM,
         action_dim=ACT_DIM,
     )
-    return LowerBodyPolicy(
+    return LocomotionPolicy(
         session or FakeSession(), spec, control_dt=control_dt,
         target_lower=np.full(ACT_DIM, -10.0), target_upper=np.full(ACT_DIM, 10.0))
 
@@ -134,7 +134,7 @@ def test_target_may_leave_the_joint_range():
         joint_names=tuple(f'j{i}' for i in range(ACT_DIM)),
         default_pos=np.zeros(ACT_DIM), action_scale=np.ones(ACT_DIM),
         obs_dim=OBS_DIM, action_dim=ACT_DIM)
-    policy = LowerBodyPolicy(
+    policy = LocomotionPolicy(
         FakeSession(action=np.full(ACT_DIM, -0.763, dtype=np.float32)), spec,
         control_dt=0.02, target_lower=np.full(ACT_DIM, -2.274),
         target_upper=np.full(ACT_DIM, 2.274))
@@ -150,7 +150,7 @@ def test_target_is_clipped_at_ctrlrange():
         joint_names=tuple(f'j{i}' for i in range(ACT_DIM)),
         default_pos=np.zeros(ACT_DIM), action_scale=np.ones(ACT_DIM),
         obs_dim=OBS_DIM, action_dim=ACT_DIM)
-    policy = LowerBodyPolicy(
+    policy = LocomotionPolicy(
         FakeSession(action=np.full(ACT_DIM, 500.0, dtype=np.float32)), spec,
         control_dt=0.02, target_lower=np.full(ACT_DIM, -2.274),
         target_upper=np.full(ACT_DIM, 2.274))

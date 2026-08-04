@@ -7,9 +7,9 @@ WebXR 只在**安全上下文**里可用，所以头显要么走 ``http://localh
 
 用法::
 
-    ros2 run g1_lower_body_policy make_vr_cert              # 自动探测本机所有 IPv4
-    ros2 run g1_lower_body_policy make_vr_cert 192.168.137.149
-    ros2 run g1_lower_body_policy make_vr_cert -o /tmp/mycert
+    ros2 run g1_motion_control make_vr_cert              # 自动探测本机所有 IPv4
+    ros2 run g1_motion_control make_vr_cert 192.168.137.149
+    ros2 run g1_motion_control make_vr_cert -o /tmp/mycert
 
 默认写到 ``~/.ros/g1_vr/``，正是 ``vr_teleop.launch.py`` 默认去找的位置——签完
 直接起节点就是 HTTPS，不用传参数。放在 ``~/.ros`` 而不是源码树里有两个原因：
