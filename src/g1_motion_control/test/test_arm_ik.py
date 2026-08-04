@@ -58,7 +58,10 @@ def configured_ik():
         tol_ori=config['ik_tol_ori'],
         max_step_pos=config['ik_max_step_pos'], max_step_ori=config['ik_max_step_ori'],
         joint_limits={name: (-math.inf, high)
-                      for name, high in zip(arms, config['ik_limit_upper'])})
+                      for name, high in zip(arms, config['ik_limit_upper'])},
+        null_bias={name: gain
+                   for name, gain in zip(arms, config['ik_null_bias']) if gain},
+        null_bias_gate=tuple(config['ik_null_bias_gate']))
 
 
 def test_reduced_model_keeps_only_the_arms(ik):
@@ -277,6 +280,82 @@ def test_rescue_seed_never_fires_during_normal_tracking(configured_ik):
         q, hit = _arm_pipeline(ik, q, goal, stand, rate, rescue)
         fired += hit
     assert fired == 0, f'正常跟随里触发了 {fired} 次逃生求解'
+
+
+def test_null_bias_rejects_bad_gains(ik):
+    urdf = (Path(get_package_share_directory('unitree_g1_description'))
+            / 'model' / 'final.urdf').read_text(encoding='utf-8')
+    with pytest.raises(ValueError):
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'no_such_joint': 0.2})
+    with pytest.raises(ValueError):           # 负增益是把关节往外推，必须拦住
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'right_elbow_joint': -0.2})
+    with pytest.raises(ValueError):
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'right_elbow_joint': math.nan})
+    with pytest.raises(ValueError):           # 门控上下界颠倒
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'right_elbow_joint': 0.2},
+              null_bias_gate=(1.2, 0.8))
+
+
+def test_null_bias_gate_stays_shut_during_normal_tracking(configured_ik, ik):
+    """门控存在的全部理由：正常工况必须和**完全不带偏置**逐位相同。
+
+    没有门控时偏置会把稳态残差从 0.858 顶到 1.933 mm，越过 ik_tol_pos(1 mm)，
+    于是求解器永远判不了收敛，稳态迭代从 0 变成跑满 10 次。
+    """
+    stand = STAND_POSTURE(ik)
+    home = ik.fk(stand)
+    plain, biased = stand.copy(), stand.copy()
+    for i in range(200):                      # 3 cm 画圆，肘角远低于门控下限
+        angle = 2 * math.pi * i / 100
+        goal = {side: np.concatenate(
+            [pose[:3] + [0.0, 0.03 * math.cos(angle), 0.03 * math.sin(angle)], pose[3:]])
+            for side, pose in home.items()}
+        plain, _, _, plain_iters = ik.solve(plain, goal)
+        biased, _, _, biased_iters = configured_ik.solve(biased, goal)
+    assert np.allclose(plain, biased), '正常跟随时门控没关严，解被偏置改了'
+    assert biased_iters == plain_iters, '正常跟随时带偏置多花了迭代'
+
+
+def test_null_bias_moves_the_posture_when_the_elbow_is_pinned(configured_ik, ik):
+    """够不着、肘顶限位时门控打开，把三根自转轴往 0 拉。
+
+    代价是稳态残差略增（实测 72.5 -> 73.5 mm，+1.4%）：DLS 的"零空间"是阻尼伪逆定义的
+    软零空间，偏置有一小部分泄漏进任务空间。这一点泄漏正是效果的来源——把投影阻尼调小
+    到 λ²/100，泄漏没了，位形改善也没了（同轴帧 9.1% -> 18.1%）。
+    """
+    stand = STAND_POSTURE(ik)
+    goal = {side: np.concatenate([pose[:3] + [0.20, 0.0, 0.0], pose[3:]])
+            for side, pose in ik.fk(stand).items()}
+    plain, biased = stand.copy(), stand.copy()
+    for _ in range(300):
+        plain, _, _, _ = ik.solve(plain, goal)
+        biased, _, _, _ = configured_ik.solve(biased, goal)
+    triple = [i for i, name in enumerate(ik.joint_names)
+              if any(k in name for k in ('shoulder_yaw', 'elbow', 'wrist_roll'))]
+    assert np.abs(biased[triple]).max() < np.abs(plain[triple]).max(), \
+        '肘顶限位时偏置没把三根自转轴往 0 拉'
+    for side in goal:
+        plain_err = float(np.linalg.norm(ik.fk(plain)[side][:3] - goal[side][:3]))
+        biased_err = float(np.linalg.norm(ik.fk(biased)[side][:3] - goal[side][:3]))
+        assert biased_err < plain_err * 1.05, \
+            f'{side} 侧残差劣化超过 5%：{plain_err:.4f} -> {biased_err:.4f} m'
+
+
+def test_null_bias_settles_instead_of_chattering(configured_ik):
+    """偏置是 -k*q（梯度正比于偏离量），到位就自动归零，所以稳态必须是不动点。
+
+    换成常幅值步（-k*sign(q)，即 L1 梯度）实测稳态每帧还抖 0.103 rad = 5 rad/s。
+    """
+    ik = configured_ik
+    stand = STAND_POSTURE(ik)
+    goal = {side: np.concatenate([pose[:3] + [0.20, 0.0, 0.0], pose[3:]])
+            for side, pose in ik.fk(stand).items()}   # 够不着，确保门控是开的
+    track, q = [], stand.copy()
+    for _ in range(160):
+        q, _, _, _ = ik.solve(q, goal)
+        track.append(q.copy())
+    assert np.abs(np.diff(np.asarray(track)[80:], axis=0)).max() < 1e-9, \
+        '门控打开时解在稳态还在抖'
 
 
 def test_same_seed_and_target_give_the_same_solution(configured_ik):

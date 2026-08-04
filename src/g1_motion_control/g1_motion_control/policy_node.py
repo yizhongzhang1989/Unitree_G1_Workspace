@@ -167,6 +167,18 @@ class MotionControlNode(Node):
             raise ValueError(f'ik_limit_upper 长度必须等于 arm_joints ({len(self._arm_names)})')
         joint_limits = {name: (-math.inf, high)
                         for name, high in zip(self._arm_names, limit_hi)} if limit_hi else {}
+        # 零空间偏置增益（长度同 arm_joints，0 = 该轴不偏置）。收肘限位拦不住"肘长期
+        # 顶在 1.4"，这一道在不动末端的前提下把三根自转轴拉回 0——理由见 config 注释。
+        bias_gain = list(p('ik_null_bias', Parameter.Type.DOUBLE_ARRAY)
+                         .get_parameter_value().double_array_value)
+        if bias_gain and len(bias_gain) != len(self._arm_names):
+            raise ValueError(f'ik_null_bias 长度必须等于 arm_joints ({len(self._arm_names)})')
+        null_bias = {name: gain for name, gain in zip(self._arm_names, bias_gain)
+                     if gain} if bias_gain else {}
+        gate = list(p('ik_null_bias_gate', [0.8, 1.2])
+                    .get_parameter_value().double_array_value)
+        if len(gate) != 2:
+            raise ValueError('ik_null_bias_gate 必须是 2 个数：开始角、全开角')
         self._ik_kwargs = dict(
             tip_frames={
                 'left': p('left_tip_frame', 'left_gripper_base')
@@ -183,6 +195,8 @@ class MotionControlNode(Node):
             max_step_pos=p('ik_max_step_pos', 0.1).get_parameter_value().double_value,
             max_step_ori=p('ik_max_step_ori', 0.5).get_parameter_value().double_value,
             joint_limits=joint_limits,
+            null_bias=null_bias,
+            null_bias_gate=tuple(gate),
         )
         # 热启动陷进坏解支时的逃生阈值（m）。理由见 config 里那段注释。
         self._rescue_err = float(
