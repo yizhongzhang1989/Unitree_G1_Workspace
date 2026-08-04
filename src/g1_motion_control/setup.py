@@ -17,6 +17,15 @@ setup(
         ('share/' + package_name + '/config', glob('config/*.onnx')),
         # WebXR 采集页与监控页，由 vr_teleop 节点内嵌的 aiohttp 直接托管。
         ('share/' + package_name + '/vr', glob('vr/*.html')),
+        # 双臂监控页，由 dashboard_node 托管。vendor 里是 three.js，
+        # 只拿了 OrbitControls 和 STLLoader（手臂 mesh 全是 STL）。
+        ('share/' + package_name + '/dashboard',
+         glob('dashboard/*.html') + glob('dashboard/*.js') + glob('dashboard/*.css')),
+        ('share/' + package_name + '/dashboard/vendor', glob('dashboard/vendor/*.js')),
+        ('share/' + package_name + '/dashboard/vendor/addons/controls',
+         glob('dashboard/vendor/addons/controls/*.js')),
+        ('share/' + package_name + '/dashboard/vendor/addons/loaders',
+         glob('dashboard/vendor/addons/loaders/*.js')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +39,7 @@ setup(
             'teleop_keyboard = g1_motion_control.teleop_keyboard:main',
             'vr_teleop = g1_motion_control.vr_teleop:main',
             'make_vr_cert = g1_motion_control.make_vr_cert:main',
+            'dashboard_node = g1_motion_control.dashboard_node:main',
         ],
     },
 )

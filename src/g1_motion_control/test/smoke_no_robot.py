@@ -261,6 +261,16 @@ def scenario(node, config):
           np.abs(last[left_slots]).max() > 0.01
           and np.abs(last[right_slots]).max() > 0.01)
 
+    # status 的 pose 是目标、pose_now 是实际到位。vr_teleop 的离合锚在 pose_now 上，
+    # 锚在 pose 上会让"松开-挪手-再按"的接力把目标累积出可达域（见 test_vr_teleop）。
+    now = (node.status.get('pose_now') or {}).get('right')
+    goal = (node.status.get('pose') or {}).get('right')
+    reached = ik.fk(last[arm_slots])['right']
+    check('status 的 pose_now 就是实际到位的末端位姿',
+          now is not None and goal is not None
+          and np.abs(np.asarray(now) - reached).max() < 1e-4
+          and np.abs(np.asarray(goal) - right_up).max() < 1e-4)
+
     arm_before = last[arm_slots].copy()
     last = publish([0.0, 0.0, 0.0, config['initial_height']])
     check('长度 4 完全不动上肢（teleop_keyboard.py 的回归）',

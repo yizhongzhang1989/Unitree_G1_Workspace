@@ -1,0 +1,177 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: #0f1419;
+  color: #e6e6e6;
+  font: 13px/1.5 system-ui, sans-serif;
+}
+
+#viewer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+}
+
+#hud {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pill {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #23272e;
+  border: 1px solid #2f353e;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill.ok {
+  background: #14532d;
+  border-color: #14532d;
+  color: #86efac;
+}
+
+.pill.bad {
+  background: #4c1d1d;
+  border-color: #4c1d1d;
+  color: #fca5a5;
+}
+
+#panel {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 330px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #1b1e24e6;
+  border: 1px solid #2a2f37;
+  backdrop-filter: blur(6px);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.row.head {
+  margin-top: 0;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.hint,
+.foot {
+  color: #8b94a3;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.foot {
+  justify-content: space-between;
+  border-top: 1px solid #2a2f37;
+  padding-top: 8px;
+}
+
+table {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  padding: 3px 4px;
+  text-align: right;
+  font-weight: 400;
+}
+
+thead th {
+  color: #8b94a3;
+  font-size: 11px;
+  border-bottom: 1px solid #2a2f37;
+}
+
+tbody th {
+  text-align: left;
+  white-space: nowrap;
+}
+
+tr.sub th,
+tr.sub td {
+  color: #9fb4c4;
+  padding-bottom: 8px;
+}
+
+td.err {
+  vertical-align: middle;
+  font-weight: 600;
+}
+
+td.err.far {
+  color: #fca5a5;
+}
+
+.legend {
+  color: #8b94a3;
+  font-size: 11px;
+  gap: 14px;
+}
+
+.sw {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+
+.sw.solid {
+  background: #39d353;
+}
+
+.sw.hollow {
+  border: 2px solid #f0a45c;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+button {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid #2f353e;
+  background: #23272e;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2c313a;
+}

@@ -105,10 +105,15 @@ flowchart TD
 
 `~/status`（JSON）字段：`state / ready_to_start / command / request / reason / stale`，
 加上上肢的 `ik_ready`、`ik_pos_err` / `ik_ori_err`（最近一帧两臂的最大残差，米 / 弧度）、
-`ik_iters`、`ik_ms`、`grip`，以及 `pose`（当前生效的两个末端位姿目标）。现场排查先看这几项。
+`ik_iters`、`ik_ms`、`grip`，以及**一对**末端位姿：`pose`（当前生效的**目标**，由 `~/command`
+写入）与 `pose_now`（**实际到位**，已发布关节目标的正解，只在 `running` 时有）。
+两者的差就是 `ik_pos_err` / `ik_ori_err`。现场排查先看这几项。
 
-> `pose` 不只是给人看的：遥操源接管时直接拿它当原点，就**不必自己再建一份
-> IK 模型算正解**。`vr_teleop` 走的就是这条路。
+> `pose_now` 不只是给人看的：遥操源接管时直接拿它当原点，就**不必自己再建一份
+> IK 模型算正解**。`vr_teleop` 走的就是这条路——播种和离合接合**都**用它，
+> 全程不碰 `pose`。理由见 VR 那一节。
+>
+> `pose` 则是给**观测**用的：要画“指令要它去哪 vs 它实际到了哪”，两条曲线就是这一对。
 
 再往下游（不归本包管）：FPC 写 command interface → `G1TopicSystem::write()` 补上
 `default_29dof_param.yaml` 的 kp/kd → `/lowcmd`（500 Hz，前 29 轴）与
@@ -159,7 +164,6 @@ ros2 launch g1_motion_control vr_teleop.launch.py
 
 完整上机流程、证书、排查清单见 [vr/README.md](vr/README.md)。已验证 Meta Quest 2/3、
 PICO 4；手柄读的是 `xr-standard` 标准映射。
-
 | VR 输入 | 机器人 |
 |---|---|
 | **左摇杆** | 水平速度 `vx` / `vy` |
@@ -171,10 +175,17 @@ PICO 4；手柄读的是 `xr-standard` 标准映射。
 
 几个必须知道的点：
 
-* **本节点只在策略层进入 `running` 之后才发指令**，接管的原点直接取策略层在
-  `~/status` 里发布的 `pose`，两边的起点是同一个值。所以顺序是：先站立、再启动策略，
-  才轮到 VR。
+* **本节点只在策略层进入 `running` 之后才发指令**，播种与接管的原点都直接取策略层在
+  `~/status` 里发布的 `pose_now`（**实际到位**的末端位姿），两边的起点是同一个值。
+  所以顺序是：先站立、再启动策略，才轮到 VR。
 * **离合接合的瞬间位移与转角都恒为 0**（手柄位置、手柄姿态、末端位姿三个原点一起锁）。
+  末端那一个取的是 `pose_now`（**实际到位**）而不是上一帧目标：目标够不着时两者能差
+  几十厘米，锚在目标上的话「松开 → 挪手 → 再按」这种**接力**会把目标一路累积出可达域。
+  实测 6 轮 × 前伸 10 cm 之后目标 588 mm / 实际 171 mm，手往回拉 58 mm 机器人才见动静、
+  要空推 588 mm 才回到起点；锚在 `pose_now` 上则发散收敛到 94 mm、死区 2 mm、回到起点
+  只要 174 mm。正常可达工况下两者跟随精度逐位相同（p50 0.21 vs 0.22 mm）。
+  取**关节目标**的正解而不是实测 `q` 的正解：PD 要出力就必须有位置差，锚在实测上等于
+  每次接合都把这个静差吃进目标，手臂会朝重力方向反向累积。
   除此之外上肢的防跳全靠策略层的 `arm_rate_limit`（IK 出口限速），两者都锁进了单测。
 * **VR 帧超时（`frame_timeout_s` 0.3 s）或退出 VR 会话**：速度立刻归零、双臂冻结、
   夹爪保持。不会卸力——要卸力请用策略层的 `~/estop`。
@@ -182,6 +193,39 @@ PICO 4；手柄读的是 `xr-standard` 标准映射。
   手里有东西时先把 trigger 扣住再进 `running`。
 * 坐标系：WebXR 右手系、Y 向上、-Z 朝前；机器人 X 前、Y 左、Z 上。手部位移在
   **标定后的世界系**里映射，不跟头显朝向转。
+
+### 双臂监控页（可选）
+
+看「指令要它去哪 vs 它实际到了哪」。浏览器打开 `http://<机器人IP>:8181/`：
+
+```bash
+ros2 launch g1_motion_control dashboard.launch.py
+#   换端口：  bind_port:=8182      只收本机：bind_host:=127.0.0.1
+```
+
+| 画面元素 | 是什么 |
+|---|---|
+| 手臂网格 | `/joint_states` 的**实测位形** |
+| 绿色实心球 + 坐标轴 | `status.pose` —— 末端位姿**目标** |
+| 橙色空心环 + 坐标轴 | `status.pose_now` —— **实际到位** |
+| 右上表格 | 两者的 xyz（毫米）与 `ik_pos_err`；残差 > 10 mm 标红 |
+
+**这是个独立的只读进程**，不在控制链路上：不发指令、不调服务，不开就是零开销。
+控制栈没起来时页面只会一直等 `/robot_description`，不影响别的东西。
+
+几个刻意的取舍：
+
+- **正运动学在浏览器里算，后端不碰 pinocchio**。关节树发过去之后 three.js 的
+  `Object3D` 嵌套本来就要合成矩阵，后端再算一遍是白花钱。所以 `/api/state` 每次只回
+  ~20 个关节角 + 4 个位姿（**321 字节**），不是整棵 link 变换树。
+- **没人看页面就退订 `/joint_states`**。那一路是 100 Hz，光 rclpy 反序列化在 Jetson 上
+  就要 12% 单核。实测：页面关着 **≈7%**（基本是 rclpy 空转），开着 **≈23%**（20 Hz 轮询）。
+- **只保留 `base_frame` 之下含可动关节的分支**，头、相机、雷达那些 fixed 分支自动剪掉
+  （29 个 link / 80 个关节），少下好几 MB 的 mesh。判据不是关节名单，换 URDF 不用改配置。
+- **渲染按需**：没有新数据、相机也没动就不 `render()`，页面挂着不看时不占 GPU。
+- `/mesh` **只认 `package://`**。它的参数来自网络而节点默认听 `0.0.0.0`，放开任意路径
+  就是一个任意文件读；`control.launch.py` 在发 `/robot_description` 前已经把裸相对路径
+  统一改写成 `package://`，所以真机上不会漏 mesh。
 
 ---
 
@@ -732,17 +776,22 @@ g1_motion_control/
 │   ├── policy_node.py           # ROS 节点 + 状态机 + 看门狗 + 指令分块
 │   ├── teleop_keyboard.py       # 键盘遥控台（只发长度 4，只管下半身）
 │   ├── vr_teleop.py             # VR 桥接（内嵌 WebXR 服务，发长度 20，上下肢全管）
+│   ├── dashboard_node.py        # 双臂监控页后端（只读，不在控制链路上）
 │   └── make_vr_cert.py          # 签局域网自签证书，兼作证书路径/端口的唯一定义
 ├── launch/
 │   ├── motion_control.launch.py
-│   └── vr_teleop.launch.py
+│   ├── vr_teleop.launch.py
+│   └── dashboard.launch.py
 ├── vr/                          # WebXR 采集页 + 监控页（装到 share/）+ adb 守护脚本
 │   └── README.md                # VR 上机流程、证书、排查清单
+├── dashboard/                   # 双臂监控页前端（装到 share/），vendor 里是 three.js
 └── test/
     ├── test_policy_runtime.py   # 13 个纯逻辑用例，pytest
     ├── test_arm_ik.py           # 19 个 IK 用例（正逆往返 / 不可达不抖 / 单侧求解 / 零空间偏置与门控 / 整条管线不卡死不跳变）
-    ├── test_vr_teleop.py        # 22 个 VR 用例（离合零跳变 / 轴映射 / 标定 / 摇杆 / 夹爪方向）
-    └── smoke_no_robot.py        # 无真机联调，32 项检查，直接 python3 跑
+    ├── test_vr_teleop.py        # 24 个 VR 用例（离合零跳变与锚点 / 轴映射 / 标定 / 摇杆 / 夹爪方向）
+    ├── test_dashboard.py        # 12 个监控页用例（URDF 裁剪 / rpy 约定 / mimic 单遍解算 / 路径容纳）
+    ├── smoke_no_robot.py        # 无真机联调，33 项检查，直接 python3 跑
+    └── smoke_dashboard.py       # 监控页联调，20 项检查，直接 python3 跑
 ```
 
 > 数据（`config/*`、`vr/*.html`）走 `data_files` 装到 `share/`，运行时用
@@ -753,10 +802,13 @@ g1_motion_control/
 ### 上机前的自检
 
 ```bash
-# 假状态源 + 假 controller_manager，把状态机从头走一遍，32 项检查
+# 假状态源 + 假 controller_manager，把状态机从头走一遍，33 项检查
 python3 src/g1_motion_control/test/smoke_no_robot.py
 
-# 纯逻辑单测 54 项
+# 监控页联调（假 URDF / joint_states / status，逐个打 HTTP 口），20 项检查
+python3 src/g1_motion_control/test/smoke_dashboard.py
+
+# 纯逻辑单测 68 项
 cd src/g1_motion_control && PYTHONPATH=$PWD:$PYTHONPATH python3 -m pytest test/ -q
 ```
 

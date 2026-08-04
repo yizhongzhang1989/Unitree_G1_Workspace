@@ -22,8 +22,10 @@
   xr-standard 的摇杆是 ``axes[2]=X``（右为正）、``axes[3]=Y``（**下**为正），而机器人是
   X 前 / Y 左 / 逆时针为正 / 上为正，所以四个轴**全要取负号**。
 * **上肢**：``squeeze`` 是离合。按下的瞬间同时锁住「手柄位置」「手柄姿态」「机器人
-  当前末端位姿」三个原点，之后下发的是 ``末端原点 + 手柄位移`` 与 ``手柄转角 × 末端原姿态``
-  —— 全程都是**相对量**，从来不是绝对位姿。松开就冻结在最后一帧。
+  **实际到位**的末端位姿」三个原点，之后下发的是 ``末端原点 + 手柄位移`` 与
+  ``手柄转角 × 末端原姿态`` —— 全程都是**相对量**，从来不是绝对位姿。松开就
+  冻结在最后一帧。末端原点取策略层的 ``pose_now``（**实际到位**）而不是上一帧目标，
+  否则“松开-挪手-再按”的接力会把目标一路累积出可达域（见 ``_update_arms``）。
 * **标定**：任一手柄按 **A/X** 把它**此刻所指的水平方向定为机器人正前方**。
   不标定时默认用 WebXR 参考空间的 -Z 当正前方，你一转身手往“前”推就不是机器人的前了；
   标定只取**航向（绕重力轴）**，不改上下，所以手往上抬永远是末端往上。
@@ -35,8 +37,8 @@
 
 安全
 ----
-* 只在策略层进入 ``running`` 之后才发指令；接管的原点直接取策略层在 ``~/status``
-  里发布的末端位姿目标，所以两边的起点是同一个值——本节点不再自己建一份
+* 只在策略层进入 ``running`` 之后才发指令；播种与接管的原点都直接取策略层在
+  ``~/status`` 里发布的位姿，所以两边的起点是同一个值——本节点不再自己建一份
   IK 模型算正解。
 * VR 帧超时（``frame_timeout_s``）或退出 VR 会话：速度立刻归零、双臂冻结、高度保持。
 * 离合按下瞬间位移与转角都恒为 0，所以接管不会跳；除此之外上肢的防跳全靠策略层
@@ -375,12 +377,13 @@ class VRTeleop(Node):
             self._seeded = False        # 退出 running 后重新播种，不留旧目标。
             return
         if not self._seeded:
-            pose = status.get('pose') or {}
-            if not all(side in pose for side in SIDES):
-                return                  # 策略层刚接管，正解播种还没落到 status 上。
-            # 直接用策略层已发布的末端目标当原点：本节点不再自己建一份 IK 模型
-            # 算正解，两边的起点由构造保证是同一个值，不会因取数时刻不同而错开。
-            self._pose = {side: np.asarray(pose[side], dtype=np.float64)
+            actual = status.get('pose_now') or {}
+            if not all(side in actual for side in SIDES):
+                return                  # 策略层刚接管，正解还没落到 status 上。
+            # 直接用策略层报的末端位姿当原点：本节点不再自己建一份 IK 模型
+            # 算正解。取 pose_now（实际到位）而不是 pose（目标），那样接入一个
+            # 已经在跑的策略层时不会把别人推飞了的目标原样复读回去。
+            self._pose = {side: np.asarray(actual[side], dtype=np.float64)
                           for side in SIDES}
             self._grip = np.asarray(status.get('grip') or (0.0, 0.0),
                                     dtype=np.float64)
@@ -397,7 +400,7 @@ class VRTeleop(Node):
                                       throttle_duration_sec=2.0)
         else:
             self._update_command(frame)
-            self._update_arms(frame)
+            self._update_arms(frame, status.get('pose_now') or {})
 
         self._message.data = [
             float(self._twist[0]), float(self._twist[1]), float(self._twist[2]),
@@ -514,7 +517,8 @@ class VRTeleop(Node):
             self._height - right[1] * self._height_rate / self._rate,
             self._h_lo), self._h_hi)
 
-    def _update_arms(self, frame: dict) -> None:
+    def _update_arms(self, frame: dict, actual: dict) -> None:
+        """``actual`` 是策略层 status 里的 ``pose_now``（各末端实际到位的位姿）。"""
         for index, side in enumerate(SIDES):
             hand = frame.get(side) or {}
             buttons = hand.get('buttons') or {}
@@ -526,6 +530,11 @@ class VRTeleop(Node):
                 rotation = _matrix(grip['orientation'])
                 if clutch is None:
                     # 三个原点一起锁：接管瞬间位移和转角都恒为 0，所以不会跳。
+                    # 末端那一个取实际到位而不是上一帧目标：目标够不着时两者能差
+                    # 几十厘米，锚在目标上会让“松开-挪手-再按”的接力把目标一路累积
+                    # 出可达域（实测 6 轮 ×10 cm 前伸后目标 588 mm / 实际 171 mm）。
+                    self._pose[side] = np.asarray(
+                        actual.get(side, self._pose[side]), dtype=np.float64)
                     clutch = (position, rotation, self._pose[side].copy())
                     self._clutch[side] = clutch
                     self.get_logger().info(f'{side} 离合接合')

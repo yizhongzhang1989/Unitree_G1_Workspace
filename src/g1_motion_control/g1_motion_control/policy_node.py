@@ -691,6 +691,17 @@ class MotionControlNode(Node):
                 'pose': {side: [round(float(v), 5) for v in pose]
                          for side, pose in self._pose.items()},
             }
+            # 已发布关节目标的正解。目标够不着时它和上面的 'pose' 能差出几十厘米
+            # （实测 6 轮 ×10 cm 前伸接力后目标 588 mm / 实际 171 mm），遥操侧的
+            # 离合必须锚在这一份上，否则位移会一路累积出可达域再也拉不回来。
+            # 取关节**目标**而不是实测 q：PD 要出力就必须有位置差，锚在实测上等于
+            # 每次接合都把这个静差吃进目标，手臂会朝重力方向反向累积。
+            # FK 单次 0.045 ms，且这个定时器和控制环在同一个互斥回调组里，不会和
+            # 它抢 ArmIK 内部那份 pinocchio data 缓存。
+            if self._ik is not None and self._state is State.RUNNING:
+                payload['pose_now'] = {
+                    side: [round(float(v), 5) for v in pose]
+                    for side, pose in self._ik.fk(self._arm_target).items()}
         self._status_publisher.publish(String(data=json.dumps(payload)))
 
     def shutdown(self) -> None:
