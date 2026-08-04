@@ -4,10 +4,12 @@
 正逆运动学互为反解、够不着时不抛异常且解仍在 URDF 限位内、单侧求解不动另一侧。
 """
 
+import math
 from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from ament_index_python.packages import get_package_share_directory
 
 from g1_lower_body_policy.arm_ik import ArmIK
@@ -24,6 +26,39 @@ def ik():
     urdf = (Path(get_package_share_directory('unitree_g1_description'))
             / 'model' / 'final.urdf')
     return ArmIK(urdf.read_text(encoding='utf-8'), ARM_JOINTS, TIP_FRAMES)
+
+
+def _config():
+    share = Path(get_package_share_directory('g1_lower_body_policy'))
+    return yaml.safe_load((share / 'config' / 'lower_body_policy.yaml')
+                          .read_text(encoding='utf-8'))['/lower_body_policy']['ros__parameters']
+
+
+def STAND_POSTURE(ik):
+    """STAND 结束时手臂停的位形（passive_targets 的手臂 14 位），也是接管的起点。"""
+    config = _config()
+    by_name = dict(zip(config['arm_joints'], config['passive_targets'][:14]))
+    return np.array([by_name[name] for name in ik.joint_names])
+
+
+@pytest.fixture(scope='module')
+def configured_ik():
+    """按 config/lower_body_policy.yaml 里实际发布的参数建，用来卡住部署值本身。
+
+    库默认值和实际跑的那一套不是一回事，只测默认值等于没测。
+    """
+    config = _config()
+    urdf = (Path(get_package_share_directory('unitree_g1_description'))
+            / 'model' / 'final.urdf')
+    arms = config['arm_joints']
+    return ArmIK(
+        urdf.read_text(encoding='utf-8'), arms, TIP_FRAMES,
+        base_frame=config['base_frame'], max_iters=config['ik_max_iters'],
+        damping=config['ik_damping'], tol_pos=config['ik_tol_pos'],
+        tol_ori=config['ik_tol_ori'],
+        max_step_pos=config['ik_max_step_pos'], max_step_ori=config['ik_max_step_ori'],
+        joint_limits={name: (-math.inf, high)
+                      for name, high in zip(arms, config['ik_limit_upper'])})
 
 
 def test_reduced_model_keeps_only_the_arms(ik):
@@ -78,47 +113,178 @@ def test_seed_outside_limits_is_clamped(ik):
     assert np.allclose(q, ik.upper)
 
 
-def test_redundant_dof_does_not_drift_along_a_closed_path(ik):
-    """7 自由度、任务 6 维，多出来的那一维必须被钉住。
+def test_redundant_dof_does_not_drift_along_a_closed_path(configured_ik):
+    """末端绕闭合路径回到原点后，冗余自由度必须也回到原处。
 
-    没有零空间姿态偏置时，让右手画一个 6 cm 的圆就能让 shoulder_yaw 一路漂到
-    -1.23 rad，然后在某一帧被迫重构、单帧跳 0.23 rad。上肢不限速，这一下就是电机
-    全权限的弹动。这里复刻节点的调用方式（上一帧的解当种子，每帧 solve 一次）。
+    手臂 7 自由度、任务 6 维，多出来的那一维完全由种子定。这里验的是求解本身：
+    种子恒定、目标绕回原处时，位形必须也回到原处，不能自己往一个方向爬。
+    （节点实际用的是热启动，那一支的累积漂移由 ik_rescue_err 和 arm_rate_limit 管，
+    见 test_arm_pipeline_* 那几个用例。）
     """
-    rest = {'left_shoulder_roll_joint': 0.25, 'left_elbow_joint': 0.5,
-            'right_shoulder_roll_joint': -0.25, 'right_elbow_joint': 0.5}
-    solver = ArmIK((Path(get_package_share_directory('unitree_g1_description'))
-                    / 'model' / 'final.urdf').read_text(encoding='utf-8'),
-                   ARM_JOINTS, TIP_FRAMES, rest_posture=rest)
-    start = np.array([0.2, -0.3, 0, 0.8, 0, 0, 0, 0.2, 0.3, 0, 0.8, 0, 0, 0])
-    center = solver.fk(start)['right']
-    right = [i for i, name in enumerate(solver.joint_names) if name.startswith('right')]
+    ik = configured_ik
+    seed = STAND_POSTURE(ik)
+    center = ik.fk(seed)['right']
+    yaw = ik.joint_names.index('right_shoulder_yaw_joint')
 
-    q, track = start.copy(), []
-    for step in range(200):
-        angle = 2.0 * np.pi * step / 200.0
-        goal = center.copy()
-        goal[1] += 0.06 * np.cos(angle) - 0.06
-        goal[2] += 0.06 * np.sin(angle)
-        q, pos_err, _, _ = solver.solve(q, {'right': goal})
-        track.append(q[right].copy())
+    track = []
+    for k in range(300):                      # 3 整圈
+        angle = 2 * np.pi * k / 100
+        target = dict(ik.fk(seed))
+        target['right'] = center.copy()
+        target['right'][1] += 0.03 * np.cos(angle) - 0.03
+        target['right'][2] += 0.03 * np.sin(angle)
+        q, _, _, _ = ik.solve(seed, target)   # 种子恒定，解不回灌
+        track.append(q.copy())
 
-    jump = np.abs(np.diff(np.asarray(track), axis=0)).max()
-    drift = np.abs(np.asarray(track)[-1] - start[right]).max()
-    assert jump < 0.10, f'单帧关节跃变 {jump:.4f} rad 过大，零空间约束可能失效'
-    assert drift < 0.35, f'绕回原点后位形漂移 {drift:.4f} rad，冗余自由度在游走'
-    assert pos_err < 2e-3
+    track = np.asarray(track)
+    assert abs(track[-1, yaw] - track[100, yaw]) < 0.02, '绕整圈回来后 shoulder_yaw 漂了'
+    assert np.abs(np.diff(track[100:], axis=0)).max() < 0.05, '单帧跳变过大'
 
 
 def test_unreachable_target_settles_instead_of_chattering(ik):
-    """够不着的目标保持不动时，解必须收敛到定点，不能持续抖。
+    """够不着的目标保持不动时，解必须逐帧一致，不能持续抖。
 
-    纯最小范数 DLS 在这里会残留 1.4e-2 rad 的循环抖动，50 Hz 下就是肉眼可见的嗡动。
+    按节点的实际用法调用：种子恒定，解不回灌。目标恒定 + 种子恒定 => 输出必须恒定。
     """
-    goal = ik.fk(np.zeros(14))['right'].copy()
+    seed = np.zeros(14)
+    goal = ik.fk(seed)['right'].copy()
     goal[0] += 0.35
-    q, track = np.zeros(14), []
-    for _ in range(60):
-        q, _, _, _ = ik.solve(q, {'right': goal})
+    track = [ik.solve(seed, {'right': goal})[0] for _ in range(60)]
+    assert np.abs(np.diff(np.asarray(track)[20:], axis=0)).max() < 1e-9
+
+
+def test_far_unreachable_target_does_not_blow_up_the_step(ik):
+    """够得**很远**的不可达目标：步长必须被限住，否则关节会顶穿限位再弹回来。
+
+    DLS 的步长正比于误差（最坏增益 1/(2λ)=10 rad/m），所以"够不着"够狠时会失稳。
+    上面那个用例只推了 0.35 m，落在阈值之内；这里推 0.60 m，实测不限幅时稳态每帧
+    抖 5.76 rad，限幅后是 1e-14 量级。
+    """
+    here = ik.fk(np.zeros(14))
+    goal = {side: pose.copy() for side, pose in here.items()}
+    for pose in goal.values():
+        pose[0] += 0.60
+    seed = np.zeros(14)
+    track = []
+    for _ in range(120):
+        q, _, _, _ = ik.solve(seed, goal)
         track.append(q.copy())
-    assert np.abs(np.diff(np.asarray(track)[20:], axis=0)).max() < 1e-6
+    assert np.abs(np.diff(np.asarray(track)[60:], axis=0)).max() < 1e-9
+    assert np.all(np.isfinite(q))
+    assert np.all(q >= ik.lower - 1e-9) and np.all(q <= ik.upper + 1e-9)
+
+
+def test_warm_start_never_gets_trapped_past_the_elbow_singularity(configured_ik):
+    """热启动 + 肘部限位必须能扛住"推远-拉回"，这是那条限位存在的全部理由。
+
+    G1 的肘角不是"0 伸直、越大越弯"：肩到夹爪的距离在 elbow=1.571 处最大，那里才是完全
+    伸直、也是奇异点，而 URDF 行程 [-1.047, 2.094] 把它夹在中间。**拿上一帧的解做种子**
+    时，目标够不着会把肘推过 1.571 顶到 2.094（手臂看起来是直的），之后再也回不来——
+    实测 8 轮里卡死 4 轮、残差 39 mm。把肘上限收到 1.4 后 0/8，代价只有 0.3 mm 可达半径。
+    """
+    ik = configured_ik
+    seed = STAND_POSTURE(ik)
+    home = ik.fk(seed)
+    far = {side: pose.copy() for side, pose in home.items()}
+    for pose in far.values():
+        pose[0] += 0.50                       # 推到够不着的前方
+    q = seed.copy()
+    for _ in range(4):
+        for _ in range(40):
+            q, _, _, _ = ik.solve(q, far)     # 热启动：解回灌进下一帧
+        for _ in range(60):
+            q, pos_err, _, _ = ik.solve(q, home)
+        assert pos_err < 5e-3, f'拉回后没收敛，残差 {pos_err * 1000:.1f} mm'
+
+
+def test_elbow_limit_must_stay_below_the_extension_singularity(configured_ik):
+    """肘的上限必须挡在伸直奇异点（1.571 rad）之前，否则热启动会把解推过去再也回不来。"""
+    for index, name in enumerate(configured_ik.joint_names):
+        if 'elbow' in name:
+            assert configured_ik.upper[index] < 1.571, \
+                f'{name} 上限 {configured_ik.upper[index]} 越过了伸直奇异点'
+
+
+def _arm_pipeline(ik, q, targets, stand, rate, rescue):
+    """复刻 policy_node._control 的上肢那一段：热启动 -> 逃生种子 -> 限速。"""
+    solved, pos_err, _, _ = ik.solve(q, targets)
+    fired = pos_err > rescue
+    if fired:
+        alt, alt_pos, _, _ = ik.solve(stand, targets)
+        if alt_pos < pos_err - rescue:
+            solved = alt
+    return q + np.clip(solved - q, -rate, rate), fired
+
+
+def test_arm_pipeline_always_comes_back_from_an_unreachable_target(configured_ik):
+    """整条上肢管线必须能从任意方向的"推远"回到原位。收肘只堵住了肘那条陷阱。
+
+    肩上还有一条同类的：热启动被推远后会翻进 shoulder_pitch≈+2.41 /
+    shoulder_roll 顶死 ±2.252 的镜像解支，从那儿连原位都够不着（残差 70 mm，永不恢复），
+    而且落进去之后正常跟随也一起崩。实测 60 轮里纯热启动卡死 10 轮，
+    加上 ik_rescue_err 这一道逃生后 0 轮。下面这 8 个方向里纯热启动会卡死 3 个。
+    """
+    ik, config = configured_ik, _config()
+    rate = config['arm_rate_limit'] / config['control_rate_hz']
+    rescue, stand = config['ik_rescue_err'], STAND_POSTURE(ik)
+    home = ik.fk(stand)
+    rng = np.random.default_rng(1)
+    for trial in range(8):
+        offset = rng.uniform(0.25, 0.75, 3) * rng.choice([-1.0, 1.0], 3)
+        far = {side: np.concatenate([pose[:3] + offset, pose[3:]])
+               for side, pose in home.items()}
+        q = stand.copy()
+        for goal, frames in ((far, 80), (home, 200)):
+            for _ in range(frames):
+                q, _ = _arm_pipeline(ik, q, goal, stand, rate, rescue)
+        back = ik.fk(q)
+        residual = max(float(np.linalg.norm(back[side][:3] - home[side][:3]))
+                       for side in home)
+        assert residual < 5e-3, \
+            f'第 {trial} 轮拉回后卡住，残差 {residual * 1000:.1f} mm，位形 {np.round(q, 3)}'
+
+
+def test_arm_pipeline_rate_limit_caps_every_frame(configured_ik):
+    """跨解支时求解值一帧能跳好几弧度，发布值必须被 arm_rate_limit 压住。"""
+    ik, config = configured_ik, _config()
+    rate = config['arm_rate_limit'] / config['control_rate_hz']
+    rescue, stand = config['ik_rescue_err'], STAND_POSTURE(ik)
+    home = ik.fk(stand)
+    rng = np.random.default_rng(5)
+    q, published = stand.copy(), []
+    for _ in range(200):                      # 大幅随机跳目标，逼它反复换解支
+        offset = rng.uniform(-0.2, 0.2, 3)
+        goal = {side: np.concatenate([pose[:3] + offset, pose[3:]])
+                for side, pose in home.items()}
+        q, _ = _arm_pipeline(ik, q, goal, stand, rate, rescue)
+        published.append(q.copy())
+    step = np.abs(np.diff(np.asarray(published), axis=0)).max()
+    assert step <= rate + 1e-9, f'单帧跳了 {step:.3f} rad，限速 {rate:.3f} 没生效'
+
+
+def test_rescue_seed_never_fires_during_normal_tracking(configured_ik):
+    """逃生那一道在正常跟随时必须一次都不触发，否则它就成了跟随精度的一部分。"""
+    ik, config = configured_ik, _config()
+    rate = config['arm_rate_limit'] / config['control_rate_hz']
+    rescue, stand = config['ik_rescue_err'], STAND_POSTURE(ik)
+    home = ik.fk(stand)
+    q, fired = stand.copy(), 0
+    for i in range(400):                      # 6 cm 画圆，末端每帧约 1 mm
+        angle = 2 * math.pi * i / 200
+        goal = {side: np.concatenate(
+            [pose[:3] + [0.0, 0.06 * math.cos(angle), 0.06 * math.sin(angle)], pose[3:]])
+            for side, pose in home.items()}
+        q, hit = _arm_pipeline(ik, q, goal, stand, rate, rescue)
+        fired += hit
+    assert fired == 0, f'正常跟随里触发了 {fired} 次逃生求解'
+
+
+def test_same_seed_and_target_give_the_same_solution(configured_ik):
+    """求解本身必须是纯函数：同一种子 + 同一目标 => 同一位形。"""
+    ik = configured_ik
+    seed = STAND_POSTURE(ik)
+    target = ik.fk(np.full(14, 0.3))
+    first, _, _, _ = ik.solve(seed, target)
+    for _ in range(5):
+        again, _, _, _ = ik.solve(seed, target)
+        assert np.array_equal(first, again)

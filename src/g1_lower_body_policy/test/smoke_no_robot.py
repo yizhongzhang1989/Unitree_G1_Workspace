@@ -194,9 +194,11 @@ def scenario(node, config):
     check('running 在发目标', len(run) > 50)
     check(f'目标流没断（最大间隔 {gaps.max() * 1e3:.0f} ms）', gaps.max() < 0.1)
     check('下肢在动（策略真的在跑）', np.ptp(run[:, policy_slots], axis=0).max() > 0.02)
-    # 手臂从实测位形（假状态源全 0）接管，没人发上肢指令就该一直停在那儿。
-    check('没有上肢指令时手臂/夹爪保持接管姿态',
-          np.abs(run[:, passive_slots]).max() < 1e-3)
+    # 没人发上肢指令时，手臂目标必须**不漂移**。注意不能断言"目标等于实测值"：
+    # IK 用上一帧目标热启动，接管时用实测位形播种，之后发布值和实测值之间还隔着
+    # PD 的跟随误差，两者不必相等，但必须帧帧一致。
+    check('没有上肢指令时手臂/夹爪目标不漂移',
+          np.ptp(run[:, passive_slots], axis=0).max() < 1e-6)
     check('输出全部有限', np.all(np.isfinite(run)))
     lo = np.asarray(config['target_lower_limits'])
     hi = np.asarray(config['target_upper_limits'])
@@ -235,19 +237,21 @@ def scenario(node, config):
 
     check('status 报告 IK 就绪', node.status.get('ik_ready'))
 
+    before = np.asarray(node.targets)[-1]
     last = publish([1.0, 1.0])
     check('长度 2 只动夹爪',
           np.abs(last[grip_slots] - 1.0).max() < 1e-9
-          and np.abs(last[arm_slots]).max() < 1e-3)
+          and np.abs(last[arm_slots] - before[arm_slots]).max() < 1e-6)
 
     right_up = home['right'].copy()
     right_up[2] += 0.05
+    before = np.asarray(node.targets)[-1]
     last = publish(right_up)
     reached = ik.fk(last[arm_slots])['right']
     error = float(np.linalg.norm(reached[:3] - right_up[:3]))
     check(f'长度 7 右手末端到位（残差 {error * 1e3:.2f} mm）', error < 3e-3)
     check('长度 7 不碰左臂，也不碰夹爪',
-          np.abs(last[left_slots]).max() < 1e-3
+          np.abs(last[left_slots] - before[left_slots]).max() < 1e-6
           and np.abs(last[grip_slots] - 1.0).max() < 1e-9)
 
     left_up = home['left'].copy()

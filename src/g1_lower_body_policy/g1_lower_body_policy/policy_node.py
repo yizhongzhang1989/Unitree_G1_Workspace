@@ -63,6 +63,7 @@ from controller_manager_msgs.srv import SwitchController
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -159,11 +160,13 @@ class LowerBodyPolicyNode(Node):
         if len(grip_limits) != 2:
             raise ValueError('gripper_limits 必须是 2 个数：下界、上界')
         self._grip_lo, self._grip_hi = float(grip_limits[0]), float(grip_limits[1])
-        rest = p('ik_rest_posture', [0.0] * len(self._arm_names)) \
-            .get_parameter_value().double_array_value
-        if len(rest) != len(self._arm_names):
-            raise ValueError(
-                f'ik_rest_posture 长度必须等于 arm_joints ({len(self._arm_names)})')
+        # 限位收紧（长度同 arm_joints，与 URDF 取交集，只收不放）。肘必须挡在伸直
+        # 奇异点之前，否则热启动会把解推过去再也回不来——理由见 arm_ik.py 文件头。
+        limit_hi = list(p('ik_limit_upper', Parameter.Type.DOUBLE_ARRAY).get_parameter_value().double_array_value)
+        if limit_hi and len(limit_hi) != len(self._arm_names):
+            raise ValueError(f'ik_limit_upper 长度必须等于 arm_joints ({len(self._arm_names)})')
+        joint_limits = {name: (-math.inf, high)
+                        for name, high in zip(self._arm_names, limit_hi)} if limit_hi else {}
         self._ik_kwargs = dict(
             tip_frames={
                 'left': p('left_tip_frame', 'left_gripper_base')
@@ -177,11 +180,13 @@ class LowerBodyPolicyNode(Node):
             damping=p('ik_damping', 0.05).get_parameter_value().double_value,
             tol_pos=p('ik_tol_pos', 0.001).get_parameter_value().double_value,
             tol_ori=p('ik_tol_ori', 0.0035).get_parameter_value().double_value,
-            # 按名字传，ArmIK 内部排成缩减模型的 q 顺序，不依赖这里的书写顺序。
-            rest_posture=dict(zip(self._arm_names, rest)),
-            posture_weight=p('ik_posture_weight', 0.05)
-            .get_parameter_value().double_value,
+            max_step_pos=p('ik_max_step_pos', 0.1).get_parameter_value().double_value,
+            max_step_ori=p('ik_max_step_ori', 0.5).get_parameter_value().double_value,
+            joint_limits=joint_limits,
         )
+        # 热启动陷进坏解支时的逃生阈值（m）。理由见 config 里那段注释。
+        self._rescue_err = float(
+            p('ik_rescue_err', 0.01).get_parameter_value().double_value)
 
         n = len(policy_joints)
         lower = np.asarray(p('target_lower_limits', [0.0] * n)
@@ -196,6 +201,13 @@ class LowerBodyPolicyNode(Node):
         if rate <= 0.0:
             raise ValueError('control_rate_hz 必须为正')
         dt = 1.0 / rate
+        # 手臂关节目标的变化率上限（rad/s）。**这是"手腕突然翻 180 度"唯一的根治手段**：
+        # 多解支是这台机器人的固有属性（同一末端位姿、不同种子解出的位形最大差 2.67 rad），
+        # 求解器跨支时一帧就能跳好几弧度，而上肢没有别的限速。见 config 里那段注释。
+        arm_rate = float(p('arm_rate_limit', 10.0).get_parameter_value().double_value)
+        if arm_rate <= 0.0:
+            raise ValueError('arm_rate_limit 必须为正（rad/s）')
+        self._arm_rate = arm_rate * dt
         self._stand_s = float(p('stand_s', 3.0).get_parameter_value().double_value)
 
         # 先让手张开再到前面
@@ -404,14 +416,19 @@ class LowerBodyPolicyNode(Node):
         if self._ik is not None:
             return
         try:
-            ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs) # type: ignore
+            ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs)  # type: ignore[arg-type]
             slots = [self._joints.index(name) for name in ik.joint_names]
         except Exception as error:  # 建模失败不能拖垮节点，但 ~/start 会拒绝。
             self.get_logger().error(f'手臂 IK 建模失败，上肢不可用: {error}')
             return
         with self._lock:
             self._ik, self._arm_slots = ik, slots
-        self.get_logger().info(f'手臂 IK 就绪（{ik.model.nq} 轴，限位取自 URDF）')
+        tightened = [f'{name}≤{ik.upper[i]:.3f}' for i, name in enumerate(ik.joint_names)
+                     if ik.upper[i] < ik.model.upperPositionLimit[i] - 1e-9]
+        self.get_logger().info(
+            f'手臂 IK 就绪（{ik.model.nq} 轴，限位取自 URDF'
+            + (f'，已收紧：{", ".join(tightened)}）' if tightened else '）')
+            + f'，关节限速 {self._arm_rate / 0.02:.1f} rad/s')
 
     # -- 服务 ------------------------------------------------------------------
 
@@ -601,7 +618,21 @@ class LowerBodyPolicyNode(Node):
             # 上肢出什么事都只保持上一帧手臂目标，绝不能把正在平衡的下肢一起急停。
             try:
                 clock = time.monotonic()
-                self._arm_target, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
+                # 热启动：种子就是上一帧已发布的目标，解天然连续。跨解支时仍可能跳，
+                # 所以出口按 arm_rate_limit 限速——这才是防"手腕突然翻 180 度"的那一道。
+                solved, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
+                # 逃生：热启动会把解一路推进回不来的解支（实测手臂翻到肩后、
+                # shoulder_roll 顶死限位，之后连原位都够不着）。残差大到不像"只是够不着"
+                # 时，拿站立位形当种子再解一次——那个种子从不落进陷阱。只有明显更好才采纳，
+                # 所以正常跟随根本不会触发（实测 ±3cm 轨迹 0.00%），代价也只有那一次求解。
+                if pos_err > self._rescue_err:
+                    alt, alt_pos, alt_ori, alt_iters = self._ik.solve(
+                        self._stand_pose[self._arm_slots], poses)
+                    if alt_pos < pos_err - self._rescue_err:
+                        solved, pos_err, ori_err = alt, alt_pos, alt_ori
+                        iters += alt_iters
+                self._arm_target = self._arm_target + np.clip(
+                    solved - self._arm_target, -self._arm_rate, self._arm_rate)
                 self._ik_stat = (pos_err, ori_err, iters, (time.monotonic() - clock) * 1e3)
             except Exception as error:
                 self.get_logger().warning(f'手臂 IK 异常，保持上一帧: {error}',
