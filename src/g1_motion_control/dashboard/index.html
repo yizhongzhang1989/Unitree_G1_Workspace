@@ -38,42 +38,59 @@
           <th>x</th>
           <th>y</th>
           <th>z</th>
-          <th>残差</th>
+          <th>位置差</th>
         </tr>
       </thead>
       <tbody>
         <tr data-side="left">
-          <th>左 目标</th>
+          <th>左 上层</th>
           <td class="n tx"></td>
           <td class="n ty"></td>
           <td class="n tz"></td>
-          <td class="n err" rowspan="2"></td>
+          <td></td>
         </tr>
-        <tr data-side="left" class="sub">
-          <th>左 实际</th>
+        <tr data-side="left" class="sub cmd">
+          <th>左 限速</th>
           <td class="n ax"></td>
           <td class="n ay"></td>
           <td class="n az"></td>
+          <td class="n gap"></td>
+        </tr>
+        <tr data-side="left" class="sub track">
+          <th>左 实测</th>
+          <td class="n mx"></td>
+          <td class="n my"></td>
+          <td class="n mz"></td>
+          <td class="n gap"></td>
         </tr>
         <tr data-side="right">
-          <th>右 目标</th>
+          <th>右 上层</th>
           <td class="n tx"></td>
           <td class="n ty"></td>
           <td class="n tz"></td>
-          <td class="n err" rowspan="2"></td>
+          <td></td>
         </tr>
-        <tr data-side="right" class="sub">
-          <th>右 实际</th>
+        <tr data-side="right" class="sub cmd">
+          <th>右 限速</th>
           <td class="n ax"></td>
           <td class="n ay"></td>
           <td class="n az"></td>
+          <td class="n gap"></td>
+        </tr>
+        <tr data-side="right" class="sub track">
+          <th>右 实测</th>
+          <td class="n mx"></td>
+          <td class="n my"></td>
+          <td class="n mz"></td>
+          <td class="n gap"></td>
         </tr>
       </tbody>
     </table>
 
     <div class="row legend">
-      <span><i class="sw solid"></i>目标（status.pose）</span>
-      <span><i class="sw hollow"></i>实际（status.pose_now）</span>
+      <span><i class="sw solid"></i>上层命令（VR / VLA）</span>
+      <span><i class="sw limited"></i>IK + 限速</span>
+      <span><i class="sw hollow"></i>实测模型末端</span>
     </div>
     <div class="row legend">
       <span>手臂网格 = <b>/joint_states</b> 实测位形</span>
@@ -81,8 +98,9 @@
 
     <div class="row">
       <label><input type="checkbox" id="opt-mesh" checked> 网格</label>
-      <label><input type="checkbox" id="opt-target" checked> 目标</label>
-      <label><input type="checkbox" id="opt-actual" checked> 实际</label>
+      <label><input type="checkbox" id="opt-command" checked> 上层</label>
+      <label><input type="checkbox" id="opt-limited" checked> 限速</label>
+      <label><input type="checkbox" id="opt-measured" checked> 实测</label>
       <button id="fit" type="button">复位视角</button>
     </div>
 

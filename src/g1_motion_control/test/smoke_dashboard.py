@@ -19,7 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Float64MultiArray, String
 
 PORT = 8199
 URL = f'http://127.0.0.1:{PORT}'
@@ -71,6 +71,8 @@ class Source(Node):
         self.create_publisher(String, '/robot_description', latched).publish(
             String(data=description()))
         self._joints = self.create_publisher(JointState, '/joint_states', stream)
+        self._command = self.create_publisher(
+            Float64MultiArray, '/motion_control/command', 10)
         self._status = self.create_publisher(String, '/motion_control/status', 10)
         self.create_timer(0.01, self._tick_joints)
         self.create_timer(0.1, self._tick_status)
@@ -82,13 +84,18 @@ class Source(Node):
         self._joints.publish(message)
 
     def _tick_status(self):
+        command = Float64MultiArray()
+        command.data = (
+            [0.0, 0.0, 0.0, 0.74]
+            + [0.9, 0.2, 0.1, 0.0, 0.0, 0.0, 1.0]
+            + [0.9, -0.2, 0.1, 0.0, 0.0, 0.0, 1.0]
+            + [0.0, 2.76]
+        )
+        self._command.publish(command)
         self._status.publish(String(data=json.dumps({
             'state': 'running', 'stale': '', 'ik_pos_err': 0.0724, 'ik_ms': 0.38,
-            'pose': {'left': [0.9, 0.2, 0.1, 0, 0, 0, 1],
-                     'right': [0.9, -0.2, 0.1, 0, 0, 0, 1]},
-            'pose_now': {'left': [0.3, 0.2, 0.1, 0, 0, 0, 1],
-                         'right': [0.3, -0.2, 0.1, 0, 0, 0, 1]},
-            'grip': [0.0, 2.76]})))
+            'limited_pose': {'left': [0.3, 0.2, 0.1, 0, 0, 0, 1],
+                             'right': [0.3, -0.2, 0.1, 0, 0, 0, 1]}})))
 
 
 def main() -> int:
@@ -153,8 +160,9 @@ def main() -> int:
         check('关节角来自 /joint_states',
               abs(state['q'].get('left_elbow_joint', 0) - 0.5) < 1e-9
               and abs(state['q'].get('left_eccentric_joint', 0) - 1.2) < 1e-9)
-        check('目标与实际到位分别取自 pose / pose_now',
-              state['pose']['left'][0] == 0.9 and state['pose_now']['left'][0] == 0.3)
+        check('上层命令与 IK 限速结果来自不同数据源',
+              state['command_pose']['left'][0] == 0.9
+              and state['limited_pose']['left'][0] == 0.3)
         check('残差透传，不在这一层重算', abs(state['ik_pos_err'] - 0.0724) < 1e-9)
 
         clock = time.monotonic()

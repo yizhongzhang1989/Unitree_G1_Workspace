@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""双臂监控页：只画两条手臂和末端目标，看「指令要它去哪 vs 它实际到了哪」。
+"""双臂只读监控：上层命令、限速指令与实测关节模型三层对照。
 
-    /robot_description ─┐
-    /joint_states ──────┼─► [ 本节点：stdlib HTTP + 静态页 ] ◄─轮询─ 浏览器(three.js)
-    /motion_control/status ┘
+    /motion_control/command ─┐
+    /motion_control/status ──┼─► [ 本节点：stdlib HTTP + 静态页 ] ◄─轮询─ 浏览器
+    /joint_states ───────────┤                                      (three.js FK)
+    /robot_description ──────┘
 
 **独立进程，不在控制链路上**。不开就是零开销；开着也只在浏览器轮询到来时才
 组一次几百字节的 JSON。
@@ -12,7 +13,7 @@
 
 * **后端不算正运动学、不依赖 pinocchio**。URDF 解析一次后把关节树发给前端，
   three.js 的 ``Object3D`` 嵌套本来就在算矩阵，再算一遍是白花钱。
-  于是每次轮询的 payload 只有 ~20 个关节角 + 4 个位姿，不是整棵 link 变换树。
+    于是每次轮询只发手臂关节角 + 上层/限速位姿，不发整棵 link 变换树。
 * **不订阅、不发布任何控制量，也不调用任何服务**。纯只读，所以不需要
   ``ReentrantCallbackGroup`` + ``MultiThreadedExecutor`` 那一套防死锁配置。
 * **只保留手臂**：``base_frame`` 之下**含可动关节**的分支才留（头、雷达、相机
@@ -41,9 +42,12 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Float64MultiArray, String
+
+from g1_motion_control.command_protocol import split_command
 
 _MOVABLE = ('revolute', 'continuous', 'prismatic')
+_IDLE_RELEASE_S = 3.0
 
 
 def _floats(text: str | None, fallback: tuple) -> list:
@@ -101,7 +105,7 @@ def parse_urdf(urdf: str, base: str) -> dict:
         if limit is not None and limit.get('lower') and limit.get('upper'):
             # 夹爪那两条 spline mimic 链是**按各自限位裁剪**的分段线性拟合：
             # 不裁的话中段的值会跑到区间外，滑块和连杆直接飞出手掌。
-            item['limit'] = [float(limit.get('lower')), float(limit.get('upper'))]
+            item['limit'] = [float(limit.get('lower')), float(limit.get('upper'))]  # type: ignore
         if mimic is not None:
             item['mimic'] = {'joint': mimic.get('joint'),
                              'multiplier': float(mimic.get('multiplier', 1.0)),
@@ -194,12 +198,13 @@ class DashboardNode(Node):
         p = self.declare_parameter
         self._host = p('bind_host', '0.0.0.0').get_parameter_value().string_value
         self._port = int(p('bind_port', 8181).get_parameter_value().integer_value)
-        # 末端位姿（pose / pose_now）就是相对它的，模型也从它往下画，必须同一个。
+        # 上层命令、限速指令与实测模型都用这个参考系，必须和 motion_control 一致。
         self._base = p('base_frame', 'torso_link').get_parameter_value().string_value
 
         self._lock = threading.Lock()
         self._model: dict | None = None
         self._status: dict = {}
+        self._command_pose: dict[str, list] = {}
         self._joints: JointState | None = None
         self._index: dict[str, int] = {}
         self._names: list = []
@@ -218,11 +223,15 @@ class DashboardNode(Node):
         self.create_subscription(
             String, p('status_topic', '/motion_control/status')
             .get_parameter_value().string_value, self._on_status, 10)
+        self.create_subscription(
+            Float64MultiArray,
+            p('command_topic', '/motion_control/command').get_parameter_value().string_value,
+            self._on_command,
+            QoSProfile(depth=4, history=HistoryPolicy.KEEP_LAST,
+                       reliability=ReliabilityPolicy.BEST_EFFORT))
         # /joint_states 按需订阅：没人看页面就退订，省掉 12% 单核的反序列化。
         self._joint_topic = p('joint_states_topic', '/joint_states') \
             .get_parameter_value().string_value
-        self._idle_s = float(
-            p('idle_release_s', 3.0).get_parameter_value().double_value)
         self._joint_sub = None
         self._last_poll = 0.0
         self.create_timer(0.2, self._gate)
@@ -257,7 +266,7 @@ class DashboardNode(Node):
         时间是关着的。订/退都在定时器里做，不在 HTTP 线程里碰 ROS 实体。
         """
         with self._lock:
-            watching = time.monotonic() - self._last_poll < self._idle_s
+            watching = time.monotonic() - self._last_poll < _IDLE_RELEASE_S
         if watching and self._joint_sub is None:
             self._joint_sub = self.create_subscription(
                 JointState, self._joint_topic, self._on_joints, self._stream)
@@ -275,12 +284,24 @@ class DashboardNode(Node):
         with self._lock:
             self._status = status
 
+    def _on_command(self, message: Float64MultiArray) -> None:
+        """只观察统一命令总线里的臂块，解析复用 motion_control 的唯一协议。"""
+        try:
+            chunks = split_command(message.data)
+        except ValueError:
+            return
+        with self._lock:
+            for side in ('left', 'right'):
+                if side in chunks:
+                    self._command_pose[side] = chunks[side].tolist()
+
     # -- HTTP 取数 --------------------------------------------------------------
 
     def snapshot(self) -> dict:
         with self._lock:
             self._last_poll = time.monotonic()   # 有人在看，_gate 据此保持订阅
             status, message = self._status, self._joints
+            command_pose = dict(self._command_pose)
             if message is not None and message.name != self._names:
                 # 名字表变了才重建索引；正常一整场只建一次。
                 self._names = list(message.name)
@@ -292,9 +313,9 @@ class DashboardNode(Node):
             'q': q,
             'state': status.get('state', ''),
             'stale': status.get('stale', ''),
-            # 目标 vs 实际到位。pose_now 只在 running 时有，前端要能接受它缺失。
-            'pose': status.get('pose') or {},
-            'pose_now': status.get('pose_now') or {},
+            # 上层笛卡尔命令与 IK + 关节限速后的指令；实测末端由前端模型直接给出。
+            'command_pose': command_pose,
+            'limited_pose': status.get('limited_pose') or {},
             'ik_pos_err': status.get('ik_pos_err'),
             'ik_ms': status.get('ik_ms'),
         }

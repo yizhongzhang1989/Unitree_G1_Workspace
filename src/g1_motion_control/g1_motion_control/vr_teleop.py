@@ -21,11 +21,11 @@
   松手停在当前值、不回弹）。
   xr-standard 的摇杆是 ``axes[2]=X``（右为正）、``axes[3]=Y``（**下**为正），而机器人是
   X 前 / Y 左 / 逆时针为正 / 上为正，所以四个轴**全要取负号**。
-* **上肢**：``squeeze`` 是离合。按下的瞬间同时锁住「手柄位置」「手柄姿态」「机器人
-  **实际到位**的末端位姿」三个原点，之后下发的是 ``末端原点 + 手柄位移`` 与
-  ``手柄转角 × 末端原姿态`` —— 全程都是**相对量**，从来不是绝对位姿。松开就
-  冻结在最后一帧。末端原点取策略层的 ``pose_now``（**实际到位**）而不是上一帧目标，
-  否则“松开-挪手-再按”的接力会把目标一路累积出可达域（见 ``_update_arms``）。
+* **上肢**：``squeeze`` 是离合。按下的瞬间同时锁住「手柄位置」「手柄姿态」「策略层
+  已限速的末端指令 ``limited_pose``」三个原点，之后下发的是 ``末端原点 + 手柄位移`` 与
+  ``手柄转角 × 末端原姿态`` —— 全程都是**相对量**，从来不是绝对位姿。松开就冻结在
+  最后一帧。命令始终被夹在 ``limited_pose`` 周围 ``arm_lead_limit`` 的球内，所以够不着
+  的时候目标不会一路飘出可达域。
 * **标定**：任一手柄按 **A/X** 把它**此刻所指的水平方向定为机器人正前方**。
   不标定时默认用 WebXR 参考空间的 -Z 当正前方，你一转身手往“前”推就不是机器人的前了；
   标定只取**航向（绕重力轴）**，不改上下，所以手往上抬永远是末端往上。
@@ -37,12 +37,14 @@
 
 安全
 ----
-* 只在策略层进入 ``running`` 之后才发指令；播种与接管的原点都直接取策略层在
-  ``~/status`` 里发布的位姿，所以两边的起点是同一个值——本节点不再自己建一份
-  IK 模型算正解。
+* 只在策略层进入 ``running`` 之后才发指令；播种与接管原点取策略层的
+  ``limited_pose``（IK + 关节限速后的可达指令），本节点不自己建 IK。
 * VR 帧超时（``frame_timeout_s``）或退出 VR 会话：速度立刻归零、双臂冻结、高度保持。
-* 离合按下瞬间位移与转角都恒为 0，所以接管不会跳；除此之外上肢的防跳全靠策略层
-  IK 出口的 ``arm_rate_limit``。
+* squeeze 有接合/释放迟滞；WebXR 报推算位置时冻结但保留离合，距上一帧真实跟踪位置
+  超过 ``_MAX_HAND_STEP_M`` 才无跳变重锚。策略层 IK 出口的 ``arm_rate_limit`` 是最后
+  一道关节跳变保护。
+* 上行帧来自一个默认不鉴权的 WebSocket，所有数值都过 ``_vector``，永不把异常抛进
+  50 Hz 定时器；暴露到局域网时务必设 ``token``。
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
+from g1_motion_control.command_protocol import join_command
 from g1_motion_control.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
 
 SIDES = ('left', 'right')
@@ -79,10 +82,46 @@ _ADVANCE = {'idle': ('engage', '站立'), 'estop': ('engage', '站立'),
 _BASE_MAP = np.array([[0.0, 0.0, -1.0],
                       [-1.0, 0.0, 0.0],
                       [0.0, 1.0, 0.0]])
+_MAX_HAND_STEP_M = 0.1
+
+
+def _vector(value, size: int):
+    """WebXR 帧里的一个数组 -> 长度 ``size`` 的有限值向量；不合格返回 ``None``。
+
+    帧来自一个默认不鉴权的 WebSocket，所以这里必须**永不抛异常**：
+    定时器回调里招一个异常就会把整个 50 Hz 控制环带走。
+    """
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if array.shape != (size,) or not np.all(np.isfinite(array)):
+        return None
+    return array
 
 
 def _matrix(quat_xyzw) -> np.ndarray:
     return pin.Quaternion(np.asarray(quat_xyzw, dtype=np.float64)).matrix()
+
+
+def _grip_pose(grip) -> tuple:
+    """WebXR ``grip`` -> ``(position, rotation)``；不可用的那一半给 ``None``。
+
+    位置和姿态**分开判**：光学跟踪丢了（``emulatedPosition``）姿态仍然可信，
+    所以 A/X 航向标定不受影响，只有离合位移要冻结。
+    """
+    grip = grip or {}
+    orientation = _vector(grip.get('orientation'), 4)
+    if orientation is None:
+        return None, None
+    norm = float(np.linalg.norm(orientation))
+    if not 0.5 < norm < 2.0:
+        return None, None
+    rotation = _matrix(orientation / norm)
+    position = _vector(grip.get('position'), 3)
+    if position is None or grip.get('emulated_position', False):
+        return None, rotation
+    return position, rotation
 
 
 def _quat(matrix: np.ndarray) -> np.ndarray:
@@ -134,8 +173,13 @@ class VRTeleop(Node):
         # squeeze 是模拟量，按到底才是 1.0；用 0.5 判定"按下"，怕误触就往上调。
         self._squeeze_on = float(
             p('squeeze_threshold', 0.5).get_parameter_value().double_value)
+        # 模拟按钮在阈值附近有噪声。接合后降到 80% 阈值才释放，避免一帧帧断开/重建原点。
+        self._squeeze_off = 0.8 * self._squeeze_on
         self._arm_scale = float(
             p('arm_scale', 1.0).get_parameter_value().double_value)
+        # 末端命令允许领先 limited_pose 的最大距离（m，<=0 关闭）。理由见 _leash。
+        self._lead = float(
+            p('arm_lead_limit', 0.02).get_parameter_value().double_value)
         self._timeout = float(
             p('frame_timeout_s', 0.3).get_parameter_value().double_value)
         self._grip_open = float(
@@ -377,13 +421,12 @@ class VRTeleop(Node):
             self._seeded = False        # 退出 running 后重新播种，不留旧目标。
             return
         if not self._seeded:
-            actual = status.get('pose_now') or {}
-            if not all(side in actual for side in SIDES):
+            limited = status.get('limited_pose') or {}
+            if not all(side in limited for side in SIDES):
                 return                  # 策略层刚接管，正解还没落到 status 上。
-            # 直接用策略层报的末端位姿当原点：本节点不再自己建一份 IK 模型
-            # 算正解。取 pose_now（实际到位）而不是 pose（目标），那样接入一个
-            # 已经在跑的策略层时不会把别人推飞了的目标原样复读回去。
-            self._pose = {side: np.asarray(actual[side], dtype=np.float64)
+            # 用 IK + 关节限速后真正下发的末端指令播种。它一定可达、无编码器静差，
+            # 又不会把别的发布者已经推飞的笛卡尔目标原样复读回去。
+            self._pose = {side: np.asarray(limited[side], dtype=np.float64)
                           for side in SIDES}
             self._grip = np.asarray(status.get('grip') or (0.0, 0.0),
                                     dtype=np.float64)
@@ -400,15 +443,11 @@ class VRTeleop(Node):
                                       throttle_duration_sec=2.0)
         else:
             self._update_command(frame)
-            self._update_arms(frame, status.get('pose_now') or {})
+            self._update_arms(frame, status.get('limited_pose') or {})
 
-        self._message.data = [
-            float(self._twist[0]), float(self._twist[1]), float(self._twist[2]),
-            self._height,
-            *(float(v) for v in self._pose['left']),
-            *(float(v) for v in self._pose['right']),
-            float(self._grip[0]), float(self._grip[1]),
-        ]
+        self._message.data = join_command(
+            base=(*self._twist, self._height),
+            left=self._pose['left'], right=self._pose['right'], grip=self._grip)
         self._publisher.publish(self._message)
 
     def _check_button(self, frame) -> None:
@@ -462,18 +501,18 @@ class VRTeleop(Node):
         for side in SIDES:
             hand = frame.get(side) or {}
             pressed = bool((hand.get('buttons') or {}).get('a_x'))
-            grip = hand.get('grip')
-            if pressed and not self._calib_held[side] and grip:
-                self._calibrate(side, grip['orientation'])
+            _, rotation = _grip_pose(hand.get('grip'))
+            if pressed and not self._calib_held[side] and rotation is not None:
+                self._calibrate(side, rotation)
             self._calib_held[side] = pressed
 
-    def _calibrate(self, side: str, orientation) -> None:
+    def _calibrate(self, side: str, rotation: np.ndarray) -> None:
         """把手柄此刻所指的**水平**方向定为机器人正前方。
 
         只取航向（绕 WebXR 的 +Y，也就是重力轴），不把手柄的俯仰/横滚带进来：
         带进来的话标定时手柄稍微一歪，“往上抬手”就不是“末端往上”了。
         """
-        forward = _matrix(orientation) @ np.array([0.0, 0.0, -1.0])
+        forward = rotation @ np.array([0.0, 0.0, -1.0])
         if abs(forward[0]) < 1e-6 and abs(forward[2]) < 1e-6:
             self.get_logger().warning('手柄几乎竖直，定不出水平朝向，标定已忽略')
             return
@@ -491,9 +530,8 @@ class VRTeleop(Node):
 
     def _stick(self, frame: dict, side: str) -> np.ndarray:
         """取一个摇杆的 ``[x, y]``，已去死区。"""
-        axes = np.asarray((frame.get(side) or {}).get('thumbstick') or (0.0, 0.0),
-                          dtype=np.float64)
-        if axes.shape != (2,) or not np.all(np.isfinite(axes)):
+        axes = _vector((frame.get(side) or {}).get('thumbstick'), 2)
+        if axes is None:
             return np.zeros(2)
         magnitude = float(np.linalg.norm(axes))
         if magnitude <= self._deadzone:
@@ -517,28 +555,42 @@ class VRTeleop(Node):
             self._height - right[1] * self._height_rate / self._rate,
             self._h_lo), self._h_hi)
 
-    def _update_arms(self, frame: dict, actual: dict) -> None:
-        """``actual`` 是策略层 status 里的 ``pose_now``（各末端实际到位的位姿）。"""
+    def _update_arms(self, frame: dict, limited: dict) -> None:
+        """手柄位姿 -> 最终末端目标；``limited`` 提供可达锚点与领先量上限。"""
         for index, side in enumerate(SIDES):
-            hand = frame.get(side) or {}
+            hand = frame.get(side)
+            if not hand:
+                continue                  # 该侧输入缺失：目标和夹爪都保持。
             buttons = hand.get('buttons') or {}
-            grip = hand.get('grip')
-            squeeze = float(buttons.get('squeeze', 0.0))
+            position, rotation = _grip_pose(hand.get('grip'))
+            squeeze = float(buttons.get('squeeze', 0.0) or 0.0)
             clutch = self._clutch[side]
-            if grip and squeeze >= self._squeeze_on:
-                position = np.asarray(grip['position'], dtype=np.float64)
-                rotation = _matrix(grip['orientation'])
+            active = squeeze >= (self._squeeze_off if clutch is not None else self._squeeze_on)
+            if position is None:
+                # 只冻结，不动 clutch。**千万别在这里作废 ``previous``**：那样恢复帧会
+                # 无条件重锚，把跨这一帧的位移整段丢掉。emulated 标志逐帧抖时会按比例
+                # 丢运动（实测 1/2 抖动 -> 手走 900 mm 目标走 0 mm，完全冻住）。
+                if clutch is not None:
+                    self.get_logger().warning(
+                        f'{side} 手柄失去光学位置，已冻结',
+                        throttle_duration_sec=1.0)
+            elif active:
                 if clutch is None:
                     # 三个原点一起锁：接管瞬间位移和转角都恒为 0，所以不会跳。
-                    # 末端那一个取实际到位而不是上一帧目标：目标够不着时两者能差
-                    # 几十厘米，锚在目标上会让“松开-挪手-再按”的接力把目标一路累积
-                    # 出可达域（实测 6 轮 ×10 cm 前伸后目标 588 mm / 实际 171 mm）。
                     self._pose[side] = np.asarray(
-                        actual.get(side, self._pose[side]), dtype=np.float64)
-                    clutch = (position, rotation, self._pose[side].copy())
+                        limited.get(side, self._pose[side]), dtype=np.float64)
+                    clutch = (position, rotation, self._pose[side].copy(), position)
                     self._clutch[side] = clutch
                     self.get_logger().info(f'{side} 离合接合')
-                origin, origin_rot, anchor = clutch
+                origin, origin_rot, anchor, previous = clutch
+                # 距上一帧**真实跟踪到**的位置超过这么多，就不可能是人手的运动。
+                # 冻结期间这个差会累积，所以长时丢跟踪 + 大幅挪手自然落进这一支。
+                if np.linalg.norm(position - previous) > _MAX_HAND_STEP_M:
+                    # 把新手柄位姿当新原点，同时以当前末端目标为锚，位置和姿态都连续。
+                    origin, origin_rot, anchor = position, rotation, self._pose[side].copy()
+                    self.get_logger().warning(
+                        f'{side} 手柄单帧跳变超过 {_MAX_HAND_STEP_M:.2f} m，已无跳变重置原点',
+                        throttle_duration_sec=1.0)
                 pose = self._pose[side]
                 pose[:3] = anchor[:3] + self._arm_scale * (
                     self._map @ (position - origin))
@@ -546,13 +598,46 @@ class VRTeleop(Node):
                 # _map 正交且 det=+1，所以共轭出来仍是旋转、转角不变。
                 turn = self._map @ rotation @ origin_rot.T @ self._map.T
                 pose[3:] = _quat(turn @ _matrix(anchor[3:]))
+                self._leash(side, anchor, limited.get(side))
+                self._clutch[side] = (origin, origin_rot, anchor, position)
             elif clutch is not None:
                 self._clutch[side] = None       # 松开就冻结在最后一帧。
                 self.get_logger().info(f'{side} 离合断开，手臂冻结')
             # trigger: 0 -> 完全打开、1 -> 夹紧。eccentric 是 0 闭合、2.76 打开，反向。
-            trigger = min(max(float(buttons.get('trigger', 0.0)), 0.0), 1.0)
-            self._grip[index] = self._grip_open + \
-                (self._grip_closed - self._grip_open) * trigger
+            if 'trigger' in buttons:
+                trigger = min(max(float(buttons['trigger'] or 0.0), 0.0), 1.0)
+                self._grip[index] = self._grip_open + \
+                    (self._grip_closed - self._grip_open) * trigger
+
+    def _leash(self, side: str, anchor: np.ndarray, reach) -> None:
+        """把末端命令夹在 ``limited_pose`` 周围的球里，并把修正量还给锚点。
+
+        离合接合期间末端目标本来是个**无界积分器**：只在接合那一瞬间取过可达位姿，
+        之后再没有可达性反馈。实测（真 URDF + 真 IK + 限速）胸前平放后后撤 80 cm，
+        再推回来（目标发散 / 回程死区 / 末端单帧最大 / 逃生种子触发）：
+
+            关闭  204 mm / 108 mm / 47.0 mm / 7
+             5 mm    5 mm /   0 mm /  3.5 mm / 0
+            20 mm   20 mm /   0 mm /  3.4 mm / 0     <- 默认
+            30 mm   29 mm /   9 mm /  3.5 mm / 0
+            50 mm   45 mm /  12 mm / 46.6 mm / 1
+           100 mm    6 mm /   0 mm / 69.5 mm / 4
+
+        **别调到 30 mm 以上**：那会把稳态残差顶到 ``ik_rescue_err``(10 mm) 之上，
+        策略层的逃生种子就一直开着，频繁换解支反而把单帧跳变顶到 47~92 mm。
+        可达工况零代价：±3 cm 跟随 p50 0.395 / p99 0.978 mm，与关闭时逐位相同。
+        修正量必须同步减进 ``anchor``，否则下一帧又从未夹的值算起，等于没夹。
+        """
+        if self._lead <= 0.0 or reach is None:
+            return
+        pose = self._pose[side]
+        offset = pose[:3] - np.asarray(reach, dtype=np.float64)[:3]
+        distance = float(np.linalg.norm(offset))
+        if distance <= self._lead:
+            return
+        correction = offset * (1.0 - self._lead / distance)
+        pose[:3] -= correction
+        anchor[:3] -= correction
 
     def shutdown(self) -> None:
         self._alive = False

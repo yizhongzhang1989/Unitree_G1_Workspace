@@ -5,14 +5,22 @@ rpy 用的是固定轴约定（写反了夹爪会被甩出手掌）、mimic 能�
 解算还原，以及静态文件 / mesh 的路径容纳不会被穿越。
 """
 
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pytest
 from ament_index_python.packages import get_package_share_directory
+from std_msgs.msg import Float64MultiArray
 
-from g1_motion_control.dashboard_node import mesh_url, parse_urdf, rpy_to_quat, under
+from g1_motion_control.dashboard_node import (
+    DashboardNode,
+    mesh_url,
+    parse_urdf,
+    rpy_to_quat,
+    under,
+)
 
 BASE = 'torso_link'
 
@@ -173,3 +181,24 @@ def test_under_rejects_escapes_but_follows_symlinks(tmp_path):
     assert under(tmp_path / 'share', 'page.html').read_text() == 'hi'
     for bad in ('', '../setup.py', 'a/../../b', '/etc/passwd'):
         assert under(tmp_path / 'share', bad) is None
+
+
+def test_dashboard_observes_arm_blocks_without_clearing_other_fields():
+    """2/4 不碰臂；7 只更新右臂；14/20 更新双臂，和 motion_control 契约一致。"""
+    node = DashboardNode.__new__(DashboardNode)
+    node._lock = threading.Lock()
+    node._command_pose = {}
+
+    full = Float64MultiArray()
+    full.data = [0.0] * 4 + [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0] \
+        + [0.4, 0.5, 0.6, 0.0, 0.0, 0.0, 1.0] + [0.0, 0.0]
+    node._on_command(full)
+    assert node._command_pose['left'][:3] == [0.1, 0.2, 0.3]
+    assert node._command_pose['right'][:3] == [0.4, 0.5, 0.6]
+
+    node._on_command(Float64MultiArray(data=[0.2, 0.0, 0.0, 0.74]))
+    assert node._command_pose['left'][:3] == [0.1, 0.2, 0.3]
+
+    node._on_command(Float64MultiArray(data=[0.7, 0.8, 0.9, 0.0, 0.0, 0.0, 1.0]))
+    assert node._command_pose['left'][:3] == [0.1, 0.2, 0.3]
+    assert node._command_pose['right'][:3] == [0.7, 0.8, 0.9]

@@ -5,9 +5,8 @@
     #   只收本机：  bind_host:=127.0.0.1
     #   换参考系：  base_frame:=torso_link   （必须和策略层的 base_frame 一致）
 
-浏览器打开 ``http://<机器人IP>:8181/``。绿色实心球是**目标**（``status.pose``），
-橙色空心环是**实际到位**（``status.pose_now``）；手臂网格按 ``/joint_states``
-的实测位形摆。
+浏览器打开 ``http://<机器人IP>:8181/``。绿色实心球是统一命令总线的上层末端目标，
+黄色菱形是 IK + 关节限速后的末端指令，橙色空心环绑定在实测模型末端。
 
 这是个**独立的只读进程**，不在控制链路上：不发任何指令、不调任何服务，不开就是
 零开销。控制栈没起来时页面会一直等 ``/robot_description``，不影响别的东西。
@@ -23,6 +22,7 @@ _ARGUMENTS = {
     'bind_port': '8181',
     # 末端位姿目标就是相对它发布的，改这里必须同步改 motion_control.yaml。
     'base_frame': 'torso_link',
+    'command_topic': '/motion_control/command',
     'status_topic': '/motion_control/status',
     'joint_states_topic': '/joint_states',
     'robot_description_topic': '/robot_description',

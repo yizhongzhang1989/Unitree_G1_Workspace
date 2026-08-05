@@ -45,7 +45,7 @@ const meshMat = new THREE.MeshStandardMaterial(
   { color: 0x9fb4c4, metalness: 0.2, roughness: 0.65 });
 
 const SIDES = ["left", "right"];
-const show = { mesh: true, target: true, actual: true };
+const show = { mesh: true, command: true, limited: true, measured: true };
 
 let links = {};        // link 名 -> Object3D
 let joints = [];       // 可动关节，按 URDF 的 DFS 序
@@ -56,24 +56,25 @@ let fitted = false;
 function invalidate() { needsRender = true; }
 
 // ---- 末端标记 --------------------------------------------------------------
-// 目标 = 实心球，实际到位 = 空心环。够不着时两者会明显分开，一眼看得出来。
-function marker(color, solid) {
+function marker(color, shape) {
   const group = new THREE.Group();
   group.visible = false;
   group.userData.known = false;
-  group.add(new THREE.Mesh(
-    solid ? new THREE.SphereGeometry(0.012, 16, 12)
-      : new THREE.TorusGeometry(0.016, 0.003, 8, 20),
-    new THREE.MeshBasicMaterial({ color })));
+  const geometry = shape === "sphere" ? new THREE.SphereGeometry(0.012, 16, 12)
+    : shape === "diamond" ? new THREE.OctahedronGeometry(0.016)
+      : new THREE.TorusGeometry(0.016, 0.003, 8, 20);
+  group.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color })));
   group.add(new THREE.AxesHelper(0.07));
-  base.add(group);
   return group;
 }
 
 const markers = {
-  target: { left: marker(0x39d353, true), right: marker(0x39d353, true) },
-  actual: { left: marker(0xf0a45c, false), right: marker(0xf0a45c, false) },
+  command: { left: marker(0x39d353, "sphere"), right: marker(0x39d353, "sphere") },
+  limited: { left: marker(0xf2c94c, "diamond"), right: marker(0xf2c94c, "diamond") },
+  measured: { left: marker(0xf0a45c, "ring"), right: marker(0xf0a45c, "ring") },
 };
+for (const kind of ["command", "limited"])
+  for (const side of SIDES) base.add(markers[kind][side]);
 
 // ---- 建模 ------------------------------------------------------------------
 
@@ -106,6 +107,14 @@ export function setModel(model) {
         axis: new THREE.Vector3(j.axis[0], j.axis[1], j.axis[2]).normalize(),
         originPos: pos.clone(), originQuat: quat.clone(),
       });
+    }
+  }
+  // 实测环挂在由 /joint_states 驱动的末端 link 上，因此天然和模型严丝合缝。
+  for (const side of SIDES) {
+    const tip = links[`${side}_gripper_base`];
+    if (tip) {
+      tip.add(markers.measured[side]);
+      markers.measured[side].visible = show.measured;
     }
   }
 
@@ -141,7 +150,10 @@ const _v = new THREE.Vector3();
 const resolved = {};
 
 export function setJoints(values) {
-  if (!joints.length) return;
+  if (!joints.length || !values || !Object.keys(values).length) {
+    for (const side of SIDES) markers.measured[side].visible = false;
+    return {};
+  }
   // 单遍解算：URDF 里 mimic 的源（eccentric）永远排在从动关节之前，
   // 而后端是按 DFS 序发的，所以一遍就够，不需要拓扑排序。
   for (const j of joints) {
@@ -162,7 +174,20 @@ export function setJoints(values) {
       j.obj.quaternion.copy(j.originQuat).multiply(_q.setFromAxisAngle(j.axis, value));
     }
   }
+  base.updateMatrixWorld(true);
+  const measured = {};
+  for (const side of SIDES) {
+    const tip = links[`${side}_gripper_base`];
+    if (!tip) continue;
+    const position = tip.getWorldPosition(new THREE.Vector3());
+    const quaternion = tip.getWorldQuaternion(new THREE.Quaternion());
+    measured[side] = [position.x, position.y, position.z,
+      quaternion.x, quaternion.y, quaternion.z, quaternion.w];
+    markers.measured[side].userData.known = true;
+    markers.measured[side].visible = show.measured;
+  }
   invalidate();
+  return measured;
 }
 
 export function setMarkers(kind, poses) {
@@ -182,6 +207,9 @@ export function setMarkers(kind, poses) {
 export function setVisible(what, on) {
   show[what] = on;
   if (what === "mesh") meshes.forEach((m) => { m.visible = on; });
+  else if (what === "measured") SIDES.forEach((side) => {
+    markers.measured[side].visible = on && markers.measured[side].userData.known;
+  });
   else SIDES.forEach((side) => {
     const group = markers[what][side];
     group.visible = on && group.userData.known;

@@ -3,6 +3,21 @@ WebXR 桥接：头显浏览器读手柄/头部位姿 → WebSocket 直推给 `vr
 不需要 Unity，不需要装 APK，**也不再有独立的桥接进程**——采集页由 ROS 节点自己托管
 （`g1_motion_control/vr_teleop.py` 内嵌 aiohttp）。
 
+`vr_teleop` 是上层控制源，不做 IK：它负责 A/X 航向标定、squeeze 离合、坐标映射、
+tracking 重定位抑制，最后以长度 20 发布到统一 `/motion_control/command`；和 VLA / 键盘
+遵守同一个 2/4/7/14/20 分块契约，不另建 VR 专用命令话题。它只反向读取
+`/motion_control/status.limited_pose`，用于离合接合时选一个可达、无编码器静差的锚点。
+
+WebXR 通信正常也可能失去光学位置。采集页把 `emulatedPosition` 原样送到节点：一旦为真，
+节点冻结目标但保留该侧离合。恢复时**按与上一帧真实跟踪位置的实际位移**判定：小于 0.1 m
+就照常积分，超过才无跳变重锚。**不能一律重锚**——那样 `emulatedPosition` 逐帧抖时会按
+比例吞掉手部运动，实测 1/2 抖动下手走 900 mm 而目标走 0 mm（完全冻住）。
+squeeze 使用 0.5/0.4 的接合/释放迟滞，避免模拟量在阈值附近抖动。
+
+末端命令还会被夹在 `limited_pose` 周围 `arm_lead_limit`(0.02 m) 的球里：够不着时目标
+不再无界累积，所以手往回缩马上见动静，不必先空推一大段。别调到 0.03 以上：那会把
+残差顶过策略层的 `ik_rescue_err`，逃生种子一直开着反而更跳。
+
 本目录里只剩下这些：`index.html`（头显里打开的采集页）、`monitor.html`（监控面板）——
 两个页随包安装到 `share/g1_motion_control/vr/`；加上 `adb_reverse_watch.sh` 守护
 脚本和这份说明（这两个不安装，只在源码树里用）。签证书的脚本是个 ROS 命令：

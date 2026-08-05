@@ -178,14 +178,9 @@
   </header>
 
   <div class="grid">
-    <section class="card" data-part="head">
-      <h2><span class="dot" data-f="dot"></span>头显</h2>
-      <div class="row"><label>position</label><code data-f="pos">—</code></div>
-      <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
-    </section>
-
     <section class="card" data-part="left">
       <h2><span class="dot" data-f="dot"></span>左手柄</h2>
+      <div class="row"><label>tracking</label><code data-f="tracking">—</code></div>
       <div class="row"><label>position</label><code data-f="pos">—</code></div>
       <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
       <div class="row"><label>trigger</label>
@@ -201,6 +196,7 @@
 
     <section class="card" data-part="right">
       <h2><span class="dot" data-f="dot"></span>右手柄</h2>
+      <div class="row"><label>tracking</label><code data-f="tracking">—</code></div>
       <div class="row"><label>position</label><code data-f="pos">—</code></div>
       <div class="row"><label>quaternion</label><code data-f="quat">—</code></div>
       <div class="row"><label>trigger</label>
@@ -240,14 +236,14 @@
       ? a.map(v => (v < 0 ? '' : ' ') + v.toFixed(n)).join('  ')
       : '—';
 
-    const CHIPS = [
-      ['a_x', 'A/X'], ['b_y', 'B/Y'], ['thumbstick_pressed', '摇杆按下'],
-    ];
+    const CHIPS = [['a_x', 'A/X'], ['b_y', 'B/Y']];
 
     function renderHand(key, d) {
       const c = cards[key];
       const on = !!(d && d.grip);
       c.dot.classList.toggle('on', on);
+      c.tracking.textContent = !on ? '—' :
+        (d.grip.emulated_position ? '位置推算（离合冻结）' : '光学跟踪');
       c.pos.textContent = on ? fmt(d.grip.position) : '—';
       c.quat.textContent = on ? fmt(d.grip.orientation) : '—';
       const b = (d && d.buttons) || {};
@@ -272,10 +268,6 @@
       seqEl.textContent = 'seq ' + d.seq;
       sessEl.textContent = d.session_active ? 'VR 会话进行中' : '未进入 VR';
       sessEl.className = 'badge ' + (d.session_active ? 'ok' : '');
-      const h = cards.head;
-      h.dot.classList.toggle('on', !!d.head);
-      h.pos.textContent = d.head ? fmt(d.head.position) : '—';
-      h.quat.textContent = d.head ? fmt(d.head.orientation) : '—';
       renderHand('left', d.left);
       renderHand('right', d.right);
       rawEl.textContent = JSON.stringify(d, null, 1);

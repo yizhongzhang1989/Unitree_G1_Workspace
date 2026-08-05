@@ -13,9 +13,11 @@ const CELLS = Object.fromEntries(SIDES.map((side) => {
   const rows = document.querySelectorAll(`tr[data-side="${side}"]`);
   const pick = (row, prefix) =>
     ["x", "y", "z"].map((axis) => row.querySelector("." + prefix + axis));
-  return [side, { t: pick(rows[0], "t"), a: pick(rows[1], "a") }];
+  return [side, {
+    t: pick(rows[0], "t"), a: pick(rows[1], "a"), m: pick(rows[2], "m"),
+    cmdGap: rows[1].querySelector(".gap"), trackGap: rows[2].querySelector(".gap"),
+  }];
 }));
-const ERR_CELLS = [...document.querySelectorAll("td.err")];
 
 function pill(el, text, kind) {
   el.textContent = text;
@@ -55,28 +57,36 @@ async function poll() {
   warn.hidden = !snapshot.stale;
   if (snapshot.stale) pill(warn, snapshot.stale, "bad");
 
-  viewer.setJoints(snapshot.q || {});
-  const target = snapshot.pose || {};
-  const actual = snapshot.pose_now || {};
-  viewer.setMarkers("target", target);
-  viewer.setMarkers("actual", actual);
+  const measured = viewer.setJoints(snapshot.q || {});
+  const command = snapshot.command_pose || {};
+  const limited = snapshot.limited_pose || {};
+  viewer.setMarkers("command", command);
+  viewer.setMarkers("limited", limited);
   for (const side of SIDES) {
-    cells(side, "t", target[side]);
-    cells(side, "a", actual[side]);
+    cells(side, "t", command[side]);
+    cells(side, "a", limited[side]);
+    cells(side, "m", measured[side]);
+    setGap(CELLS[side].cmdGap, distance(command[side], limited[side]));
+    setGap(CELLS[side].trackGap, distance(limited[side], measured[side]));
   }
-  // 残差是两臂里的最大值，策略层已经算好了，这里不重算。
-  const err = snapshot.ik_pos_err;
-  const text = err == null ? "—" : (err * 1000).toFixed(1);
-  ERR_CELLS.forEach((cell) => {
-    cell.textContent = text;
-    cell.classList.toggle("far", err > 0.01);
-  });
   $("ikms").textContent =
-    snapshot.ik_ms == null ? "IK —" : `IK ${snapshot.ik_ms.toFixed(2)} ms`;
+    snapshot.ik_ms == null ? "IK —" :
+      `IK ${snapshot.ik_ms.toFixed(2)} ms · 残差 ${
+        snapshot.ik_pos_err == null ? "—" : (snapshot.ik_pos_err * 1000).toFixed(1) + " mm"}`;
   $("fps").textContent = `${viewer.drawRate()} fps`;
 }
 
-for (const what of ["mesh", "target", "actual"]) {
+function distance(a, b) {
+  if (!a || !b) return null;
+  return 1000 * Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+function setGap(cell, value) {
+  cell.textContent = value == null ? "—" : value.toFixed(1);
+  cell.classList.toggle("far", value > 10);
+}
+
+for (const what of ["mesh", "command", "limited", "measured"]) {
   $("opt-" + what).addEventListener(
     "change", (event) => viewer.setVisible(what, event.target.checked));
 }

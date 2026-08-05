@@ -122,12 +122,12 @@ tr.sub td {
   padding-bottom: 8px;
 }
 
-td.err {
+td.gap {
   vertical-align: middle;
   font-weight: 600;
 }
 
-td.err.far {
+td.gap.far {
   color: #fca5a5;
 }
 
@@ -148,6 +148,11 @@ td.err.far {
 
 .sw.solid {
   background: #39d353;
+}
+
+.sw.limited {
+  background: #f2c94c;
+  transform: rotate(45deg);
 }
 
 .sw.hollow {

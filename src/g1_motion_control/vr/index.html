@@ -222,24 +222,17 @@
     function poseToObj(p) {
       if (!p) return null;
       const t = p.transform;
-      const o = {
+      return {
         position: [t.position.x, t.position.y, t.position.z],
-        // 四元数 (x, y, z, w)
+        emulated_position: !!p.emulatedPosition,
         orientation: [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w],
-        // 4x4 齐次矩阵，列主序（WebXR 原生顺序）
-        matrix: Array.from(t.matrix),
       };
-      if (p.linearVelocity) o.linear_velocity = [p.linearVelocity.x, p.linearVelocity.y, p.linearVelocity.z];
-      if (p.angularVelocity) o.angular_velocity = [p.angularVelocity.x, p.angularVelocity.y, p.angularVelocity.z];
-      return o;
     }
 
     function inputToObj(src, frame) {
       const gp = src.gamepad;
       const out = {
-        handedness: src.handedness,
         grip: poseToObj(src.gripSpace ? frame.getPose(src.gripSpace, refSpace) : null),
-        aim: poseToObj(src.targetRaySpace ? frame.getPose(src.targetRaySpace, refSpace) : null),
       };
       if (gp) {
         if (gp.hapticActuators && gp.hapticActuators.length) {
@@ -250,13 +243,10 @@
         out.buttons = {
           trigger: b(0).value,
           squeeze: b(1).value,
-          thumbstick_pressed: b(3).pressed,
           a_x: b(4).pressed,      // 右手 A / 左手 X
           b_y: b(5).pressed,      // 右手 B / 左手 Y
         };
         out.thumbstick = [gp.axes[2] ?? 0, gp.axes[3] ?? 0];
-        out.raw_buttons = gp.buttons.map(x => ({ pressed: x.pressed, touched: x.touched, value: x.value }));
-        out.raw_axes = Array.from(gp.axes);
       }
       return out;
     }
@@ -269,9 +259,7 @@
 
       const payload = {
         seq: seq++,
-        t: time / 1000,
         session_active: true,
-        head: poseToObj(viewerPose),
         left: null,
         right: null,
       };
@@ -285,7 +273,7 @@
       if (time - lastLog > 250) {
         lastLog = time;
         logEl.textContent = JSON.stringify(
-          { seq: payload.seq, head: payload.head?.position, left: payload.left?.grip?.position, right: payload.right?.grip?.position },
+          { seq: payload.seq, left: payload.left?.grip?.position, right: payload.right?.grip?.position },
           null, 2);
       }
     }
@@ -304,7 +292,7 @@
         initGL();
         session.addEventListener('end', () => {
           session = null;
-          send({ seq: seq++, t: performance.now() / 1000, session_active: false, head: null, left: null, right: null });
+          send({ seq: seq++, session_active: false, left: null, right: null });
           setStatus('VR 会话已结束。');
         });
         setStatus('VR 会话运行中，正在推送位姿数据。');

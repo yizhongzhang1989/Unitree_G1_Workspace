@@ -41,8 +41,7 @@ def STAND_POSTURE(ik):
     return np.array([by_name[name] for name in ik.joint_names])
 
 
-@pytest.fixture(scope='module')
-def configured_ik():
+def _configured_ik(null_gain=None):
     """按 config/motion_control.yaml 里实际发布的参数建，用来卡住部署值本身。
 
     库默认值和实际跑的那一套不是一回事，只测默认值等于没测。
@@ -51,6 +50,9 @@ def configured_ik():
     urdf = (Path(get_package_share_directory('unitree_g1_description'))
             / 'model' / 'final.urdf')
     arms = config['arm_joints']
+    if null_gain is None:
+        null_gain = {name: gain
+                     for name, gain in zip(arms, config['ik_null_gain']) if gain}
     return ArmIK(
         urdf.read_text(encoding='utf-8'), arms, TIP_FRAMES,
         base_frame=config['base_frame'], max_iters=config['ik_max_iters'],
@@ -59,9 +61,13 @@ def configured_ik():
         max_step_pos=config['ik_max_step_pos'], max_step_ori=config['ik_max_step_ori'],
         joint_limits={name: (-math.inf, high)
                       for name, high in zip(arms, config['ik_limit_upper'])},
-        null_bias={name: gain
-                   for name, gain in zip(arms, config['ik_null_bias']) if gain},
-        null_bias_gate=tuple(config['ik_null_bias_gate']))
+        null_gain=null_gain,
+        null_gate=tuple(config['ik_null_gate']))
+
+
+@pytest.fixture(scope='module')
+def configured_ik():
+    return _configured_ik()
 
 
 def test_reduced_model_keeps_only_the_arms(ik):
@@ -282,21 +288,21 @@ def test_rescue_seed_never_fires_during_normal_tracking(configured_ik):
     assert fired == 0, f'正常跟随里触发了 {fired} 次逃生求解'
 
 
-def test_null_bias_rejects_bad_gains(ik):
+def test_null_gain_rejects_bad_gains(ik):
     urdf = (Path(get_package_share_directory('unitree_g1_description'))
             / 'model' / 'final.urdf').read_text(encoding='utf-8')
     with pytest.raises(ValueError):
-        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'no_such_joint': 0.2})
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_gain={'no_such_joint': 0.2})
     with pytest.raises(ValueError):           # 负增益是把关节往外推，必须拦住
-        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'right_elbow_joint': -0.2})
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_gain={'right_elbow_joint': -0.2})
     with pytest.raises(ValueError):
-        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'right_elbow_joint': math.nan})
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_gain={'right_elbow_joint': math.nan})
     with pytest.raises(ValueError):           # 门控上下界颠倒
-        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_bias={'right_elbow_joint': 0.2},
-              null_bias_gate=(1.2, 0.8))
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_gain={'right_elbow_joint': 0.2},
+              null_gate=(1.2, 0.8))
 
 
-def test_null_bias_gate_stays_shut_during_normal_tracking(configured_ik, ik):
+def test_null_gate_stays_shut_during_normal_tracking(configured_ik, ik):
     """门控存在的全部理由：正常工况必须和**完全不带偏置**逐位相同。
 
     没有门控时偏置会把稳态残差从 0.858 顶到 1.933 mm，越过 ik_tol_pos(1 mm)，
@@ -316,7 +322,7 @@ def test_null_bias_gate_stays_shut_during_normal_tracking(configured_ik, ik):
     assert biased_iters == plain_iters, '正常跟随时带偏置多花了迭代'
 
 
-def test_null_bias_moves_the_posture_when_the_elbow_is_pinned(configured_ik, ik):
+def test_null_gain_moves_the_posture_when_the_elbow_is_pinned(configured_ik, ik):
     """够不着、肘顶限位时门控打开，把三根自转轴往 0 拉。
 
     代价是稳态残差略增（实测 72.5 -> 73.5 mm，+1.4%）：DLS 的"零空间"是阻尼伪逆定义的
@@ -341,8 +347,8 @@ def test_null_bias_moves_the_posture_when_the_elbow_is_pinned(configured_ik, ik)
             f'{side} 侧残差劣化超过 5%：{plain_err:.4f} -> {biased_err:.4f} m'
 
 
-def test_null_bias_settles_instead_of_chattering(configured_ik):
-    """偏置是 -k*q（梯度正比于偏离量），到位就自动归零，所以稳态必须是不动点。
+def test_null_gain_settles_instead_of_chattering(configured_ik):
+    """偏置是 -k*(q-q_ref)，到参考值就自动归零，所以稳态必须是不动点。
 
     换成常幅值步（-k*sign(q)，即 L1 梯度）实测稳态每帧还抖 0.103 rad = 5 rad/s。
     """

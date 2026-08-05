@@ -32,9 +32,9 @@ def _frame(squeeze, trigger, position, orientation=UNIT):
             for side in ('left', 'right')}
 
 
-def _arms(node, squeeze, trigger, position, orientation=UNIT, actual=None):
-    """跑一帧上肢逻辑。``actual`` 是策略层 status 里的 ``pose_now``，默认没有。"""
-    node._update_arms(_frame(squeeze, trigger, position, orientation), actual or {})
+def _arms(node, squeeze, trigger, position, orientation=UNIT, limited=None):
+    """跑一帧上肢逻辑；``limited`` 是策略层限速后的可达末端指令。"""
+    node._update_arms(_frame(squeeze, trigger, position, orientation), limited or {})
 
 
 def _spin(axis, angle):
@@ -53,7 +53,10 @@ def _angle_of(rotation):
 def node():
     teleop = VRTeleop.__new__(VRTeleop)
     teleop._squeeze_on = 0.5
+    teleop._squeeze_off = 0.4
     teleop._arm_scale = 1.0
+    # 默认关掉领先量夹紧，让几何用例只测映射本身；它有专门的用例。
+    teleop._lead = 0.0
     teleop._grip_open, teleop._grip_closed = OPEN, CLOSED
     teleop._clutch = {'left': None, 'right': None}
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
@@ -88,7 +91,8 @@ def test_controller_displacement_maps_to_robot_axes(node):
     """WebXR 是 Y 上、-Z 前；机器人是 X 前、Y 左。"""
     before = node._pose['right'][:3].copy()
     _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
-    _arms(node, 1.0, 0.0, [0.55, 0.9, -0.4])                # 右 5、上 10、前 10 cm
+    _arms(node, 1.0, 0.0, [0.525, 0.85, -0.35])
+    _arms(node, 1.0, 0.0, [0.55, 0.9, -0.4])                # 两帧走到右 5、上 10、前 10 cm
     delta = node._pose['right'][:3] - before
     assert np.allclose(delta, [0.10, -0.05, 0.10])
 
@@ -104,28 +108,147 @@ def test_release_freezes_the_arm(node):
 
 # --------------------------------------------------------------------- 离合锚点
 
-def test_clutch_anchors_on_the_actual_pose(node):
-    """锚点取 ``pose_now``（实际到位），不是上一帧目标。
+def test_clutch_anchors_on_the_limited_pose(node):
+    """锚点取 IK + 关节限速后的可达末端指令，不取飞出可达域的笛卡尔目标。
 
     目标够不着时两者差几十厘米，锚在目标上会让“松开-挪手-再按”的接力
     把目标一路累积出可达域（实测 6 轮 ×10 cm 前伸后目标 588 mm / 实际 171 mm）。
     """
     node._pose['right'] = np.array([0.90, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])  # 够不着
-    actual = {'right': [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}              # 实际到位
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], actual=actual)
-    assert np.allclose(node._pose['right'], actual['right'])
-    # 接合后的位移从实际位置起算，不是从那个飞出去的目标起算。
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.4], actual=actual)     # 手往前 10 cm
+    limited = {'right': [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], limited=limited)
+    assert np.allclose(node._pose['right'], limited['right'])
+    # 接合后的位移从限速后的位置起算，不是从那个飞出去的目标起算。
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.35], limited=limited)
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.4], limited=limited)     # 两帧往前 10 cm
     assert node._pose['right'][0] == pytest.approx(0.40)
     # 另一侧 status 里没给，退回上一帧目标，同样往前 10 cm，且仍然零跳变。
     assert np.allclose(node._pose['left'][:3], [0.40, 0.15, 0.05])
 
 
-def test_clutch_falls_back_when_pose_now_is_missing(node):
+def test_clutch_falls_back_when_limited_pose_is_missing(node):
     """status 里没给这一侧时退回上一帧目标，不能抛异常、也不能跳。"""
     before = node._pose['right'].copy()
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], actual={})
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], limited={})
     assert np.array_equal(node._pose['right'], before)
+
+
+def test_squeeze_hysteresis_keeps_an_engaged_clutch(node):
+    """接合后 squeeze 从 0.5 降到 0.45 不能断开；低于 0.4 才释放。"""
+    _arms(node, 0.6, 0.0, [0.5, 0.8, -0.3])
+    _arms(node, 0.45, 0.0, [0.5, 0.8, -0.31])
+    assert node._clutch['right'] is not None
+    _arms(node, 0.39, 0.0, [0.5, 0.8, -0.31])
+    assert node._clutch['right'] is None
+
+
+def test_webxr_relocalization_does_not_jump_the_target(node):
+    """通信正常但 WebXR 单帧重定位 20 cm：重置原点，末端目标必须逐位不动。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.35])  # 正常前移 5 cm
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    _arms(node, 1.0, 0.0, [0.7, 0.8, -0.35])  # 单帧跳 20 cm
+    for side in ('left', 'right'):
+        assert np.allclose(node._pose[side], before[side])
+
+
+def test_emulated_webxr_position_freezes_and_preserves_clutch(node):
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    frame = _frame(1.0, 0.0, [0.55, 0.8, -0.3])
+    for side in ('left', 'right'):
+        frame[side]['grip']['emulated_position'] = True
+    node._update_arms(frame, {})
+    assert all(node._clutch[side] is not None for side in ('left', 'right'))
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], before[side])
+
+
+def test_flickering_emulated_flag_does_not_swallow_hand_motion(node):
+    """emulated 逐帧抖时不能按比例丢运动。
+
+    曾经在丢 tracking 时把 clutch 的 ``previous`` 作废，于是恢复帧无条件重锚、
+    把跨这一帧的位移整段丢掉：1/2 抖动时手走 900 mm 目标走 **0 mm**（完全冻住），
+    1/3 抖动只走 33%。现在只看与上一帧**真实跟踪到**的位置的差，小步照样积。
+    """
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start)
+    before = node._pose['right'][:3].copy()
+    for step in range(60):
+        frame = _frame(1.0, 0.0, start + [0.0, 0.0, -0.003 * (step + 1)])
+        for side in ('left', 'right'):
+            frame[side]['grip']['emulated_position'] = step % 2 == 0
+        node._update_arms(frame, {})
+    assert node._pose['right'][0] - before[0] == pytest.approx(0.180)
+
+
+def test_long_tracking_loss_still_reanchors_without_a_jump(node):
+    """丢一整段后手已挪开很远：靠单帧位移阈值重锚，目标仍逐位不动。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    frozen = {side: pose.copy() for side, pose in node._pose.items()}
+    for _ in range(50):
+        frame = _frame(1.0, 0.0, [0.5, 0.8, -0.3])
+        for side in ('left', 'right'):
+            frame[side]['grip']['emulated_position'] = True
+        node._update_arms(frame, {})
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.6], limited={})     # 恢复时已差 30 cm
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], frozen[side])
+
+
+@pytest.mark.parametrize('missing', ['position', 'orientation'])
+def test_incomplete_grip_frame_freezes_instead_of_raising(node, missing):
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    frame = _frame(1.0, 0.0, [0.6, 0.8, -0.3])
+    for side in ('left', 'right'):
+        del frame[side]['grip'][missing]
+    node._update_arms(frame, {})
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], before[side])
+
+
+@pytest.mark.parametrize('junk', [
+    {'position': None, 'orientation': UNIT},
+    {'position': ['a', 'b', 'c'], 'orientation': UNIT},
+    {'position': [0.0, 0.0], 'orientation': UNIT},
+    {'position': [0.0, float('nan'), 0.0], 'orientation': UNIT},
+    {'position': [0.0, 0.0, 0.0], 'orientation': [0.0, 0.0, 0.0, 0.0]},
+    {'position': [0.0, 0.0, 0.0], 'orientation': 'nope'},
+])
+def test_malformed_grip_never_raises(node, junk):
+    """帧来自默认不鉴权的 WebSocket，任何垃圾都不能把 50 Hz 定时器回调带走。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    frame = _frame(1.0, 0.0, [0.6, 0.8, -0.3])
+    for side in ('left', 'right'):
+        frame[side]['grip'] = dict(junk)
+        frame[side]['buttons']['a_x'] = True
+    node._calib_held = {'left': False, 'right': False}
+    node._update_arms(frame, {})
+    node._check_calibration(frame)          # 标定路径同样不能抛
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], before[side])
+
+
+def test_command_never_leads_the_reachable_pose_by_more_than_the_leash(node):
+    """够不着时目标不能无界累积，否则回程先是一大段空推、接着一下大动作。
+
+    实测（真 URDF + 真 IK + arm_rate_limit）胸前平放后后撤 80 cm 再推回来：关闭时
+    目标飘出可达域 204 mm、回程空推 108 mm、末端单帧 47 mm；20 mm 时是 20 / 0 / 3.4。
+    """
+    node._lead = 0.02
+    reach = [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]     # 策略层卡在这儿不动
+    limited = {'right': reach, 'left': [0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], limited=limited)
+    for step in range(200):                              # 手往前推 60 cm
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3 - 0.003 * (step + 1)], limited=limited)
+    lead = float(np.linalg.norm(node._pose['right'][:3] - np.asarray(reach[:3])))
+    assert lead == pytest.approx(0.02, abs=1e-9)
+    # 手再往回拉 2 cm 就该马上见动静，不用空推 60 cm。
+    for step in range(7):
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.9 + 0.003 * (step + 1)], limited=limited)
+    assert node._pose['right'][0] < 0.32
 
 
 # --------------------------------------------------------------------- 姿态与标定
@@ -156,10 +279,10 @@ def test_quaternion_stays_unit(node):
 
 def test_calibration_redefines_forward(node):
     """手柄指哪儿，那儿就是机器人正前方。"""
-    node._calibrate('right', UNIT)                     # 指参考空间 -Z，即默认前方
+    node._calibrate('right', _matrix(UNIT))            # 指参考空间 -Z，即默认前方
     assert np.allclose(node._map, _BASE_MAP)
     for angle in (np.pi / 2, -np.pi / 2, np.pi, 0.7):
-        node._calibrate('right', _spin([0, 1, 0], angle))
+        node._calibrate('right', _matrix(_spin([0, 1, 0], angle)))
         pointing = _matrix(_spin([0, 1, 0], angle)) @ np.array([0.0, 0.0, -1.0])
         assert np.allclose(node._map @ pointing, [1.0, 0.0, 0.0], atol=1e-9)
         assert np.allclose(node._map @ node._map.T, np.eye(3))
@@ -168,7 +291,7 @@ def test_calibration_redefines_forward(node):
 def test_calibration_keeps_up_as_up(node):
     """只取航向：不管怎么标定，手往上抬永远是末端往上。"""
     for angle in (0.0, 1.2, -2.5):
-        node._calibrate('right', _spin([0, 1, 0], angle))
+        node._calibrate('right', _matrix(_spin([0, 1, 0], angle)))
         assert np.allclose(node._map @ np.array([0.0, 1.0, 0.0]), [0.0, 0.0, 1.0])
 
 
@@ -176,20 +299,20 @@ def test_calibration_drops_engaged_clutches(node):
     """换了映射还用旧原点算位移，方向会瞬间变——必须强制重新接合。"""
     _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
     assert node._clutch['right'] is not None
-    node._calibrate('right', _spin([0, 1, 0], 0.6))
+    node._calibrate('right', _matrix(_spin([0, 1, 0], 0.6)))
     assert all(node._clutch[side] is None for side in ('left', 'right'))
 
 
 def test_calibration_ignores_a_vertical_controller(node):
-    node._calibrate('right', _spin([0, 1, 0], 0.6))
+    node._calibrate('right', _matrix(_spin([0, 1, 0], 0.6)))
     expected = node._map.copy()
-    node._calibrate('right', _spin([1, 0, 0], np.pi / 2))   # 手柄指向正上/正下
+    node._calibrate('right', _matrix(_spin([1, 0, 0], np.pi / 2)))   # 手柄指向正上/正下
     assert np.allclose(node._map, expected)                  # 标定被忽略
 
 
 def test_calibration_button_needs_a_rising_edge(node):
     calls = []
-    node._calibrate = lambda side, orientation: calls.append(side)
+    node._calibrate = lambda side, rotation: calls.append(side)
     pressed = {'left': {'buttons': {'a_x': True}, 'grip': {'orientation': UNIT}},
                'right': {'buttons': {'a_x': False}, 'grip': {'orientation': UNIT}}}
     released = {'left': {'buttons': {'a_x': False}}, 'right': {'buttons': {'a_x': False}}}
@@ -213,6 +336,16 @@ def test_trigger_maps_to_gripper_the_right_way_round(node):
     # 越界的 trigger 不能把夹爪顶出行程。
     _arms(node, 0.0, 1.7, [0, 0, 0])
     assert node._grip[0] == pytest.approx(CLOSED)
+
+
+def test_missing_hand_keeps_its_pose_and_gripper(node):
+    node._grip[:] = [0.7, 1.1]
+    pose = node._pose['left'].copy()
+    frame = _frame(0.0, 0.0, [0.0, 0.0, 0.0])
+    frame['left'] = None
+    node._update_arms(frame, {})
+    assert np.array_equal(node._pose['left'], pose)
+    assert node._grip[0] == pytest.approx(0.7)
 
 
 # --------------------------------------------------------------------- 摇杆

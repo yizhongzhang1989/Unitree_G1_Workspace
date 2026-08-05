@@ -41,6 +41,7 @@ _ARGUMENTS = {
     'token': '',
     'tls_cert': str(DEFAULT_DIR / 'cert.pem'),
     'tls_key': str(DEFAULT_DIR / 'key.pem'),
+    'rate_hz': '50.0',
     'vx_max': '0.5',
     'vy_max': '0.4',
     'wz_max': '1.5',
@@ -51,15 +52,22 @@ _ARGUMENTS = {
     'stick_deadzone': '0.08',
     'squeeze_threshold': '0.5',
     'arm_scale': '1.0',
+    # 末端命令允许领先 limited_pose 的最大距离（m），防够不着时目标无界累积。
+    # 别调到 0.03 以上：会把残差顶过 ik_rescue_err，逃生种子一直开着反而更跳。0 = 关闭。
+    'arm_lead_limit': '0.02',
+    'gripper_open': '2.76377472169236',
+    'gripper_closed': '0.0',
     'frame_timeout_s': '0.3',
     'button_cooldown_s': '1.0',
     'policy_node': '/motion_control',
+    # 和键盘 / VLA 共用 motion_control 的标准分块命令总线。VR 发全量 20 值。
     'command_topic': '/motion_control/command',
     'status_topic': '/motion_control/status',
 }
 
-_FLOATS = ('vx_max', 'vy_max', 'wz_max', 'height', 'height_min', 'height_max',
+_FLOATS = ('rate_hz', 'vx_max', 'vy_max', 'wz_max', 'height', 'height_min', 'height_max',
            'height_rate', 'stick_deadzone', 'squeeze_threshold', 'arm_scale',
+           'arm_lead_limit', 'gripper_open', 'gripper_closed',
            'frame_timeout_s', 'button_cooldown_s')
 
 _INTS = ('bind_port', 'tls_port')

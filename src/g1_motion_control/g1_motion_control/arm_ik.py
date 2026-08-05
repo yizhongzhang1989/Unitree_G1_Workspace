@@ -12,7 +12,7 @@
 
 阻尼项写在任务空间（6x6，比 7x7 快），恒等于对**步长**的 L2 正则
 ``min ||J dq - e||^2 + lambda^2 ||dq||^2``。惩罚 ``dq`` 而非 ``q - q_ref``，所以冗余
-那一维没有回中力、完全从种子继承——这正是 ``null_bias`` 要补的那一块。
+那一维没有回中力、完全从种子继承——这正是 ``null_gain`` 要补的那一块。
 
 种子由**调用方**给，本模块不持有跨帧状态。节点用上一帧已发布的目标做种子（热启动），
 解天然连续，代价是会一帧帧累积漂移，所以需要三道防线：
@@ -20,13 +20,13 @@
 1. 本模块的 ``joint_limits`` 把肘上限收到 1.4。shoulder_yaw 与 wrist_roll 都是沿肢体
    长轴的自转轴，肘一伸直两者共线（实测 1.571 处夹角 0.0°，雅可比最差点在 1.44），而
    URDF 行程 ``[-1.047, 2.094]`` 把这一段夹在中间，热启动被推过去就再也回不来。
-2. 本模块的 ``null_bias`` 在**零空间**里把这三根轴拉回 0。收限位只能拦住"足尖推过头"，
+2. 本模块的 ``null_gain`` 在**零空间**里把那三根自转轴拉回 0。收限位只能拦住"足尖推过头"，
    拦不住"肘长期顶在 1.4"：目标够不着时肘就得伸直，而那里 3<->5 夹角只剩 9.8°。
    实测 VR 幅度（OU 15 cm）下肘顶限位的帧占 16.6%。
 3. 肩上还有一条镜像解支陷阱，收限位治不好，那一道放在**节点**里（``ik_rescue_err``
    残差超限就换站立位形重解）。本模块对此无感——只是被多调了一次。
 
-``null_bias`` 必须投影到零空间，不能直接加进步长：实测同一个偏置向量的末端污染
+``null_gain`` 对应的梯度必须投影到零空间，不能直接加进步长：实测同一个向量的末端污染
 ``||J b|| = 0.30``，而那个构型下要修的任务残差才 0.0725 m——直接加的话偏置项会把手
 拽偏、任务项再拉回来，两边对抗，位形没改善而跟随变差。
 
@@ -55,8 +55,8 @@ class ArmIK:
                  damping: float = 0.05, tol_pos: float = 1e-3,
                  tol_ori: float = 3.5e-3, joint_limits: dict | None = None,
                  max_step_pos: float = 0.1, max_step_ori: float = 0.5,
-                 null_bias: dict | None = None,
-                 null_bias_gate: tuple = (0.8, 1.2)) -> None:
+                 null_gain: dict | None = None,
+                 null_gate: tuple = (0.6, 1.2)) -> None:
         full = pin.buildModelFromXML(urdf_xml)
         missing = [name for name in arm_joints if not full.existJointName(name)]
         if missing:
@@ -116,18 +116,18 @@ class ArmIK:
         # 零空间偏置增益，按 joint_names 排。全零等于关闭，走原来那条不算投影的快路径。
         self._null_gain = None
         self._null_eye = {}
-        gate_lo, gate_hi = (float(v) for v in null_bias_gate)
+        gate_lo, gate_hi = (float(v) for v in null_gate)
         if not 0.0 <= gate_lo < gate_hi:
-            raise ValueError('null_bias_gate 必须满足 0 <= lo < hi')
+            raise ValueError('null_gate 必须满足 0 <= lo < hi')
         self._gate_lo, self._gate_span = gate_lo, gate_hi - gate_lo
-        if null_bias:
+        if null_gain:
             gains = np.zeros(self.model.nq)
-            for name, gain in null_bias.items():
+            for name, gain in null_gain.items():
                 if name not in self.joint_names:
-                    raise ValueError(f'null_bias 里的 {name} 不在手臂关节里')
+                    raise ValueError(f'null_gain 里的 {name} 不在手臂关节里')
                 value = float(gain)
                 if not np.isfinite(value) or value < 0.0:
-                    raise ValueError(f'{name} 的 null_bias 增益必须是非负有限值')
+                    raise ValueError(f'{name} 的 null_gain 必须是非负有限值')
                 gains[self.joint_names.index(name)] = value
             if np.any(gains > 0.0):
                 self._null_gain = gains

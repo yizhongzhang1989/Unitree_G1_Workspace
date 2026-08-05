@@ -75,21 +75,13 @@ from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 from g1_motion_control.arm_ik import ArmIK
+from g1_motion_control.command_protocol import split_command
 from g1_motion_control.policy_runtime import (
     LocomotionPolicy,
     load_policy,
     projected_gravity,
     spec_matches,
 )
-
-# ``~/command`` 按长度分块。全量 20 值的布局是 下肢 4 + 左臂 7 + 右臂 7 + 夹爪 2，
-# 其余长度都是它的连续子块——发多长就只覆写对应那几个字段，别的原样保留。
-# _LAYOUT 的键由块大小相加得出（依次为 2 / 4 / 7 / 14 / 20），而不是另拄一份，
-# 这样改了块大小也不会出现两张表对不上的情况。
-_BLOCK = {'base': 4, 'left': 7, 'right': 7, 'grip': 2}
-_LAYOUT = {sum(_BLOCK[name] for name in fields): fields for fields in (
-    ('grip',), ('base',), ('right',), ('left', 'right'),
-    ('base', 'left', 'right', 'grip'))}
 
 
 class State(Enum):
@@ -169,16 +161,16 @@ class MotionControlNode(Node):
                         for name, high in zip(self._arm_names, limit_hi)} if limit_hi else {}
         # 零空间偏置增益（长度同 arm_joints，0 = 该轴不偏置）。收肘限位拦不住"肘长期
         # 顶在 1.4"，这一道在不动末端的前提下把三根自转轴拉回 0——理由见 config 注释。
-        bias_gain = list(p('ik_null_bias', Parameter.Type.DOUBLE_ARRAY)
+        null_gain_values = list(p('ik_null_gain', Parameter.Type.DOUBLE_ARRAY)
+                                .get_parameter_value().double_array_value)
+        if null_gain_values and len(null_gain_values) != len(self._arm_names):
+            raise ValueError(f'ik_null_gain 长度必须等于 arm_joints ({len(self._arm_names)})')
+        null_gain = {name: gain for name, gain in zip(self._arm_names, null_gain_values)
+                     if gain} if null_gain_values else {}
+        null_gate = list(p('ik_null_gate', [0.6, 1.2])
                          .get_parameter_value().double_array_value)
-        if bias_gain and len(bias_gain) != len(self._arm_names):
-            raise ValueError(f'ik_null_bias 长度必须等于 arm_joints ({len(self._arm_names)})')
-        null_bias = {name: gain for name, gain in zip(self._arm_names, bias_gain)
-                     if gain} if bias_gain else {}
-        gate = list(p('ik_null_bias_gate', [0.8, 1.2])
-                    .get_parameter_value().double_array_value)
-        if len(gate) != 2:
-            raise ValueError('ik_null_bias_gate 必须是 2 个数：开始角、全开角')
+        if len(null_gate) != 2:
+            raise ValueError('ik_null_gate 必须是 2 个数：开始角、全开角')
         self._ik_kwargs = dict(
             tip_frames={
                 'left': p('left_tip_frame', 'left_gripper_base')
@@ -195,8 +187,8 @@ class MotionControlNode(Node):
             max_step_pos=p('ik_max_step_pos', 0.1).get_parameter_value().double_value,
             max_step_ori=p('ik_max_step_ori', 0.5).get_parameter_value().double_value,
             joint_limits=joint_limits,
-            null_bias=null_bias,
-            null_bias_gate=tuple(gate),
+            null_gain=null_gain,
+            null_gate=tuple(null_gate),
         )
         # 热启动陷进坏解支时的逃生阈值（m）。理由见 config 里那段注释。
         self._rescue_err = float(
@@ -396,25 +388,11 @@ class MotionControlNode(Node):
 
     def _on_command(self, message: Float64MultiArray) -> None:
         """按长度分块，只覆写本次带来的字段，其余保持——上下肢发布者因此互不干扰。"""
-        data = np.array(message.data, dtype=np.float64)
-        fields = _LAYOUT.get(data.size)
-        if fields is None or not np.all(np.isfinite(data)):
-            self.get_logger().warning(
-                f'丢弃非法指令：长度 {data.size} 不在 {sorted(_LAYOUT)} 里，或含非有限值')
+        try:
+            chunk = split_command(message.data)
+        except ValueError as error:
+            self.get_logger().warning(f'丢弃非法指令：{error}')
             return
-        chunk, offset = {}, 0
-        for name in fields:
-            chunk[name] = data[offset:offset + _BLOCK[name]]
-            offset += _BLOCK[name]
-        for name in ('left', 'right'):
-            pose = chunk.get(name)
-            if pose is None:
-                continue
-            norm = float(np.linalg.norm(pose[3:]))
-            if not 0.5 < norm < 2.0:
-                self.get_logger().warning(f'丢弃指令：{name} 四元数模长 {norm:.3f} 异常')
-                return
-            pose[3:] /= norm
         with self._lock:
             if 'base' in chunk:
                 self._request = np.clip(chunk['base'], self._cmd_lo, self._cmd_hi)
@@ -672,34 +650,23 @@ class MotionControlNode(Node):
         with self._lock:
             ready = (self._state is State.STAND
                      and self._now() - self._stand_start >= self._stand_s)
-            pos_err, ori_err, iters, solve_ms = self._ik_stat
+            pos_err, _, _, solve_ms = self._ik_stat
             payload = {
                 'state': self._state.value,
                 'ready_to_start': ready,
                 'command': [round(float(v), 3) for v in self._command],
-                'request': [round(float(v), 3) for v in self._request],
                 'reason': self._reason,
                 'stale': self._stale(),
                 'ik_ready': self._ik is not None,
                 'ik_pos_err': round(pos_err, 4),
-                'ik_ori_err': round(ori_err, 4),
-                'ik_iters': iters,
                 'ik_ms': round(solve_ms, 2),
                 'grip': [round(float(v), 3) for v in self._grip],
-                # 当前生效的末端位姿目标。遥操侧接管时直接拿它当原点，就不必自己
-                # 再建一份 IK 模型算正解——两边的起点由构造保证完全一致。
-                'pose': {side: [round(float(v), 5) for v in pose]
-                         for side, pose in self._pose.items()},
             }
-            # 已发布关节目标的正解。目标够不着时它和上面的 'pose' 能差出几十厘米
-            # （实测 6 轮 ×10 cm 前伸接力后目标 588 mm / 实际 171 mm），遥操侧的
-            # 离合必须锚在这一份上，否则位移会一路累积出可达域再也拉不回来。
-            # 取关节**目标**而不是实测 q：PD 要出力就必须有位置差，锚在实测上等于
-            # 每次接合都把这个静差吃进目标，手臂会朝重力方向反向累积。
-            # FK 单次 0.045 ms，且这个定时器和控制环在同一个互斥回调组里，不会和
-            # 它抢 ArmIK 内部那份 pinocchio data 缓存。
+            # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解。它是“关节指令
+            # 对应的末端”，不是编码器实测；实测末端由 dashboard 直接从 /joint_states
+            # 的模型 link 得到，避免在这里再做一次 FK 并复制进 status。
             if self._ik is not None and self._state is State.RUNNING:
-                payload['pose_now'] = {
+                payload['limited_pose'] = {
                     side: [round(float(v), 5) for v in pose]
                     for side, pose in self._ik.fk(self._arm_target).items()}
         self._status_publisher.publish(String(data=json.dumps(payload)))
