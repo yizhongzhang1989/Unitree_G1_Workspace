@@ -44,11 +44,24 @@
 
 ### 定位结论
 
-- CANalyst-II 固件即使没有对应数量的 CAN 数据帧，也会持续返回约 `9.5k` 个 USB completion/s/通道；其中大量 64 字节包的 `packet[0] == 0`，表示合法的零 CAN 帧包。
+- CANalyst-II 固件即使没有对应数量的 CAN 数据帧，也会持续返回约 `9.5k` 个 64 字节 USB 包/s/通道；其中大量包的 `packet[0] == 0`，表示合法的零 CAN 帧包。
 - 旧处理会让零帧包进入 RX 队列并通知 worker，产生无效的队列锁竞争、条件变量通知和线程唤醒。当前 completion 回调仍统计这些 USB 包，但只将 `packet[0] != 0` 的包入队；协议解析器继续把 frame count 0 视为合法值。
+- 每个异步 RX transfer 使用 512 字节缓冲，可一次接收并逐个解析最多 8 个完整协议包。CANalyst-II 在当前 USB 拓扑中只以 12 Mbps Full Speed 运行，原先 64 字节 transfer 恰好只有一个 endpoint max packet，双通道满负载下曾在约 230 秒后出现一次 `LIBUSB_TRANSFER_OVERFLOW`。扩大 transfer 可吸收连续到达的协议包，并减少 libusb completion 频率。
 - 把每通道 RX transfer 从 8 减到 4 的 A/B 测试更差，因此生产默认值保持 8。不要把 transfer 数量当作降低固件空包率的手段。
 - 临时逐秒分层时延统计会干扰紧时延测量。同一功能配置启用诊断时曾出现 source `10.079/10.327 ms`、ROS receive `15.314/15.590 ms` 的最大 gap；关闭诊断后得到上表结果。因此生产和验收均保持 `io_diagnostics:=false`，需要排障时才短时启用基础吞吐计数。
 - 不调用 `libusb_reset_device()`；本机实测 reset 可能使命令 endpoint 或固件进入不可用状态。
+
+### 512 字节 RX transfer 的 A-B-A 实测
+
+2026-08-06 在相同双 KWR57 1 kHz、双 Gloria-M 失能、FPC inactive 配置下，仅切换单个编译期常量 `kPacketsPerRxTransfer=8/1`。每组预热后用 `/proc/<pid>/stat` 的累计用户态与内核态 tick 测 60 秒，期间不增加 ROS 订阅者：
+
+| 顺序 | RX transfer | bridge 单核 CPU | 协议包 / completion |
+|---|---:|---:|---:|
+| A1 | 512 B（8 包） | 35.17% | 8.000 |
+| B | 64 B（1 包） | 48.93% | 1.000 |
+| A2 | 512 B（8 包） | 35.87% | 8.000 |
+
+两次 512 B 均值为 35.52%，相对 64 B 的 bridge CPU 下降 27.4%（绝对下降 13.40 个单核百分点）。两组协议包率都约为每通道 9.5 kHz，KWR57 均约 1 kHz，差异不是少处理数据造成的。这个数字只代表 `native_bridge_node`，不是整机总 CPU；主要收益来自 completion/重提交次数降为八分之一。
 
 ## 数据路径
 ```mermaid
@@ -174,7 +187,7 @@ KWR57 只有连续的 `base -> base+1 -> base+2` 才能组成一个六轴样本�
 ### 故障与过载语义不同
 
 - 命中 KWR57 数据 ID 的标准数据帧如果 DLC 错误或三帧乱序，不会关闭 bridge；组包器丢弃当前半包、重新同步，并在退出统计中报告 `malformed` 和 `dropped_sequences`。相同 ID 的扩展帧和 RTR 帧不会进入 KWR57 组包器，而是发布到对应默认 `/<bus>/rx`。
-- native RX packet 长度/布局错误、USB transfer 失败、RX transport 队列溢出或内部 frame callback 抛出异常属于 transport fatal；节点记录 `FATAL` 后关闭整个 ROS context。这里没有 Python handler 的“三次失败后只禁用该设备”降级。
+- native RX packet 长度/布局错误、不可恢复的 USB transfer 失败、RX transport 队列溢出或内部 frame callback 抛出异常属于 transport fatal；节点记录 `FATAL` 后关闭整个 ROS context。`LIBUSB_TRANSFER_OVERFLOW`（旧日志中的 status 6）只表示当前 RX transfer 的数据超过接收缓冲，不是设备断开；bridge 丢弃该 transfer、计入 `rx_overflows` 并立即重提交。连续超过 3 次 overflow 仍按 transport fatal 处理，避免在持续损坏的链路上静默丢数据。这里没有 Python handler 的“三次失败后只禁用该设备”降级。
 - Python `LatestFrameBuffer` 过载时丢弃最旧帧并继续运行；native RX transport 队列溢出会记录 drop 后立即进入 fatal 停止，避免在未知丢帧状态下继续生产控制。
 - native TX 队列满时只拒绝并记录当前发送帧，不会因为单次 TX 入队失败自动关闭进程。调用方必须把相关错误视为命令未送达。
 
@@ -233,6 +246,8 @@ lsusb -d 04d8:0053
 journalctl -k --since "1 minute ago" | grep -Ei \
   'error -110|error -71|unable to enumerate|reset .*USB|04d8|0053|canalyst'
 ```
+
+`lsusb` 仍能看到 `04d8:0053` 且 bridge 能重新起流时不需要插拔。只有设备不再枚举，或未正常关闭后重启持续报 `LIBUSB_ERROR_TIMEOUT`、无法 open/claim、完全没有 RX 数据时，才应先停止所有 bridge，再物理插拔适配器复位。
 
 ## 源码结构
 ```text

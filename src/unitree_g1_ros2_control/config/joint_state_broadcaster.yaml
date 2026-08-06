@@ -1,3 +1,4 @@
 /joint_state_broadcaster:
   ros__parameters:
     publish_rate: 100.0
+    publish_dynamic_joint_states: false

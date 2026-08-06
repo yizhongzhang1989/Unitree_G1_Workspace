@@ -50,12 +50,12 @@ class Teleop(Node):
             .get_parameter_value().string_value.rstrip('/')
         self.rate = float(p('publish_rate_hz', 50.0).get_parameter_value().double_value)
         self._step = (
-            float(p('vx_step', 0.05).get_parameter_value().double_value),
-            float(p('vy_step', 0.05).get_parameter_value().double_value),
-            float(p('wz_step', 0.10).get_parameter_value().double_value),
+            float(p('vx_step', 0.1).get_parameter_value().double_value),
+            float(p('vy_step', 0.1).get_parameter_value().double_value),
+            float(p('wz_step', 0.1).get_parameter_value().double_value),
         )
         self._limit = (
-            float(p('vx_max', 0.5).get_parameter_value().double_value),
+            float(p('vx_max', 0.8).get_parameter_value().double_value),
             float(p('vy_max', 0.4).get_parameter_value().double_value),
             float(p('wz_max', 1.5).get_parameter_value().double_value),
         )
@@ -65,7 +65,7 @@ class Teleop(Node):
             float(p('height_max', 0.80).get_parameter_value().double_value),
         )
         self._height = min(max(
-            float(p('initial_height', 0.75).get_parameter_value().double_value),
+            float(p('initial_height', 0.76).get_parameter_value().double_value),
             self._h_range[0]), self._h_range[1])
         self._hold_timeout = float(
             p('hold_timeout_s', 0.4).get_parameter_value().double_value)

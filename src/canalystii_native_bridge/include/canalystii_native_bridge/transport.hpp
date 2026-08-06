@@ -43,6 +43,7 @@ struct TransportStats
 {
   std::array<std::uint64_t, 2> rx_packets{};
   std::array<std::uint64_t, 2> rx_frames{};
+  std::array<std::uint64_t, 2> rx_overflows{};
   std::array<std::uint64_t, 2> tx_packets{};
   std::array<std::uint64_t, 2> tx_frames{};
   std::array<std::uint64_t, 2> rx_queue_drops{};

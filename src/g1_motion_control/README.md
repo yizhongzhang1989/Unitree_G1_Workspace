@@ -292,7 +292,7 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 
 | 触发 | 阈值 | 说明 |
 |---|---|---|
-| `/joint_states` 或 IMU 超时 | `state_timeout_s` 0.1 s | 广播是 100 Hz |
+| `/joint_states` 或 IMU 超时 | `state_timeout_s` 0.2 s | 广播是 100 Hz；容忍短时调度抖动 |
 | 姿态倾覆 | `tilt_limit_rad` 1.0 rad | 与官方 `mdp::bad_orientation` 默认阈值一致（官方那份被注释掉了，这里是打开的） |
 | 推理抛异常 / 输出非有限值 | — | 观测里出 NaN 也在这里被拦 |
 
@@ -730,7 +730,7 @@ CPU 闭环重跑里手臂写 0 并**没有**让下肢站不住，所以这一项
 | `~/engage` 返回 `/joint_states 超时` | 控制栈没起，或 `scope:=whole_body` 忘了写 |
 | `~/engage` 返回 `switch_controller 拒绝激活` | FPC 被别的控制节点占着（IKT Pose Commander / JTC），先把它们停掉；只读 dashboard 不占控制器 |
 | `~/start` 返回 `站立插值还没走完` | 等满 `stand_s` 再按 `Enter` |
-| 跑着跑着莫名急停、原因是 `/joint_states 超时` | Jetson 上负载高时广播确实会抖。把 `state_timeout_s` 从 0.1 提到 0.2——仍然小于硬件自己的 `state_timeout_s`(0.25 s)，不会削弱保护 |
+| 跑着跑着莫名急停、原因是 `/joint_states` 或 IMU 超时 | 默认 `state_timeout_s` 已取 0.2 s，用于容忍 Jetson 上的短时广播/回调调度抖动；它仍小于硬件自己的 `state_timeout_s`(0.25 s) |
 | 急停后机器人还硬着 | 看日志有没有 `卸力失败`。有的话立刻用手柄断电——这条路径失效说明 controller_manager 没响应 |
 | 站立位姿正常但一放策略就抖 | 先确认 `/joint_states` 的 `velocity` 字段非空（观测第 6 项全 0 会让策略瞎跑）：`ros2 topic echo /joint_states --field velocity --once` |
 

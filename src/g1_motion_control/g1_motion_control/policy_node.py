@@ -228,7 +228,7 @@ class MotionControlNode(Node):
             for index, name in enumerate(self._joints) if 'shoulder_roll' in name]
 
         self._state_timeout = float(
-            p('state_timeout_s', 0.1).get_parameter_value().double_value)
+            p('state_timeout_s', 0.2).get_parameter_value().double_value)
         self._command_timeout = float(
             p('command_timeout_s', 0.5).get_parameter_value().double_value)
         # 与官方 mdp::bad_orientation 的默认 limit_angle 一致。
@@ -356,7 +356,7 @@ class MotionControlNode(Node):
     # -- 状态回调 --------------------------------------------------------------
 
     def _now(self) -> float:
-        return self.get_clock().now().nanoseconds * 1e-9
+        return time.monotonic()
 
     def _on_joint_states(self, message: JointState) -> None:
         names = list(message.name)

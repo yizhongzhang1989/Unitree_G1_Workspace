@@ -23,6 +23,7 @@
 #include "rclcpp/client.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/node.hpp"
+#include "realtime_tools/mutex.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "unitree_api/msg/request.hpp"
@@ -136,7 +137,7 @@ private:
     std::array<double, kImuAxisCount> pending_torso_imu_{};
     std::atomic<bool> torso_imu_received_{false};
 
-    mutable std::mutex state_mutex_;
+    mutable realtime_tools::prio_inherit_mutex state_mutex_;
     PendingState pending_state_;
 
     // ros2_control tracks the lifecycle state itself, but the destructor still

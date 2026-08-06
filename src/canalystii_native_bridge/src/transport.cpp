@@ -23,6 +23,8 @@ constexpr std::array<unsigned char, 2> kMessageOutEndpoints{0x01, 0x03};
 constexpr std::array<unsigned char, 2> kMessageInEndpoints{0x81, 0x83};
 constexpr int kUsbInterface = 0;
 constexpr unsigned int kCommandTimeoutMs = 250;
+constexpr std::size_t kPacketsPerRxTransfer = 8;
+constexpr std::size_t kMaxConsecutiveRxOverflows = 3;
 
 void check_libusb(int result, const std::string & operation)
 {
@@ -200,7 +202,7 @@ struct CanalystiiTransport::Impl
     Impl * owner{nullptr};
     int channel{0};
     libusb_transfer * transfer{nullptr};
-    UsbPacket buffer{};
+    std::array<std::uint8_t, kUsbPacketSize * kPacketsPerRxTransfer> buffer{};
     bool submitted{false};
   };
 
@@ -346,19 +348,38 @@ struct CanalystiiTransport::Impl
     }
 
     if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
-      if (transfer->actual_length != static_cast<int>(slot->buffer.size())) {
-        self->set_error("CANalyst-II returned a non-64-byte RX packet");
+      self->consecutive_rx_overflows[slot->channel] = 0;
+      if (transfer->actual_length < 0 ||
+        transfer->actual_length % static_cast<int>(kUsbPacketSize) != 0)
+      {
+        self->set_error("CANalyst-II returned a partial 64-byte RX packet");
       } else {
-        ++self->rx_packets[slot->channel];
-        if (slot->buffer[0] != 0) {
-          if (!self->rx_queues[slot->channel]->push(slot->buffer)) {
+        const std::size_t packet_count =
+          static_cast<std::size_t>(transfer->actual_length) / kUsbPacketSize;
+        for (std::size_t index = 0; index < packet_count; ++index) {
+          ++self->rx_packets[slot->channel];
+          const std::uint8_t * packet_data =
+            slot->buffer.data() + index * kUsbPacketSize;
+          if (packet_data[0] == 0) {
+            continue;
+          }
+          UsbPacket packet;
+          std::copy_n(packet_data, packet.size(), packet.begin());
+          if (!self->rx_queues[slot->channel]->push(packet)) {
             ++self->rx_queue_drops[slot->channel];
             self->set_error("CANalyst-II native RX queue overflow on channel " +
               std::to_string(slot->channel));
-          } else {
-            self->rx_conditions[slot->channel].notify_one();
+            break;
           }
+          self->rx_conditions[slot->channel].notify_one();
         }
+      }
+    } else if (transfer->status == LIBUSB_TRANSFER_OVERFLOW && !self->stopping.load()) {
+      ++self->rx_overflows[slot->channel];
+      const std::size_t consecutive = ++self->consecutive_rx_overflows[slot->channel];
+      if (consecutive > kMaxConsecutiveRxOverflows) {
+        self->set_error("CANalyst-II RX transfer repeatedly overflowed on channel " +
+          std::to_string(slot->channel));
       }
     } else if (transfer->status != LIBUSB_TRANSFER_CANCELLED && !self->stopping.load()) {
       self->set_error("CANalyst-II RX transfer failed on channel " +
@@ -643,6 +664,7 @@ struct CanalystiiTransport::Impl
     for (std::size_t channel = 0; channel < 2; ++channel) {
       result.rx_packets[channel] = rx_packets[channel].load();
       result.rx_frames[channel] = rx_frames[channel].load();
+      result.rx_overflows[channel] = rx_overflows[channel].load();
       result.tx_packets[channel] = tx_packets[channel].load();
       result.tx_frames[channel] = tx_frames[channel].load();
       result.rx_queue_drops[channel] = rx_queue_drops[channel].load();
@@ -671,9 +693,11 @@ struct CanalystiiTransport::Impl
 
   std::array<std::atomic<std::uint64_t>, 2> rx_packets{};
   std::array<std::atomic<std::uint64_t>, 2> rx_frames{};
+  std::array<std::atomic<std::uint64_t>, 2> rx_overflows{};
   std::array<std::atomic<std::uint64_t>, 2> tx_packets{};
   std::array<std::atomic<std::uint64_t>, 2> tx_frames{};
   std::array<std::atomic<std::uint64_t>, 2> rx_queue_drops{};
+  std::array<std::size_t, 2> consecutive_rx_overflows{};
 
   std::array<std::condition_variable, 2> rx_conditions;
   std::condition_variable tx_condition;

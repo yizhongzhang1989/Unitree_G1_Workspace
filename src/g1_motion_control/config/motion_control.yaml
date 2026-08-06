@@ -250,8 +250,9 @@
     height_rate_limit: 0.15
     initial_height: 0.74
 
-    # 看门狗。tilt_limit_rad 与官方 mdp::bad_orientation 的默认 limit_angle 一致。
-    state_timeout_s: 0.1
+    # 看门狗。状态窗口 0.2 s 用于容忍 ROS 广播/回调的偶发调度抖动，仍小于硬件层 0.25 s。
+    # tilt_limit_rad 与官方 mdp::bad_orientation 的默认 limit_angle 一致。
+    state_timeout_s: 0.2
     command_timeout_s: 0.5
     tilt_limit_rad: 1.0
 

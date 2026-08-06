@@ -157,12 +157,12 @@ class VRTeleop(Node):
         self._rate = float(p('rate_hz', 50.0).get_parameter_value().double_value)
         # 限幅与 teleop_keyboard.py 同一组。高度上界取 0.78 而不是键盘的 0.80：
         # 策略层 command_limits 就是裁到 0.78，写 0.80 只会让摇杆顶端摸起来像卡住了。
-        self._vx_max = float(p('vx_max', 0.5).get_parameter_value().double_value)
+        self._vx_max = float(p('vx_max', 0.8).get_parameter_value().double_value)
         self._vy_max = float(p('vy_max', 0.4).get_parameter_value().double_value)
         self._wz_max = float(p('wz_max', 1.5).get_parameter_value().double_value)
-        self._height0 = float(p('height', 0.78).get_parameter_value().double_value)
+        self._height0 = float(p('height', 0.76).get_parameter_value().double_value)
         self._h_lo = float(p('height_min', 0.50).get_parameter_value().double_value)
-        self._h_hi = float(p('height_max', 0.78).get_parameter_value().double_value)
+        self._h_hi = float(p('height_max', 0.80).get_parameter_value().double_value)
         # 摇杆推到底时的高度变化率。策略层自己也按 0.15 m/s 限速（训练里高度指令
         # 就是这个速率缓变），所以这里取同值，再大也过不去。
         self._height_rate = float(
