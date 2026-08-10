@@ -1,7 +1,8 @@
 "use strict";
 // 取数 + 数字面板。3D 全在 viewer.js 里
-// 用**短轮询**而不是 WebSocket：数据源 `~/status` 本来就只有 10 Hz，每次几百字节，轮询的代码量和故障模式都比长连接少一大截
+// 用**短轮询**而不是 WebSocket：状态与低层数据约 1 KiB/次，轮询的代码量和故障模式都比长连接少一大截
 import * as viewer from "/viewer.js";
+import * as jointChart from "/joint_chart.js";
 
 const POLL_MS = 50;             // 20 Hz，够跟上 10 Hz 的 status，也不浪费
 const $ = (id) => document.getElementById(id);
@@ -39,9 +40,13 @@ async function poll() {
     snapshot = await (await fetch("/api/state")).json();
     missed = 0;
   } catch {
-    if (++missed === 3) pill($("conn"), "断开", "bad");
+    if (++missed === 3) {
+      pill($("conn"), "断开", "bad");
+      jointChart.setConnected(false);
+    }
     return;
   }
+  jointChart.update(snapshot);
   if (!modelLoaded) {
     // 模型只取一次。控制栈还没起来时 /api/model 会 503，下一拍再试
     const response = await fetch("/api/model");

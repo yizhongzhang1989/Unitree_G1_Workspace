@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""双臂只读监控：上层命令、限速指令与实测关节模型三层对照。
+"""整机只读监控：双臂末端三层对照 + 29 个本体关节状态。
 
     /motion_control/command ─┐
     /motion_control/status ──┼─► [ 本节点：stdlib HTTP + 静态页 ] ◄─轮询─ 浏览器
     /joint_states ───────────┤                                      (three.js FK)
+    /lowstate ───────────────┤                                      (29 轴曲线/状态/温度)
     /robot_description ──────┘
 
 **独立进程，不在控制链路上**。不开就是零开销；开着也只在浏览器轮询到来时才
-组一次几百字节的 JSON。
+组一次约 1 KiB 的 JSON。
 
 刻意省掉的三件事（和 ``ikt_pose_commander`` 的 dashboard 比）：
 
 * **后端不算正运动学、不依赖 pinocchio**。URDF 解析一次后把关节树发给前端，
   three.js 的 ``Object3D`` 嵌套本来就在算矩阵，再算一遍是白花钱。
-    于是每次轮询只发手臂关节角 + 上层/限速位姿，不发整棵 link 变换树。
+        于是每次轮询只发手臂关节角、29 轴低层状态和上层/限速位姿，不发整棵
+        link 变换树。
 * **不订阅、不发布任何控制量，也不调用任何服务**。纯只读，所以不需要
   ``ReentrantCallbackGroup`` + ``MultiThreadedExecutor`` 那一套防死锁配置。
-* **只保留手臂**：``base_frame`` 之下**含可动关节**的分支才留（头、雷达、相机
+* **3D 模型只保留手臂**：``base_frame`` 之下**含可动关节**的分支才留（头、雷达、相机
   那些 fixed 分支自动被剪掉）。不必配置关节名单，换 URDF 也不用改。
 
-``/joint_states`` 是 100 Hz，回调里只存一个引用；取值推迟到浏览器真的来问的
-那一刻（≤轮询频率）。而且**没人看页面就直接退订**：实测这一路的反序列化在
- Jetson 上占 12% 单核（空转 5% -> 订阅后 17%），而监控页大部分时间是关着的。
+``/joint_states`` 是 100 Hz，回调里只存一个引用；``/lowstate`` 可达 500 Hz 以上，
+节点只按 20 Hz 留最新帧。取值推迟到浏览器真的来问的那一刻（≤轮询频率）。
+而且**没人看页面就直接退订两路**：实测仅 ``/joint_states`` 的反序列化就在 Jetson
+上占 12% 单核（空转 5% -> 订阅后 17%），而监控页大部分时间是关着的。
 """
 
 from __future__ import annotations
@@ -43,11 +46,56 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
+from unitree_hg.msg import LowState
 
 from g1_motion_control.command_protocol import split_command
 
 _MOVABLE = ('revolute', 'continuous', 'prismatic')
 _IDLE_RELEASE_S = 3.0
+_LOWSTATE_SAMPLE_S = 0.05
+_G1_JOINT_NAMES = (
+    'left_hip_pitch_joint',
+    'left_hip_roll_joint',
+    'left_hip_yaw_joint',
+    'left_knee_joint',
+    'left_ankle_pitch_joint',
+    'left_ankle_roll_joint',
+    'right_hip_pitch_joint',
+    'right_hip_roll_joint',
+    'right_hip_yaw_joint',
+    'right_knee_joint',
+    'right_ankle_pitch_joint',
+    'right_ankle_roll_joint',
+    'waist_yaw_joint',
+    'waist_roll_joint',
+    'waist_pitch_joint',
+    'left_shoulder_pitch_joint',
+    'left_shoulder_roll_joint',
+    'left_shoulder_yaw_joint',
+    'left_elbow_joint',
+    'left_wrist_roll_joint',
+    'left_wrist_pitch_joint',
+    'left_wrist_yaw_joint',
+    'right_shoulder_pitch_joint',
+    'right_shoulder_roll_joint',
+    'right_shoulder_yaw_joint',
+    'right_elbow_joint',
+    'right_wrist_roll_joint',
+    'right_wrist_pitch_joint',
+    'right_wrist_yaw_joint',
+)
+
+
+def lowstate_motors(message: LowState | None) -> dict[str, list]:
+    """按物理电机索引映射 ``q / motorstate / 外壳温度 / 绕组温度``。"""
+    if message is None:
+        return {}
+    return {
+        name: [motor.q, int(motor.motorstate),
+               int(motor.temperature[0]), int(motor.temperature[1])]
+        for name, motor in zip(_G1_JOINT_NAMES, message.motor_state)
+        if math.isfinite(motor.q)
+    }
 
 
 def _floats(text: str | None, fallback: tuple) -> list:
@@ -206,6 +254,9 @@ class DashboardNode(Node):
         self._status: dict = {}
         self._command_pose: dict[str, list] = {}
         self._joints: JointState | None = None
+        self._lowstate: LowState | None = None
+        self._lowstate_seq = 0
+        self._next_lowstate_sample = 0.0
         self._index: dict[str, int] = {}
         self._names: list = []
         # 页面走 data_files 装到 share/，运行时只认这一条路径。用
@@ -232,7 +283,10 @@ class DashboardNode(Node):
         # /joint_states 按需订阅：没人看页面就退订，省掉 12% 单核的反序列化。
         self._joint_topic = p('joint_states_topic', '/joint_states') \
             .get_parameter_value().string_value
+        self._lowstate_topic = p('lowstate_topic', '/lowstate') \
+            .get_parameter_value().string_value
         self._joint_sub = None
+        self._lowstate_sub = None
         self._last_poll = 0.0
         self.create_timer(0.2, self._gate)
 
@@ -259,6 +313,16 @@ class DashboardNode(Node):
         with self._lock:
             self._joints = message
 
+    def _on_lowstate(self, message: LowState) -> None:
+        # /lowstate 可达 1 kHz；dashboard 只需要 20 Hz 曲线，避免每帧争锁和组 JSON。
+        now = time.monotonic()
+        if now < self._next_lowstate_sample:
+            return
+        self._next_lowstate_sample = now + _LOWSTATE_SAMPLE_S
+        with self._lock:
+            self._lowstate = message
+            self._lowstate_seq += 1
+
     def _gate(self) -> None:
         """有人看才订 ``/joint_states``，没人看就退订。
 
@@ -270,11 +334,16 @@ class DashboardNode(Node):
         if watching and self._joint_sub is None:
             self._joint_sub = self.create_subscription(
                 JointState, self._joint_topic, self._on_joints, self._stream)
-        elif not watching and self._joint_sub is not None:
+            self._lowstate_sub = self.create_subscription(
+                LowState, self._lowstate_topic, self._on_lowstate, self._stream)
+        elif not watching and self._joint_sub is not None and self._lowstate_sub is not None:
             self.destroy_subscription(self._joint_sub)
+            self.destroy_subscription(self._lowstate_sub)
             self._joint_sub = None
+            self._lowstate_sub = None
             with self._lock:
                 self._joints = None
+                self._lowstate = None
 
     def _on_status(self, message: String) -> None:
         try:
@@ -300,7 +369,8 @@ class DashboardNode(Node):
     def snapshot(self) -> dict:
         with self._lock:
             self._last_poll = time.monotonic()   # 有人在看，_gate 据此保持订阅
-            status, message = self._status, self._joints
+            status, message, lowstate = self._status, self._joints, self._lowstate
+            lowstate_seq = self._lowstate_seq
             command_pose = dict(self._command_pose)
             if message is not None and message.name != self._names:
                 # 名字表变了才重建索引；正常一整场只建一次。
@@ -311,6 +381,9 @@ class DashboardNode(Node):
         q = {name: position[i] for name, i in index.items() if i < len(position)}
         return {
             'q': q,
+            'motor_names': _G1_JOINT_NAMES,
+            'motors': lowstate_motors(lowstate),
+            'motor_seq': lowstate_seq,
             'state': status.get('state', ''),
             'stale': status.get('stale', ''),
             # 上层笛卡尔命令与 IK + 关节限速后的指令；实测末端由前端模型直接给出。
