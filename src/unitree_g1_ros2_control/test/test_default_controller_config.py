@@ -42,7 +42,18 @@ def test_default_controller_claims_g1_body_and_both_grippers():
         "right_eccentric_joint",
     ]
     assert len(joints) == 31
-    assert set(forward_parameters) == {"joints"}
+    # The gravity feed-forward is a parameter of this controller now, not a
+    # second controller relaying into it.
+    assert set(forward_parameters) == {
+        "joints",
+        "gravity_table",
+        "gravity_filter_cutoff_hz",
+        "offset_ramp_s",
+        "compensation_scale",
+    }
+    assert forward_parameters["gravity_table"] == \
+        "package://arm_gravity_compensation/config/gravity_table.yaml"
+    assert forward_parameters["compensation_scale"] == 1.0
     assert trajectory_parameters["joints"] == joints
     assert trajectory_parameters["command_interfaces"] == ["position"]
     assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
@@ -51,6 +62,11 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     assert "state_publish_rate" not in trajectory_parameters
     assert trajectory_parameters["allow_nonzero_velocity_at_trajectory_end"] is False
     assert trajectory_parameters["allow_partial_joints_goal"] is True
+    # 轨迹点也是绝对位置，所以它拿到与 FPC 完全相同的一套重力前馈参数。
+    assert trajectory_parameters["gravity_table"] == \
+        forward_parameters["gravity_table"]
+    assert trajectory_parameters["compensation_scale"] == 1.0
+    assert trajectory_parameters["open_loop_control"] is False
     constraints = trajectory_parameters["constraints"]
     assert constraints["goal_time"] == 2.0
     assert constraints["stopped_velocity_tolerance"] == 0.05
@@ -66,7 +82,19 @@ def test_controller_manager_registers_mutually_exclusive_fpc_and_jtc():
     assert manager_config["forward_position_controller"]["type"] == \
         "unitree_g1_forward_command_controller/ForwardCommandController"
     assert manager_config["joint_trajectory_controller"]["type"] == \
-        "joint_trajectory_controller/JointTrajectoryController"
+        "unitree_g1_joint_trajectory_controller/JointTrajectoryController"
+    # 重力补偿已并入两个运动控制器，不再是独立 controller。
+    assert "arm_gravity_compensation" not in manager_config
+
+
+def test_plugin_names_stay_recognisable_to_the_test_dashboard():
+    # dashboard_node.classify_controller() 靠这两个后缀/子串归类；改名会让页面
+    # 把它们当成 "other"，Engage 按钮和关节面板都会消失。
+    plugins = ElementTree.parse(PACKAGE_ROOT / "controller_plugins.xml").getroot()
+    names = {element.get("name").lower() for element in plugins.findall("class")}
+
+    assert any(name.endswith("jointtrajectorycontroller") for name in names)
+    assert any("forward_command_controller" in name for name in names)
 
 
 def test_arm_stiffness_default_is_owned_by_hardware_plugin():
@@ -125,3 +153,4 @@ def test_control_launch_loads_both_motion_controllers_inactive():
 
     assert "--inactive" in spawners["forward_position_controller"]
     assert "--inactive" in spawners["joint_trajectory_controller"]
+    assert "arm_gravity_compensation" not in spawners

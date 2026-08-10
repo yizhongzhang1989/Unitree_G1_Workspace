@@ -456,7 +456,7 @@ void G1TopicSystem::create_ros_interfaces() {
         gripper_publishers_[side] = node_->create_publisher<gloria_ros::msg::MitCommand>(
             gripper_command_topics_[side], reliable_qos);
     }
-    auto wrench_qos = rclcpp::QoS(rclcpp::KeepLast(64)).best_effort();
+    auto wrench_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
     for (std::size_t side = 0; side < kForceTorqueSensorCount; ++side) {
         wrench_subscriptions_[side] =
             node_->create_subscription<geometry_msgs::msg::WrenchStamped>(
@@ -604,7 +604,7 @@ void G1TopicSystem::on_lowstate(const unitree_hg::msg::LowState::SharedPtr messa
             return;
         }
     }
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
     for (std::size_t index = 0; index < kG1JointCount; ++index) {
         const auto& motor = message->motor_state[index];
         pending_state_.position[index] = motor.q;
@@ -652,7 +652,7 @@ void G1TopicSystem::decode_imu(
 }
 
 void G1TopicSystem::on_torso_imu(const unitree_hg::msg::IMUState::SharedPtr message) {
-    std::lock_guard<std::mutex> guard(state_mutex_);
+    std::lock_guard<realtime_tools::prio_inherit_mutex> guard(state_mutex_);
     decode_imu(*message, pending_torso_imu_);
     torso_imu_received_.store(true, std::memory_order_release);
 }
@@ -672,7 +672,7 @@ void G1TopicSystem::on_gripper_state(
         return;
     }
     const std::size_t target_index = kG1JointCount + side;
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
     pending_state_.position[target_index] = message->position[source_index];
     pending_state_.velocity[target_index] =
         source_index < message->velocity.size() && std::isfinite(message->velocity[source_index])
@@ -728,7 +728,7 @@ void G1TopicSystem::on_motion_response(const unitree_api::msg::Response::SharedP
 
 hardware_interface::return_type G1TopicSystem::read(const rclcpp::Time&, const rclcpp::Duration&) {
     {
-        std::lock_guard<std::mutex> lock(state_mutex_);
+        std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
         for (std::size_t index = 0; index < kControlledJointCount; ++index) {
             if (!pending_state_.received[index]) {
                 continue;
@@ -745,20 +745,19 @@ hardware_interface::return_type G1TopicSystem::read(const rclcpp::Time&, const r
     for (std::size_t sensor = 0; sensor < kForceTorqueSensorCount; ++sensor) {
         if (wrench_received_[sensor].load(std::memory_order_acquire)) {
             std::array<double, kWrenchAxisCount> snapshot{};
-            std::uint64_t before = 0;
-            std::uint64_t after = 0;
-            do {
-                before = wrench_sequence_[sensor].load(std::memory_order_acquire);
-                if ((before & 1U) != 0U) {
-                    continue;
-                }
+            const std::uint64_t before =
+                wrench_sequence_[sensor].load(std::memory_order_acquire);
+            if ((before & 1U) == 0U) {
                 for (std::size_t axis = 0; axis < kWrenchAxisCount; ++axis) {
                     snapshot[axis] =
                         pending_wrench_[sensor][axis].load(std::memory_order_relaxed);
                 }
-                after = wrench_sequence_[sensor].load(std::memory_order_acquire);
-            } while (before != after || (after & 1U) != 0U);
-            wrench_state_[sensor] = snapshot;
+                const std::uint64_t after =
+                    wrench_sequence_[sensor].load(std::memory_order_acquire);
+                if (before == after) {
+                    wrench_state_[sensor] = snapshot;
+                }
+            }
         }
     }
     return hardware_interface::return_type::OK;
@@ -813,7 +812,7 @@ hardware_interface::return_type G1TopicSystem::write(const rclcpp::Time&, const 
             command.kd = static_cast<float>(damping_[index]);
         }
         {
-            std::lock_guard<std::mutex> lock(state_mutex_);
+            std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
             message.mode_machine = pending_state_.mode_machine;
         }
         message.crc = lowcmd_crc(message);
@@ -862,7 +861,7 @@ hardware_interface::return_type G1TopicSystem::write(const rclcpp::Time&, const 
 
 bool G1TopicSystem::state_ready(std::uint32_t claim_mask, std::string& reason) const {
     const auto now = Clock::now();
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
     if ((claim_mask & kBodyClaimMask) != 0U) {
         for (std::size_t index = 0; index < kG1JointCount; ++index) {
             if (!pending_state_.received[index]) {
@@ -1223,7 +1222,7 @@ void G1TopicSystem::release_body() {
     const int steps = std::max(1, static_cast<int>(release_ramp_s_ * kRate));
     std::uint8_t mode_machine = 0;
     {
-        std::lock_guard<std::mutex> lock(state_mutex_);
+        std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
         mode_machine = pending_state_.mode_machine;
     }
 

@@ -9,10 +9,6 @@ controller_manager:
     # 默认值跟随 has_realtime_kernel()，而本机内核是 PREEMPT 不是 PREEMPT_RT，
     # 所以必须显式打开才会 mlockall。失败只会打警告，不影响启动。
     lock_memory: true
-    # cpu_affinity 故意不设：本机 8 核，钉核的收益要靠实测，且钉错会挤压
-    # canalystii_native_bridge 的 USB 收发线程。需要时用
-    #   ros2 param set /controller_manager cpu_affinity [6,7]
-    # 之类先量一轮再固化。
 
     joint_state_broadcaster:
       type: unitree_g1_broadcasters/JointStateBroadcaster
@@ -29,8 +25,5 @@ controller_manager:
     forward_position_controller:
       type: unitree_g1_forward_command_controller/ForwardCommandController
 
-    arm_gravity_compensation:
-      type: unitree_g1_controllers/ArmGravityCompensation
-
     joint_trajectory_controller:
-      type: joint_trajectory_controller/JointTrajectoryController
+      type: unitree_g1_joint_trajectory_controller/JointTrajectoryController

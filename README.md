@@ -6,10 +6,12 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 |---|---|
 | `robot_bringup` | 组合整机或末端设备的生产 launch |
 | `unitree_g1_ros2_control` | 把 FPC/JTC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
+| `g1_motion_control` | FPC 之上的整机 31 轴运动控制层：下肢 15 轴走 ONNX 策略（输入 `vx/vy/w/h`），上肢 14 轴走双臂 IK，夹爪 2 轴透传；内附 VR / 键盘遥操 |
 | `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
 | `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
+| `g1_motion_control` | 整机 31 轴运动控制层 + 遥操台（在 FPC 之上） |
 
 
 ## 快速开始
@@ -33,6 +35,8 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ```
 
 ROS 环境由容器自动装配，**不需要手动 `source`**。只有当 `install/` 是这次新建出来的、当前 shell 还没加载到它时，才需要 `source scripts/env.sh` 刷一下。
+
+编译优化由工作区根目录的 [`colcon_defaults.yaml`](colcon_defaults.yaml) 统一给到 `RelWithDebInfo`（`-O2 -g`）。colcon 默认不设 `CMAKE_BUILD_TYPE`，那样一个 `-O` 都没有——实测控制环上的代码差 24 倍。**命令行显式传 `--cmake-args` 会整体覆盖该文件而不是合并**，临时加参数时要把 build type 一起写全。
 
 也可以不进交互 shell，直接一次性执行：
 ```bash
@@ -100,6 +104,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── robot_test_dashboard/     [git submodule] 机器人测试 Dashboard
     ├── unitree_g1_description/   整机 description 包（model/ 为 URDF submodule）
     ├── arm_gravity_compensation/ 双臂重力参数采点、EM 标定与 Web 工作流
+    ├── g1_motion_control/     整机 31 轴运动控制层 + 遥操台（在 FPC 之上）
     ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和互斥 FPC/JTC
     └── unitree_ros2/             [git submodule] 官方消息结构（仅构建 unitree_api、unitree_hg）
 ```
@@ -129,11 +134,11 @@ ROS 环境不在这里：它定义在工作区的 [`scripts/env.sh`](scripts/env
 ```bash
 .devcontainer/dev.sh build       # 产出 g1-humble:latest，约 2 GB
 ```
-本机直连不到 `mirrors.ustc.edu.cn`，`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `socks5h://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
+本机直连不到镜像站（`mirrors.aliyun.com` 只能经代理访问，`mirrors.ustc.edu.cn` 和 `pypi.org` 则完全不可达），`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `socks5h://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
 
 compose 里 `build.network: host` 是必需的——BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，`127.0.0.1` 不是宿主的 loopback，代理会连不上。
 
-VS Code 的 "Reopen in Container" 不会带这些代理变量，所以**必须先跑一次 `dev.sh build`** 把镜像做好。
+VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY`，所以 compose 里把默认值写成了 `socks5h://127.0.0.1:1080`；代理地址不是这个的话，先跑一次 `dev.sh build` 把镜像做好再进容器。
 
 ### 进容器
 ```bash
@@ -288,7 +293,7 @@ ros2 launch robot_bringup end_effectors_dashboard.launch.py topology:=dual
 
 8770 默认是监视模式：显示相机、KWR57 和 Gloria 反馈，但不创建 `MitCommand` publisher，也不调用夹爪 enable/disable。它可以和 8200 同时运行。仅在 `scope:=end_effectors`、没有任何 ros2_control 夹爪 controller 时，才可显式追加 `allow_gripper_control:=true` 恢复独立末端控制；不要在整机控制期间打开该参数。
 
-整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放），并为不 claim 任何接口的重力补偿控制器补全页面所需的关节列表。
+整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放）。
 
 Engage 会依次检查 31 轴反馈 freshness 与 PR mode、释放现有 MotionSwitcher 模式、等待外部 `/lowcmd` 静默、使能所 claim 的 Gloria-M，并在二次状态检查后才开放输出。Disengage 先阻止低层输出、失能夹爪，再恢复接管前的运动模式。任一步失败都保持输出关闭并返回切换失败。完整事务见 [unitree_g1_ros2_control/README.md](src/unitree_g1_ros2_control/README.md)。
 

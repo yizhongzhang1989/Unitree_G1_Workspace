@@ -40,8 +40,7 @@ flowchart TB
     CM["ControllerManager<br/>list / switch_controller<br/>command interface 仲裁"]
     subgraph CTRL["controller（pluginlib 装入本进程）"]
       direction LR
-      GC["arm_gravity_compensation<br/>claim：无"]
-      FPC["forward_position_controller<br/>claim：31 × position"]
+      FPC["forward_position_controller<br/>claim：31 × position<br/>内含重力前馈"]
       JTC["joint_trajectory_controller<br/>claim：31 × position"]
       BC["joint_state_broadcaster<br/>pelvis_imu_broadcaster<br/>claim：无"]
     end
@@ -57,16 +56,14 @@ flowchart TB
 
   RSP["robot_state_publisher → TF"]
 
-  UP -. "① ~/target（31 值）" .-> GC
-  UP -. "② ~/commands（31 值）" .-> FPC
-  UP -. "③ ~/joint_trajectory + ~/follow_joint_trajectory" .-> JTC
+  UP -. "① ~/commands（31 值）" .-> FPC
+  UP -. "② ~/joint_trajectory + ~/follow_joint_trajectory" .-> JTC
   UP -. "switch_controller" .-> CM
   CM --- CTRL
-  GC -. "command_topic 指向 ②<br/>同进程回环，+1 拍" .-> FPC
 
   FPC ==> |"写 31 × &lt;joint&gt;/position"| HW
   JTC ==> |"写 31 × &lt;joint&gt;/position"| HW
-  HW ==> |"读 14 × kp + torso_imu 四元数"| GC
+  HW ==> |"读 14 × kp + torso_imu 四元数"| FPC
   HW ==> |"读 position/velocity/effort + pelvis_imu"| BC
 
   HW -. "/lowcmd（含 CRC，500 Hz）" .-> G1
@@ -80,7 +77,7 @@ flowchart TB
 读图三条规则：
 
 - **虚线 `-.->` 是 DDS**（跨进程或同进程回环都算），**粗实线 `==>` 是同进程指针读写**——后者不经过任何序列化，也不会丢帧。
-- **①②③ 是三个互斥入口**，上游同一时刻只能用其中一个：②③ 因为 FPC/JTC claim 同一组 command interface 而互斥（manager 强制），①② 因为重力补偿的输出就是 ②、两个 publisher 会抢同一个话题而互斥（约定，由上游自己保证）。
+- **①② 是两个互斥入口**，上游同一时刻只能用其中一个：FPC/JTC claim 同一组 command interface，manager 强制互斥。
 - 只有 `G1TopicSystem` 碰真实设备；FPC/JTC 从头到尾不知道 `LowCmd` 长什么样。
 
 下面几节把图上每条边的消息类型、QoS 和数量展开。
@@ -92,7 +89,7 @@ flowchart TB
 | `ros2_control_node`（含 manager + 全部 controller + `G1TopicSystem`） | [control.launch.py](launch/control.launch.py)，被 `robot_bringup/all_data.launch.py scope:=whole_body` include | 唯一 manager，500 Hz |
 | `robot_state_publisher` | 同上 | 发 `/robot_description` 与 TF |
 | `joint_state_broadcaster`、`pelvis_imu_broadcaster` | 同上，`spawner` | **active**，各 100 Hz |
-| `forward_position_controller`、`joint_trajectory_controller`、`arm_gravity_compensation` | 同上，`spawner --inactive` | **inactive**，用谁激活谁 |
+| `forward_position_controller`、`joint_trajectory_controller` | 同上，`spawner --inactive` | **inactive**，用谁激活谁 |
 | `left_ft_broadcaster`、`right_ft_broadcaster` | 已在 `controllers.yaml` 注册，默认不 spawn | 未加载（KWR57 raw 话题已存在，避免 1 kHz 重复发布） |
 | CAN bridge、KWR57、Gloria-M、相机 | `robot_bringup/all_data.launch.py`（两个 scope 都启动） | 独立进程 |
 | 8200 控制器测试网页 | `robot_bringup/whole_body_dashboard.launch.py` | 独立进程，纯客户端 |
@@ -100,29 +97,27 @@ flowchart TB
 
 `all_data.launch.py scope:=whole_body` 已经 include 本包的 `control.launch.py`——**不要再起第二个 manager**。
 
-### 三个 controller 的对外接口
+### 两个 controller 的对外接口
 
-| | `forward_position_controller`（FPC） | `joint_trajectory_controller`（JTC） | `arm_gravity_compensation` |
-|---|---|---|---|
-| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `joint_trajectory_controller/JointTrajectoryController`（上游官方） | `unitree_g1_controllers/ArmGravityCompensation` |
-| **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) | 话题 `~/joint_trajectory`<br/>+ action `~/follow_joint_trajectory`<br/>（`control_msgs/FollowJointTrajectory`） | 话题 `~/target`<br/>格式与 FPC 的 `~/commands` 完全相同<br/>BEST_EFFORT · KEEP_LAST(1) |
-| **输出** | 写 command interface | 写 command interface | **发话题**：参数 `command_topic`，默认 `/forward_position_controller/commands` |
-| claim 的 command interface | 31 × `<joint>/position` | 31 × `<joint>/position`（同一组） | **无**（`interface_configuration_type::NONE`） |
-| 读的 state interface | 31 × `<joint>/position` | 同左 | 4 × `torso_imu/orientation.{x,y,z,w}` + 14 × `<arm_joint>/kp` |
-| 运行时可调参数 | — | 标准 JTC 容差等 | `compensation_scale`（无锁写，active 时可改） |
+| | `forward_position_controller`（FPC） | `joint_trajectory_controller`（JTC） |
+|---|---|---|
+| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `unitree_g1_joint_trajectory_controller/JointTrajectoryController`（上游官方类的子类） |
+| **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) | 话题 `~/joint_trajectory`<br/>+ action `~/follow_joint_trajectory`<br/>（`control_msgs/FollowJointTrajectory`） |
+| **输出** | 写 command interface（含重力偏移） | 写 command interface（含重力偏移） |
+| claim 的 command interface | 31 × `<joint>/position` | 31 × `<joint>/position`（同一组） |
+| 读的 state interface | 31 × `<joint>/position`<br/>+ 4 × `torso_imu/orientation.{x,y,z,w}`<br/>+ 14 × `<arm_joint>/kp` | 31 × `position`、`velocity`<br/>+ 同样 4 + 14 个 |
+| 运行时可调参数 | `compensation_scale`（无锁写，active 时可改） | 同左，另加标准 JTC 容差等 |
 
 两个 broadcaster 方向相反——它们只读 state interface，往外发话题：`joint_state_broadcaster` → `/joint_states`（100 Hz），`pelvis_imu_broadcaster` → `sensor_name: pelvis_imu` / `frame_id: pelvis`（100 Hz）。
 
-### controller 之间的关系：互斥 + 嫁接
+### controller 之间的关系：互斥
 
 ```mermaid
 flowchart LR
   U1["8200 面板 / IK Commander"]
-  U1 -->|"~/target"| GC
-  U1 -.->|"或直接 ~/commands"| FPC
+  U1 -->|"~/commands"| FPC
   U1 -.->|"或 ~/joint_trajectory"| JTC
-  GC["arm_gravity_compensation<br/>claim：无"] -->|"command_topic<br/>（DDS，同进程回环）"| FPC
-  FPC["forward_position_controller<br/>claim：31 × position"]
+  FPC["forward_position_controller<br/>claim：31 × position<br/>内含重力前馈"]
   JTC["joint_trajectory_controller<br/>claim：31 × position"]
   FPC ==>|"指针写"| HW["G1TopicSystem"]
   JTC ==>|"指针写"| HW
@@ -130,9 +125,7 @@ flowchart LR
 ```
 
 - **互斥（FPC ↔ JTC）**：两者 `joints` 顺序完全相同、请求同一组 31 个 `<joint>/position`。ResourceManager 拒绝重复 claim，所以 `switch_controller` 激活其中一个时必须同时停掉另一个。这不是约定，是硬约束。
-- **嫁接（重力补偿 → FPC）**：重力补偿**一个 command interface 都不 claim**，所以它可以和 FPC 同时 active。它是个纯粹的**目标改写器**：收 31 个绝对位置 → 把 14 个手臂位加上重力偏移 → 原样格式再发出去。连接方式就是**话题名对接**——它的 `command_topic` 指向 FPC 的 `~/commands`。上游想接入，只要把发布目标从 `/forward_position_controller/commands` 改成 `/arm_gravity_compensation/target` 即可，消息一个字节都不用改。
-- 因此**上游必须二选一**：要么直接发 FPC，要么发重力补偿的 `~/target`。两个同时发就是两个 publisher 抢同一个话题。8200 面板和 IK 入口都各自实现了这个互斥（见 [robot_bringup/README.md](../robot_bringup/README.md)）。
-- 这一跳的代价是固定一拍延迟，原因和为什么可以接受见下面的[嫁接的代价](#嫁接的代价固定一拍延迟)。
+- **重力补偿不是第三个 controller**，而是这两个 controller 内部各自的一段前馈（见下节），参数名和含义完全一致。「要不要补偿」是 `compensation_scale` 参数，不是「激活哪个 controller」。
 
 ### `G1TopicSystem` 的接口
 
@@ -180,8 +173,8 @@ G1 增益表保持物理电机顺序不变。`arm_stiffness_scale` 只缩放双�
 
 启动反馈到达前，对外 joint state 使用有限零值，IMU 使用单位四元数，避免 `robot_state_publisher` 产生 NaN TF。控制安全仍由独立的 `received` 标志和 freshness 检查决定，中性启动值不能使 controller 通过 Engage。
 
-### 手臂重力补偿 controller
-`unitree_g1_controllers/ArmGravityCompensation`（实例名 `arm_gravity_compensation`）**不 claim 任何 command interface**，因此可与 FPC 同时 active。它本质上是个**目标改写器**：订阅 `~/target`（`Float64MultiArray`，31 值，与 FPC 同构），只改写 14 个手臂位，其余 17 位原样透传，再发到 `command_topic`（默认 `/forward_position_controller/commands`）。
+### 手臂重力补偿（内置于两个运动 controller）
+重力前馈不是单独的 controller，而是 [`GravityFeedforward`](include/unitree_g1_ros2_control/gravity_feedforward.hpp) 这个类：FPC 和 JTC 各持有一个成员，参数名、state interface 和数值行为完全相同。它只改写 14 个手臂位，其余位原样透传，之后直接写 command interface。纯数学部分（`load_gravity_table` / `update_torso_gravity` / `arm_offsets`）不碰任何 ROS 类型，可单独做数值单测。
 
 ```mermaid
 graph LR
@@ -192,15 +185,14 @@ graph LR
         I["torso_imu/orientation.xyzw"]
         K["14 × &lt;arm_joint&gt;/kp"]
     end
-    T["~/target<br/>31 个绝对位置"] --> C
-    Y --> C["ArmGravityCompensation"]
+    T["~/commands<br/>31 个绝对位置"] --> C
+    Y --> C["ForwardPositionController::update()"]
     I --> C
     K --> C
-    C -->|"31 个绝对位置"| F["/forward_position_controller/commands"]
-    F --> G["FPC → G1TopicSystem → LowCmd"]
+    C ==>|"写 31 × &lt;joint&gt;/position"| G["G1TopicSystem → LowCmd"]
 ```
 
-共 18 个 state interface（4 个 IMU 四元数 + 14 个 `kp`），全部是同进程内的 `double` 直读，无序列化。输出是**绝对**关节位置，不是增量——格式与 FPC 期望的输入完全一致，这正是它能透明插在中间的原因。上游（如 `ikt_pose_commander`）只需把发布目标改到 `/arm_gravity_compensation/target` 就接入了。
+除 31 个位置反馈外另读 18 个 state interface（4 个 IMU 四元数 + 14 个 `kp`），全部是同进程内的 `double` 直读，无序列化。state interface 不互斥，所以多 claim 这八个不影响任何其他 controller。
 
 电机内部执行 $\tau = k_p(q_{cmd}-q) - k_d\dot q$，想让手臂停在 $q_{target}$ 就需要
 $$q_{cmd} = q_{target} + s\,\frac{G(q_{target})}{k_p}$$
@@ -208,10 +200,12 @@ $$q_{cmd} = q_{target} + s\,\frac{G(q_{target})}{k_p}$$
 其中 $s$ 是 `compensation_scale`（默认 1.0），可运行时调：
 
 ```bash
-ros2 param set /arm_gravity_compensation compensation_scale 0.95
+ros2 param set /forward_position_controller compensation_scale 0.95
 ```
 
-标定残留的共模误差只有手臂浮起来后才看得出（表现为缓慢上飘或下沉），靠手感拧到位比重新辨识快得多。写入是无锁的，可在 controller 活动时随时改。
+标定残留的共模误差只有手臂浮起来后才看得出（表现为缓慢上飘或下沉），靠手感拧到位比重新辨识快得多。写入是无锁的，可在 controller 活动时随时改；**设为 `0.0` 就是纯转发行为**（代替了以前「不激活重力补偿 controller」这个用法），下一拍即生效，不用等新指令。
+
+> 设为 `0.0` 时激活斜坡也会**回到 0 并按住**，所以重新拧回 `1.0` 是按 `offset_ramp_s` 重新爬升的。否则斜坡早就满了，一开就是整个 ~0.4 rad 阶跃——正是斜坡要防的那个冲击。順带跳过了每拍的 28 次 sin/cos，但那只是 0.9 µs，不是重点（见下）。
 
 > 需要这个倍率本身就是一个待修缺陷：静态标定把静摩擦当成了质量，系统性抬高约 5%。修法（双向逼近）和另一个零空间漂移缺陷见 [arm_gravity_compensation/README.md](../arm_gravity_compensation/README.md) 的「两个已知缺陷」。
 
@@ -220,25 +214,36 @@ ros2 param set /arm_gravity_compensation compensation_scale 0.95
 - **不补偿 `kd`**。阻尼是稳定项，且稳态下 $\dot q \to 0$ 本就不进入偏移量。
 - **$k_p$ 从 `<joint>/kp` state interface 读**，不在 controller 配置里重写。增益不一致会把每一个补偿力矩按同比例算错而没有任何外部症状，所以只允许一个数据源。
 
-#### 嫁接的代价：固定一拍延迟
-它和 FPC 之间是**话题**，不是共享内存。虽然两个 controller 由同一个 `ros2_control_node` 进程加载，这一跳仍然要走完整的 rclcpp 链路——本仓库的 controller 用的是不带 `NodeOptions` 的 `init(const std::string&)` 重载，节点没开 `use_intra_process_comms`。
+#### 它到底多贵（实测）
+Jetson 上实测一次完整求值（IMU 滤波 + 两条链共14 个刚体）：
 
-真正决定延迟的不是传输，而是三次线程交接：
+| 构建方式 | 每拍耗时 | 占 500 Hz 周期 |
+|---|---|---|
+| colcon 默认（`CMAKE_BUILD_TYPE` 为空，**无 -O**） | 21.7 µs | 1.09% |
+| `RelWithDebInfo` | 0.89 µs | 0.045% |
 
-```
-[cm_thread, 第 N 拍]   重力补偿 update() → RealtimePublisher::unlockAndPublish()
-[RealtimePublisher 线程]                 → publish()
-[executor 线程]         FPC 订阅回调      → RealtimeBuffer::writeFromNonRT()
-[cm_thread, 第 N+1 拍] FPC update()       → readFromRT()
-```
+**差 24 倍。** 所以真正值得做的不是给重力补偿加快速通道，而是把这个包编进优化——`CMakeLists.txt` 现在在未指定时默认 `RelWithDebInfo`（保留符号以便 profile，命令行显式传 `-DCMAKE_BUILD_TYPE=` 仍优先）。同一个 24 倍也作用在 `G1TopicSystem` 的 `read()`/`write()` 上。
 
-订阅回调由 controller_manager 的 `MultiThreadedExecutor` 派发，不在 500 Hz 控制线程上，因此**无论如何赶不上同一拍**。`update_rate: 500` 下这是固定 2 ms。
+> 工作区其他包仍是默认无优化。要全局打开用
+> `colcon build --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo`。
 
-开进程内通信解决不了这个问题：IPC 仍然是“写进订阅端 ring buffer + 触发 guard condition”，回调照样由 executor 派发，三次交接一次不少；省下的只有 31 个 `double`（248 B）的序列化，微秒级。而且 `RealtimePublisher` 按 const-ref 发 `Float64MultiArray`（不是 `unique_ptr` move），连零拷贝也拿不到。
+#### 为什么必须内置，而不是另起一个 controller
+这段逻辑曾经是一个独立的 `arm_gravity_compensation` controller，通过 DDS 把改写后的 31 个 `double` 转发给 FPC。那个结构有个**正确性**问题，不只是多激活一次：
 
-**为什么可以接受**：重力偏移的带宽被 `gravity_filter_cutoff_hz`（默认 2.0）限死，2 Hz 信号上 2 ms 只相当于 $2\pi \cdot 2 \cdot 0.002 = 0.025$ rad $= 1.4°$ 相位滞后，远小于标定残差本身。补偿量又是在**目标位置**求值的，本就领先于测量，这一拍不会变成负阻尼。丢帧同样无害：两端都是 `best_effort` + `KeepLast(1)`，而它每拍都重发（不看上游是否更新——躯干姿态和激活斜坡一直在变），FPC 最多多持一拍旧命令。
+- 重力偏移必须**每拍**跟随躯干姿态和激活斜坡重算，所以它每拍都重发；而 FPC 用 `RealtimeBuffer` + 序号去重，**只在 executor 投递消息的那一拍才更新**。订阅回调由 `MultiThreadedExecutor` 派发，不在 500 Hz 控制线程上——于是一个 500 Hz 的重力跟随被 executor 抖动重采样（某一拍 0 条，下一拍 2 条只用最后一条）。站着不动看不出来，躯干持续俯仰翻滚时就是相位滞后 → 手臂下坠和振荡。
+- 顺带的开销：订阅回调里每拍一次 `make_shared` + vector 拷贝，500 Hz 就是每秒 1000 次堆分配 + 500 次序列化/反序列化/executor 唤醒，只为在同一个进程里传 31 个 `double`。
 
-真要消掉这一拍只有两条路，且都要放弃“可独立开关”：把补偿并进 FPC 的 `update()`，或者让它自己 claim command interface 直接写（那它就变成位置控制器，与 FPC 互斥，8200 面板那套“叠在 FPC 前面”的模型也随之作废）。
+Foxy 和 Humble 都没有办法让一个 controller 直接调另一个 controller 的接口。Humble 的 `ChainableControllerInterface` 也不行——它解决的是进程内交接和依赖管理，**依旧要同时 activate 两个**。合并是唯一能做到只激活一个、且偏移量与写硬件同拍的办法。
+
+#### 轨迹控制器怎么拿到同一份偏移
+`joint_trajectory_controller` 是上游包的类，不能改它的代码，所以本包继承出 `GravityJointTrajectoryController`，在它的 `update()` 外面加偏移。关键在于上游 controller **在保持位置时根本不写 command interface**，直接“读回来再加偏移”会把自己的输出当成输入，每拍累加一次，手臂直接飞走。因此顺序是：
+
+1. 先把上一拍的**裸** setpoint 写回 command interface；
+2. 调上游 `update()`（它不读 command interface，只可能覆写）；
+3. 再读回来——无论它写了没写，拿到的都是裸 setpoint；
+4. 加偏移写下去。
+
+因为步骤 2 的前提是“不读 command interface”，`open_loop_control: true` 会让它从 command interface 取初值，那时偏移已经在里面了——所以两者**同时开启会在 `on_configure` 直接报错**。激活后到第一个轨迹到达之前不写任何命令，保持 FPC→JTC 交接时的零位移行为不变。
 
 #### 重力表里有什么
 Controller 不解析 URDF、也不依赖任何动力学库。URDF 中与静态重力有关的只有两类信息，它们已在导出时蒸馏进 `gravity_table`（默认 `package://arm_gravity_compensation/config/gravity_table.yaml`，即仓库内受版本管理的那份；参数同时接受普通绝对路径和 `~`）：
@@ -274,20 +279,22 @@ Pinocchio 仍然用在**导出那一步**：标定包里用它读 `final.urdf`�
 #### 安全限制
 偏移量**不设人为上限**，与本包其他环节一致（见下面「安全切换」）。它是纯前馈量 $G(q_{target})/k_p$，输入只有已校验的重力表（质量有限非负）和归一化到 9.81 的重力方向，没有反馈回路，因此天然由标定时的负载定界；人为 clamp 只会在负载变重时悄悄削弱补偿。
 
-> 整条链路（本 controller → FPC → `G1TopicSystem`）都不读 URDF 关节限位。目标本就靠近机械限位时，重力偏移会把 `q_cmd` 推出限位外，关节会以 $k_p \times$ 超出量 顶在硬限位上（`arm_stiffness_scale=2` 时 $k_p$ 约 28.6 N·m/rad）。这是 MIT 阻抗控制的固有行为，不是本 controller 特有的。
+> 整条链路（FPC → `G1TopicSystem`）都不读 URDF 关节限位。目标本就靠近机械限位时，重力偏移会把 `q_cmd` 推出限位外，关节会以 $k_p \times$ 超出量 顶在硬限位上（`arm_stiffness_scale=2` 时 $k_p$ 约 28.6 N·m/rad）。这是 MIT 阻抗控制的固有行为，不是重力前馈特有的。
 
 激活时偏移从 0 线性升到全量（`offset_ramp_s`，默认 2 s）。肩部稳态偏移可达 0.4–0.8 rad（`arm_stiffness_scale=2` 时约 0.4 rad），若直接施加，命令会相对当前下垂位置阶跃两倍偏移量，产生接近电机上限的力矩冲击。
 
-其余保护：IMU 四元数模长偏离 1 超过 0.1 时保持上一个有效重力方向；没收到过 `~/target` 就不发任何命令；激活时任一 `kp` 非正则拒绝。
+其余保护：IMU 四元数模长偏离 1 超过 0.1 时保持上一个有效重力方向；从未收到过有效姿态时只写裸目标（不加偏移）；没收到过 `~/commands` 就不写任何命令；激活时任一 `kp` 非正则拒绝。
 
-> 本 controller 不读 `MotorState.mode`，无法感知电机已失去使能。电机不再跟随位置指令时只剩绕组阻尼，**手感是“紧”而不是“软”**——排查“手臂不听指令”时应先查 `/lowstate` 的 `mode`、`temperature` 和 `motorstate`，再查控制链路。字段含义与实测记录见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
+> FPC 不读 `MotorState.mode`，无法感知电机已失去使能。电机不再跟随位置指令时只剩绕组阻尼，**手感是“紧”而不是“软”**——排查“手臂不听指令”时应先查 `/lowstate` 的 `mode`、`temperature` 和 `motorstate`，再查控制链路。字段含义与实测记录见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
 
-`gravity_table` 不存在时 `on_configure` 会失败并进入 `finalized`（而不是静默地不做补偿）。首次标定完成并导出后，需要重新加载该 controller——重启控制栈或：
+`gravity_table` 非空但文件不存在时 `on_configure` 会失败并进入 `finalized`（而不是静默地不做补偿）；按默认配置，**没标定过就起不来 FPC**。首次标定完成并导出后，需要重新加载该 controller——重启控制栈或：
 
 ```bash
-ros2 control unload_controller arm_gravity_compensation
-ros2 control load_controller arm_gravity_compensation --set-state configure
+ros2 control unload_controller forward_position_controller
+ros2 control load_controller forward_position_controller --set-state configure
 ```
+
+临时不想要补偿时把 `compensation_scale` 设为 `0.0`；彻底关闭则把 `gravity_table` 置空，那 18 个额外 state interface 也不再声明。
 
 ### 关闭时的卸力斜坡
 

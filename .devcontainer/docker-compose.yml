@@ -1,5 +1,5 @@
 # 容器运行参数的唯一来源。.devcontainer/devcontainer.json 通过 dockerComposeFile
-# 引用本文件，build.sh / run.sh 也走它，所以参数只维护一份。
+# 引用本文件，dev.sh 也走它，所以参数只维护一份。
 services:
   dev:
     image: g1-humble:latest
@@ -10,11 +10,12 @@ services:
       # 下面那个 SOCKS 代理就连不上。必须显式共享宿主网络栈。
       network: host
       args:
-        # 由 build.sh 导出。本机直连不到 USTC，构建期必须借宿主的 SOCKS 代理。
-        # "Reopen in Container" 不会带这些变量，所以要先跑一次 build.sh 把镜像做好。
-        http_proxy: ${G1_BUILD_PROXY:-}
-        https_proxy: ${G1_BUILD_PROXY:-}
-        all_proxy: ${G1_BUILD_PROXY:-}
+        # 本机直连不到镜像站，构建期必须借宿主的 SOCKS 代理。默认值不能留空：
+        # VS Code 的 "Reopen/Rebuild in Container" 不经过 dev.sh，拿不到 G1_BUILD_PROXY，
+        # 留空就会无代理构建 → apt 索引全拉不到 → 几十个包一起 "Unable to locate"。
+        http_proxy: ${G1_BUILD_PROXY:-socks5h://127.0.0.1:1080}
+        https_proxy: ${G1_BUILD_PROXY:-socks5h://127.0.0.1:1080}
+        all_proxy: ${G1_BUILD_PROXY:-socks5h://127.0.0.1:1080}
         no_proxy: localhost,127.0.0.1
         USER_NAME: ${G1_USER_NAME:-unitree}
         USER_UID: ${G1_USER_UID:-1000}
@@ -52,9 +53,9 @@ services:
       - ..:/workspace
       - /dev:/dev
       # 重力标定结果 ~/.ros/arm_gravity_compensation/ 要持久化。
-      # 容器侧用户名跟宿主走（build.sh 传 $(id -un)），两边都用同一个变量。
+      # 容器侧用户名跟宿主走（dev.sh build 传 $(id -un)），两边都用同一个变量。
       - ${HOME:-/home/unitree}/.ros:/home/${G1_USER_NAME:-unitree}/.ros
     working_dir: /workspace
 
-    # devcontainer 需要容器常驻；run.sh 用 `compose run` 会覆盖掉这一条
+    # devcontainer 需要容器常驻；dev.sh 用 `compose run` 会覆盖掉这一条
     command: sleep infinity

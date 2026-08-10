@@ -1,6 +1,7 @@
 #include "unitree_g1_ros2_control/forward_position_controller.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -18,6 +19,7 @@ namespace unitree_g1_ros2_control {
 controller_interface::CallbackReturn ForwardPositionController::on_init() {
     try {
         auto_declare<std::vector<std::string>>("joints", {});
+        GravityFeedforward::declare_parameters(get_node());
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare parameters: %s", error.what());
         return CallbackReturn::ERROR;
@@ -42,6 +44,7 @@ ForwardPositionController::state_interface_configuration() const {
     for (const auto& joint_name : joint_names_) {
         configuration.names.push_back(joint_name + "/" + hardware_interface::HW_IF_POSITION);
     }
+    gravity_.append_state_interfaces(joint_names_, configuration.names);
     return configuration;
 }
 
@@ -59,6 +62,12 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_configur
         RCLCPP_ERROR(get_node()->get_logger(), "The joints parameter contains duplicate names");
         return CallbackReturn::ERROR;
     }
+    if (!gravity_.configure(get_node(), joint_names_)) return CallbackReturn::ERROR;
+
+    target_.assign(joint_names_.size(), 0.0);
+    command_.assign(joint_names_.size(), 0.0);
+    target_valid_ = false;
+
     const auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
     command_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>(
         "~/commands", command_qos,
@@ -74,64 +83,70 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_configur
 
 ForwardPositionController::CallbackReturn ForwardPositionController::on_activate(
     const rclcpp_lifecycle::State&) {
-    if (command_interfaces_.size() != joint_names_.size() ||
-        state_interfaces_.size() != joint_names_.size()) {
+    const std::size_t expected_states = joint_names_.size() + gravity_.state_interface_count();
+    if (command_interfaces_.size() != joint_names_.size() || state_interfaces_.size() != expected_states) {
         RCLCPP_ERROR(
-            get_node()->get_logger(), "Expected %zu command and state interfaces",
-            joint_names_.size());
+            get_node()->get_logger(), "Expected %zu command and %zu state interfaces",
+            joint_names_.size(), expected_states);
         return CallbackReturn::ERROR;
     }
-
-    std::vector<double> current_positions;
-    if (!copy_current_state(current_positions)) {
-        RCLCPP_ERROR(get_node()->get_logger(), "Cannot activate with non-finite joint state");
+    if (!gravity_.activate(state_interfaces_, get_node()->get_logger())) {
         return CallbackReturn::ERROR;
     }
-    for (std::size_t index = 0; index < current_positions.size(); ++index) {
-        command_interfaces_[index].set_value(current_positions[index]);
+    // Start from where the joints physically are, so activation cannot jump.
+    for (std::size_t index = 0; index < joint_names_.size(); ++index) {
+        const double position = state_interfaces_[index].get_value();
+        if (!std::isfinite(position)) {
+            RCLCPP_ERROR(get_node()->get_logger(), "Cannot activate with non-finite joint state");
+            return CallbackReturn::ERROR;
+        }
+        command_interfaces_[index].set_value(position);
     }
     processed_sequence_ = 0;
+    target_valid_ = false;
     command_buffer_.writeFromNonRT(std::shared_ptr<CommandSample>());
     return CallbackReturn::SUCCESS;
 }
 
 ForwardPositionController::CallbackReturn ForwardPositionController::on_deactivate(
     const rclcpp_lifecycle::State&) {
+    target_valid_ = false;
+    gravity_.reset();
     command_buffer_.writeFromNonRT(std::shared_ptr<CommandSample>());
     return CallbackReturn::SUCCESS;
 }
 
 controller_interface::return_type ForwardPositionController::update(
-    const rclcpp::Time&, const rclcpp::Duration&) {
-    const auto command = *command_buffer_.readFromRT();
-    if (!command || command->sequence == processed_sequence_) {
-        return controller_interface::return_type::OK;
+    const rclcpp::Time&, const rclcpp::Duration& period) {
+    const auto sample = *command_buffer_.readFromRT();
+    if (sample && sample->sequence != processed_sequence_) {
+        processed_sequence_ = sample->sequence;
+        if (sample->positions.size() != command_interfaces_.size() ||
+            !std::all_of(sample->positions.begin(), sample->positions.end(),
+                         [](double value) { return std::isfinite(value); })) {
+            RCLCPP_WARN(
+                get_node()->get_logger(),
+                "Discarding invalid position command: expected %zu finite values",
+                command_interfaces_.size());
+        } else {
+            target_ = sample->positions;
+            target_valid_ = true;
+        }
     }
-    processed_sequence_ = command->sequence;
-    if (command->positions.size() != command_interfaces_.size() ||
-        !std::all_of(command->positions.begin(), command->positions.end(),
-                     [](double value) { return std::isfinite(value); })) {
-        RCLCPP_WARN(
-            get_node()->get_logger(), "Discarding invalid position command: expected %zu finite values",
-            command_interfaces_.size());
-        return controller_interface::return_type::OK;
-    }
+    if (!target_valid_) return controller_interface::return_type::OK;
 
-    for (std::size_t index = 0; index < command->positions.size(); ++index) {
-        command_interfaces_[index].set_value(command->positions[index]);
-    }
+    // Rewritten every cycle rather than only on a new target: the offset has to
+    // keep following the torso attitude and the activation ramp even while the
+    // target stands still, and dropping the offset has to take effect at once
+    // instead of waiting for the next setpoint.
+    write_command(gravity_.apply(state_interfaces_, period, target_, command_) ? command_ : target_);
     return controller_interface::return_type::OK;
 }
 
-bool ForwardPositionController::copy_current_state(std::vector<double>& positions) const {
-    positions.clear();
-    positions.reserve(state_interfaces_.size());
-    for (const auto& state_interface : state_interfaces_) {
-        const double value = state_interface.get_value();
-        if (!std::isfinite(value)) return false;
-        positions.push_back(value);
+void ForwardPositionController::write_command(const std::vector<double>& positions) {
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+        command_interfaces_[index].set_value(positions[index]);
     }
-    return true;
 }
 
 }  // namespace unitree_g1_ros2_control

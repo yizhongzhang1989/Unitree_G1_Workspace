@@ -280,10 +280,12 @@ void NativeBridgeNode::report_statistics()
   for (int channel : channel_ids_) {
     RCLCPP_INFO(
       get_logger(),
-      "native ch%d RX packets=%lu frames=%lu TX packets=%lu frames=%lu queue_drops=%lu",
+      "native ch%d RX packets=%lu frames=%lu overflows=%lu TX packets=%lu frames=%lu "
+      "queue_drops=%lu",
       channel,
       static_cast<unsigned long>(stats.rx_packets[channel]),
       static_cast<unsigned long>(stats.rx_frames[channel]),
+      static_cast<unsigned long>(stats.rx_overflows[channel]),
       static_cast<unsigned long>(stats.tx_packets[channel]),
       static_cast<unsigned long>(stats.tx_frames[channel]),
       static_cast<unsigned long>(stats.rx_queue_drops[channel]));
@@ -307,9 +309,12 @@ void NativeBridgeNode::shutdown_transport()
     transport_->close();
     for (int channel : channel_ids_) {
       RCLCPP_INFO(
-        get_logger(), "native ch%d final RX frames=%lu TX frames=%lu drops=%lu",
+        get_logger(),
+        "native ch%d final RX packets=%lu frames=%lu overflows=%lu TX frames=%lu drops=%lu",
         channel,
+        static_cast<unsigned long>(stats.rx_packets[channel]),
         static_cast<unsigned long>(stats.rx_frames[channel]),
+        static_cast<unsigned long>(stats.rx_overflows[channel]),
         static_cast<unsigned long>(stats.tx_frames[channel]),
         static_cast<unsigned long>(stats.rx_queue_drops[channel]));
     }

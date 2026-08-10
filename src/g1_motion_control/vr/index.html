@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quest → Robot Bridge</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      font: 15px/1.5 system-ui, sans-serif;
+      background: #14161a;
+      color: #e6e6e6;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 0 0 12px;
+    }
+
+    button {
+      font-size: 22px;
+      padding: 14px 28px;
+      border: 0;
+      border-radius: 10px;
+      background: #2f6feb;
+      color: #fff;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background: #3a3f47;
+      color: #888;
+      cursor: not-allowed;
+    }
+
+    #status {
+      margin: 12px 0;
+      color: #9fb4d0;
+    }
+
+    pre {
+      margin-top: 16px;
+      padding: 12px;
+      background: #0d0f12;
+      border-radius: 8px;
+      max-height: 55vh;
+      overflow: auto;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+
+    canvas {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Quest → Robot Bridge</h1>
+  <p id="status">初始化中…</p>
+  <button id="enterVR" disabled>Enter VR</button>
+  <p style="color:#8b95a3">本页是<b>采集端</b>，需在头显浏览器里打开并进入 VR。
+    要在电脑上查看数据请打开 <a href="/monitor" style="color:#6aa9ff">/monitor</a>。</p>
+  <pre id="log">等待数据…</pre>
+  <canvas id="gl"></canvas>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const btn = document.getElementById('enterVR');
+    const token = new URLSearchParams(location.search).get('token');
+
+    const setStatus = (s) => { statusEl.textContent = s; };
+
+    /* ---------- WebSocket 上行链路 ---------- */
+    let ws = null;
+    let retry = null;
+
+    function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+      ws = new WebSocket(`${proto}://${location.host}/ws/device${qs}`);
+      ws.onopen = () => setStatus('WebSocket 已连接。戴上头显后点 Enter VR。');
+      ws.onclose = () => {
+        setStatus('WebSocket 断开，1s 后重连…');
+        clearTimeout(retry);
+        retry = setTimeout(connectWS, 1000);
+      };
+      ws.onmessage = (ev) => {
+        // 下行：机器人端可以回送震动反馈
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'haptic') pulse(msg.hand, msg.intensity, msg.duration);
+        } catch (e) { /* 忽略非法下行消息 */ }
+      };
+    }
+    connectWS();
+
+    function send(obj) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (ws.bufferedAmount > 1 << 18) return;   // 背压保护，丢弃过期帧
+      ws.send(JSON.stringify(obj));
+    }
+
+    /* ---------- 震动反馈 ---------- */
+    const actuators = { left: null, right: null };
+    function pulse(hand, intensity = 0.6, duration = 80) {
+      const a = actuators[hand];
+      if (a && a.pulse) a.pulse(Math.min(Math.max(intensity, 0), 1), duration);
+    }
+
+    /* ---------- 极简 WebGL 可视化（地面网格 + 手柄线框） ---------- */
+    const VS = `
+      attribute vec3 aPos;
+      uniform mat4 uMVP;
+      void main() { gl_Position = uMVP * vec4(aPos, 1.0); }`;
+    const FS = `
+      precision mediump float;
+      uniform vec3 uColor;
+      void main() { gl_FragColor = vec4(uColor, 1.0); }`;
+
+    let prog, aPos, uMVP, uColor;
+    let gridBuf, gridCount, ctrlBuf, ctrlCount;
+
+    function initGL() {
+      const compile = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+      };
+      prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+      aPos = gl.getAttribLocation(prog, 'aPos');
+      uMVP = gl.getUniformLocation(prog, 'uMVP');
+      uColor = gl.getUniformLocation(prog, 'uColor');
+
+      // 地面网格：±3m，每 0.25m 一条
+      const g = [];
+      for (let i = -12; i <= 12; i++) {
+        const t = i * 0.25;
+        g.push(-3, 0, t, 3, 0, t, t, 0, -3, t, 0, 3);
+      }
+      gridBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(g), gl.STATIC_DRAW);
+      gridCount = g.length / 3;
+
+      // 手柄：6cm 立方体线框 + 一根指向 -Z 的 15cm 朝向线
+      const h = 0.03;
+      const v = [[-h, -h, -h], [h, -h, -h], [h, h, -h], [-h, h, -h],
+                 [-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]];
+      const e = [0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7];
+      const c = [];
+      for (const i of e) c.push(...v[i]);
+      c.push(0, 0, 0, 0, 0, -0.15);
+      ctrlBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, ctrlBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(c), gl.STATIC_DRAW);
+      ctrlCount = c.length / 3;
+
+      gl.enable(gl.DEPTH_TEST);
+    }
+
+    // 列主序 4x4 矩阵相乘
+    function mul(a, b) {
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) {
+        for (let r = 0; r < 4; r++) {
+          o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1]
+            + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+        }
+      }
+      return o;
+    }
+
+    function draw(buf, count, mvp, color) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.uniformMatrix4fv(uMVP, false, mvp);
+      gl.uniform3fv(uColor, color);
+      gl.drawArrays(gl.LINES, 0, count);
+    }
+
+    function render(frame, viewerPose) {
+      const layer = session.renderState.baseLayer;
+      if (!layer || !gl) return;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+      gl.clearColor(0.04, 0.05, 0.07, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (!viewerPose || !prog) return;
+
+      gl.useProgram(prog);
+      for (const view of viewerPose.views) {
+        const vp = layer.getViewport(view);
+        gl.viewport(vp.x, vp.y, vp.width, vp.height);
+        const viewProj = mul(view.projectionMatrix, view.transform.inverse.matrix);
+        draw(gridBuf, gridCount, viewProj, [0.22, 0.32, 0.45]);
+        for (const src of session.inputSources) {
+          const p = src.gripSpace ? frame.getPose(src.gripSpace, refSpace) : null;
+          if (!p) continue;
+          const color = src.handedness === 'left' ? [0.3, 0.8, 1.0] : [1.0, 0.55, 0.25];
+          draw(ctrlBuf, ctrlCount, mul(viewProj, p.transform.matrix), color);
+        }
+      }
+    }
+
+    /* ---------- WebXR ---------- */
+    let session = null, gl = null, refSpace = null, seq = 0, lastLog = 0;
+
+    function poseToObj(p) {
+      if (!p) return null;
+      const t = p.transform;
+      return {
+        position: [t.position.x, t.position.y, t.position.z],
+        emulated_position: !!p.emulatedPosition,
+        orientation: [t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w],
+      };
+    }
+
+    function inputToObj(src, frame) {
+      const gp = src.gamepad;
+      const out = {
+        grip: poseToObj(src.gripSpace ? frame.getPose(src.gripSpace, refSpace) : null),
+      };
+      if (gp) {
+        if (gp.hapticActuators && gp.hapticActuators.length) {
+          actuators[src.handedness] = gp.hapticActuators[0];
+        }
+        const b = (i) => gp.buttons[i] || { pressed: false, touched: false, value: 0 };
+        // xr-standard 映射，Quest Touch 与 PICO 手柄索引一致
+        out.buttons = {
+          trigger: b(0).value,
+          squeeze: b(1).value,
+          a_x: b(4).pressed,      // 右手 A / 左手 X
+          b_y: b(5).pressed,      // 右手 B / 左手 Y
+        };
+        out.thumbstick = [gp.axes[2] ?? 0, gp.axes[3] ?? 0];
+      }
+      return out;
+    }
+
+    function onFrame(time, frame) {
+      session.requestAnimationFrame(onFrame);
+
+      const viewerPose = frame.getViewerPose(refSpace);
+      render(frame, viewerPose);
+
+      const payload = {
+        seq: seq++,
+        session_active: true,
+        left: null,
+        right: null,
+      };
+      for (const src of session.inputSources) {
+        if (src.handedness === 'left' || src.handedness === 'right') {
+          payload[src.handedness] = inputToObj(src, frame);
+        }
+      }
+      send(payload);
+
+      if (time - lastLog > 250) {
+        lastLog = time;
+        logEl.textContent = JSON.stringify(
+          { seq: payload.seq, left: payload.left?.grip?.position, right: payload.right?.grip?.position },
+          null, 2);
+      }
+    }
+
+    btn.onclick = async () => {
+      try {
+        const canvas = document.getElementById('gl');
+        gl = canvas.getContext('webgl2', { xrCompatible: true }) || canvas.getContext('webgl', { xrCompatible: true });
+        session = await navigator.xr.requestSession('immersive-vr', {
+          optionalFeatures: ['local-floor', 'bounded-floor'],
+        });
+        await gl.makeXRCompatible();
+        session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+        refSpace = await session.requestReferenceSpace('local-floor')
+          .catch(() => session.requestReferenceSpace('local'));
+        initGL();
+        session.addEventListener('end', () => {
+          session = null;
+          send({ seq: seq++, session_active: false, left: null, right: null });
+          setStatus('VR 会话已结束。');
+        });
+        setStatus('VR 会话运行中，正在推送位姿数据。');
+        session.requestAnimationFrame(onFrame);
+      } catch (e) {
+        setStatus('启动 VR 失败：' + e.message);
+      }
+    };
+
+    (async () => {
+      if (!navigator.xr) {
+        setStatus('navigator.xr 不可用：页面必须通过 HTTPS 或 http://localhost 访问（见 server.py 顶部说明）。');
+        return;
+      }
+      const ok = await navigator.xr.isSessionSupported('immersive-vr');
+      btn.disabled = !ok;
+      if (!ok) setStatus('当前浏览器不支持 immersive-vr。');
+    })();
+  </script>
+</body>
+
+</html>

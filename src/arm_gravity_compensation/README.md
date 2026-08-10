@@ -156,7 +156,7 @@ $$\tau_\uparrow = G(q) + f,\qquad \tau_\downarrow = G(q) - f$$
 标定结果放在包内 `config/`，**纳入版本管理**，三个文件都在点击“导出”时原子写入：
 - `config/parameters.json`：源 URDF 参数、当前逐 link 标定值、采点和每轮迭代记录。
 - `config/calibrated.urdf`：与源 `final.urdf` 保持相同 link/joint/mimic 结构，只替换标定后的 `mass` 和六个 inertia 分量。
-- `config/gravity_table.yaml`：给运行时用的**归并刚体链**，每侧 7 个体的 `axis / origin_xyz / origin_rotation / mass / com` 平铺数组，另带 `imu_to_torso`。它按 ROS 2 参数文件格式书写，由 `unitree_g1_controllers/ArmGravityCompensation` 通过 `package://arm_gravity_compensation/config/gravity_table.yaml` 读取。标定出的力矩偏置不在其中（只留在 `parameters.json`），原因见 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
+- `config/gravity_table.yaml`：给运行时用的**归并刚体链**，每侧 7 个体的 `axis / origin_xyz / origin_rotation / mass / com` 平铺数组，另带 `imu_to_torso`。它按 ROS 2 参数文件格式书写，由 `forward_position_controller` 的 `gravity_table` 参数通过 `package://arm_gravity_compensation/config/gravity_table.yaml` 读取。标定出的力矩偏置不在其中（只留在 `parameters.json`），原因见 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
 
 节点拿到的是安装后的 share 路径，而 `--symlink-install` 使它经 `build/` 指回源码树，写入前的 `Path.resolve()` 会跟随这条链，所以导出直接落在 `src/arm_gravity_compensation/config/` 上，符号链接也不会被替换。三个路径均可用 `parameter_file` / `calibrated_urdf` / `gravity_table` 参数覆盖；重力表的顶层键名取自 `gravity_controller_name`（默认 `arm_gravity_compensation`）。
 

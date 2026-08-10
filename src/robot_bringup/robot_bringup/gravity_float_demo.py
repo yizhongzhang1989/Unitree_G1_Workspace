@@ -37,7 +37,7 @@ class GravityFloatDemo(Node):
         self._floating = [(self._joints.index(name), name) for name in floating]
 
         target_topic = self.declare_parameter(
-            "target_topic", "/arm_gravity_compensation/target"
+            "target_topic", "/forward_position_controller/commands"
         ).get_parameter_value().string_value
         rate = self.declare_parameter(
             "publish_rate_hz", 100.0).get_parameter_value().double_value

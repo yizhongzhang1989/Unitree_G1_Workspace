@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>g1_motion_control</name>
+  <version>0.1.0</version>
+  <description>
+    G1 整机 31 轴运动控制层。位于 forward_position_controller 之上：输入
+    vx/vy/w/h、两个末端位姿和两个夹爪角度，在同一个 50 Hz 定时器里算齐 31 轴位置
+    目标（下肢 15 轴走 ONNX 策略，上肢 14 轴走双臂 IK，夹爪 2 轴透传），
+    由 forward_position_controller 带重力补偿写到硬件。内附 VR / 键盘两套遥操。
+  </description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>unitree_hg</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- 双臂 IK 的运动学后端（.devcontainer/Dockerfile 里的 ros-humble-pinocchio）。 -->
+  <exec_depend>pinocchio</exec_depend>
+  <!-- vr_teleop 内嵌的 WebXR 服务用。 -->
+  <exec_depend>python3-aiohttp</exec_depend>
+  <!-- make_vr_cert 签局域网自签证书用（WebXR 要求安全上下文）。 -->
+  <exec_depend>python3-cryptography</exec_depend>
+  <!-- onnxruntime 没有 rosdep key，由 .devcontainer/Dockerfile 的 pip3 install 提供。 -->
+
+  <exec_depend>unitree_g1_ros2_control</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

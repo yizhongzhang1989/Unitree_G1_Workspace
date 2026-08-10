@@ -2,6 +2,8 @@
     // 本工作区只在 .devcontainer 里开发，所有路径按容器内的布局写。
     "ROS2.distro": "humble",
     "python.defaultInterpreterPath": "/usr/bin/python3",
+    // pinocchio 是没有 .pyi 的 Boost.Python 扩展，靠 typings/ 下的占位 stub 消除假阳性。
+    "python.analysis.stubPath": "typings",
     "python.analysis.extraPaths": [
         "/opt/ros/humble/lib/python3.10/site-packages",
 

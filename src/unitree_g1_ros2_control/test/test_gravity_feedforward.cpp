@@ -4,16 +4,11 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
-#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "hardware_interface/handle.hpp"
-#include "hardware_interface/loaned_state_interface.hpp"
-#include "rclcpp/executors/single_threaded_executor.hpp"
-#include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
-#include "unitree_g1_ros2_control/arm_gravity_compensation_controller.hpp"
+#include "unitree_g1_ros2_control/gravity_feedforward.hpp"
 
 namespace unitree_g1_ros2_control {
 namespace {
@@ -81,87 +76,28 @@ std::string write_single_body_table() {
     return write_table({kMass, 0, 0, 0, 0, 0, 0}, {kLever, 0, 0, 0, 0, 0, 0}, {});
 }
 
-class ArmGravityCompensationControllerTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        if (!rclcpp::ok()) {
-            int argc = 0;
-            char** argv = nullptr;
-            rclcpp::init(argc, argv);
-        }
+/// Load the table, take one upright IMU sample and apply the offsets at full
+/// gain, exactly the way the controller drives it.
+std::vector<double> offsets(const std::string& table, const std::vector<double>& target) {
+    GravityFeedforward gravity;
+    gravity.load_gravity_table(table, kJointNames);
+    // Torso upright: the fused attitude is identity, so gravity points at -Z.
+    EXPECT_TRUE(gravity.update_torso_gravity({0.0, 0.0, 0.0, 1.0}, 0.002));
+
+    const std::vector<double> stiffness(
+        GravityFeedforward::kSideCount * GravityFeedforward::kArmJointCount, kStiffness);
+    std::vector<double> command = target;
+    for (std::size_t side = 0; side < GravityFeedforward::kSideCount; ++side) {
+        gravity.arm_offsets(side, target, 1.0, stiffness, command);
     }
-    void TearDown() override {
-        if (rclcpp::ok()) rclcpp::shutdown();
-    }
+    return command;
+}
 
-    /// Configure, activate and spin the controller until it publishes once.
-    std::vector<double> run(const std::string& table, const std::vector<double>& target_values) {
-        // Torso upright: the fused attitude is identity, so gravity points at -Z.
-        imu_ = {0.0, 0.0, 0.0, 1.0};
-        gains_.assign(14, kStiffness);
-        std::vector<hardware_interface::StateInterface> interfaces;
-        const std::vector<std::string> names = {
-            "orientation.x", "orientation.y", "orientation.z", "orientation.w",
-        };
-        for (std::size_t index = 0; index < names.size(); ++index) {
-            interfaces.emplace_back("torso_imu", names[index], &imu_[index]);
-        }
-        // The hardware publishes the stiffness it really applies; the controller
-        // must use those values instead of a duplicated parameter.
-        for (std::size_t index = 0; index < gains_.size(); ++index) {
-            interfaces.emplace_back(kJointNames[index], "kp", &gains_[index]);
-        }
-        std::vector<hardware_interface::LoanedStateInterface> loaned;
-        for (auto& interface : interfaces) loaned.emplace_back(interface);
-
-        ArmGravityCompensationController controller;
-        EXPECT_EQ(controller.init("arm_gravity"), controller_interface::return_type::OK);
-        controller.get_node()->set_parameter({"joints", kJointNames});
-        controller.get_node()->set_parameter({"gravity_table", table});
-        controller.get_node()->set_parameter({"command_topic", "/test_commands"});
-        controller.get_node()->set_parameter({"offset_ramp_s", 0.0});
-        EXPECT_EQ(controller.on_configure(rclcpp_lifecycle::State()),
-                  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS);
-        controller.assign_interfaces({}, std::move(loaned));
-        EXPECT_EQ(controller.on_activate(rclcpp_lifecycle::State()),
-                  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS);
-
-        rclcpp::executors::SingleThreadedExecutor executor;
-        executor.add_node(controller.get_node()->get_node_base_interface());
-        auto listener = std::make_shared<rclcpp::Node>("listener");
-        std_msgs::msg::Float64MultiArray received;
-        bool got = false;
-        auto subscription = listener->create_subscription<std_msgs::msg::Float64MultiArray>(
-            "/test_commands", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
-            [&](std_msgs::msg::Float64MultiArray::SharedPtr message) {
-                received = *message;
-                got = true;
-            });
-        executor.add_node(listener);
-        auto publisher = listener->create_publisher<std_msgs::msg::Float64MultiArray>(
-            "/arm_gravity/target", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort());
-
-        std_msgs::msg::Float64MultiArray target;
-        target.data = target_values;
-        for (int attempt = 0; attempt < 60 && !got; ++attempt) {
-            publisher->publish(target);
-            executor.spin_some();
-            controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
-            executor.spin_some();
-        }
-        EXPECT_TRUE(got);
-        return received.data;
-    }
-
-    std::vector<double> imu_;
-    std::vector<double> gains_;
-};
-
-TEST_F(ArmGravityCompensationControllerTest, offsets_arm_targets_and_passes_others_through) {
+TEST(GravityFeedforwardTest, offsets_arm_targets_and_passes_others_through) {
     const std::string table = write_single_body_table();
     std::vector<double> target(kJointNames.size(), 0.0);
     target.back() = 0.25;  // waist_yaw_joint must be forwarded untouched
-    const std::vector<double> command = run(table, target);
+    const std::vector<double> command = offsets(table, target);
     ASSERT_EQ(command.size(), kJointNames.size());
 
     const double expected = -kMass * kGravity * kLever / kStiffness;
@@ -172,14 +108,12 @@ TEST_F(ArmGravityCompensationControllerTest, offsets_arm_targets_and_passes_othe
         EXPECT_NEAR(command[index + 7], 0.0, 1e-9) << "right index " << index;
     }
     EXPECT_NEAR(command.back(), 0.25, 1e-12);
-    // Ramping in over a finite time must never overshoot the steady offset.
-    EXPECT_LE(std::abs(command[0]), std::abs(expected) + 1e-9);
     std::remove(table.c_str());
 }
 
 /// A single body cannot catch an error in how a joint accumulates everything
 /// distal to it, which is the part that actually walks the chain.
-TEST_F(ArmGravityCompensationControllerTest, inner_joint_carries_every_outer_body) {
+TEST(GravityFeedforwardTest, inner_joint_carries_every_outer_body) {
     constexpr double kMassA = 0.3;
     constexpr double kComA = 0.2;
     constexpr double kMassB = 0.5;
@@ -188,7 +122,8 @@ TEST_F(ArmGravityCompensationControllerTest, inner_joint_carries_every_outer_bod
     const std::string table = write_table(
         {kMassA, kMassB, 0, 0, 0, 0, 0}, {kComA, kComB, 0, 0, 0, 0, 0},
         {0.0, kLinkB, 0, 0, 0, 0, 0});
-    const std::vector<double> command = run(table, std::vector<double>(kJointNames.size(), 0.0));
+    const std::vector<double> command =
+        offsets(table, std::vector<double>(kJointNames.size(), 0.0));
     ASSERT_EQ(command.size(), kJointNames.size());
 
     // Joint 1 only carries body B; joint 0 carries both, with body B's mass
@@ -205,6 +140,50 @@ TEST_F(ArmGravityCompensationControllerTest, inner_joint_carries_every_outer_bod
     }
     std::remove(table.c_str());
 }
+
+/// The stiffness the controller reads off the hardware is indexed by this list,
+/// so a wrong order would scale every joint by another joint's gain.
+TEST(GravityFeedforwardTest, reports_the_command_slots_its_stiffness_belongs_to) {
+    const std::string table = write_single_body_table();
+    GravityFeedforward gravity;
+    gravity.load_gravity_table(table, kJointNames);
+
+    std::vector<std::size_t> expected(2 * GravityFeedforward::kArmJointCount);
+    for (std::size_t index = 0; index < expected.size(); ++index) expected[index] = index;
+    EXPECT_TRUE(gravity.loaded());
+    EXPECT_EQ(gravity.compensated_indices(), expected);
+    std::remove(table.c_str());
+}
+
+TEST(GravityFeedforwardTest, rejects_a_table_naming_an_uncommanded_joint) {
+    const std::string table = write_single_body_table();
+    GravityFeedforward gravity;
+
+    EXPECT_THROW(
+        gravity.load_gravity_table(table, {"waist_yaw_joint"}), std::runtime_error);
+    EXPECT_FALSE(gravity.loaded());
+    std::remove(table.c_str());
+}
+
+/// Without an attitude there is no gravity direction, so the caller has to be
+/// told to fall back to the bare target instead of applying a stale offset.
+TEST(GravityFeedforwardTest, refuses_a_non_unit_quaternion_until_one_arrives) {
+    const std::string table = write_single_body_table();
+    GravityFeedforward gravity;
+    gravity.load_gravity_table(table, kJointNames);
+
+    EXPECT_FALSE(gravity.update_torso_gravity({0.0, 0.0, 0.0, 0.0}, 0.002));
+    EXPECT_FALSE(gravity.gravity_valid());
+
+    EXPECT_TRUE(gravity.update_torso_gravity({0.0, 0.0, 0.0, 1.0}, 0.002));
+    // A later bad sample keeps the last good direction rather than dropping it.
+    EXPECT_TRUE(gravity.update_torso_gravity({std::nan(""), 0.0, 0.0, 1.0}, 0.002));
+    gravity.reset();
+    EXPECT_FALSE(gravity.gravity_valid());
+    std::remove(table.c_str());
+}
+
+
 
 }  // namespace
 }  // namespace unitree_g1_ros2_control

@@ -9,7 +9,7 @@
 | `end_effectors_dual_bus.launch.py` | `all_data topology:=dual` 使用的底层双通道末端拓扑 |
 | `end_effectors_dashboard.launch.py` | 仅端口 `8770` 的末端联调网页；不启动数据节点 |
 | `whole_body_dashboard.launch.py` | 仅端口 `8200` 的 controller 测试网页；连接已有 manager，不启动数据或控制节点 |
-| `gravity_float_demo.launch.py` | 激活重力补偿 + FPC，让双臂进入可徒手推动的失重状态；连接已有 manager |
+| `gravity_float_demo.launch.py` | 激活 FPC（内含重力补偿），让双臂进入可徒手推动的失重状态；连接已有 manager |
 
 末端设备实现集中在 `robot_bringup/end_effectors/`。`unitree_g1_description` 只提供模型资源；`unitree_g1_ros2_control` 提供真实的 ros2_control `SystemInterface`、C++ controller 与 broadcaster。
 
@@ -178,9 +178,9 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 
 第一条命令启动唯一 `/controller_manager`，将 `/lowstate`、双 Gloria-M、双 KWR57 和 pelvis IMU 接入 `hardware_interface`，发布 `/robot_description`、TF 与统一 `/joint_states`；第二条命令只在 `http://<机器人 IP>:8200` 提供网页。`forward_position_controller`（FPC）和 `joint_trajectory_controller`（JTC）均已加载但保持 `inactive`，且 claim 相同的 29 个 G1 关节和两只 Gloria，因此只能由 controller_manager 激活其中一个。夹爪采用独立、更宽的 `0.75 s` feedback timeout，单侧 stale 只停止该侧，不切断本体 LowCmd。
 
-Dashboard wrapper 只把切换超时放宽到 30 秒并做切换后状态校验，并为不 claim 任何接口的重力补偿控制器补全关节列表，不代理任何 controller-manager 服务。Web 快照还会按 URDF joint limit 一次性重算 Gloria-M 的受限分段 mimic FK，并隐藏 `internal_*` 虚拟 link/joint；浏览器中的夹爪部分只显示物理连杆和两个 `eccentric_joint`，不改变 `/joint_states`、TF 或 ros2_control 控制链。Engage/Disengage 的 MotionSwitcher、夹爪生命周期、状态 freshness 和回滚由 C++ 硬件插件执行，详见 [`unitree_g1_ros2_control/README.md`](../unitree_g1_ros2_control/README.md)。实机 Disengage 后仍建议独立确认 controller 为 `inactive`、命令接口为 `unclaimed`、两只夹爪已失能且 MotionSwitcher 模式已恢复。
+Dashboard wrapper 只把切换超时放宽到 30 秒并做切换后状态校验，不代理任何 controller-manager 服务。Web 快照还会按 URDF joint limit 一次性重算 Gloria-M 的受限分段 mimic FK，并隐藏 `internal_*` 虚拟 link/joint；浏览器中的夹爪部分只显示物理连杆和两个 `eccentric_joint`，不改变 `/joint_states`、TF 或 ros2_control 控制链。Engage/Disengage 的 MotionSwitcher、夹爪生命周期、状态 freshness 和回滚由 C++ 硬件插件执行，详见 [`unitree_g1_ros2_control/README.md`](../unitree_g1_ros2_control/README.md)。实机 Disengage 后仍建议独立确认 controller 为 `inactive`、命令接口为 `unclaimed`、两只夹爪已失能且 MotionSwitcher 模式已恢复。
 
-`arm_gravity_compensation` 也出现在控制器列表里，按前向位置控制器的方式驱动：它不 claim 任何 command interface，wrapper 因此只给它填关节列表（取自它自己的 `joints` 参数）而不填 command interface，否则页面会把它要喂的 FPC 停掉。Engage 它会先把它 `command_topic` 指向的 FPC 一起拉起来，setpoint 发到 `<name>/target`；直接 Engage 那个 FPC 则会先停掉它，两者不会同时往一个命令话题发。
+手臂重力补偿已内置在 FPC 里，不再是列表里的第三个 controller，页面上只看得到 FPC 和 JTC 两个互斥项。临时不想要补偿就把 `compensation_scale` 设为 `0.0`。
 
 `robot_test_dashboard` 不是 controller 实现。它只是通用测试客户端：对 JTC 生成单点 `JointTrajectory`，对 FPC 生成限速后的 `Float64MultiArray`。真正的 JTC 是 ROS 2 `joint_trajectory_controller` 包提供的标准插件；本工作区只在 `unitree_g1_ros2_control` 中保存其实例配置。IK 也不属于 Dashboard 或硬件插件，它由 `ikt_core` 求解、由 Pose Commander 选择目标并调用 FPC/JTC。
 
@@ -196,14 +196,13 @@ ros2 launch robot_bringup ikt_pose_commander.launch.py
 
 该入口连接两个真实 ros2_control controller：自定义 `forward_position_controller`（FPC）用于 **Track robot** 连续跟踪，上游标准 `joint_trajectory_controller`（JTC）用于 **Snap robot**、Disable 后持位和 `return_to_start`。两者配置完全相同的 31 个 position command interface；Commander 通过 `/controller_manager/switch_controller` 一启一停，manager 的资源 claim 保证它们不能同时 active。JTC 和 FPC 最终都只写 `G1TopicSystem` 的 position command interface，实际 G1/Gloria MIT 命令仍由现有硬件插件生成，没有第二条底层下发通道。
 
-`command_topic` 决定 FPC 那条全量位置流发给谁，同时决定 Engage 时要额外激活哪个 controller（话题的属主）：
+FPC 那条全量位置流直接发到 `/forward_position_controller/commands`。它自己把标定后的手臂重力偏移加在每个 setpoint 上（每拍重算，跟随躯干姿态），手臂因此停在指令位姿上而不是沉在它下方。不想要补偿时：
 
-| `command_topic` | 效果 |
-|---|---|
-| `/arm_gravity_compensation/target`（默认） | 经重力补偿 controller：每个 setpoint 加上标定后的手臂重力偏移再转发给 FPC，手臂停在指令位姿上 |
-| `/forward_position_controller/commands` | 直接下发 FPC，不做补偿，手臂稳定沉在每个指令位姿下方 |
+```bash
+ros2 param set /forward_position_controller compensation_scale 0.0
+```
 
-重力补偿 controller 不 claim 任何 command interface，因此与 FPC 同时 active。Engage 时先切 FPC，再在发第一帧 setpoint 之前激活它——它的 `offset_ramp_s` 从激活时刻起算，间隔太久会把整个重力偏移一次性加满。激活前会读它的 `command_topic` 参数确认确实转发给本 Commander 的 FPC；不匹配或激活失败就回滚 FPC 并拒绝 Engage，不会出现「FPC 已 active 占着硬件但没人转发、机器人一动不动」。Stop/Disengage 在同一次 `switch_controller` 里把 FPC、JTC 和它一起停掉。
+Stop/Disengage 在同一次 `switch_controller` 里把 FPC 和 JTC 一起停掉。
 
 FPC 使用一个 200 Hz control timer 完成“读取最新 Cartesian 目标、必要时求解 IK、更新全关节 target 缓存并发布”的完整周期。缓存按 controller 的 31 个关节名建立，首次缺失项才从实测位置初始化；每次 IK 结果只覆盖本次动态 active-joint 区间，区间外关节继续使用上次设定的 target，而不是用实时反馈回填。FPC 和 JTC 都按各自关节顺序从同一缓存生成全量命令，因此切换控制手或 controller 后仍保留另一只手及其余关节的设定目标。浏览器只允许一个目标请求在途，等待槽只保留最新姿态；每个到达 Dashboard 的 `/api/target` 会立即发布一次 ROS 目标，100 Hz 定时器只负责保活。Commander 目标订阅和 FPC 命令链均使用 `KEEP_LAST(1)`，不会在恢复后回放拖动期间的旧 setpoint。
 
@@ -213,7 +212,7 @@ G1 入口的默认跟踪参数为 `control_rate_hz=200`、`stream_rate_hz=100`�
 
 不可达或奇异目标保持 `best-effort`：IK 每次只从当前实测关节 seed 求解并发送最接近配置，不切换中立 seed、不保存“最后可达解”，也不需要恢复服务。后续目标回到可达区域时会在同一控制周期链上自然恢复为普通跟踪。
 
-适配入口只处理动态模型视图、固定的 G1 控制器名和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为 `right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于 `http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，`command_topic:=/forward_position_controller/commands` 关闭重力补偿，或传入 `enable_dashboard:=false` 仅启动 Commander。
+适配入口只处理动态模型视图、固定的 G1 控制器名和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧为 `right_gripper_base`、参考帧为 `torso_link`，Dashboard 位于 `http://<机器人 IP>:8180`；可通过 `controlled_frame:=left_gripper_base` 切换左手，或传入 `enable_dashboard:=false` 仅启动 Commander。
 
 8180 Dashboard 复用整机测试页面的 Gloria-M 受限分段 mimic FK 与虚拟节点过滤；`internal_*` link/joint 不进入 3D 标签、关节面板、控制帧下拉框或 fixed-joint 列表，但仍作为计算中间量保证物理 slider 和 connecting rod 的模型联动。
 
@@ -226,7 +225,7 @@ source scripts/env.sh
 ros2 launch robot_bringup gravity_float_demo.launch.py
 ```
 
-它做两件事：把 `arm_gravity_compensation` 和 `forward_position_controller` 一起切到 active（两者可共存——重力补偿 controller 不 claim 任何 command interface），然后启动 `gravity_float_demo` 节点。
+它做两件事：把 `forward_position_controller` 切到 active（重力补偿已内置在它里，不需要第二个 controller），然后启动 `gravity_float_demo` 节点。
 
 该节点把 **14 个手臂关节**的目标持续跟随 `/joint_states` 的实测值。controller 随后写出 `q_cmd = q_meas + G(q_meas)/kp`，电机实际施加：
 ```
@@ -235,7 +234,7 @@ tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq
 
 位置项恰好抵消，只剩重力项和阻尼：手臂在任意姿态都能自撑自重，你只需克服阻尼就能推动它。
 
-**其余 17 个关节（腿、腰、夹爪）只在启动时快照一次，之后锁死。** 重力补偿 controller 对非手臂关节是透传的，如果它们也跟随实测值，力矩就只剩 `-kd*dq`，腿会发软。浮动关节列表由 launch 从重力表 `left.joints` / `right.joints` 读出，与 controller 实际补偿的范围严格一致。
+**其余 17 个关节（腿、腰、夹爪）只在启动时快照一次，之后锁死。** 重力前馈对非手臂关节是透传的，如果它们也跟随实测值，力矩就只剩 `-kd*dq`，腿会发软。浮动关节列表由 launch 从重力表 `left.joints` / `right.joints` 读出，与 controller 实际补偿的范围严格一致。
 
 启动瞬间有 2 s 斜坡（controller 的 `offset_ramp_s`），在此期间手臂会从下垂位置逐渐抬起到持平。
 
@@ -245,7 +244,7 @@ tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq
 
 停止：`Ctrl-C` 结束 demo 后，controller 仍是 active，需要显式停回去。
 ```bash
-ros2 control switch_controllers --stop forward_position_controller arm_gravity_compensation
+ros2 control switch_controllers --stop forward_position_controller
 ```
 
 ### 退出调试模式
