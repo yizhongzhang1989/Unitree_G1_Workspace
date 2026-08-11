@@ -17,7 +17,7 @@ from .constants import (ALL_ARM_JOINTS, ARM_JOINTS, SIDES, mirror_arm_values,
                         opposite_side)
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # A pose is hand-guided on one arm, or on both at once when the operator
 # selected joints from each side.
 CAPTURE_SIDES = SIDES + ("both",)
@@ -28,6 +28,13 @@ IDENTIFIED_OBSERVABILITY = 0.9
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _finite_list(values: ArrayLike, size: int, name: str) -> list:
+    array = np.asarray(values, dtype=float).reshape(-1)
+    if array.size != size or not np.all(np.isfinite(array)):
+        raise ValueError("%s must be %d finite values" % (name, size))
+    return [float(value) for value in array]
 
 
 def _vector(element: Optional[ET.Element], attribute: str,
@@ -170,17 +177,28 @@ def create_parameter_document(urdf_xml: str, source_path: str) -> dict:
             "iterations": [],
             "active_run": None,
         },
+        # 力传感器标定与手臂惯性辨识共用采点，但求解完全独立：一次线性最小二乘，
+        # 不迭代、不需要力矩输出，所以结果自成一段。
+        "ft_sensor": _empty_ft_section(),
     }
+
+
+def _empty_ft_section() -> dict:
+    return {"samples": [], "left": None, "right": None}
 
 
 def load_parameter_document(path: str) -> dict:
     with open(Path(path).expanduser(), "r", encoding="utf-8") as stream:
         document = json.load(stream)
-    if document.get("schema_version") != SCHEMA_VERSION:
+    version = document.get("schema_version")
+    if version == 2:
+        # 手臂标定的结果不受影响，补上力传感器那一段即可。
+        document["ft_sensor"] = _empty_ft_section()
+        document["schema_version"] = SCHEMA_VERSION
+    elif version != SCHEMA_VERSION:
         raise ValueError(
-            "unsupported parameter schema version %r"
-            % document.get("schema_version"))
-    for key in ("source_urdf", "links", "joints", "calibration"):
+            "unsupported parameter schema version %r" % version)
+    for key in ("source_urdf", "links", "joints", "calibration", "ft_sensor"):
         if key not in document:
             raise ValueError("parameter file is missing %s" % key)
     return document
@@ -231,11 +249,16 @@ class ParameterStore:
             with open(source, "r", encoding="utf-8") as stream:
                 digest = hashlib.sha256(stream.read().encode("utf-8")).hexdigest()
             stored_source = document["source_urdf"]
-            if (Path(stored_source["path"]).resolve() != source or
-                    stored_source["sha256"] != digest):
+            if stored_source["sha256"] != digest:
                 raise ValueError(
                     "existing parameter file belongs to a different URDF; "
                     "back it up and reinitialize explicitly")
+            # 同一份模型换个路径看到（工作区搬家、或容器里透过 bind mount 看同一棵树）
+            # 不是换了模型：内容摘要才是身份，路径只是出处记录。
+            if Path(stored_source["path"]).resolve() != source:
+                stored_source["path"] = str(source)
+                self.save(document)
+                document = self.load()
             return self._backfill_target_sides(document)
         source = Path(urdf_path).expanduser().resolve()
         with open(source, "r", encoding="utf-8") as stream:
@@ -434,3 +457,75 @@ class ParameterStore:
 
         return atomic_write(output_path, ET.tostring(
             root, encoding="utf-8", xml_declaration=True))
+
+    # ------------------------------------------------------------------ #
+    # 力传感器
+    # ------------------------------------------------------------------ #
+
+    def append_ft_sample(self, side: str, positions: Mapping[str, float],
+                         gravity: ArrayLike, wrench: ArrayLike,
+                         wrench_std: ArrayLike, *, source: str) -> dict:
+        """Record one static reading. ``gravity`` stays in the torso frame.
+
+        Keeping the raw pose and torso gravity instead of the sensor-frame
+        direction means a corrected URDF re-derives every sample instead of
+        invalidating them.
+        """
+        if side not in SIDES:
+            raise ValueError("side must be 'left' or 'right'")
+        values = {name: float(positions.get(name, np.nan))
+                  for name in ALL_ARM_JOINTS}
+        if not np.all(np.isfinite(list(values.values()))):
+            raise ValueError("sample must contain 14 finite arm positions")
+        document = self.load()
+        samples = document["ft_sensor"]["samples"]
+        sample = {
+            "id": 1 + max((int(item["id"]) for item in samples), default=0),
+            "captured_at": utc_now(),
+            "source": source,
+            "side": side,
+            "positions": values,
+            "gravity": _finite_list(gravity, 3, "gravity"),
+            "wrench": _finite_list(wrench, 6, "wrench"),
+            "wrench_std": _finite_list(wrench_std, 6, "wrench_std"),
+        }
+        samples.append(sample)
+        self.save(document)
+        return sample
+
+    def remove_ft_sample(self, sample_id: int) -> bool:
+        document = self.load()
+        samples = document["ft_sensor"]["samples"]
+        remaining = [item for item in samples if int(item["id"]) != int(sample_id)]
+        if len(remaining) == len(samples):
+            return False
+        document["ft_sensor"]["samples"] = remaining
+        self.save(document)
+        return True
+
+    def clear_ft_samples(self, side: str = "") -> int:
+        document = self.load()
+        samples = document["ft_sensor"]["samples"]
+        remaining = [item for item in samples
+                     if side and item["side"] != side]
+        document["ft_sensor"]["samples"] = remaining
+        self.save(document)
+        return len(samples) - len(remaining)
+
+    def set_ft_calibration(self, side: str, calibration: Mapping,
+                           diagnostics: Mapping) -> dict:
+        if side not in SIDES:
+            raise ValueError("side must be 'left' or 'right'")
+        document = self.load()
+        record = {
+            "calibrated_at": utc_now(),
+            "calibration": dict(calibration),
+            "diagnostics": dict(diagnostics),
+        }
+        document["ft_sensor"][side] = record
+        self.save(document)
+        return record
+
+    def ft_samples(self, side: str = "") -> list:
+        samples = self.load()["ft_sensor"]["samples"]
+        return [item for item in samples if not side or item["side"] == side]

@@ -29,6 +29,7 @@ from robot_bringup.end_effectors.topology import dashboard_topology_parameters
 
 _MAX_REQUEST_BYTES = 64 * 1024
 _HANDS = ("left", "right")
+_STREAMS = ("sensor", "net", "gripper")
 _SENSOR_ACTIONS = ("start", "stop", "tare", "reset_tare")
 _GRIPPER_SERVICES = ("enable", "disable", "refresh")
 _CAMERA_PATH_PREFIX = "/api/cameras/"
@@ -283,10 +284,7 @@ class EndEffectorsDashboard(Node):
         topology_defaults = dashboard_topology_parameters("dual")
         self._state_lock = threading.Lock()
         self._stream_locks = {
-            hand: {
-                "sensor": threading.Lock(),
-                "gripper": threading.Lock(),
-            }
+            hand: {name: threading.Lock() for name in _STREAMS}
             for hand in _HANDS
         }
         self._service_locks = {hand: threading.Lock() for hand in _HANDS}
@@ -343,6 +341,8 @@ class EndEffectorsDashboard(Node):
                     gp("left_sensor_node").get_parameter_value().string_value),
                 "wrench_topic": gp(
                     "left_wrench_topic").get_parameter_value().string_value,
+                "net_topic": gp(
+                    "left_net_topic").get_parameter_value().string_value,
                 "gripper_node": _target_name(
                     gp("left_gripper_node")
                     .get_parameter_value().string_value),
@@ -358,6 +358,8 @@ class EndEffectorsDashboard(Node):
                     .get_parameter_value().string_value),
                 "wrench_topic": gp(
                     "right_wrench_topic").get_parameter_value().string_value,
+                "net_topic": gp(
+                    "right_net_topic").get_parameter_value().string_value,
                 "gripper_node": _target_name(
                     gp("right_gripper_node")
                     .get_parameter_value().string_value),
@@ -372,6 +374,9 @@ class EndEffectorsDashboard(Node):
             if not config["wrench_topic"].startswith("/"):
                 raise ValueError(
                     f"{hand}_wrench_topic must be an absolute topic")
+            if not config["net_topic"].startswith("/"):
+                raise ValueError(
+                    f"{hand}_net_topic must be an absolute topic")
             camera_url = urlsplit(config["camera_url"])
             if (camera_url.scheme not in ("http", "https")
                     or not camera_url.netloc):
@@ -392,8 +397,7 @@ class EndEffectorsDashboard(Node):
         now = time.monotonic()
         self._state = {
             hand: {
-                "sensor": self._new_stream_state(now),
-                "gripper": self._new_stream_state(now),
+                **{name: self._new_stream_state(now) for name in _STREAMS},
                 "camera": {
                     "connected": False,
                     "message": "not checked",
@@ -443,8 +447,17 @@ class EndEffectorsDashboard(Node):
             self._wrench_subscriptions.append(self.create_subscription(
                 WrenchStamped,
                 config["wrench_topic"],
-                lambda message, selected=hand: self._on_wrench(
-                    selected, message),
+                lambda message, selected=hand: self._record_stream_sample(
+                    selected, "sensor", message),
+                wrench_qos,
+                raw=True,
+            ))
+            # 净力那一路只有起了 end_effector_load 才存在；没有就一直是空流。
+            self._wrench_subscriptions.append(self.create_subscription(
+                WrenchStamped,
+                config["net_topic"],
+                lambda message, selected=hand: self._record_stream_sample(
+                    selected, "net", message),
                 wrench_qos,
                 raw=True,
             ))
@@ -452,8 +465,8 @@ class EndEffectorsDashboard(Node):
             self._joint_subscriptions.append(self.create_subscription(
                 JointState,
                 joint_topic,
-                lambda message, selected=hand: self._on_joint_state(
-                    selected, message),
+                lambda message, selected=hand: self._record_stream_sample(
+                    selected, "gripper", message),
                 latest_qos,
             ))
             self._mit_publishers[hand] = self.create_publisher(
@@ -538,12 +551,6 @@ class EndEffectorsDashboard(Node):
                 stream["window_count"] = 0
                 stream["window_started"] = now
 
-    def _on_wrench(self, hand: str, serialized_message: Any) -> None:
-        self._record_stream_sample(hand, "sensor", serialized_message)
-
-    def _on_joint_state(self, hand: str, message: Any) -> None:
-        self._record_stream_sample(hand, "gripper", message)
-
     def _latest_gripper_position(self, hand: str) -> Optional[float]:
         with self._stream_locks[hand]["gripper"]:
             stream = self._state[hand]["gripper"]
@@ -574,61 +581,55 @@ class EndEffectorsDashboard(Node):
     def snapshot(self) -> dict:
         now = time.monotonic()
         wall_now = time.time()
-        stream_snapshots = {}
+        # 流锁必须在拿 _state_lock 之前放掉，两把锁的顺序反过来就会死锁。
+        streams = {}
         for hand in _HANDS:
-            for stream_name in ("sensor", "gripper"):
-                with self._stream_locks[hand][stream_name]:
-                    stream = self._state[hand][stream_name]
-                    stream_snapshots[(hand, stream_name)] = (
+            for name in _STREAMS:
+                with self._stream_locks[hand][name]:
+                    stream = self._state[hand][name]
+                    received = stream["received_monotonic"]
+                    age = now - received if received > 0.0 else None
+                    streams[(hand, name)] = (
                         stream["sample"],
-                        stream["received_monotonic"],
-                        stream["rate_hz"],
-                    )
+                        wall_now - age if age is not None else None,
+                        {
+                            "connected": (
+                                age is not None and age <= self._state_stale),
+                            "age_s": age,
+                            "rate_hz": stream["rate_hz"],
+                        })
 
         hands = {}
         with self._state_lock:
             for hand, config in self._config.items():
-                sensor_sample, sensor_received, sensor_rate = (
-                    stream_snapshots[(hand, "sensor")])
-                gripper_sample, gripper_received, gripper_rate = (
-                    stream_snapshots[(hand, "gripper")])
-                sensor_age = (
-                    now - sensor_received
-                    if sensor_received > 0.0 else None
-                )
-                gripper_age = (
-                    now - gripper_received
-                    if gripper_received > 0.0 else None
-                )
+                sensor, sensor_stamp, sensor_status = streams[(hand, "sensor")]
+                net, net_stamp, net_status = streams[(hand, "net")]
+                gripper, gripper_stamp, gripper_status = (
+                    streams[(hand, "gripper")])
                 hands[hand] = {
                     "label": config["label"],
                     "bus": config["bus"],
                     "sensor": {
                         "target_node": config["sensor_node"],
                         "topic": config["wrench_topic"],
-                        "connected": (
-                            sensor_age is not None
-                            and sensor_age <= self._state_stale),
-                        "age_s": sensor_age,
-                        "rate_hz": sensor_rate,
+                        **sensor_status,
                         "wrench": _serialized_wrench_payload(
-                            sensor_sample,
-                            wall_now - sensor_age
-                            if sensor_age is not None else None),
+                            sensor, sensor_stamp),
+                        # 只有起了 end_effector_load 才有净力，没有就整段缺席。
+                        "net": {
+                            "topic": config["net_topic"],
+                            **net_status,
+                            "wrench": _serialized_wrench_payload(
+                                net, net_stamp),
+                        } if net_stamp is not None else None,
                     },
                     "gripper": {
                         "target_node": config["gripper_node"],
                         "topic": _child_name(
                             config["gripper_node"], "joint_states"),
-                        "connected": (
-                            gripper_age is not None
-                            and gripper_age <= self._state_stale),
-                        "age_s": gripper_age,
-                        "rate_hz": gripper_rate,
+                        **gripper_status,
                         "joint_state": _joint_state_payload(
-                            gripper_sample,
-                            wall_now - gripper_age
-                            if gripper_age is not None else None),
+                            gripper, gripper_stamp),
                     },
                     "camera": {
                         **self._state[hand]["camera"],

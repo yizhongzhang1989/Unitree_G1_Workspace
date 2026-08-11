@@ -1,9 +1,12 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from arm_gravity_compensation.constants import ARM_JOINTS
 from arm_gravity_compensation.gravity_model import TorsoArmGravityModel
+from arm_gravity_compensation.table import (gravity_from_table,
+                                            sensor_orientation_from_table)
 
 
 URDF = (Path(__file__).parents[2] / "unitree_g1_description" / "model" /
@@ -32,7 +35,7 @@ def test_gravity_table_reproduces_pinocchio_for_both_arms():
             # 导出表只带纯重力项，标定出的力矩偏置不外传，所以要减掉。
             _, biases = model.arm_parameters(side)
             np.testing.assert_allclose(
-                model.gravity_from_table(
+                gravity_from_table(
                     table, side, q[offset:offset + 7], gravity),
                 model.compensation(side, q, gravity) - biases,
                 atol=1e-12)
@@ -58,6 +61,87 @@ def test_real_urdf_is_reduced_to_two_torso_relative_arms():
     assert model.model.nq == 14
     assert model.joint_names[0] == "left_shoulder_pitch_joint"
     assert model.joint_names[-1] == "right_wrist_yaw_joint"
+
+
+def test_sensor_mount_matches_the_urdf_and_carries_the_whole_gripper():
+    model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
+
+    rotation, translation = model.sensor_placement["left"]
+    np.testing.assert_allclose(translation, [0.0415, 0.0, 0.0], atol=1e-12)
+    # rpy = (pi/2, 0, pi/2)
+    np.testing.assert_allclose(
+        rotation, [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        atol=1e-12)
+    assert "left_gripper_base" in model.distal_links["left"]
+    assert "left_kwr57b_link" not in model.distal_links["left"]
+
+    mass, moment = model.distal_inertia("left")
+    assert 0.4 < mass < 0.8
+    # 夹爪重心离腕 yaw 关节十几厘米，不然挂载点就是错的。
+    assert 0.05 < np.linalg.norm(moment / mass) < 0.3
+
+
+def test_measured_tool_keeps_every_joint_torque_when_it_matches_the_model():
+    """写回远端质量只是把腕组拆开记账，合成量不变则补偿输出一分不差。"""
+    model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
+    model.set_arm_parameters(
+        "left", np.full(len(model.parameter_links["left"]), 1.3),
+        np.zeros(7))
+    baseline = model.gravity_table()
+    rotation, translation = model.sensor_placement["left"]
+    mass, moment = model.distal_inertia("left")
+    tool = {"left": {"mass": mass,
+                     "com": rotation.T @ (moment / mass - translation)}}
+
+    table = model.gravity_table(tool=tool)
+    random = np.random.RandomState(17)
+
+    np.testing.assert_allclose(
+        table["left"]["mass"], baseline["left"]["mass"], rtol=1e-12)
+    np.testing.assert_allclose(
+        table["left"]["com"], baseline["left"]["com"], atol=1e-12)
+    for _ in range(200):
+        q = random.uniform(-2.0, 2.0, size=7)
+        gravity = random.normal(size=3)
+        gravity *= 9.81 / np.linalg.norm(gravity)
+        np.testing.assert_allclose(
+            gravity_from_table(table, "left", q, gravity),
+            gravity_from_table(baseline, "left", q, gravity),
+            atol=1e-9)
+
+
+def test_measured_tool_moves_the_torque_when_the_gripper_is_heavier():
+    model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
+    rotation, translation = model.sensor_placement["right"]
+    mass, moment = model.distal_inertia("right")
+    heavier = {"right": {"mass": mass + 0.25,
+                         "com": rotation.T @ (moment / mass - translation)}}
+
+    table = model.gravity_table(tool=heavier)
+    gravity = np.array([0.0, 0.0, -9.81])
+    q = np.zeros(7)
+
+    assert table["right"]["mass"][6] == pytest.approx(
+        model.gravity_table()["right"]["mass"][6] + 0.25)
+    assert np.max(np.abs(
+        gravity_from_table(table, "right", q, gravity) -
+        gravity_from_table(model.gravity_table(), "right", q, gravity)
+    )) > 0.05
+
+
+def test_sensor_orientation_matches_pinocchio_forward_kinematics():
+    model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
+    table = model.gravity_table()
+    random = np.random.RandomState(23)
+
+    for _ in range(20):
+        q = random.uniform(-1.5, 1.5, size=14)
+        for offset, side in ((0, "left"), (7, "right")):
+            np.testing.assert_allclose(
+                sensor_orientation_from_table(
+                    table, side, q[offset:offset + 7]),
+                model.sensor_orientation(side, q),
+                atol=1e-12)
     np.testing.assert_allclose(model.imu_to_torso, np.eye(3), atol=1e-12)
 
 

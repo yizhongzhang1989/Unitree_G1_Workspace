@@ -30,6 +30,13 @@ ALL_ARM_JOINTS = ARM_JOINTS["left"] + ARM_JOINTS["right"]
 ALL_ARM_MOTOR_INDICES = ARM_MOTOR_INDICES["left"] + ARM_MOTOR_INDICES["right"]
 SIDES = ("left", "right")
 
+# 六维力传感器固连在腕 yaw 之后，它远端的一切（夹爪、相机、线缆）都由它称量。
+# 这个 link 系就是 ft_model 里的 L 系：净力旋量、工具与负载质心都表达在它里面。
+FT_SENSOR_LINKS = {
+    "left": "left_kwr57b_link",
+    "right": "right_kwr57b_link",
+}
+
 # final.urdf 的左右臂关于矢状面严格镜像：每个关节 origin 满足
 # ``left_xyz = diag(1, -1, 1) @ right_xyz``，轴向完全相同。镜像是保向性相反的
 # 变换，绕 ``a`` 转 theta 映射为绕 ``diag(1,-1,1) @ a`` 转 -theta，于是

@@ -4,12 +4,13 @@
 | 入口 | 实际启动 |
 |---|---|
 | `all_data.launch.py scope:=end_effectors` | 末端拓扑：bridge、进程内 KWR57、Gloria-M、左右相机 |
-| `all_data.launch.py scope:=whole_body` | 末端拓扑，再增加唯一真实 `controller_manager`、统一硬件插件、broadcaster、URDF 和互斥 inactive FPC/JTC |
+| `all_data.launch.py scope:=whole_body` | 末端拓扑，再增加唯一真实 `controller_manager`、统一硬件插件、broadcaster、URDF、互斥 inactive FPC/JTC 和末端负载链 |
 | `end_effectors_single_bus.launch.py` | `all_data topology:=single` 使用的底层单通道末端拓扑 |
 | `end_effectors_dual_bus.launch.py` | `all_data topology:=dual` 使用的底层双通道末端拓扑 |
 | `end_effectors_dashboard.launch.py` | 仅端口 `8770` 的末端联调网页；不启动数据节点 |
 | `whole_body_dashboard.launch.py` | 仅端口 `8200` 的 controller 测试网页；连接已有 manager，不启动数据或控制节点 |
 | `gravity_float_demo.launch.py` | 激活 FPC（内含重力补偿），让双臂进入可徒手推动的失重状态；连接已有 manager |
+| `end_effector_load.launch.py` | KWR57 净力补偿 + 末端负载估计；已被 `scope:=whole_body` 默认 include |
 
 末端设备实现集中在 `robot_bringup/end_effectors/`。`unitree_g1_description` 只提供模型资源；`unitree_g1_ros2_control` 提供真实的 ros2_control `SystemInterface`、C++ controller 与 broadcaster。
 
@@ -73,9 +74,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  D["Dashboard / IK"] -->|"commands DDS"| C
+  D["Dashboard / IK / 策略层"] -->|"commands DDS"| C
   subgraph RP["ros2_control_node 进程"]
-    C["ForwardCommandController"] -->|"command interface\n内存"| H["G1TopicSystem"]
+    C["ForwardCommandController<br/>内含 GravityFeedforward"] -->|"command interface\n内存"| H["G1TopicSystem"]
     H -->|"state interface\n内存"| C
   end
   H -->|"LowCmd DDS"| G1["G1 低层"]
@@ -85,6 +86,17 @@ flowchart LR
   B -->|"进程内 CAN 帧"| K["native KWR57 device"]
   K -->|"raw Wrench DDS，1 kHz"| H
   GL -->|"JointState DDS"| H
+
+  subgraph EL["end_effector_load（whole_body 默认启用）"]
+    FT["ft_wrench_compensator<br/>扣零偏与工具自重"]
+    PE["payload_estimator<br/>递推 LS"]
+  end
+  K -->|"/armN/wrench_raw，1 kHz"| FT
+  H -->|"/joint_states 与 /secondary_imu"| FT
+  FT -->|"/armN/wrench_net，200 Hz"| PE
+  FT -->|"/armN/gravity，200 Hz"| PE
+  FT -->|"/armN/wrench_net"| USE["力控 / 上层 / 8770 页面"]
+  PE -->|"/armN/payload，10 Hz"| C
 ```
 
 G1 的 LowCmd 编码在 C++ 硬件插件内完成；Gloria 协议仍由独立 `gloria_ros` 节点负责；KWR57 三帧协议仍在 bridge 进程内完成。这样保留各设备独立 launch 和诊断能力，同时避免 controller-manager facade、状态重发节点及 KWR57 中间 CAN Frame 流。
@@ -110,6 +122,8 @@ G1 的 LowCmd 编码在 C++ 硬件插件内完成；Gloria 协议仍由独立 `g
 
 `end_effectors_dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
 
+KWR57 一律以 **SI 发布**（`use_si=True`）：`geometry_msgs/Wrench` 就定义在 N 与 N·m，发出厂默认的 kgf 等于把一个 9.8 倍的陷阱留给每一个下游。
+
 当前联调台架使用 `end_effectors_dual_bus.launch.py` 的完整四设备拓扑：CAN0 和 CAN1 各接一台 KWR57 与一台 Gloria-M。默认 1 kHz 力传感器流、100 Hz 夹爪往返运动的总线占用与实测见 [`CAN_BUS_LOAD.md`](CAN_BUS_LOAD.md)。
 
 2026-07-23 的 30 秒生产验收使用双 KWR57、双 Gloria-M、active FPC、默认 8 个异步 RX transfer/通道并关闭 `io_diagnostics`。左右 KWR57 ROS receive 最大 gap 为 `7.027/7.433 ms`，实际 CAN TX 为 `99.999/100.001 Hz`；四设备正常负载目标通过。该结果未包含相机并发，详细边界和空 USB 包根因见 [`canalystii_native_bridge/README.md`](../canalystii_native_bridge/README.md)。
@@ -131,6 +145,18 @@ ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual
 `scope:=whole_body` 已 include `unitree_g1_ros2_control/control.launch.py`。不要在同一 ROS graph 再启动该 launch，也不要同时运行任何会独占 CANalyst-II 的 `*_debug.launch.py`。
 
 `bash scripts/run_end_effectors.sh single|dual` 是 `scope:=end_effectors` 的快捷入口，并在 Ctrl-C 时清理设备进程。
+
+### 末端负载（净力 + 自适应重力补偿）
+`scope:=whole_body` 默认就会拉起这条链，链路见上方架构图里的 `end_effector_load` 子图，两个节点各自做什么见 [`arm_gravity_compensation/README.md`](../arm_gravity_compensation/README.md)。
+
+```bash
+# 默认已含；传感器拔了、或标定过期想回到标称工具重量时才关掉
+ros2 launch robot_bringup all_data.launch.py scope:=whole_body end_effector_load:=false
+# 已有整机栈时单独补上：
+ros2 launch robot_bringup end_effector_load.launch.py
+```
+
+**只在 `whole_body` 下有意义**：补偿节点要关节角和躯干 IMU。它依赖仓库里已导出的 `ft_calibration.yaml`；该文件缺失或不合法时只有这两个节点退出，整机栈照常跑，重力补偿在 `payload_timeout_s` 后退回标称工具重量。起来后 8770 页面会自动多画一组净力六轴条。
 
 ## 双手 Web 联调
 先按上一节启动数据，再单独启动统一网页；`topology` 必须一致：

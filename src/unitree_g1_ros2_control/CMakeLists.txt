@@ -38,7 +38,9 @@ find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/forward_position_controller.cpp
+  src/ft_compensation.cpp
   src/gravity_feedforward.cpp
+  src/gravity_table.cpp
   src/gravity_joint_trajectory_controller.cpp
   src/g1_topic_system.cpp
   src/throttled_broadcasters.cpp
@@ -68,6 +70,17 @@ ament_target_dependencies(${PROJECT_NAME}
 )
 target_link_libraries(${PROJECT_NAME} yaml-cpp)
 
+# 把 KWR57 原始读数变成负载净力旋量。独立进程：通用 CAN bridge 不该知道手臂在哪。
+add_executable(ft_wrench_compensator src/ft_wrench_compensator_node.cpp)
+target_link_libraries(ft_wrench_compensator ${PROJECT_NAME})
+ament_target_dependencies(ft_wrench_compensator
+  geometry_msgs
+  rclcpp
+  sensor_msgs
+  std_srvs
+  unitree_hg
+)
+
 pluginlib_export_plugin_description_file(
   controller_interface controller_plugins.xml)
 pluginlib_export_plugin_description_file(
@@ -88,6 +101,10 @@ install(
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
+)
+install(
+  TARGETS ft_wrench_compensator
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
@@ -120,6 +137,17 @@ if(BUILD_TESTING)
     test_gravity_feedforward
     ${PROJECT_NAME}
   )
+  ament_add_gtest(
+    test_ft_compensation
+    test/test_ft_compensation.cpp
+  )
+  target_link_libraries(
+    test_ft_compensation
+    ${PROJECT_NAME}
+  )
+  # 跨语言对拍数据由 arm_gravity_compensation 的 Python 参考实现生成。
+  target_compile_definitions(test_ft_compensation PRIVATE
+    TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
   ament_add_gtest(
     test_gravity_joint_trajectory_controller
     test/test_gravity_joint_trajectory_controller.cpp

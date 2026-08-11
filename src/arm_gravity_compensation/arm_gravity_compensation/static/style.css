@@ -125,6 +125,18 @@ td code { font-family: "IBM Plex Mono", monospace; font-size: 11px; }
 .delete-button { width: 30px; height: 30px; border: 1px solid currentColor; border-radius: 3px; color: #ff8c83; background: transparent; cursor: pointer; }
 .empty-row { color: var(--muted); text-align: center; padding: 24px; }
 
+.section-note { max-width: 900px; margin: 0 0 22px; color: var(--muted); line-height: 1.7; }
+.ft-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; margin-bottom: 28px; }
+.ft-card { border-top: 2px solid var(--ink); padding-top: 16px; min-width: 0; }
+.ft-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ft-card-head h3 { margin: 0; font-size: 14px; }
+.ft-card code { display: block; margin: 6px 0 12px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.metric-grid { margin: 0; }
+.metric-grid div { min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); }
+.metric-grid dt { color: var(--muted); font-size: 12px; }
+.metric-grid dd { margin: 0; font: 500 12px/1.3 "IBM Plex Mono", monospace; text-align: right; overflow-wrap: anywhere; }
+.ft-stamp { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
+
 .hint { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 5px; border: 1px solid currentColor; border-radius: 50%; font: 600 9px/1 "IBM Plex Mono", monospace; vertical-align: middle; cursor: help; opacity: .65; flex: 0 0 auto; }
 .hint::before { content: "?"; }
 .hint:hover, .hint:focus-visible { opacity: 1; }

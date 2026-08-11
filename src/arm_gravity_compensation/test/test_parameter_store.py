@@ -77,6 +77,26 @@ def test_existing_file_rejects_changed_source_urdf(tmp_path):
         raise AssertionError("changed source URDF reused stale parameters")
 
 
+def test_the_same_model_at_another_path_keeps_the_calibration(tmp_path):
+    """工作区搬家、或容器里透过 bind mount 看同一棵树，都不该作废标定。"""
+    first = tmp_path / "a" / "model.urdf"
+    second = tmp_path / "b" / "model.urdf"
+    for path in (first, second):
+        path.parent.mkdir()
+        path.write_text(URDF.read_text())
+    store = ParameterStore(str(tmp_path / "parameters.json"))
+    document = store.initialize(str(first))
+    links = document["model_scope"]["parameter_links"]["left"]
+    store.apply_link_estimate(
+        "left", links, np.full(len(links), 1.3), np.zeros(7),
+        np.ones(len(links)), np.ones(7), {})
+
+    moved = store.initialize(str(second))
+
+    assert moved["source_urdf"]["path"] == str(second)
+    assert moved["links"]["left_shoulder_pitch_link"]["inertial"]["scale"] == 1.3
+
+
 def test_final_urdf_groups_payload_and_exports_same_tree(tmp_path):
     final_urdf = (Path(__file__).parents[2] / "unitree_g1_description" /
                   "model" / "final.urdf")
@@ -167,3 +187,41 @@ def test_mirrored_estimate_seeds_the_other_arm(tmp_path):
     left_scales, left_biases = store.link_estimate("left")
     np.testing.assert_allclose(left_scales, scales)
     np.testing.assert_allclose(left_biases, MIRROR_SIGNS * biases)
+
+
+def test_force_sensor_samples_and_result_round_trip(tmp_path):
+    path = tmp_path / "parameters.json"
+    store = ParameterStore(str(path))
+    document = store.initialize(str(URDF))
+    positions = {name: 0.2 for side in ARM_JOINTS for name in ARM_JOINTS[side]}
+
+    store.append_ft_sample(
+        "left", positions, [0.1, 0.0, -9.8], np.arange(6.0), np.full(6, 0.01),
+        source="manual")
+    second = store.append_ft_sample(
+        "right", positions, [0.1, 0.0, -9.8], np.arange(6.0), np.full(6, 0.01),
+        source="automatic_settle")
+    store.set_ft_calibration(
+        "left", {"tool_mass": 0.61}, {"force_residual_rms": 0.02})
+
+    assert second["id"] == 2
+    assert [item["id"] for item in store.ft_samples("left")] == [1]
+    assert json.loads(path.read_text())["ft_sensor"]["left"][
+        "calibration"]["tool_mass"] == 0.61
+    assert store.remove_ft_sample(2) is True
+    assert store.clear_ft_samples() == 1
+    assert store.ft_samples() == []
+
+
+def test_schema_two_files_gain_the_force_sensor_section(tmp_path):
+    path = tmp_path / "parameters.json"
+    store = ParameterStore(str(path))
+    document = store.initialize(str(URDF))
+    document["schema_version"] = 2
+    del document["ft_sensor"]
+    path.write_text(json.dumps(document))
+
+    migrated = store.load()
+
+    assert migrated["schema_version"] == 3
+    assert migrated["ft_sensor"]["samples"] == []

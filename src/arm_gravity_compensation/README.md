@@ -1,8 +1,9 @@
 # arm_gravity_compensation
-Unitree G1 双臂相对 `torso_link` 的重力参数标定工具。网页串联参数初始化、关节选择、手拉采点、纯扭矩自动标定和同构 URDF 导出。
+Unitree G1 双臂相对 `torso_link` 的重力参数标定工具。网页串联参数初始化、关节选择、手拉采点、纯扭矩自动标定和同构 URDF 导出，并在同一批静态姿态上顺带完成 KWR57 力传感器的零偏与末端工具标定。
 
 ## 边界
-- 只使用 `/lowstate`、`/secondary_imu`、`/lowcmd` 和 MotionSwitcher API，不使用夹爪、力传感器或 CAN 接口。
+- 手臂惯性辨识只使用 `/lowstate`、`/secondary_imu`、`/lowcmd` 和 MotionSwitcher API，不使用夹爪或 CAN 接口。
+- 力传感器标定**只订阅** `wrench_raw`，不发任何 LowCmd：把手臂摆到一个朝向、松手让现有重力补偿悬停（或用手扶前臂，别碰工具）就能采点。它和力矩辨识共享采点动作，但求解完全独立——一次线性最小二乘，不迭代。
 - 只控制 G1 左右各 7 个手臂电机（索引 15–21、22–28）。**位置环由电机内部以自身频率闭合**：`LowCmd` 写入 `tau`（重力前馈）、`q`（参考轨迹）、`kp`（`motor_stiffness`，默认 40×5/20×2）和 `kd`（`motor_damping`，默认 3×5/1.5×2），`dq` 恒为零。本节点不做软件 PD，因此跟踪不受 ROS/DDS 延时和力矩限速影响。
 - 电机实际输出 $\tau = \tau_{ff} + k_p(q_{des}-q) - k_d\dot q$，三项均已知或可测，所以它就是静态辨识的观测量；手臂停在哪里都不影响正确性。随着迭代收敛 $q_{des}-q \to 0$，观测量趋近纯前馈，也就越来越不依赖 $k_p$ 的标称精度。
 - Pinocchio 以 `torso_link` 为固定根，只计算两条完整手臂子树。`final.urdf` 中固连的 KWR57、Gloria-M 和安装件都保留为独立 link 参数；夹爪主动关节固定在闭合位，mimic 链按 URDF 展开后锁定。
@@ -19,7 +20,6 @@ G1 有**两个** IMU，这里只能用躯干那个：
 
 因为 `imu_in_torso_joint` 的 `rpy` 为零，`/secondary_imu` 的加速度计读数只需取反并归一化到 9.81 就是躯干系重力，不需要腾关节变换。`imu_topic` 参数可覆盖。
 
-> **2026-07-27 之前的标定结果不可用**：当时错用了 `/lowstate.imu_state`（盆骨）。`parameters.json` 只存了 14 个手臂关节角、没存腰关节角，无法事后旋转修正，需要重跑。
 - 采点阶段不创建 `/lowcmd` publisher，也不调用 MotionSwitcher。只有显式允许并从页面确认后，自动标定阶段才取得低层输出权。
 - 当前只修正刚体质量缩放。对每个 link 使用同一系数 $s$：`mass *= s`，六个 inertia 分量同时 `*= s`，`origin xyz/rpy` 不变。
 
@@ -88,6 +88,63 @@ ros2 launch arm_gravity_compensation gravity_calibration.launch.py \
 
 任一 LowState 超时、PR 模式错误、IMU 不稳定、目标超时或用户停止都会终止输出。节点退出时先停止 `/lowcmd`，再尝试恢复接管前的 MotionSwitcher 模式。
 
+## 第三步：力传感器标定
+页面第 05 段。整段**只读**：不发 LowCmd，也不需要 `allow_torque_output`。
+
+1. 让手臂能自己停住（现有重力补偿浮动，或用手扶前臂），把末端摆到一个朝向。
+2. 点"记录当前朝向"。节点在一个 IMU 平均窗口里同时统计两台传感器的均值和抖动；抖动超阈值（默认 1 N / 0.1 N·m）直接拒绝——那说明还有人碰着工具。
+3. 换朝向重复。**至少 4 个**，并且要让传感器的三根轴都朝下过一次；页面上的 `spread` 是重力单位向量矩阵的最小/最大奇异值之比，越接近 1 越好，实践上做 8~12 个。
+4. 点"求解"，核对"建议取矩点"的量级后点"采用建议取矩点重解"（见下），再点第 01 段的"导出全部结果"。那一个按钮同时写 `calibrated.urdf`、`gravity_table.yaml` 和 `ft_calibration.yaml`。
+
+自动扭矩标定跑到每个姿态停稳时也会顺带记一条力样本（`source = automatic_settle`），因为那一刻工具那端最干净。
+
+### 求解了什么，没求解什么
+力通道解 $F = A u + b_F$：$A$ 取完整 3×3 时未知量 12 个，每个朝向给 3 个方程，所以 4 个朝向恰好可解。对 $A$ 做极分解 $A = \text{polarity}\cdot m\cdot R$ 一次拿到三样东西：工具质量、安装姿态偏差、以及奇异值的离散——**前者是可复现的常值偏差，后者才是轴增益/正交性损伤**。
+
+只有当自由模型相对受约束模型（$R$ 固定为名义安装姿态）的残差下降通过 F 检验（p < 0.01）时才采纳估计出的 $R$，否则一律用名义值。这一道是必须的：关节零位和 URDF 几何误差合起来约 1°，会伪造出约 1.7% 的表观非正交性，而它对质量估计只是二阶影响（< 0.02%）。页面同时显示两个模型的残差和 p 值。
+
+力矩通道在 $A$ 定下来之后对一阶矩线性，需要至少 3 个不共面的朝向。**纯重力标定解不出力矩通道的轴增益**：$M = B(h\times u)$ 里 $B\,\text{skew}(h)$ 的秩最多是 2，$B$ 和 $h$ 分不开，所以那一路只出零偏和一阶矩。
+
+标定用的是**实测关节角**，不是指令位置，所以到位精度不进模型。
+
+### 力矩参考点必须从外面给
+传感器对**自己的力矩参考点**取矩，厂家把它放在工具侧法兰面上，不在 URDF link 原点。重力标定同样解不出它：一阶矩只在 $c - d$ 这个组合里出现，$h$ 和 $d$ 是同一项。所以 `measurement_origin` 是**输入**，不是输出。
+
+页面给出建议值的办法是拿 CAD 反推 —— 质量偏差只改大小不改方向，于是
+
+$$d = c_{\text{CAD}} - \frac{h_{\text{meas}}}{m_{\text{meas}}}$$
+
+**必须核对量级**：它应该正好等于一个传感器高度（KWR57 是 53 mm）。对上了才说明"参考点在法兰面"这个假设成立；对不上说明 CAD 质心本身不可信，这时宁可留 0。
+
+实机首次标定的数据（2026-08-11，11 个朝向/侧）：
+
+| | 左 | 右 |
+|---|---|---|
+| 测得工具质心 z | 48.5 mm | 49.7 mm |
+| CAD 远端质心 z | 101.5 mm | 101.5 mm |
+| **反推出的参考点** | **[−1.1, −5.7, **53.0**] mm** | **[−1.2, −6.2, **51.8**] mm** |
+
+KWR57 圆柱高 53 mm、夹爪法兰在 z = 53 mm。真正的证据不是 z 分量对得上（那是定义使然），而是**两台独立标定的传感器都给出同一个方向**：横向分量只有 1~6 mm，几乎落在传感器轴线上；假设若不成立，$d$ 会指向任意方向、量级任意。
+
+设错的后果只在力矩上：负载被挂在比真实位置靠近手腕 52 mm 处，1 kg 负载在腕部少算 0.51 N·m。净力的**力**部分完全不受影响。
+
+流程：先照常求解一次（`measurement_origin` 默认 0），核对建议值的量级与方向，然后点「采用建议取矩点重解」。该值随标定结果一起存进 `parameters.json`，之后每次求解都会沿用，不必重复设置。
+
+### 运行时
+整机入口默认已经拉起这两个节点：
+
+```bash
+ros2 launch robot_bringup all_data.launch.py scope:=whole_body
+# 已有整机栈时单独补上：
+ros2 launch robot_bringup end_effector_load.launch.py
+```
+- `ft_wrench_compensator`（C++，在 `unitree_g1_ros2_control`）：`wrench_raw` → `wrench_net`，扣掉零偏和工具自重，输出的是**负载或环境施加给工具侧的物理力旋量**，静挂 1 kg 就是 9.81 N 指向地面，frame 是 `*_kwr57b_link` 且对其原点取矩。服务 `~/rezero` 在已知空载时单姿态重估零偏（只改内存，应对温漂）。
+- `payload_estimator`（Python，本包）：净力 + `<arm>/gravity` → `geometry_msgs/InertiaStamped` 的质量与质心 → 重力补偿。**不把净力直接喂回补偿**：那是一条增益 $1/k_p$ 的导纳环，而且分不清"一直拎着的负载"和"顶到桌子上的接触力"。压成缓变参数则天然稳定——只在重力方向不再动（手臂静止）且净力确实沿重力方向时才更新。质心要多个朝向才可辨识，在那之前按可观测度线性混合工具自身的质心当先验。
+
+**运动学只算一遍**：补偿节点为了扣工具自重本来就要算传感器系的重力方向，于是把它一并发到 `<arm>/gravity`，估计器直接用——不订阅 `/joint_states`，也不加载重力表。养第二份 FK 除了多一份 CPU，还会在两次求解落到不同 `joint_states` 采样上时悄悄错开。
+
+> **标定完成后不要再按 dashboard 的"置零"**：那是驱动内部的软件 tare，会把标定好的零偏整个错开。`ft_wrench_compensator` 启动时会主动调一次 `reset_tare` 把它清掉。
+
 ## 两个已知缺陷（都没做，需要时按下面做）
 
 这两件事都**没有实现**，2026-07-27 那次标定是用一次性脚本和手感修正绕过去的。它们是当前精度的主要限制。
@@ -153,10 +210,11 @@ $$\tau_\uparrow = G(q) + f,\qquad \tau_\downarrow = G(q) - f$$
 做完之后 `torque_bias` 才有资格导出到运行时——现在它被排除在重力表之外正是因为它混了静摩擦，见 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
 
 ## 文件
-标定结果放在包内 `config/`，**纳入版本管理**，三个文件都在点击“导出”时原子写入：
-- `config/parameters.json`：源 URDF 参数、当前逐 link 标定值、采点和每轮迭代记录。
+标定结果放在包内 `config/`，**纳入版本管理**，四个文件都在点击"导出"时原子写入：
+- `config/parameters.json`：源 URDF 参数、当前逐 link 标定值、采点和每轮迭代记录，外加 `ft_sensor` 段（力传感器样本与每侧结果）。schema v3；v2 的文件在加载时自动补齐这一段。
 - `config/calibrated.urdf`：与源 `final.urdf` 保持相同 link/joint/mimic 结构，只替换标定后的 `mass` 和六个 inertia 分量。
-- `config/gravity_table.yaml`：给运行时用的**归并刚体链**，每侧 7 个体的 `axis / origin_xyz / origin_rotation / mass / com` 平铺数组，另带 `imu_to_torso`。它按 ROS 2 参数文件格式书写，由 `forward_position_controller` 的 `gravity_table` 参数通过 `package://arm_gravity_compensation/config/gravity_table.yaml` 读取。标定出的力矩偏置不在其中（只留在 `parameters.json`），原因见 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
+- `config/gravity_table.yaml`：给运行时用的**归并刚体链**，每侧 7 个体的 `axis / origin_xyz / origin_rotation / mass / com` 平铺数组，另带 `imu_to_torso`，以及力传感器测量系相对腕 yaw 关节系的常值位姿 `payload_origin_xyz / payload_origin_rotation`。后者既是末端负载的挂载点，也让运行时能把重力方向转进测量系。它按 ROS 2 参数文件格式书写，由 `forward_position_controller` 的 `gravity_table` 参数通过 `package://arm_gravity_compensation/config/gravity_table.yaml` 读取。标定出的力矩偏置不在其中（只留在 `parameters.json`），原因见 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
+- `config/ft_calibration.yaml`：每侧的 `force_bias / torque_bias / tool_mass / tool_com / measurement_origin / rotation / polarity / frame`，由 `ft_wrench_compensator` 读取。`tool_com` 对 **link 原点**取矩，`measurement_origin` 是传感器自己的力矩参考点在同一个系里的位置。
 
 节点拿到的是安装后的 share 路径，而 `--symlink-install` 使它经 `build/` 指回源码树，写入前的 `Path.resolve()` 会跟随这条链，所以导出直接落在 `src/arm_gravity_compensation/config/` 上，符号链接也不会被替换。三个路径均可用 `parameter_file` / `calibrated_urdf` / `gravity_table` 参数覆盖；重力表的顶层键名取自 `gravity_controller_name`（默认 `arm_gravity_compensation`）。
 

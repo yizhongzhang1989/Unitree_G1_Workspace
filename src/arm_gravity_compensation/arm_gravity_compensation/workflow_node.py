@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
 import time
-from typing import Any, Dict, Optional, Sequence, cast
+from typing import Any, Dict, Mapping, Optional, Sequence, cast
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
@@ -15,6 +15,7 @@ import rclpy
 import yaml
 from numpy.typing import ArrayLike
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import WrenchStamped
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (HistoryPolicy, QoSProfile, ReliabilityPolicy)
@@ -24,7 +25,9 @@ from unitree_hg.msg import IMUState, LowCmd, LowState
 from .calibration import StaticSample, fit_selected_joints
 from .capture import PassivePoseCapture
 from .constants import (ALL_ARM_JOINTS, ALL_ARM_MOTOR_INDICES,
-                        ARM_JOINTS, ARM_MOTOR_INDICES, SIDES)
+                        ARM_JOINTS, ARM_MOTOR_INDICES, FT_SENSOR_LINKS, SIDES)
+from .ft_model import (FtSample, KGF_TO_NEWTON, orientation_coverage,
+                       solve_ft_calibration, suggest_measurement_origin)
 from .gravity_model import TorsoArmGravityModel
 from .imu import ImuSampleWindow, gravity_from_acceleration
 from .lowcmd import MotorSetpoint, populate_arm_command
@@ -42,6 +45,40 @@ _CONFIRMATION = "START_TORQUE_CALIBRATION"
 
 class CalibrationStopped(RuntimeError):
     pass
+
+
+class WrenchWindow:
+    """Running mean and spread of one sensor between two resets.
+
+    The spread is what tells a settled pose from one where somebody is still
+    holding the tool, which is the only way a hand-guided sample can be trusted.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+        self.stamp = 0.0
+
+    def reset(self) -> None:
+        self._sum = np.zeros(6, dtype=float)
+        self._square = np.zeros(6, dtype=float)
+        self._count = 0
+
+    def add(self, values: np.ndarray, now: float) -> None:
+        self._sum += values
+        self._square += values * values
+        self._count += 1
+        self.stamp = now
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def summary(self):
+        if self._count <= 0:
+            raise ValueError("no wrench samples in this window")
+        mean = self._sum / self._count
+        variance = np.maximum(self._square / self._count - mean * mean, 0.0)
+        return mean, np.sqrt(variance), self._count
 
 
 class ArmGravityWorkflow(Node):
@@ -119,6 +156,38 @@ class ArmGravityWorkflow(Node):
         self._fallback_motion = self.declare_parameter(
             "fallback_motion_mode", "ai").get_parameter_value().string_value
 
+        # 力传感器那一路只订阅，标定不需要任何力矩输出：把手臂摆到一个朝向、
+        # 松手（或交给现有重力补偿悬停）就能采一个点。
+        self._wrench_topics = {
+            "left": self.declare_parameter(
+                "left_wrench_topic", "/arm0/wrench_raw"
+            ).get_parameter_value().string_value,
+            "right": self.declare_parameter(
+                "right_wrench_topic", "/arm1/wrench_raw"
+            ).get_parameter_value().string_value,
+        }
+        # 与参数文件同目录：那条路径已经跟随 --symlink-install 的链回到源码树，
+        # 而新文件在 share 里没有链可跟随，直接拼 share 会写进 install 树。
+        self._ft_calibration_path = str(Path(self.declare_parameter(
+            "ft_calibration_file",
+            str(Path(self._parameter_path).parent / "ft_calibration.yaml")
+        ).get_parameter_value().string_value).expanduser().resolve())
+        self._ft_node_name = self.declare_parameter(
+            "ft_node_name", "ft_wrench_compensator"
+        ).get_parameter_value().string_value
+        # 驱动默认发 kgf/kgf·m，模型全程用 SI。
+        self._ft_unit_scale = (
+            1.0 if self.declare_parameter(
+                "ft_input_unit", "si").get_parameter_value().string_value
+            .lower() == "si" else KGF_TO_NEWTON)
+        # 1 kHz 的回调在 Python 里不便宜，而静态采样只需要几百个点就够平均。
+        self._ft_decimation = max(1, self.declare_parameter(
+            "ft_decimation", 10).get_parameter_value().integer_value)
+        self._ft_force_spread = self.declare_parameter(
+            "ft_force_spread_limit", 1.0).get_parameter_value().double_value
+        self._ft_torque_spread = self.declare_parameter(
+            "ft_torque_spread_limit", 0.1).get_parameter_value().double_value
+
         self._controller_kwargs = {
             "stiffness": self.declare_parameter(
                 "motor_stiffness", [40.0, 40.0, 40.0, 40.0,
@@ -155,6 +224,8 @@ class ArmGravityWorkflow(Node):
         self._capture: Optional[PassivePoseCapture] = None
         self._capture_automatic = False
         self._capture_side = "both"
+        self._wrench_windows = {side: WrenchWindow() for side in SIDES}
+        self._wrench_counter = {side: 0 for side in SIDES}
 
         self._phase = "idle"
         self._message = "Waiting for LowState"
@@ -192,6 +263,13 @@ class ArmGravityWorkflow(Node):
             IMUState, self._imu_topic, self._on_torso_imu, sensor_qos)
         self._lowcmd_subscription = self.create_subscription(
             LowCmd, self._lowcmd_topic, self._on_lowcmd, sensor_qos)
+        self._wrench_subscriptions = [
+            self.create_subscription(
+                WrenchStamped, topic,
+                (lambda message, side=side: self._on_wrench(side, message)),
+                sensor_qos)
+            for side, topic in self._wrench_topics.items() if topic
+        ]
         self._motion_request = self.create_publisher(
             Request, "/api/motion_switcher/request", reliable_qos)
         self._motion_subscription = self.create_subscription(
@@ -266,6 +344,21 @@ class ArmGravityWorkflow(Node):
         with self._lock:
             self._last_observed_lowcmd = time.monotonic()
             self._state_condition.notify_all()
+
+    def _on_wrench(self, side: str, message: WrenchStamped) -> None:
+        counter = self._wrench_counter[side] + 1
+        self._wrench_counter[side] = counter
+        if counter % self._ft_decimation:
+            return
+        force = message.wrench.force
+        torque = message.wrench.torque
+        values = np.array([force.x, force.y, force.z,
+                           torque.x, torque.y, torque.z],
+                          dtype=float) * self._ft_unit_scale
+        if not np.all(np.isfinite(values)):
+            return
+        with self._lock:
+            self._wrench_windows[side].add(values, time.monotonic())
 
     def _on_motion_response(self, message: Response) -> None:
         with self._lock:
@@ -364,6 +457,165 @@ class ArmGravityWorkflow(Node):
             self._store.save(document)
         return {"ok": True, "message": "All captured poses removed"}
 
+    # ------------------------------------------------------------------ #
+    # 力传感器：一次性线性标定。全程只读，不发任何 LowCmd，所以把手臂交给现有的
+    # 重力补偿悬停、或者干脆用手扶住前臂都行，只要工具那一端没人碰。
+    # ------------------------------------------------------------------ #
+
+    def capture_ft_sample(self) -> dict:
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                raise RuntimeError("automatic calibration is running")
+            self._require_fresh_state_locked()
+            live = self._live_sensors_locked()
+            if not live:
+                raise RuntimeError("no force sensor is publishing")
+        gravity, positions = self._average_static_window()
+        recorded = self._record_ft_samples(
+            np.mean(positions, axis=0), gravity, live, "manual")
+        self._set_message(
+            "Recorded a force sample on %s" % ", ".join(recorded))
+        return {"ok": True, "sides": recorded}
+
+    def remove_ft_sample(self, sample_id: int) -> dict:
+        with self._file_lock:
+            removed = self._store.remove_ft_sample(int(sample_id))
+        return {"ok": removed,
+                "message": "Sample removed" if removed else "Sample not found"}
+
+    def clear_ft_samples(self, side: str = "") -> dict:
+        with self._file_lock:
+            removed = self._store.clear_ft_samples(side)
+        return {"ok": True, "message": "Removed %d force samples" % removed}
+
+    def fit_ft_sensor(self, sides: Sequence[str],
+                      estimate_orientation: bool = True,
+                      origins: Optional[Mapping[str, Sequence[float]]] = None
+                      ) -> dict:
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                raise RuntimeError("automatic calibration is running")
+        chosen = [side for side in (list(sides) or list(SIDES)) if side in SIDES]
+        if not chosen:
+            raise ValueError("select at least one side")
+        results = {}
+        for side in chosen:
+            origin = (origins or {}).get(side, self._stored_origin(side))
+            solution = solve_ft_calibration(
+                self._ft_samples(side),
+                estimate_orientation=bool(estimate_orientation),
+                origin=origin)
+            diagnostics = dict(
+                solution.diagnostics, **self._tool_reference(side, solution))
+            with self._file_lock:
+                results[side] = self._store.set_ft_calibration(
+                    side, solution.calibration.to_dict(), diagnostics)
+        self._set_message(
+            "Force sensor solved for %s" % ", ".join(chosen))
+        return {"ok": True, "results": results}
+
+    def _stored_origin(self, side: str) -> np.ndarray:
+        record = self._store.load()["ft_sensor"].get(side)
+        if not record:
+            return np.zeros(3)
+        return np.asarray(
+            record["calibration"].get("measurement_origin", np.zeros(3)),
+            dtype=float)
+
+    def _tool_reference(self, side: str, solution) -> dict:
+        """What the URDF thinks the tool is, and where that puts the torque point.
+
+        The sensor reports torque about its own reference point, which sits on
+        the tool flange rather than at the link origin. Gravity cannot separate
+        the two, so the model has to supply the missing half.
+        """
+        if side not in self._model.sensor_placement:
+            return {}
+        rotation, translation = self._model.sensor_placement[side]
+        mass, moment = self._model.distal_inertia(side)
+        if mass <= 0.0:
+            return {}
+        modelled = rotation.T @ (moment / mass - translation)
+        return {
+            "modelled_tool_mass": float(mass),
+            "modelled_tool_com": [float(value) for value in modelled],
+            "suggested_origin": [
+                float(value) for value in suggest_measurement_origin(
+                    solution.calibration, modelled)],
+        }
+
+    def _ft_samples(self, side: str) -> list:
+        """Turn stored poses into the sensor-frame gravity the solver wants."""
+        samples = []
+        for item in self._store.ft_samples(side):
+            q = np.array([item["positions"][name] for name in ALL_ARM_JOINTS],
+                         dtype=float)
+            rotation = self._model.sensor_orientation(side, q)
+            samples.append(FtSample(
+                gravity=rotation.T @ np.asarray(item["gravity"], dtype=float),
+                wrench=item["wrench"]))
+        if not samples:
+            raise ValueError("no force samples captured on the %s arm" % side)
+        return samples
+
+    def _live_sensors_locked(self) -> list:
+        return [side for side in SIDES
+                if 0.0 < self._wrench_windows[side].stamp and
+                time.monotonic() - self._wrench_windows[side].stamp <
+                self._state_timeout]
+
+    def _average_static_window(self):
+        """Average one settled pose: torso gravity plus the arm positions."""
+        window = ImuSampleWindow()
+        positions = []
+        with self._lock:
+            self._imu_window = window
+            for side in SIDES:
+                self._wrench_windows[side].reset()
+        deadline = time.monotonic() + self._imu_timeout
+        try:
+            while not window.ready(self._imu_duration, self._imu_samples):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("IMU averaging window timed out")
+                with self._state_condition:
+                    self._state_condition.wait(timeout=0.05)
+                with self._lock:
+                    positions.append(self._position.copy())
+        finally:
+            with self._lock:
+                if self._imu_window is window:
+                    self._imu_window = None
+        array = np.asarray(positions)
+        spread = float(np.max(np.ptp(array, axis=0))) if array.size else np.inf
+        if spread > self._stability_position_range:
+            raise RuntimeError(
+                "the arm moved while averaging (%.4f rad)" % spread)
+        return window.estimate(
+            self._model.imu_to_torso,
+            acceleration_sign=self._acceleration_sign).gravity, array
+
+    def _record_ft_samples(self, position: np.ndarray, gravity: np.ndarray,
+                           sides: Sequence[str], source: str) -> list:
+        values = {name: float(value)
+                  for name, value in zip(ALL_ARM_JOINTS, position)}
+        recorded = []
+        for side in sides:
+            with self._lock:
+                mean, spread, count = self._wrench_windows[side].summary()
+            if (np.max(spread[:3]) > self._ft_force_spread or
+                    np.max(spread[3:]) > self._ft_torque_spread):
+                raise RuntimeError(
+                    "%s reading is unsettled (force %.2f N, torque %.3f N·m); "
+                    "let go of the tool"
+                    % (side, np.max(spread[:3]), np.max(spread[3:])))
+            if count < 5:
+                raise RuntimeError("%s produced only %d readings" % (side, count))
+            with self._file_lock:
+                self._store.append_ft_sample(
+                    side, values, gravity, mean, spread, source=source)
+            recorded.append(side)
+        return recorded
+
     def start_calibration(self, confirmation: str,
                           selected_joints: Sequence[str]) -> dict:
         if not self._allow_torque_output:
@@ -408,16 +660,48 @@ class ArmGravityWorkflow(Node):
         self._set_message("Stop requested; ramping torque output down")
         return {"ok": True, "message": self._message}
 
-    def export_urdf(self) -> dict:
+    def export_urdf(self, adopt_tool: bool = False) -> dict:
+        """Write the calibrated URDF, the gravity table and the sensor file.
+
+        ``adopt_tool`` replaces the modelled gripper of the wrist group with
+        what the sensor weighed. It is off by default because the identified
+        wrist group already absorbs the real tool: leaving it off keeps every
+        joint torque exactly as it is today and only records where the payload
+        hangs.
+        """
         with self._file_lock:
+            document = self._store.load()
+            calibrated = {side: record for side in SIDES
+                          for record in [document["ft_sensor"].get(side)]
+                          if record}
+            tool = None
+            if adopt_tool:
+                if not calibrated:
+                    raise ValueError("no force sensor calibration to adopt")
+                tool = {
+                    side: {"mass": record["calibration"]["tool_mass"],
+                           "com": record["calibration"]["tool_com"]}
+                    for side, record in calibrated.items()
+                }
             output = self._store.export_calibrated_urdf(self._output_urdf)
             table = atomic_write(
                 self._gravity_table_path,
                 yaml.safe_dump(
                     {self._controller_name: {
-                        "ros__parameters": self._model.gravity_table()}},
+                        "ros__parameters": self._model.gravity_table(tool=tool)}},
                     default_flow_style=None, sort_keys=False).encode("utf-8"))
-        return {"ok": True, "path": output, "gravity_table": table}
+            sensors = ""
+            if calibrated:
+                sensors = atomic_write(
+                    self._ft_calibration_path,
+                    yaml.safe_dump({self._ft_node_name: {"ros__parameters": {
+                        side: dict(record["calibration"],
+                                   frame=FT_SENSOR_LINKS[side],
+                                   calibrated_at=record["calibrated_at"])
+                        for side, record in calibrated.items()}}},
+                        default_flow_style=None, sort_keys=False).encode("utf-8"))
+        return {"ok": True, "path": output, "gravity_table": table,
+                "ft_calibration": sensors, "adopted_tool": bool(tool)}
 
     def _run_calibration(self) -> None:
         previous_mode = ""
@@ -661,6 +945,8 @@ class ArmGravityWorkflow(Node):
             imu_window = ImuSampleWindow()
             with self._lock:
                 self._imu_window = imu_window
+                for each_side in SIDES:
+                    self._wrench_windows[each_side].reset()
             try:
                 while not imu_window.ready(
                         self._imu_duration, self._imu_samples):
@@ -707,6 +993,16 @@ class ArmGravityWorkflow(Node):
 
             q = np.mean(position_array, axis=0)
             side_position = self._side_values(q, side)
+            # 力矩标定停稳的那一刻正好是力传感器最好的样本：工具那端没人碰。
+            with self._lock:
+                live = self._live_sensors_locked()
+            if live:
+                try:
+                    self._record_ft_samples(
+                        q, gravity_estimate.gravity, live, "automatic_settle")
+                except Exception as error:  # noqa: BLE001
+                    self.get_logger().warning(
+                        "force sample skipped: %s" % error)
             return StaticSample(
                 target_id=target_id,
                 q=q,
@@ -952,6 +1248,8 @@ class ArmGravityWorkflow(Node):
                 "parameter": self._parameter_path,
                 "source_urdf": self._urdf_path,
                 "calibrated_urdf": self._output_urdf,
+                "gravity_table": self._gravity_table_path,
+                "ft_calibration": self._ft_calibration_path,
                 "schema_version": document["schema_version"],
                 "source_sha256": document["source_urdf"]["sha256"],
             },
@@ -960,7 +1258,42 @@ class ArmGravityWorkflow(Node):
             "targets": document["calibration"]["targets"],
             "iterations": document["calibration"]["iterations"],
             "parameter_groups": parameter_groups,
+            "ft_sensor": self._ft_snapshot(document),
         }
+
+    def _ft_snapshot(self, document: dict) -> dict:
+        with self._lock:
+            live = {side: (None if self._wrench_windows[side].stamp <= 0.0 else
+                           time.monotonic() - self._wrench_windows[side].stamp)
+                    for side in SIDES}
+            latest = {side: (self._wrench_windows[side].summary()[0].tolist()
+                             if self._wrench_windows[side].count else None)
+                      for side in SIDES}
+        stored = document["ft_sensor"]
+        sides = {}
+        for side in SIDES:
+            samples = [item for item in stored["samples"]
+                       if item["side"] == side]
+            mounted = side in self._model.sensor_placement
+            coverage = orientation_coverage([
+                self._model.sensor_orientation(
+                    side,
+                    [item["positions"][name] for name in ALL_ARM_JOINTS]).T @
+                np.asarray(item["gravity"], dtype=float)
+                for item in samples] if mounted else [])
+            sides[side] = {
+                "topic": self._wrench_topics[side],
+                "age": live[side],
+                "wrench": latest[side],
+                "frame": FT_SENSOR_LINKS[side],
+                "samples": [{"id": item["id"], "captured_at": item["captured_at"],
+                             "source": item["source"], "wrench": item["wrench"],
+                             "wrench_std": item["wrench_std"]}
+                            for item in samples],
+                "coverage": coverage,
+                "result": stored[side],
+            }
+        return sides
 
     def _start_http(self) -> None:
         workflow = self
@@ -1026,7 +1359,17 @@ class ArmGravityWorkflow(Node):
                             str(body.get("confirmation", "")),
                             body.get("selected_joints", [])),
                         "/api/calibration/stop": workflow.stop_calibration,
-                        "/api/export": workflow.export_urdf,
+                        "/api/export": lambda: workflow.export_urdf(
+                            bool(body.get("adopt_tool", False))),
+                        "/api/ft/capture": workflow.capture_ft_sample,
+                        "/api/ft/remove": lambda: workflow.remove_ft_sample(
+                            int(body.get("id", 0))),
+                        "/api/ft/clear": lambda: workflow.clear_ft_samples(
+                            str(body.get("side", ""))),
+                        "/api/ft/solve": lambda: workflow.fit_ft_sensor(
+                            body.get("sides", []),
+                            bool(body.get("estimate_orientation", True)),
+                            body.get("origins")),
                     }
                     route = routes.get(path)
                     if route is None:
