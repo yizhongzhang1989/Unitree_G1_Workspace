@@ -144,6 +144,12 @@ NativeBridgeNode::NativeBridgeNode(const rclcpp::NodeOptions & options)
     statistics_timer_ = create_wall_timer(
       std::chrono::seconds(1), std::bind(&NativeBridgeNode::report_statistics, this));
   }
+  failure_timer_ = create_wall_timer(
+    std::chrono::milliseconds(200), [this]() {
+      if (transport_failed_.load() && rclcpp::ok()) {
+        rclcpp::shutdown();
+      }
+    });
   // pre-shutdown 回调在 context 失效之前、执行器仍在运行时被调用，是唯一还能继续
   // 转发 CAN TX 的时机：设备节点的退出失能帧要靠它才能真正上总线。
   pre_shutdown_handle_ = get_node_base_interface()->get_context()->add_pre_shutdown_callback(
@@ -230,9 +236,9 @@ void NativeBridgeNode::publish_can_frame(int channel_id, const CanFrame & frame)
 void NativeBridgeNode::transport_error(const std::string & message)
 {
   RCLCPP_FATAL(get_logger(), "native CANalyst-II transport failed: %s", message.c_str());
-  if (rclcpp::ok()) {
-    rclcpp::shutdown();
-  }
+  // 这里跑的是 libusb 完成回调或 TX 线程。直接 rclcpp::shutdown() 会把它卡在
+  // pre-shutdown 回调里，而主线程可能正在 join 它，libusb 的事件锁也还握在手上。
+  transport_failed_.store(true);
 }
 
 void NativeBridgeNode::wait_for_can_clients()
@@ -298,6 +304,7 @@ void NativeBridgeNode::shutdown_transport()
     return;
   }
   statistics_timer_.reset();
+  failure_timer_.reset();
   for (const auto & device : device_nodes_) {
     device->stop_device();
   }
