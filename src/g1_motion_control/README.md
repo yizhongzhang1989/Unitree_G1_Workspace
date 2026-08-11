@@ -4,12 +4,14 @@
 
 | 段 | 轴数 | 来源 |
 |---|---|---|
-| 下肢（12 腿 + 3 腰） | 15 | ONNX 策略，输入 `vx / vy / wz / h` |
+| 下肢（12 腿 + 3 腰） | 15 | ONNX 策略 |
 | 上肢双臂 | 14 | 双臂 IK，输入两个末端位姿（`*_gripper_base` 相对 `torso_link`） |
 | 夹爪偏心轴 | 2 | 直接透传，只按 URDF 行程裁剪 |
 
 不分层、不加第二个定时器、不加第二个发布者。手臂**始终开启**，没有开关参数也没有服务。
-策略的职责是在上肢被遥操 / VLA 随意摆布时保持平衡并跟随速度与盆骨高度指令。
+策略的职责是在上肢被遥操 / VLA 随意摆布时站稳。**它吃不吃下肢指令由装载的权重决定**：
+当前包里的站立策略不吃（`~/command` 的速度/高度块仍然被收下并在 `~/state` 里回显，但不
+传给推理），换回原来的速度跟踪策略就吃——只需换 `config/policy.onnx`，代码不用改。见第 4 节。
 
 ```mermaid
 flowchart TD
@@ -114,10 +116,10 @@ flowchart TD
 | `/robot_description` | `std_msgs/String`（latched） | 一次 | 建 IK 缩减模型用 |
 
 每一维观测怎么从这些话题装配出来，见第 4 节。注意 `/joint_states` 里是**全部 31 轴**
-（29 本体 + 2 夹爪偏心轴），节点按 `policy_joints` 的名字取其中 15 个；名字对不上就等
-下一帧，不会拿错位的数据去推理。
+（29 本体 + 2 夹爪偏心轴），节点按 ONNX 里声明的观测关节名单取其中一部分（站立策略取 29 个，
+原速度策略取 15 个）；名字对不上就等下一帧，不会拿错位的数据去推理。
 
-上肢的输入不进观测，直接驱动 IK：`~/command` 的臂位姿块是 `*_gripper_base` 相对
+上肢的**指令**不进观测，直接驱动 IK（但手臂的**实测位姿**是进观测的，见第 4 节）：`~/command` 的臂位姿块是 `*_gripper_base` 相对
 `torso_link` 的 `[x,y,z,qx,qy,qz,qw]`；夹爪块直接透传到槽位 29/30，只按 `gripper_limits` 裁剪。
 
 上肢指令**不设超时**：没人发就保持上一个位姿目标。手臂停在原地才是安全行为，
@@ -332,26 +334,35 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 
 ## 4. 下肢观测与动作契约
 
-这一节是整个部署里最要命的部分：错一位就是错一个策略。层内的 `policy_runtime.py` 把关节顺序、默认位姿、动作缩放**全部从 ONNX 的 metadata 里读**，不在代码里抄第二份；启动时再和 `config/motion_control.yaml` 的 `policy_joints` 逐个比对，对不上直接拒绝启动。
+这一节是整个部署里最要命的部分：错一位就是错一个策略。层内的 `policy_runtime.py` 把关节顺序、默认位姿、动作缩放**全部从 ONNX 的 metadata 里读**，不在代码里抄第二份；启动时再和 `config/motion_control.yaml` 的 `policy_joints` / `arm_joints` 逐个比对，对不上直接拒绝启动。
 
-### 观测（42 维，顺序即拼接顺序）
+**观测布局也是从 metadata 读的**，照着 `observation_names` 逐项装配，不写死在代码里。于是换策略 = 换 `config/policy.onnx`，代码一行不用动，两套契约可以随时互换：
 
-| # | 项 | 维 | 实机来源 | 训练侧对应 |
-|---|---|---|---|---|
-| 0 | `base_ang_vel` | 3 | `/pelvis_imu_broadcaster/imu.angular_velocity` | `robot/imu_ang_vel`（gyro@`imu_in_pelvis`） |
-| 1 | `projected_gravity` | 3 | 同上的 `orientation`，`R(q)ᵀ·[0,0,-1]` | `projected_gravity_b` |
-| 2 | `command_twist` | 3 | `[vx, vy, wz]` | `generated_commands("twist")` |
-| 3 | `command_height` | 1 | `[h]` | `generated_commands("height")` |
-| 4 | `phase` | 2 | `[sin, cos]`，`period=0.6 s`；`‖[vx,vy,wz]‖<0.1` 时置零 | `mdp.phase` |
-| 5 | `joint_pos` | 15 | `q_meas - q_default` | `joint_pos_rel` |
-| 6 | `joint_vel` | 15 | `dq_meas` | `joint_vel_rel` |
+| | 速度跟踪（原策略） | 站立（`G1-Gloria-Stand`） |
+|---|---|---|
+| 观测维度 | 57 | 79 |
+| 指令项 | `command_twist` + `command_height` + `phase` | **无** |
+| 观测关节 | 下肢 15 轴 | 全身 29 轴（下肢 15 + 手臂 14） |
+| 动作关节 | 下肢 15 轴 | 下肢 15 轴 |
 
-**没有 `actions` 项。** GRU 的隐状态本来就记得自己上一拍输出了什么，再从输入喂回去等于
-给策略接了一条显式正反馈通路，所以训练侧把它从 actor 观测里去掉了。部署侧因此也不再
-维护"上一拍动作"这个状态。
+`~/command` 两套都照收、照限速、照在 `~/state` 里回显；站立那套只是 `observation_names` 里没有指令项，于是压根不会被拼进观测向量。节点侧的调用代码两套完全一样。上肢 IK 与指令块也完全不受影响。
 
-**隐状态**（`h_in` / `h_out`，形状 `(1,1,32)`）逐拍回喂，并在急停/接管时清零——训练里它
-就是每个 episode 开头归零的，不清就会把上一次跑飞前的状态带进下一次接管。
+目前 `policy_runtime` 认识的项，遇到不认识的名字直接拒绝加载：
+
+| 项 | 维 | 实机来源 | 训练侧对应 |
+|---|---|---|---|
+| `base_ang_vel` | 3 | `/pelvis_imu_broadcaster/imu.angular_velocity` | `base_ang_vel` |
+| `projected_gravity` | 3 | 同上的 `orientation`，`R(q)ᵀ·[0,0,-1]` | `projected_gravity_b` |
+| `command_twist` | 3 | `~/command` 的 `[vx, vy, wz]` | `generated_commands("twist")` |
+| `command_height` | 1 | `~/command` 的 `[h]` | `generated_commands("height")` |
+| `phase` | 2 | `[sin, cos]`，`period=0.6 s`；`‖[vx,vy,wz]‖<0.1` 时置零 | `mdp.phase` |
+| `joint_pos` | len(观测关节) | `q_meas - q_default` | `joint_pos_rel` |
+| `joint_vel` | len(观测关节) | `dq_meas` | `joint_vel_rel` |
+| `actions` | len(动作关节) | 上一拍策略**原始**（未裁剪）输出 | `last_action` |
+
+**站立那 29 轴 = `policy_joints`（15）+ `arm_joints`（14），不包含两个夹爪轴。** 手臂由 VR IK 自顾自地驱动，它摆到哪儿直接决定质心落在哪儿，所以必须让下肢看得到；训练侧的事件会把手臂在整个可达范围内摆起来，这 14 维在训练分布里是有方差的。夹爪相反：训练里它恒为 0，观测归一化学到的标准差接近零，真机上一开合就会被除成巨值盖掉平衡信号（实测夹爪偏 0.2 rad 造成的动作扰动是左膝偏同样角度的 5 倍），所以它只以物理扰动的形式进入。
+
+观测关节名单和动作关节名单是 metadata 里**两份独立的名单**（`obs_joint_pos_joint_names` / `action_joint_names`），不能互相代用，也不能靠截 `joint_names` 前 N 个去猜——模型里 `left_eccentric_joint` 夹在左右臂中间。
 
 归一化已经在导出时折进 ONNX 图里（`Sub`/`Div`），**不要**在外面再减均值。
 

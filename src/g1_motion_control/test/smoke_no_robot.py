@@ -380,7 +380,7 @@ def main() -> int:
     from g1_motion_control.policy_runtime import load_policy
     _, spec = load_policy(str(Path(
         get_package_share_directory('g1_motion_control')) / 'config' / 'policy.onnx'))
-    config['stand_pose'] = spec.default_pos
+    config['stand_pose'] = spec.action_default_pos
 
     rclpy.init()
     node = Harness()

@@ -279,17 +279,24 @@ class MotionControlNode(Node):
         if not policy_path.is_file():
             raise ValueError(f'找不到策略文件: {policy_path}')
         session, spec = load_policy(str(policy_path))
-        spec_matches(spec, policy_joints)
+        # 两套契约：速度跟踪策略只看下肢 15 轴，站立策略看全身 29 轴（下肢 + 手臂）。
+        # 夹爪两轴一律不进观测。按长度选完后还要逐个比对，写错了不会静默通过。
+        expected_obs_joints = (
+            policy_joints if len(spec.obs_joint_names) == len(policy_joints)
+            else policy_joints + self._arm_names)
+        spec_matches(spec, policy_joints, expected_obs_joints)
+        self._obs_slots = [self._joints.index(name) for name in spec.obs_joint_names]
         self._policy = LocomotionPolicy(session, spec, control_dt=dt,
                                         target_lower=lower, target_upper=upper)
         # 站立位姿 = 策略的默认位姿 + 被动关节目标，直接取自 ONNX metadata：这和
         # 训练里 reset 后的开局位姿是同一份数，不另抄一遍。
         self._stand_pose = np.empty(len(self._joints))
-        self._stand_pose[self._policy_slots] = spec.default_pos
+        self._stand_pose[self._policy_slots] = spec.action_default_pos
         self._stand_pose[passive_slots] = passive_values
         self.get_logger().info(
             f'策略已加载: {policy_path.name} obs={spec.obs_dim} act={spec.action_dim} '
-            f'@ {rate:.0f} Hz')
+            f'观测关节={len(spec.obs_joint_names)} 轴 '
+            f'{"吃指令" if spec.uses_command else "不吃指令（站立）"} @ {rate:.0f} Hz')
 
         # -- 运行期状态（全部在 _lock 下访问）----------------------------------
         self._lock = threading.Lock()
@@ -621,8 +628,8 @@ class MotionControlNode(Node):
                     origin, goal = self._stand_via, self._stand_pose
                 target = origin + alpha * (goal - origin)
             else:
-                joint_pos = self._q[self._policy_slots]
-                joint_vel = self._dq[self._policy_slots]
+                joint_pos = self._q[self._obs_slots]
+                joint_vel = self._dq[self._obs_slots]
                 ang_vel = self._ang_vel
                 request = self._request.copy()
                 if self._now() - self._command_stamp > self._command_timeout:
@@ -630,6 +637,8 @@ class MotionControlNode(Node):
                 self._command = np.clip(
                     self._command + np.clip(request - self._command, -self._cmd_rate, self._cmd_rate),
                     self._cmd_lo, self._cmd_hi)
+                # 无论策略吃不吃指令都照传：吃不吃由 ONNX 的 observation_names 决定，
+                # 这里不做分支，换策略时这段代码不用动。
                 command = self._command.copy()
             # 条件写成 RUNNING or 插值走完，是因为 ~/start 可能抢在控制线程前面把状态改掉。
             arms = self._ik is not None and (
