@@ -13,12 +13,9 @@ import numpy as np
 import pytest
 from ament_index_python.packages import get_package_share_directory
 from std_msgs.msg import Float64MultiArray
-from unitree_hg.msg import LowState
 
 from g1_motion_control.dashboard_node import (
     DashboardNode,
-    _G1_JOINT_NAMES,
-    lowstate_motors,
     mesh_url,
     parse_urdf,
     rpy_to_quat,
@@ -205,19 +202,3 @@ def test_dashboard_observes_arm_blocks_without_clearing_other_fields():
     node._on_command(Float64MultiArray(data=[0.7, 0.8, 0.9, 0.0, 0.0, 0.0, 1.0]))
     assert node._command_pose['left'][:3] == [0.1, 0.2, 0.3]
     assert node._command_pose['right'][:3] == [0.7, 0.8, 0.9]
-
-
-def test_lowstate_motor_indices_map_to_the_29_body_joints():
-    """LowState 没有关节名，映射错一位就会把故障码标到错误的电机。"""
-    message = LowState()
-    for index, motor in enumerate(message.motor_state):
-        motor.q = index / 10.0
-        motor.motorstate = 0
-        motor.temperature = [40 + index, 50 + index]
-    message.motor_state[13].motorstate = 0x200
-
-    motors = lowstate_motors(message)
-    assert len(_G1_JOINT_NAMES) == len(motors) == 29
-    assert motors['left_hip_pitch_joint'] == [0.0, 0, 40, 50]
-    assert motors['waist_roll_joint'] == pytest.approx([1.3, 0x200, 53, 63])
-    assert motors['right_wrist_yaw_joint'] == pytest.approx([2.8, 0, 68, 78])

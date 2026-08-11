@@ -194,6 +194,43 @@ ssh -L 8770:127.0.0.1:8770 user@robot
 
 `robot_bringup` 生产拓扑固定使用 KWR57 进程内 handler。ROS Frame 回退只保留在单设备调试入口 `kwr57_ros/ft_sensor_debug.launch.py use_frame_handler:=false` 和外部 bridge 入口 `kwr57_ros/ft_sensor.launch.py`，原因与 PC2 性能数据见 [`kwr57_ros/README.md`](../kwr57_ros/README.md)。
 
+## 底层数据监控页
+把 `LowState` 的每一个字段铺出来，包括 `g1_motion_control` 那个页面没有的力矩、电压、`sensor` 和 `mode`：
+```bash
+source scripts/env.sh
+ros2 launch robot_bringup lowlevel_dashboard.launch.py
+```
+
+浏览器打开 `http://<机器人 IP>:8210`。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，而 `localhost` 常先解析到 IPv6 `::1`，表现为页面能打开、数据却一直不来。
+
+这个页面**不依赖本工作区的任何东西**：它直接订阅 G1 固件发的话题，不需要 `all_data`、`/controller_manager`、`/robot_description` 或 TF。控制栈没起来也能看，正好用来判断"是机器人没数据还是我们的栈有问题"。
+
+| 页面区域 | 内容 |
+|---|---|
+| 左上表格 | 35 个电机槽（29 本体 + 6 宇树预留，预留默认折叠），每行 `mode`、`q`、`dq`、`ddq`、`tau_est`、外壳/绕组温度、`vol`、`motorstate`、`sensor` |
+| 左下 IMU | 盆骨（`LowState.imu_state`）与躯干（`/lf/secondary_imu`）对照。四元数按固件的 **`w x y z`** 原样显示，不是 ROS 的 `xyzw` |
+| 右侧曲线 | 勾表格**列头**决定画哪些信号，勾表格**行**决定画哪些电机；每列一张图、各自的量纲与 Y 轴。单张窄于 600 px 就自动折行并把图均分到各行 |
+| 顶部 | `mode_pr`、`mode_machine`、`tick`、实测总线频率 |
+
+`wireless_remote`（40 字节遥控器原始数据）和 `crc`、`version` 折叠在 IMU 下方。
+
+**纯只读**：不发布任何话题、不调用任何服务，`ros2 node info /lowlevel_dashboard` 的 Publishers 只有 `/rosout` 和 `/parameter_events`。没人看页面时会退订，页面重开自动订回。
+
+默认订阅固件的 `/lf/*` 低频版。`/lf/lowstate` 与 `/lowstate`、`/lf/secondary_imu` 与 `/secondary_imu` 都由 G1 固件直发（ROS 图里显示为 `_CREATED_BY_BARE_DDS_APP_`，因为它用裸 CycloneDDS 而不是 rclcpp），内容逐字段相同，只差频率：
+
+| 话题 | 实测频率 | 何时用 |
+|---|---|---|
+| `/lf/lowstate` + `/lf/secondary_imu`（默认） | 20 Hz | 日常监控，够用 |
+| `/lowstate` + `/secondary_imu` | 1040 Hz | 看高频细节时把两个 topic 参数改回去，代价是接近一个核 |
+
+两路都用 `raw=True` 订阅，回调只存字节串，反序列化（实测 712 µs，占整条链路 79%）推迟到浏览器真的来问的那一刻——所以开销跟的是页面轮询频率，不是总线频率。不这么做时 spin 线程握着 GIL 不放，HTTP 单次响应会被饿到 200 ms。页面固定 20 Hz 轮询，和总线对齐，再快只会拿到重复帧。
+
+远程机器可使用 SSH 端口转发：
+
+```bash
+ssh -L 8210:127.0.0.1:8210 user@robot
+```
+
 ## 整机 ros2_control 与测试面板
 先启动全部硬件与真实控制栈，再单独启动测试网页：
 ```bash

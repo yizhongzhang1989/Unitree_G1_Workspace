@@ -21,7 +21,6 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
-from unitree_hg.msg import LowState
 
 PORT = 8199
 URL = f'http://127.0.0.1:{PORT}'
@@ -74,7 +73,6 @@ class Source(Node):
         self.create_publisher(String, '/robot_description', latched).publish(
             String(data=description()))
         self._joints = self.create_publisher(JointState, '/joint_states', stream)
-        self._lowstate = self.create_publisher(LowState, '/lowstate', stream)
         self._command = self.create_publisher(
             Float64MultiArray, '/motion_control/command', 10)
         self._status = self.create_publisher(String, '/motion_control/status', 10)
@@ -86,12 +84,6 @@ class Source(Node):
         message.name = ['left_elbow_joint', 'right_elbow_joint', 'left_eccentric_joint']
         message.position = [0.5, 0.7, 1.2]
         self._joints.publish(message)
-        lowstate = LowState()
-        for index, motor in enumerate(lowstate.motor_state):
-            motor.q = index / 10.0
-            motor.temperature = [40 + index, 50 + index]
-        lowstate.motor_state[13].motorstate = 0x200
-        self._lowstate.publish(lowstate)
 
     def _tick_status(self):
         command = Float64MultiArray()
@@ -109,7 +101,7 @@ class Source(Node):
 
 
 def main() -> int:
-    # 与正在运行的真机控制栈隔离，否则同名 status/joint_states/lowstate 会混流，
+    # 与正在运行的真机控制栈隔离，否则同名 status/joint_states 会混流，
     # smoke 读到哪一个发布者取决于 DDS 调度，断言会随机失败。
     os.environ['ROS_DOMAIN_ID'] = DOMAIN_ID
     rclpy.init()
@@ -127,7 +119,7 @@ def main() -> int:
         status, _, body = get('/')
         check('/ 返回采集页', status == 200 and b'<canvas id="viewer">' in body)
 
-        for path in ('/dashboard.js', '/joint_chart.js', '/viewer.js', '/dashboard.css',
+        for path in ('/dashboard.js', '/viewer.js', '/dashboard.css',
                      '/vendor/three.module.js',
                      '/vendor/addons/controls/OrbitControls.js',
                      '/vendor/addons/loaders/STLLoader.js'):
@@ -171,7 +163,7 @@ def main() -> int:
         # /joint_states 是按需订阅的，第一次轮询之后才会订上，等它到齐。
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            if (state['q'] and state['motors'] and state['command_pose']
+            if (state['q'] and state['command_pose']
                     and state['limited_pose'] and state['ik_pos_err'] is not None):
                 break
             time.sleep(0.2)
@@ -180,18 +172,15 @@ def main() -> int:
         for _ in range(50):
             get('/api/state')
         per = (time.monotonic() - clock) / 50 * 1e3
-        waist_roll = state['motors'].get('waist_roll_joint', [])
-        check(f'29 轴温度齐全，/api/state 单次 {per:.2f} ms',
-              len(state['motor_names']) == len(state['motors']) == 29
-              and len(waist_roll) == 4
-              and abs(waist_roll[0] - 1.3) < 1e-6
-              and waist_roll[1:] == [0x200, 53, 63]
+        check(f'手臂关节角齐全，/api/state 单次 {per:.2f} ms',
+              abs(state['q'].get('left_elbow_joint', 0.0) - 0.5) < 1e-6
+              and abs(state['q'].get('right_elbow_joint', 0.0) - 0.7) < 1e-6
               and per < 20.0)
 
         # 没人看页面就退订 100 Hz 的 /joint_states——这一路在 Jetson 上占 12% 单核。
         time.sleep(4.5)
         idle = json.loads(get('/api/state')[2])
-        check('闲置后两路高频状态都被退订', not idle['q'] and not idle['motors'])
+        check('闲置后高频状态被退订', not idle['q'])
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             if json.loads(get('/api/state')[2])['q']:

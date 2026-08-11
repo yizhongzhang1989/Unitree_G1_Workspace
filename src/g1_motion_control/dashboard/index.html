@@ -110,35 +110,6 @@
     </div>
   </div>
 
-  <section id="joint-panel" aria-label="关节角度曲线">
-    <div class="joint-head">
-      <div>
-        <strong>关节角度</strong>
-        <span class="hint">最近 10 秒 · °</span>
-      </div>
-      <span class="pill" id="lowstate">等待 /lowstate</span>
-    </div>
-    <div class="joint-body">
-      <aside class="joint-picker">
-        <div class="joint-toolbar">
-          <span>29 轴</span>
-          <span class="joint-actions">
-            <button id="joint-all" type="button">全选</button>
-            <button id="joint-clear" type="button">清空</button>
-          </span>
-        </div>
-        <div class="joint-columns" aria-hidden="true">
-          <span>关节</span><span>角度</span><span>外壳/绕组 °C</span><span>状态码</span>
-        </div>
-        <div id="joint-list" class="joint-list"></div>
-      </aside>
-      <div class="chart-wrap">
-        <canvas id="joint-chart" aria-label="已选关节的角度时间曲线"></canvas>
-        <div id="chart-empty">等待 /lowstate</div>
-      </div>
-    </div>
-  </section>
-
   <script type="module" src="/dashboard.js"></script>
 </body>
 

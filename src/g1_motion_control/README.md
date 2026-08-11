@@ -37,12 +37,11 @@ flowchart TD
     POL -. "engage / start / estop<br/>经 /controller_manager/switch_controller" .-> CM
 
     subgraph MON["可选只读监控"]
-      DASH["dashboard<br/>joint_states 做 FK<br/>lowstate 画 29 轴曲线"]
+      DASH["dashboard<br/>joint_states 做 FK<br/>末端三层对照"]
     end
     CMD -. "只观察上层末端命令" .-> DASH
     STAT -.-> DASH
     JS -. "实测关节" .-> DASH
-    G1 -. "29 轴 q / motorstate / temperature" .-> DASH
     RD -. "手臂模型" .-> DASH
 
     subgraph RC["ros2_control_node（500 Hz 实时环）"]
@@ -78,7 +77,7 @@ flowchart TD
 |---|---|---|---|
 | 键盘 / VR / VLA | 各自设备输入；VR 另读 `limited_pose` 当离合锚点 | `/motion_control/command`，长度只允许 2/4/7/14/20 | IK、关节限位、直接写 FPC |
 | `motion_control` | 统一命令、`/joint_states`、IMU、`/robot_description`、状态机服务 | FPC 31 轴目标；10 Hz `~/status` | 区分命令来自谁；任务级语义 |
-| dashboard（可选） | 统一命令、`~/status`、`/joint_states`、`/lowstate`、`/robot_description` | HTTP 页面；**不发任何 ROS 消息、不调服务** | 控制机器人；在后端重复做 FK |
+| dashboard（可选） | 统一命令、`~/status`、`/joint_states`、`/robot_description` | HTTP 页面；**不发任何 ROS 消息、不调服务** | 控制机器人；在后端重复做 FK；电机底层字段（看 `robot_bringup`） |
 | ros2_control / 硬件 | 31 轴位置目标、增益与传感器 | `/lowcmd`、夹爪命令、`/joint_states`、IMU | 上层任务与末端规划 |
 
 ## 1. 指令话题契约：`~/command` 按长度分块
@@ -244,10 +243,9 @@ ros2 launch g1_motion_control dashboard.launch.py
 | 黄色菱形 + 坐标轴 | `status.limited_pose` —— IK + 关节限速后的末端指令 |
 | 橙色空心环 + 坐标轴 | 直接挂在实测模型的 `*_gripper_base` 上 |
 | 右上表格 | 上层→限速、限速→实测两段位置差；超过 10 mm 标红 |
-| 左下关节列表 | `/lowstate` 的 29 个本体关节；复选框决定曲线显示哪些轴 |
-| 关节角度曲线 | 已选关节最近 10 s 的实测角度（°），默认显示腰部三轴 |
-| 状态码 | `motorstate`，十六进制显示；非零标红。固件未公开位域定义，不在页面猜含义 |
-| 外壳/绕组 | `temperature[0] / temperature[1]`（°C），两路温度同时显示 |
+
+电机的力矩、电压、两路温度和 `motorstate` 故障码不在这页，看 `robot_bringup` 的底层监控页：
+`ros2 launch robot_bringup lowlevel_dashboard.launch.py`（`http://<机器人IP>:8210/`）。
 
 **这是个独立的只读进程**，不在控制链路上：不发指令、不调服务，不开就是零开销。
 控制栈没起来时页面只会一直等 `/robot_description`，不影响别的东西。
@@ -256,10 +254,9 @@ ros2 launch g1_motion_control dashboard.launch.py
 
 - **正运动学在浏览器里算，后端不碰 pinocchio**。关节树发过去之后 three.js 的
   `Object3D` 嵌套本来就要合成矩阵，后端再算一遍是白花钱。所以 `/api/state` 每次只回
-  手臂关节角、29 轴低层状态和上层/限速位姿（典型约 1 KiB），不是整棵 link 变换树。
-- **没人看页面就退订 `/joint_states` 与 `/lowstate`**。前者是 100 Hz，后者可达 500 Hz；
-  页面关闭 3 s 后两路都释放，重新打开时自动订回。`/lowstate` 在节点内按 20 Hz 留最新帧，
-  浏览器只保存最近 10 s，不让高频历史堆在 ROS 节点里。
+  手臂关节角和上层/限速位姿（典型约 1 KiB），不是整棵 link 变换树。
+- **没人看页面就退订 `/joint_states`**。这一路是 100 Hz，页面关闭 3 s 后释放，
+  重新打开时自动订回。
 - **只保留 `base_frame` 之下含可动关节的分支**，头、相机、雷达那些 fixed 分支自动剪掉
   （29 个 link / 80 个关节），少下好几 MB 的 mesh。判据不是关节名单，换 URDF 不用改配置。
 - **渲染按需**：没有新数据、相机也没动就不 `render()`，页面挂着不看时不占 GPU。
@@ -768,9 +765,9 @@ g1_motion_control/
     ├── test_policy_runtime.py   # 13 个纯逻辑用例，pytest
     ├── test_arm_ik.py           # 19 个 IK 用例（正逆往返 / 不可达不抖 / 单侧求解 / 零空间偏置与门控 / 整条管线不卡死不跳变）
     ├── test_vr_teleop.py        # 39 个 VR 用例（离合 / tracking 防跳 / 领先量夹紧 / 畸形帧 / 轴映射 / 标定 / 夹爪）
-    ├── test_dashboard.py        # 14 个监控页用例（URDF 裁剪 / lowstate 映射 / mimic 单遍解算 / 路径容纳）
+    ├── test_dashboard.py        # 13 个监控页用例（URDF 裁剪 / mimic 单遍解算 / 路径容纳）
     ├── smoke_no_robot.py        # 无真机联调，33 项检查，直接 python3 跑
-    └── smoke_dashboard.py       # 监控页联调，18 项检查，直接 python3 跑
+    └── smoke_dashboard.py       # 监控页联调，17 项检查，直接 python3 跑
 ```
 
 > 数据（`config/*`、`vr/*.html`）走 `data_files` 装到 `share/`，运行时用
@@ -784,7 +781,7 @@ g1_motion_control/
 # 假状态源 + 假 controller_manager，把状态机从头走一遍，33 项检查
 python3 src/g1_motion_control/test/smoke_no_robot.py
 
-# 监控页联调（假 URDF / joint_states / lowstate / status，逐个打 HTTP 口），18 项检查
+# 监控页联调（假 URDF / joint_states / status，逐个打 HTTP 口），17 项检查
 python3 src/g1_motion_control/test/smoke_dashboard.py
 
 # 纯逻辑单测 84 项

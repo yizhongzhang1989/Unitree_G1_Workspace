@@ -14,7 +14,11 @@ setup(
          ['package.xml', 'README.md', 'CAN_BUS_LOAD.md']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
-    package_data={package_name + '.end_effectors': ['dashboard.html']},
+    package_data={
+        package_name + '.end_effectors': ['dashboard.html'],
+        package_name + '.lowlevel': [
+            'static/*.html', 'static/*.css', 'static/*.js'],
+    },
     include_package_data=True,
     install_requires=['setuptools'],
     zip_safe=True,
@@ -36,6 +40,8 @@ setup(
             'robot_bringup.ikt_pose_commander_compat:main',
             'ikt_pose_commander_dashboard = '
             'robot_bringup.ikt_pose_commander_compat:dashboard_main',
+            'lowlevel_dashboard = '
+            'robot_bringup.lowlevel.dashboard_node:main',
             'whole_body_dashboard = '
             'robot_bringup.dashboard_compat_node:main',
         ],

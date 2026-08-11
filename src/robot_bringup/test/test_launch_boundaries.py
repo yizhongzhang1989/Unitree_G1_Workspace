@@ -178,6 +178,23 @@ def test_whole_body_dashboard_only_creates_compat_web_node():
     assert _node_executable(nodes[0]) == "whole_body_dashboard"
 
 
+def test_lowlevel_dashboard_expands_to_one_read_only_web_node():
+    module = _load_launch("lowlevel_dashboard.launch.py")
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "web_host": "0.0.0.0",
+        "web_port": "8210",
+        "lowstate_topic": "/lf/lowstate",
+        "secondary_imu_topic": "/lf/secondary_imu",
+        "idle_release_s": "3.0",
+    })
+    actions = module._dashboard_node(context)
+    assert len(actions) == 1
+    assert isinstance(actions[0], Node)
+    assert _node_package(actions[0]) == "robot_bringup"
+    assert _node_executable(actions[0]) == "lowlevel_dashboard"
+
+
 def test_ikt_pose_commander_uses_named_position_controllers():
     module = _load_launch("ikt_pose_commander.launch.py")
     description = module.generate_launch_description()
