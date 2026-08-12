@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>底层监控 · robot_bringup</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script type="module" src="/dashboard.js"></script>
+</head>
+
+<body>
+  <header id="hud">
+    <strong>底层总线</strong>
+    <span class="pill" id="conn">连接中…</span>
+    <span class="pill" id="rate">等待 /lowstate</span>
+    <span class="pill" id="machine">mode_machine —</span>
+    <span class="pill" id="mode-pr">mode_pr —</span>
+    <span class="pill" id="tick">tick —</span>
+    <span class="hint">只读页：不发布任何话题、不调用任何服务</span>
+  </header>
+
+  <main>
+    <section id="motor-panel" aria-label="电机全字段">
+      <div class="bar">
+        <span><strong>电机</strong> <span class="hint" id="motor-count">—</span></span>
+        <span class="bar-actions">
+          <label><input type="checkbox" id="opt-reserved"> 显示预留槽</label>
+          <button id="pick-all" type="button">全选</button>
+          <button id="pick-none" type="button">清空</button>
+        </span>
+      </div>
+      <div class="table-wrap">
+        <table id="motors">
+          <thead>
+            <tr>
+              <th class="col-pick"></th>
+              <th class="col-name">电机</th>
+              <th>mode</th>
+              <th data-signal="q">q °</th>
+              <th data-signal="dq">dq °/s</th>
+              <th data-signal="ddq">ddq °/s²</th>
+              <th data-signal="tau_est">τ N·m</th>
+              <th data-signal="temp_shell">外壳 ℃</th>
+              <th data-signal="temp_winding">绕组 ℃</th>
+              <th data-signal="vol">V</th>
+              <th>motorstate</th>
+              <th>sensor</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="chart-panel" aria-label="信号曲线">
+      <div class="bar">
+        <span><strong>曲线</strong> <span class="hint">最近 10 秒 · 勾选表头的列增减曲线</span></span>
+        <span class="hint" id="chart-hint">勾选左侧电机</span>
+      </div>
+      <div class="chart-body">
+        <div id="chart-grid"></div>
+        <div id="chart-empty">等待 /lowstate</div>
+      </div>
+    </section>
+
+    <section id="imu-panel" aria-label="IMU 与 LowState 头部">
+      <div class="bar"><strong>IMU</strong> <span class="hint">四元数为固件的 w x y z</span></div>
+      <table id="imu">
+        <thead>
+          <tr>
+            <th></th>
+            <th>盆骨 <span class="hint">lowstate</span></th>
+            <th>躯干 <span class="hint">/secondary_imu</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr data-field="quaternion">
+            <th>quat wxyz</th>
+            <td></td>
+            <td></td>
+          </tr>
+          <tr data-field="rpy">
+            <th>rpy °</th>
+            <td></td>
+            <td></td>
+          </tr>
+          <tr data-field="gyroscope">
+            <th>陀螺 rad/s</th>
+            <td></td>
+            <td></td>
+          </tr>
+          <tr data-field="accelerometer">
+            <th>加速度 m/s²</th>
+            <td></td>
+            <td></td>
+          </tr>
+          <tr data-field="temperature">
+            <th>温度 ℃</th>
+            <td></td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <details id="remote">
+        <summary>wireless_remote <span class="hint">40 字节</span></summary>
+        <code id="remote-hex">—</code>
+      </details>
+      <div class="foot">
+        <span id="version">version —</span>
+        <span id="crc">crc —</span>
+      </div>
+    </section>
+  </main>
+</body>
+
+</html>

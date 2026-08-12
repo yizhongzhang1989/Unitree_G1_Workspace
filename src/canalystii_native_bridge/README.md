@@ -124,6 +124,24 @@ KWR57 只有连续的 `base -> base+1 -> base+2` 才能组成一个六轴样本�
 
 节点用 `rclcpp` 的 pre-shutdown 回调延后 context 失效：Ctrl+C 时终端把 SIGINT 同时发给进程组内所有进程，夹爪等设备节点的退出帧仍要经本节点转发才能上总线，因此关闭请求到达后总线保持可用，直到 TX 静默或宽限期用尽。
 
+### 关闭与重启
+
+**中止在飞的 bulk IN transfer 会挂死 CANalyst-II 固件。** 这是本设备最重要的一条约束，也是「重启一次就打不开设备、只能物理重插」的根因。挂死后设备仍在总线上，但连 EP0 的标准 `GET_STATUS` 都不应答（`halted=0`，所以既不是端点 halt 也不是 data toggle），只有断电重启才能恢复；`libusb_reset_device` 需要设备参与握手，对已挂死的固件会永久卡在不可中断的 `USBDEVFS_RESET` ioctl 上，连带 `exit_group` 一起卡住，那时连 SIGKILL 都杀不掉进程——**不要调用它**。
+
+所以关闭时不主动取消 transfer：固件持续回空包（约 9.5k 包/s/通道），停止重提之后在飞的 transfer 几毫秒内就会自然完成。只有等待 200 ms 后仍有未完成的 transfer（总线真的静默了）才退回到 `libusb_cancel_transfer`。
+
+同一条根因也解释了为什么 bridge 被 SIGKILL 之后设备会直接从 USB 总线上消失：**内核会替死掉的进程中止所有在飞的 URB**，和显式取消是同一个动作。所以关闭路径上任何会导致 SIGKILL 的无界等待，都是会毁设备的 bug，不只是不优雅。
+
+正常 Ctrl+C 的完整关闭：`signal_handler` → 宽限期（TX 静默即提前结束）→ KWR57 停流 → 停 CAN 通道 → transfer 自然收尾 → 收尾统计 → 退出，不应出现 launch 的 `escalating to SIGTERM`。停通道的命令必须赶在事件线程收摊之前发：`libusb_bulk_transfer` 是同步调用，需要有人替它处理 libusb 事件，事件线程没了就必然 250 ms 超时。
+
+打开阶段的任何失败（找不到设备、认领接口失败、初始化命令超时）都归到同一个结论，报错统一带上 **「请手动拔插一次 CANalyst-II 的 USB 线」**：
+
+```
+[FATAL] [can_bridge_ros]: CANalyst-II 04d8:0053 was not found or could not be opened；请手动拔插一次 CANalyst-II 的 USB 线
+```
+
+实测（2026-08-11，双 KWR57 1 kHz 满载）：修复前固件在第 2~4 次拆除即挂死；修复后连续 39 次启停零死亡，每轮关闭后用标准控制请求探测设备均为存活。
+
 每个 `kwr57_device_specs` 对象支持以下字段：
 
 | 字段 | 默认值 | 说明 |

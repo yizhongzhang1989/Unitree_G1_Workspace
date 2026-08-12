@@ -2,7 +2,8 @@
 
 scope:=end_effectors starts the complete end-effector data path only.
 scope:=whole_body additionally starts the real ros2_control manager, state
-broadcasters, assembled robot description, and an inactive position controller.
+broadcasters, assembled robot description, an inactive position controller, and
+the end-effector load path (net wrench + payload estimate).
 """
 
 import os
@@ -60,6 +61,16 @@ def _data_launches(context):
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
             }.items(),
         ))
+        # 净力与负载估计都要关节角和躯干 IMU，末端 scope 下没有它们。
+        if LaunchConfiguration("end_effector_load").perform(
+                context).lower() in ("true", "1"):
+            actions.append(IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(os.path.join(
+                    bringup_share, "launch", "end_effector_load.launch.py")),
+                launch_arguments={
+                    "joint_states_topic": LaunchConfiguration("joint_states_topic"),
+                }.items(),
+            ))
 
     return actions
 
@@ -76,5 +87,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("robot_description_topic", default_value="/robot_description"),
         DeclareLaunchArgument("require_pr_mode", default_value="true"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
+        # 关掉的代价是重力补偿退回标称工具重量，抓着负载时手臂会下垂。
+        DeclareLaunchArgument("end_effector_load", default_value="true"),
         OpaqueFunction(function=_data_launches),
     ])

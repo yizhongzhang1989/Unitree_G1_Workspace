@@ -46,9 +46,11 @@ private:
   std::vector<std::shared_ptr<Kwr57DeviceNode>> device_nodes_;
   std::unique_ptr<CanalystiiTransport> transport_;
   rclcpp::TimerBase::SharedPtr statistics_timer_;
+  rclcpp::TimerBase::SharedPtr failure_timer_;
   rclcpp::PreShutdownCallbackHandle pre_shutdown_handle_;
   std::chrono::milliseconds shutdown_grace_{0};
   std::atomic<bool> shutting_down_{false};
+  std::atomic<bool> transport_failed_{false};
 };
 
 }  // namespace canalystii_native_bridge

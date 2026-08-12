@@ -31,6 +31,7 @@ setup(
     entry_points={
         "console_scripts": [
             "gravity_calibration = arm_gravity_compensation.workflow_node:main",
+            "payload_estimator = arm_gravity_compensation.payload_node:main",
         ],
     },
 )

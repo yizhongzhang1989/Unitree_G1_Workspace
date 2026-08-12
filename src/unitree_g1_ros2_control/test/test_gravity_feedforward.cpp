@@ -32,7 +32,10 @@ const std::vector<std::string> kJointNames = {
 /// exactly `-g * sum(m_i * x_i)` over the bodies distal to that joint.
 std::string write_table(
     const std::array<double, 7>& masses, const std::array<double, 7>& coms,
-    const std::array<double, 7>& origins) {
+    const std::array<double, 7>& origins,
+    const std::array<double, 3>& mount = {0.0, 0.0, 0.0},
+    const std::array<double, 9>& mount_rotation =
+        {1, 0, 0, 0, 1, 0, 0, 0, 1}) {
     const std::string path = "/tmp/arm_gravity_table_test.yaml";
     std::ofstream stream(path);
     stream << "arm_gravity_compensation:\n  ros__parameters:\n";
@@ -66,6 +69,11 @@ std::string write_table(
         stream << "]\n      com: [";
         for (std::size_t index = 0; index < 7; ++index) {
             stream << (index ? ", " : "") << coms[index] << ", 0, 0";
+        }
+        stream << "]\n      payload_origin_xyz: [" << mount[0] << ", " << mount[1]
+               << ", " << mount[2] << "]\n      payload_origin_rotation: [";
+        for (std::size_t index = 0; index < 9; ++index) {
+            stream << (index ? ", " : "") << mount_rotation[index];
         }
         stream << "]\n";
     }
@@ -141,10 +149,61 @@ TEST(GravityFeedforwardTest, inner_joint_carries_every_outer_body) {
     std::remove(table.c_str());
 }
 
+/// A payload is reported in the sensor frame, so it only lands on the right
+/// lever arm if both the mount offset and the mount rotation are applied.
+TEST(GravityFeedforwardTest, payload_hangs_off_the_sensor_mount) {
+    constexpr double kMount = 0.3;
+    constexpr double kPayload = 0.8;
+    constexpr double kCom = 0.12;
+    const std::string table = write_table({}, {}, {}, {kMount, 0.0, 0.0});
+    GravityFeedforward gravity;
+    gravity.load_gravity_table(table, kJointNames);
+    EXPECT_TRUE(gravity.update_torso_gravity({0.0, 0.0, 0.0, 1.0}, 0.002));
+    gravity.set_payload(0, kPayload, {kPayload * kCom, 0.0, 0.0});
+
+    const std::vector<double> target(kJointNames.size(), 0.0);
+    const std::vector<double> stiffness(
+        GravityFeedforward::kSideCount * GravityFeedforward::kArmJointCount, kStiffness);
+    std::vector<double> command = target;
+    gravity.arm_offsets(0, target, 1.0, stiffness, command);
+
+    // Every joint sits at the origin here, so each carries the same lever.
+    const double expected = -kPayload * (kMount + kCom) * kGravity / kStiffness;
+    for (std::size_t index = 0; index < 7; ++index) {
+        EXPECT_NEAR(command[index], expected, 1e-9) << "index " << index;
+    }
+    for (std::size_t index = 7; index < 14; ++index) {
+        EXPECT_NEAR(command[index], 0.0, 1e-12) << "index " << index;
+    }
+    std::remove(table.c_str());
+}
+
+/// A mount rotation applied transposed would keep producing a torque here
+/// instead of turning the lever out of the gravity plane.
+TEST(GravityFeedforwardTest, payload_lever_follows_the_mount_rotation) {
+    const std::string table = write_table(
+        {}, {}, {}, {0.0, 0.0, 0.0}, {0, -1, 0, 1, 0, 0, 0, 0, 1});
+    GravityFeedforward gravity;
+    gravity.load_gravity_table(table, kJointNames);
+    EXPECT_TRUE(gravity.update_torso_gravity({0.0, 0.0, 0.0, 1.0}, 0.002));
+    gravity.set_payload(0, 0.8, {0.8 * 0.12, 0.0, 0.0});
+
+    const std::vector<double> target(kJointNames.size(), 0.0);
+    const std::vector<double> stiffness(
+        GravityFeedforward::kSideCount * GravityFeedforward::kArmJointCount, kStiffness);
+    std::vector<double> command = target;
+    gravity.arm_offsets(0, target, 1.0, stiffness, command);
+
+    // The lever now points along +Y, and every joint turns about +Y.
+    for (std::size_t index = 0; index < 7; ++index) {
+        EXPECT_NEAR(command[index], 0.0, 1e-12) << "index " << index;
+    }
+    std::remove(table.c_str());
+}
+
 /// The stiffness the controller reads off the hardware is indexed by this list,
 /// so a wrong order would scale every joint by another joint's gain.
-TEST(GravityFeedforwardTest, reports_the_command_slots_its_stiffness_belongs_to) {
-    const std::string table = write_single_body_table();
+TEST(GravityFeedforwardTest, reports_the_command_slots_its_stiffness_belongs_to) {    const std::string table = write_single_body_table();
     GravityFeedforward gravity;
     gravity.load_gravity_table(table, kJointNames);
 

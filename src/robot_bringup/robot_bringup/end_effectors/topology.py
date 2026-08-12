@@ -40,8 +40,11 @@ class Kwr57Device:
     period_ms: int = 1
     sample_rate_hz: int = 1000
     publish_rate: float = 0.0
-    use_si: bool = False
+    # KWR57 出厂发 kgf/kgf·m，而 geometry_msgs/Wrench 就定义在 N 与 N·m，发原单位等
+    # 于把一个 9.8 倍的陷阱留给每一个下游。
+    use_si: bool = True
     autostart: bool = True
+    # 驱动自带的软件置零会把标定好的零偏整个错开，标定后不该再用。
     tare_on_start: bool = False
 
     def __post_init__(self) -> None:
@@ -66,6 +69,15 @@ class Kwr57Device:
     def data_ids(self) -> Tuple[int, int, int]:
         return (self.data_base_id, self.data_base_id + 1,
                 self.data_base_id + 2)
+
+    @property
+    def net_topic(self) -> str:
+        """扣掉零偏与工具自重后的净力话题。
+
+        `ft_wrench_compensator` 的默认输出与它一致；设备没标定时这个话题根本不存在，
+        订阅者自行处理空流。
+        """
+        return self.wrench_topic.rsplit("/", 1)[0] + "/wrench_net"
 
     @property
     def native_config(self) -> Dict[str, object]:
@@ -210,6 +222,7 @@ def dashboard_topology_parameters(name: str) -> Dict[str, str]:
             f"{hand}_bus": sensor.bus.name,
             f"{hand}_sensor_node": f"/{sensor.name}",
             f"{hand}_wrench_topic": sensor.wrench_topic,
+            f"{hand}_net_topic": sensor.net_topic,
             f"{hand}_gripper_node": f"/{gripper.name}",
         })
     return parameters

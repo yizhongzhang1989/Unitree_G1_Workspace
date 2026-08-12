@@ -1,4 +1,4 @@
-"""构造末端设备 CAN bridge、力传感器、夹爪和相机节点。"""
+"""构造末端设备 CAN bridge、力传感器、夹爪和相机节点"""
 
 import os
 from typing import Sequence, Union
@@ -21,7 +21,7 @@ def build_bridge_node_parameters(
         buses: Sequence[CanBus],
         kwr57_devices: Sequence[Kwr57Device],
         gloria_devices: Sequence[GloriaDevice]):
-    """Build all topology-derived bridge parameters."""
+    """Build all topology-derived bridge parameters"""
     parameters = build_bridge_parameters(
         buses, kwr57_devices, gloria_devices)
     parameters["kwr57_device_specs"] = [
@@ -33,7 +33,7 @@ def build_bridge_node_parameters(
 
 def bridge(buses: Sequence[CanBus], kwr57_devices: Sequence[Kwr57Device],
               gloria_devices: Sequence[GloriaDevice]) -> Node:
-    """从末端拓扑直接构造原生 bridge。"""
+    """从末端拓扑直接构造原生 bridge"""
     return Node(
         package="canalystii_native_bridge", executable="native_bridge_node",
         name="can_bridge_ros", output="screen", emulate_tty=True,
@@ -47,7 +47,7 @@ def gripper(
     device: GloriaDevice,
     enable_on_start: Union[str, Substitution]
     ) -> IncludeLaunchDescription:
-    """将部署清单参数传给 gloria_ros 的单节点 launch。"""
+    """将部署清单参数传给 gloria_ros 的单节点 launch"""
     launch_path = os.path.join(
         get_package_share_directory("gloria_ros"),
         "launch",
@@ -71,7 +71,7 @@ def gripper(
 
 
 def camera(side: str, ip_address: str, server_port: int) -> Node:
-    """由左右手部署参数构造一个 IP 相机节点。"""
+    """由左右手部署参数构造一个 IP 相机节点"""
     camera_name = f"camera_{side}"
     return Node(
         package="camera_node", executable="camera_node",
@@ -97,11 +97,10 @@ def end_effector_actions(
         kwr57_devices: Sequence[Kwr57Device],
     gloria_devices: Sequence[GloriaDevice],
     enable_grippers_on_start: Union[str, Substitution]):
-    """Build all end-effector actions with KWR57 in the bridge process."""
+    """Build all end-effector actions with KWR57 in the bridge process"""
     return [
-                bridge(buses, kwr57_devices, gloria_devices),
-                *(gripper(device, enable_grippers_on_start)
-                    for device in gloria_devices),
-                # camera("left", "192.168.123.97", 8010),
-                # camera("right", "192.168.123.98", 8011),
+        bridge(buses, kwr57_devices, gloria_devices),
+        *(gripper(device, enable_grippers_on_start) for device in gloria_devices),
+        camera("left", "192.168.123.97", 8010),
+        camera("right", "192.168.123.98", 8011),
     ]

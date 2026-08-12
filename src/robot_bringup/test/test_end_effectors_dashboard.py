@@ -253,10 +253,17 @@ class HtmlContractTest(unittest.TestCase):
         self.assertIn('data-role="camera-placeholder"', html)
         self.assertIn("function updateCamera(hand, panel, camera)", html)
         self.assertIn("cameraRetryAt", html)
-        for axis in ("fx", "fy", "fz", "mx", "my", "mz"):
+        for axis, mode in (
+            ("fx", "force"), ("fy", "force"), ("fz", "force"),
+            ("mx", "torque"), ("my", "torque"), ("mz", "torque"),
+        ):
             with self.subTest(axis=axis):
-                self.assertIn(f'data-axis="{axis}"', html)
-                self.assertIn(f'data-value="{axis}"', html)
+                self.assertIn(f'{axis}: "{mode}"', html)
+        # 六轴条由 JS 从同一份定义生成，原始与净力两组共用，不再各写一遍标记
+        self.assertIn('data-axis="${axis}"', html)
+        self.assertIn('data-wrench="raw"', html)
+        self.assertIn('data-wrench="net"', html)
+        self.assertIn("[data-net]", html)
         self.assertNotIn('data-vector="force"', html)
         self.assertNotIn('data-vector="torque"', html)
         self.assertNotIn("function drawVector(", html)

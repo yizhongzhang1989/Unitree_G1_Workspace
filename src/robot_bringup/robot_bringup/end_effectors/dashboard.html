@@ -356,6 +356,22 @@
       padding: 14px 16px;
     }
 
+    .net-visual {
+      padding-top: 0;
+    }
+
+    .net-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 9px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line, rgba(255,255,255,.12));
+      color: var(--muted);
+      font-size: 12px;
+    }
+
     .axis-bars {
       display: grid;
       gap: 9px;
@@ -879,20 +895,20 @@
           <span class="status-label"><i class="dot offline" data-dot="sensor"></i><span data-role="sensor-status">未连接</span></span>
         </div>
         <div class="wrench-visual">
-          <div class="axis-bars" aria-label="六轴实时数值与量程">
-            <div class="axis-row" data-axis="fx"><span class="axis-name">Fx</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="fx">--</output></div>
-            <div class="axis-row" data-axis="fy"><span class="axis-name">Fy</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="fy">--</output></div>
-            <div class="axis-row" data-axis="fz"><span class="axis-name">Fz</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="fz">--</output></div>
-            <div class="axis-row" data-axis="mx"><span class="axis-name">Mx</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="mx">--</output></div>
-            <div class="axis-row" data-axis="my"><span class="axis-name">My</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="my">--</output></div>
-            <div class="axis-row" data-axis="mz"><span class="axis-name">Mz</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value" data-value="mz">--</output></div>
+          <div class="axis-bars" data-wrench="raw" aria-label="六轴实时数值与量程"></div>
+        </div>
+        <div class="wrench-visual net-visual" data-net hidden>
+          <div class="net-head">
+            <span>净力旋量（扣零偏与工具自重）</span>
+            <span class="age" data-role="net-endpoint">--</span>
           </div>
+          <div class="axis-bars" data-wrench="net" aria-label="净力六轴数值与量程"></div>
         </div>
         <div class="control-row">
           <div class="button-group">
             <button class="button" type="button" data-sensor="start">启动</button>
             <button class="button secondary" type="button" data-sensor="stop">停止</button>
-            <button class="button secondary" type="button" data-sensor="tare">置零</button>
+            <button class="button secondary" type="button" data-sensor="tare" title="驱动内部的软件置零，只影响原始读数。标定完成后别用：它会把标定好的零偏整个错开，令 wrench_net 失真。">置零</button>
           </div>
           <span class="age" data-role="sensor-age">age --</span>
         </div>
@@ -966,7 +982,8 @@
     const panels = {};
     const pending = new Set();
     const cameraRetryAt = { left: 0, right: 0 };
-    const WRENCH_SCALES = { force: 10, torque: 0.25 };
+    const netShown = {};
+    const WRENCH_SCALES = { force: 100, torque: 2.5 };
     const WRENCH_AXES = {
       fx: "force", fy: "force", fz: "force",
       mx: "torque", my: "torque", mz: "torque",
@@ -992,13 +1009,15 @@
       return value >= 0 ? `+${rendered}` : rendered;
     }
 
-    function updateWrenchVisual(panel, values) {
+    function updateWrenchVisual(bars, wrench) {
       for (const [axis, mode] of Object.entries(WRENCH_AXES)) {
-        const value = values[axis];
+        const source = mode === "force" ? wrench && wrench.force
+                                        : wrench && wrench.torque;
+        const value = source ? source[axis[1]] : null;
         const numeric = typeof value === "number" && Number.isFinite(value)
           ? value : 0;
         const ratio = Math.max(-1, Math.min(1, numeric / WRENCH_SCALES[mode]));
-        const row = one(panel, `[data-axis="${axis}"]`);
+        const row = one(bars, `[data-axis="${axis}"]`);
         const fill = one(row, ".axis-fill");
         fill.style.left = `${ratio >= 0 ? 50 : 50 + ratio * 50}%`;
         fill.style.width = `${Math.abs(ratio) * 50}%`;
@@ -1027,6 +1046,11 @@
       for (const [hand, meta] of Object.entries(HANDS)) {
         const panel = template.content.firstElementChild.cloneNode(true);
         panel.dataset.hand = hand;
+        for (const bars of panel.querySelectorAll(".axis-bars")) {
+          bars.innerHTML = Object.keys(WRENCH_AXES).map(axis =>
+            `<div class="axis-row" data-axis="${axis}"><span class="axis-name">${axis[0].toUpperCase()}${axis[1]}</span><span class="axis-track"><i class="axis-fill"></i></span><output class="axis-value">--</output></div>`
+          ).join("");
+        }
         text(panel, "label", meta.label);
         text(panel, "bus", meta.bus);
         text(panel, "mapping", meta.mapping);
@@ -1214,16 +1238,17 @@
       setStreamStrip(hand, "sensor", sensor);
       setStreamStrip(hand, "gripper", gripper);
 
-      const wrench = sensor.wrench;
-      const values = {
-        fx: wrench && wrench.force ? wrench.force.x : null,
-        fy: wrench && wrench.force ? wrench.force.y : null,
-        fz: wrench && wrench.force ? wrench.force.z : null,
-        mx: wrench && wrench.torque ? wrench.torque.x : null,
-        my: wrench && wrench.torque ? wrench.torque.y : null,
-        mz: wrench && wrench.torque ? wrench.torque.z : null,
-      };
-      updateWrenchVisual(panel, values);
+      updateWrenchVisual(one(panel, '[data-wrench="raw"]'), sensor.wrench);
+
+      // 净力要起了 end_effector_load 才有；进页面时定一次，之后不再增删。
+      if (netShown[hand] === undefined) {
+        netShown[hand] = Boolean(sensor.net);
+        one(panel, "[data-net]").hidden = !netShown[hand];
+      }
+      if (netShown[hand] && sensor.net) {
+        text(panel, "net-endpoint", `${sensor.net.topic} · ${rate(sensor.net)} · ${age(sensor.net)}`);
+        updateWrenchVisual(one(panel, '[data-wrench="net"]'), sensor.net.wrench);
+      }
 
       const joint = gripper.joint_state;
       one(panel, '[data-value="position"]').textContent = number(joint && joint.position ? joint.position[0] : null);

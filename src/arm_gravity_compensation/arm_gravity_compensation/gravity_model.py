@@ -3,13 +3,14 @@
 import copy
 import hashlib
 import xml.etree.ElementTree as ET
-from typing import Dict, Mapping, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from numpy.typing import ArrayLike
 import pinocchio as pin
 
-from .constants import ALL_ARM_JOINTS, ARM_JOINTS, SIDES
+from .constants import ALL_ARM_JOINTS, ARM_JOINTS, FT_SENSOR_LINKS, SIDES
+
 
 
 def _rpy_matrix(rpy: ArrayLike) -> np.ndarray:
@@ -40,16 +41,6 @@ def _joint_axis(joint) -> np.ndarray:
     return np.asarray(axis, dtype=float)
 
 
-def _axis_rotation(axis: ArrayLike, angle: float) -> np.ndarray:
-    """Rodrigues rotation about a unit axis."""
-    unit = np.asarray(axis, dtype=float)
-    cross = np.array([[0.0, -unit[2], unit[1]],
-                      [unit[2], 0.0, -unit[0]],
-                      [-unit[1], unit[0], 0.0]])
-    return (np.eye(3) + np.sin(angle) * cross +
-            (1.0 - np.cos(angle)) * (cross @ cross))
-
-
 def imu_to_torso_rotation(urdf_xml: str) -> np.ndarray:
     root = ET.fromstring(urdf_xml)
     for joint in root.findall("joint"):
@@ -73,6 +64,53 @@ def _model_link(source: ET.Element) -> ET.Element:
     if inertial is not None:
         link.append(copy.deepcopy(inertial))
     return link
+
+
+def _origin(joint: ET.Element) -> Tuple[np.ndarray, np.ndarray]:
+    origin = joint.find("origin")
+    xyz = origin.get("xyz", "0 0 0") if origin is not None else "0 0 0"
+    rpy = origin.get("rpy", "0 0 0") if origin is not None else "0 0 0"
+    return (_rpy_matrix([float(value) for value in rpy.split()]),
+            np.array([float(value) for value in xyz.split()], dtype=float))
+
+
+def welded_placement(root: ET.Element, ancestor: str,
+                     link: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Return the constant pose of ``link`` in ``ancestor``'s frame.
+
+    Only fixed joints may appear on the way up: a movable one would make the
+    pose depend on a configuration, and every caller here needs a constant.
+    """
+    parent_joint = {joint.find("child").get("link"): joint
+                    for joint in root.findall("joint")}
+    rotation = np.eye(3)
+    translation = np.zeros(3)
+    current = link
+    while current != ancestor:
+        joint = parent_joint.get(current)
+        if joint is None:
+            raise ValueError("%s is not below %s" % (link, ancestor))
+        if joint.get("type") != "fixed":
+            raise ValueError("%s is not welded to %s" % (link, ancestor))
+        joint_rotation, joint_translation = _origin(joint)
+        translation = joint_translation + joint_rotation @ translation
+        rotation = joint_rotation @ rotation
+        current = joint.find("parent").get("link")
+    return rotation, translation
+
+
+def _descendants(root: ET.Element, link: str) -> Tuple[str, ...]:
+    children: Dict[str, list] = {}
+    for joint in root.findall("joint"):
+        children.setdefault(joint.find("parent").get("link"), []).append(
+            joint.find("child").get("link"))
+    found: list = []
+    pending = list(children.get(link, ()))
+    while pending:
+        current = pending.pop()
+        found.append(current)
+        pending.extend(children.get(current, ()))
+    return tuple(found)
 
 
 def extract_torso_arm_urdf(
@@ -230,8 +268,31 @@ class TorsoArmGravityModel:
         }
         if any(np.any(values <= 0.0) for values in self.joint_efforts.values()):
             raise ValueError("arm joints must declare a positive effort limit")
+        # 力传感器固连在腕 yaw 上。它到腕 yaw 关节系的常值位姿既是负载的挂载点，
+        # 也是运行时把重力方向转进测量系的那一步；它远端的 link 就是它称量的工具。
+        # 没装传感器的 URDF（裸 G1）照样能用，只是没有负载那一路。
+        present = {link.get("name") for link in self._template.findall("link")}
+        self._wrist_links = {
+            side: next(joint.find("child").get("link")
+                       for joint in self._template.findall("joint")
+                       if joint.get("name") == ARM_JOINTS[side][-1])
+            for side in SIDES
+        }
+        self.sensor_placement = {
+            side: welded_placement(
+                self._template, self._wrist_links[side], FT_SENSOR_LINKS[side])
+            for side in SIDES if FT_SENSOR_LINKS[side] in present
+        }
+        self.distal_links = {
+            side: _descendants(self._template, FT_SENSOR_LINKS[side])
+            for side in self.sensor_placement
+        }
         self.model = _build_reduced_model(reduced_xml)
         self.data = self.model.createData()
+        # 传感器姿态只用运动学，与质量缩放无关，所以这一对 (model, data) 建一次就
+        # 不再动：标定线程随时会替换 self.model / self.data，而网页线程在同一时刻
+        # 查询姿态，共用一个 Data 就是并发写同一块缓存。
+        self._sensor_kinematics = (self.model, self.model.createData())
         self.joint_names = ALL_ARM_JOINTS
         self._refresh_indices()
         self._basis_models: Dict[str, tuple] = {}
@@ -317,6 +378,22 @@ class TorsoArmGravityModel:
         rows = np.array([self._v_indices[name] for name in ARM_JOINTS[side]])
         return np.asarray(torque, dtype=float)[rows] + self._biases[side]
 
+    def sensor_orientation(self, side: str, q: ArrayLike) -> np.ndarray:
+        """Rotation of the force sensor frame in the torso frame.
+
+        Gravity read in the torso frame becomes gravity in the sensor frame by
+        transposing this, which is all the sensor calibration needs from the
+        kinematics.
+        """
+        self._check_side(side)
+        if side not in self.sensor_placement:
+            raise ValueError("URDF has no %s" % FT_SENSOR_LINKS[side])
+        model, data = self._sensor_kinematics
+        pin.forwardKinematics(model, data, self._validate_configuration(q))
+        joint_id = int(model.getJointId(ARM_JOINTS[side][-1]))
+        return (np.asarray(data.oMi[joint_id].rotation) @
+                self.sensor_placement[side][0])
+
     def design_matrix(self, side: str, q: ArrayLike,
                       gravity: ArrayLike) -> np.ndarray:
         """Return one scale column per original link plus seven bias columns."""
@@ -342,7 +419,29 @@ class TorsoArmGravityModel:
             for joint_name in ARM_JOINTS[side]
         }
 
-    def gravity_table(self) -> Dict[str, object]:
+    def distal_inertia(self, side: str) -> Tuple[float, np.ndarray]:
+        """Mass and first moment of everything hanging off the force sensor.
+
+        Expressed in the wrist-yaw joint frame at the current scales. The
+        gripper closes through mimic joints rather than fixed ones, so the
+        merge is left to Pinocchio at the same locked configuration the rest of
+        the model uses.
+        """
+        self._check_side(side)
+        if side not in self.distal_links:
+            raise ValueError("URDF has no %s" % FT_SENSOR_LINKS[side])
+        model = _build_reduced_model(
+            self._scaled_urdf(keep=frozenset(self.distal_links[side])))
+        inertia = model.inertias[int(model.getJointId(ARM_JOINTS[side][-1]))]
+        mass = float(inertia.mass)
+        if mass <= 0.0:
+            return 0.0, np.zeros(3)
+        return mass, mass * np.asarray(inertia.lever, dtype=float)
+
+    def gravity_table(
+        self,
+        tool: Optional[Mapping[str, Mapping[str, ArrayLike]]] = None,
+    ) -> Dict[str, object]:
         """Export the lumped serial chain a runtime controller needs.
 
         Every link welded to a moving body is already merged into that body by
@@ -350,6 +449,16 @@ class TorsoArmGravityModel:
         torques exactly. The values are flat per-side arrays so the export is
         directly loadable as a ROS 2 parameter file; a consumer only needs
         forward kinematics plus one cross product per body.
+
+        ``payload_origin_*`` is where the force sensor sits on the last body.
+        A runtime payload is reported in that frame, so this is what lets the
+        controller hang it on the chain, and what lets the sensor node rotate
+        gravity into its own frame.
+
+        Passing ``tool`` replaces the part of the last body that hangs off the
+        sensor with what the sensor actually weighs. Leaving it out keeps the
+        identified numbers untouched: the split is then bookkeeping only and
+        every joint torque stays bit-for-bit what it was.
         """
         table = {"imu_to_torso": [float(value)
                                   for value in self.imu_to_torso.ravel()]}
@@ -372,6 +481,12 @@ class TorsoArmGravityModel:
                     for value in np.asarray(placement.rotation).ravel())
                 masses.append(float(inertia.mass))
                 centres.extend(np.asarray(inertia.lever, dtype=float).tolist())
+            rotation, translation = self.sensor_placement.get(
+                side, (np.eye(3), np.zeros(3)))
+            if tool is not None and side in tool:
+                masses[-1], centres[-3:] = self._measured_tool_body(
+                    side, masses[-1], np.asarray(centres[-3:], dtype=float),
+                    tool[side])
             table[side] = {
                 "joints": names,
                 "axis": axes,
@@ -379,74 +494,58 @@ class TorsoArmGravityModel:
                 "origin_rotation": rotations,
                 "mass": masses,
                 "com": centres,
+                "payload_origin_xyz": translation.tolist(),
+                "payload_origin_rotation": [float(value)
+                                            for value in rotation.ravel()],
             }
         return table
 
-    @staticmethod
-    def gravity_from_table(table: Dict[str, object], side: str,
-                           q: ArrayLike,
-                           gravity: ArrayLike) -> np.ndarray:
-        """Reference implementation of what the runtime controller evaluates."""
-        chain = table[side]
-        angles = np.asarray(q, dtype=float)
-        gravity_vector = np.asarray(gravity, dtype=float)
-        masses = np.asarray(chain["mass"], dtype=float)
-        count = masses.size
+    def _measured_tool_body(self, side: str, mass: float, centre: np.ndarray,
+                            tool: Mapping[str, ArrayLike]) -> Tuple[float, list]:
+        """Swap the modelled tool of the last body for the weighed one."""
+        rotation, translation = self.sensor_placement[side]
+        measured_mass = float(tool["mass"])
+        measured_centre = np.asarray(tool["com"], dtype=float).reshape(3)
+        modelled_mass, modelled_moment = self.distal_inertia(side)
+        total_mass = mass - modelled_mass + measured_mass
+        if total_mass <= 0.0:
+            raise ValueError(
+                "%s tool weighs %.3f kg but the identified wrist group only "
+                "holds %.3f kg" % (side, measured_mass, mass))
+        moment = (mass * centre - modelled_moment + measured_mass *
+                  (translation + rotation @ measured_centre))
+        return total_mass, (moment / total_mass).tolist()
 
-        rotation = np.eye(3)
-        translation = np.zeros(3)
-        origins = np.zeros((count, 3))
-        axes = np.zeros((count, 3))
-        moments = np.zeros((count, 3))
-        for index in range(count):
-            block = slice(3 * index, 3 * index + 3)
-            translation = translation + rotation @ np.asarray(
-                chain["origin_xyz"][block], dtype=float)
-            rotation = rotation @ np.asarray(
-                chain["origin_rotation"][9 * index:9 * index + 9],
-                dtype=float).reshape(3, 3)
-            axis = np.asarray(chain["axis"][block], dtype=float)
-            rotation = rotation @ _axis_rotation(axis, float(angles[index]))
-            origins[index] = translation
-            axes[index] = rotation @ axis
-            moments[index] = masses[index] * (
-                translation + rotation @ np.asarray(
-                    chain["com"][block], dtype=float))
-
-        torque = np.zeros(count, dtype=float)
-        for index in range(count):
-            downstream_mass = float(np.sum(masses[index:]))
-            downstream_moment = np.sum(moments[index:], axis=0)
-            torque[index] -= axes[index] @ np.cross(
-                downstream_moment - downstream_mass * origins[index],
-                gravity_vector)
-        return torque
-
-
-    def _scaled_urdf(self, only_link: str = "") -> str:
+    def _scaled_urdf(self, keep: Optional[frozenset] = None,
+                     scaled: bool = True) -> str:
+        """Reduced URDF at the current scales; ``keep`` blanks every other link."""
         root = copy.deepcopy(self._template)
-        scale_by_link = {
-            link_name: float(scale)
-            for side in SIDES
-            for link_name, scale in zip(
-                self.parameter_links[side], self._scales[side])
-        }
+        scale_by_link = self._scale_by_link()
         for link in root.findall("link"):
             inertial = link.find("inertial")
             if inertial is None:
                 continue
             link_name = link.get("name")
-            if only_link and link_name != only_link:
+            if keep is not None and link_name not in keep:
                 link.remove(inertial)
                 continue
             _scale_inertial(
-                inertial, 1.0 if only_link else scale_by_link[link_name])
+                inertial, scale_by_link.get(link_name, 1.0) if scaled else 1.0)
         return ET.tostring(root, encoding="unicode")
+
+    def _scale_by_link(self) -> Dict[str, float]:
+        return {
+            link_name: float(scale)
+            for side in SIDES
+            for link_name, scale in zip(
+                self.parameter_links[side], self._scales[side])
+        }
 
     def _basis_model(self, link_name: str):
         cached = self._basis_models.get(link_name)
         if cached is None:
-            model = _build_reduced_model(self._scaled_urdf(only_link=link_name))
+            model = _build_reduced_model(
+                self._scaled_urdf(keep=frozenset([link_name]), scaled=False))
             cached = (model, model.createData())
             self._basis_models[link_name] = cached
         return cached

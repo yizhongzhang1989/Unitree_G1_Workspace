@@ -50,6 +50,12 @@ class BuildBridgeParametersTest(unittest.TestCase):
                     parameters[f"{hand}_sensor_node"], f"/{sensor.name}")
                 self.assertEqual(
                     parameters[f"{hand}_wrench_topic"], sensor.wrench_topic)
+                # 净力话题与原始话题同命名空间，补偿节点的默认输出与它一致。
+                self.assertEqual(
+                    parameters[f"{hand}_net_topic"], sensor.net_topic)
+                self.assertEqual(
+                    sensor.net_topic,
+                    sensor.wrench_topic.replace("wrench_raw", "wrench_net"))
                 self.assertEqual(
                     parameters[f"{hand}_gripper_node"], f"/{gripper.name}")
 

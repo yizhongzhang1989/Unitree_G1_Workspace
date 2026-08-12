@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -249,7 +250,9 @@ struct CanalystiiTransport::Impl
         condition.notify_all();
       }
       tx_condition.notify_all();
-      if (error_callback) {
+      // 拆除阶段的失败（停流命令没送出去之类）是正常收尾噪声，报 FATAL 只会让人
+      // 以为出了大事。
+      if (error_callback && !closing.load()) {
         error_callback(message);
       }
     }
@@ -274,22 +277,27 @@ struct CanalystiiTransport::Impl
   void initialize_device()
   {
     check_libusb(libusb_init(&context), "could not initialize libusb");
-    handle = libusb_open_device_with_vid_pid(context, kUsbVendorId, kUsbProductId);
-    if (handle == nullptr) {
-      throw std::runtime_error("CANalyst-II 04d8:0053 was not found or could not be opened");
-    }
-
-    libusb_set_auto_detach_kernel_driver(handle, 1);
-    int configuration = 0;
-    check_libusb(libusb_get_configuration(handle, &configuration), "could not read USB configuration");
-    if (configuration != 1) {
-      check_libusb(libusb_set_configuration(handle, 1), "could not select USB configuration 1");
-    }
-    check_libusb(libusb_claim_interface(handle, kUsbInterface), "could not claim CANalyst-II interface");
-    interface_claimed = true;
-
-    for (const int channel : channels) {
-      send_command(channel, make_init_1mbps_command());
+    try {
+      handle = libusb_open_device_with_vid_pid(context, kUsbVendorId, kUsbProductId);
+      if (handle == nullptr) {
+        throw std::runtime_error("CANalyst-II 04d8:0053 was not found or could not be opened");
+      }
+      libusb_set_auto_detach_kernel_driver(handle, 1);
+      int configuration = 0;
+      check_libusb(
+        libusb_get_configuration(handle, &configuration), "could not read USB configuration");
+      if (configuration != 1) {
+        check_libusb(libusb_set_configuration(handle, 1), "could not select USB configuration 1");
+      }
+      check_libusb(
+        libusb_claim_interface(handle, kUsbInterface), "could not claim CANalyst-II interface");
+      interface_claimed = true;
+      for (const int channel : channels) {
+        send_command(channel, make_init_1mbps_command());
+      }
+    } catch (const std::exception & exception) {
+      // 固件被中止过的传输挂死之后就停在这些状态里，纯软件救不回来
+      throw std::runtime_error(std::string(exception.what()) + "；请手动拔插一次 CANalyst-II 的 USB 线");
     }
   }
 
@@ -441,14 +449,23 @@ struct CanalystiiTransport::Impl
 
   void event_loop()
   {
-    bool cancellation_issued = false;
+    auto cancel_at = std::chrono::steady_clock::time_point::max();
     while (true) {
-      if (stopping.load() && !cancellation_issued) {
-        cancellation_issued = true;
-        cancel_transfers();
-      }
-      if (cancellation_issued && active_transfers.load() == 0) {
-        break;
+      if (stopping.load()) {
+        const auto now = std::chrono::steady_clock::now();
+        // 设备一直在回空包，停止重提之后在飞的 transfer 几毫秒内就会自然完成。
+        // 中止传输是这个固件最容易崩的地方，先给自然完成留窗口，只有总线真的
+        // 静默了才退回到取消；取消还要反复发，因为完成回调可能刚好在 stopping
+        // 置位前又重提了一个
+        if (cancel_at == std::chrono::steady_clock::time_point::max()) {
+          cancel_at = now + std::chrono::milliseconds(200);
+        } else if (now >= cancel_at) {
+          cancel_at = now + std::chrono::milliseconds(200);
+          cancel_transfers();
+        }
+        if (active_transfers.load() == 0) {
+          break;
+        }
       }
 
       timeval timeout{};
@@ -527,6 +544,7 @@ struct CanalystiiTransport::Impl
       return;
     }
     stopping.store(false);
+    closing.store(false);
     try {
       initialize_device();
       allocate_transfers();
@@ -548,12 +566,7 @@ struct CanalystiiTransport::Impl
       if (event_thread.joinable()) {
         event_thread.join();
       } else if (context != nullptr && active_transfers.load() != 0) {
-        cancel_transfers();
-        while (active_transfers.load() != 0) {
-          timeval timeout{};
-          timeout.tv_usec = 1000;
-          libusb_handle_events_timeout(context, &timeout);
-        }
+        event_loop();
       }
       if (tx_thread.joinable()) {
         tx_thread.join();
@@ -624,9 +637,21 @@ struct CanalystiiTransport::Impl
 
   void close()
   {
+    closing.store(true);
     if (!opened.exchange(false)) {
       release_resources();
       return;
+    }
+    // 停流要赶在事件线程收摊之前：同步命令传输得有人替它处理 libusb 事件，
+    // 否则必然 250 ms 超时，设备就带着 1 kHz 的流被拔掉句柄。
+    if (handle != nullptr) {
+      for (const int channel : channels) {
+        try {
+          send_command(channel, make_simple_command(kCommandStop));
+        } catch (const std::exception & exception) {
+          set_error(std::string("CANalyst-II channel stop failed: ") + exception.what());
+        }
+      }
     }
     stopping.store(true);
     for (auto & condition : rx_conditions) {
@@ -646,15 +671,6 @@ struct CanalystiiTransport::Impl
     }
     processing_threads.clear();
 
-    if (handle != nullptr) {
-      for (const int channel : channels) {
-        try {
-          send_command(channel, make_simple_command(kCommandStop));
-        } catch (const std::exception & exception) {
-          set_error(std::string("CANalyst-II channel stop failed: ") + exception.what());
-        }
-      }
-    }
     release_resources();
   }
 
@@ -688,6 +704,7 @@ struct CanalystiiTransport::Impl
   std::vector<std::thread> processing_threads;
   std::atomic<bool> opened{false};
   std::atomic<bool> stopping{false};
+  std::atomic<bool> closing{false};
   std::atomic<int> active_transfers{0};
   std::atomic<std::uint64_t> outstanding_tx_frames{0};
 

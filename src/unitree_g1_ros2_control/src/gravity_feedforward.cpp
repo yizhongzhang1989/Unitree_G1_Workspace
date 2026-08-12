@@ -2,108 +2,24 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "ament_index_cpp/get_package_share_directory.hpp"
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/parameter.hpp"
-#include "yaml-cpp/yaml.h"
 
 namespace unitree_g1_ros2_control {
 
 namespace {
 
 constexpr double kGravityMagnitude = 9.81;
-const std::array<const char*, 2> kSideNames = {"left", "right"};
-
-using Vector3 = std::array<double, 3>;
-using Matrix3 = std::array<double, 9>;
 
 template <typename T>
 void declare_if_missing(
     const rclcpp_lifecycle::LifecycleNode::SharedPtr& node, const std::string& name,
     const T& value) {
     if (!node->has_parameter(name)) node->declare_parameter<T>(name, value);
-}
-
-Vector3 rotate(const Matrix3& rotation, const Vector3& vector) {
-    return {
-        rotation[0] * vector[0] + rotation[1] * vector[1] + rotation[2] * vector[2],
-        rotation[3] * vector[0] + rotation[4] * vector[1] + rotation[5] * vector[2],
-        rotation[6] * vector[0] + rotation[7] * vector[1] + rotation[8] * vector[2],
-    };
-}
-
-Matrix3 multiply(const Matrix3& left, const Matrix3& right) {
-    Matrix3 result{};
-    for (std::size_t row = 0; row < 3; ++row) {
-        for (std::size_t column = 0; column < 3; ++column) {
-            double sum = 0.0;
-            for (std::size_t inner = 0; inner < 3; ++inner) {
-                sum += left[3 * row + inner] * right[3 * inner + column];
-            }
-            result[3 * row + column] = sum;
-        }
-    }
-    return result;
-}
-
-/// Rodrigues rotation of `angle` about the unit `axis`.
-Matrix3 axis_rotation(const Vector3& axis, double angle) {
-    const double cosine = std::cos(angle);
-    const double sine = std::sin(angle);
-    const double complement = 1.0 - cosine;
-    return {
-        cosine + axis[0] * axis[0] * complement,
-        axis[0] * axis[1] * complement - axis[2] * sine,
-        axis[0] * axis[2] * complement + axis[1] * sine,
-        axis[1] * axis[0] * complement + axis[2] * sine,
-        cosine + axis[1] * axis[1] * complement,
-        axis[1] * axis[2] * complement - axis[0] * sine,
-        axis[2] * axis[0] * complement - axis[1] * sine,
-        axis[2] * axis[1] * complement + axis[0] * sine,
-        cosine + axis[2] * axis[2] * complement,
-    };
-}
-
-Vector3 cross(const Vector3& left, const Vector3& right) {
-    return {
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    };
-}
-
-double dot(const Vector3& left, const Vector3& right) {
-    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
-}
-
-double norm(const Vector3& vector) { return std::sqrt(dot(vector, vector)); }
-
-/// Resolve a leading ``~`` or a ``package://<name>/<relative>`` reference. The
-/// gravity table ships inside the calibration package, so the configured path
-/// has to survive the workspace being moved or installed elsewhere.
-std::string resolve_path(const std::string& path) {
-    constexpr const char* kPackagePrefix = "package://";
-    const std::size_t prefix_length = std::strlen(kPackagePrefix);
-    if (path.compare(0, prefix_length, kPackagePrefix) == 0) {
-        const std::size_t separator = path.find('/', prefix_length);
-        if (separator == std::string::npos) {
-            throw std::runtime_error(path + " is missing a path after the package name");
-        }
-        const std::string package =
-            path.substr(prefix_length, separator - prefix_length);
-        return ament_index_cpp::get_package_share_directory(package) +
-               path.substr(separator);
-    }
-    if (path.empty() || path[0] != '~') return path;
-    const char* home = std::getenv("HOME");
-    if (home == nullptr) return path;
-    return std::string(home) + path.substr(1);
 }
 
 /// A controller declares every parameter of its YAML from the overrides, and
@@ -120,22 +36,6 @@ double as_number(const rclcpp::Parameter& parameter) {
         return parameter.as_double();
     }
     return std::nan("");
-}
-
-std::vector<double> read_doubles(
-    const YAML::Node& node, const std::string& key, std::size_t expected) {
-    const YAML::Node entry = node[key];
-    if (!entry || !entry.IsSequence() || entry.size() != expected) {
-        throw std::runtime_error(key + " must hold " + std::to_string(expected) + " values");
-    }
-    std::vector<double> values;
-    values.reserve(expected);
-    for (const auto& item : entry) {
-        const double value = item.as<double>();
-        if (!std::isfinite(value)) throw std::runtime_error(key + " holds a non-finite value");
-        values.push_back(value);
-    }
-    return values;
 }
 
 }  // namespace
@@ -156,6 +56,11 @@ void GravityFeedforward::declare_parameters(const LifecycleNode::SharedPtr& node
     declare_if_missing<double>(node, "gravity_filter_cutoff_hz", 2.0);
     declare_if_missing<double>(node, "offset_ramp_s", 2.0);
     declare_if_missing<double>(node, "compensation_scale", 1.0);
+    declare_if_missing<std::string>(node, "left_payload_topic", "/arm0/payload");
+    declare_if_missing<std::string>(node, "right_payload_topic", "/arm1/payload");
+    declare_if_missing<double>(node, "maximum_payload_mass", 3.0);
+    declare_if_missing<double>(node, "payload_filter_tau_s", 1.0);
+    declare_if_missing<double>(node, "payload_timeout_s", 2.0);
 }
 
 bool GravityFeedforward::configure(
@@ -209,7 +114,77 @@ bool GravityFeedforward::configure(
             return result;
         });
     stiffness_.assign(compensated_indices_.size(), 0.0);
+    subscribe_payload(node);
     return true;
+}
+
+void GravityFeedforward::subscribe_payload(const LifecycleNode::SharedPtr& node) {
+    maximum_payload_mass_ = node->get_parameter("maximum_payload_mass").as_double();
+    payload_filter_tau_ = node->get_parameter("payload_filter_tau_s").as_double();
+    payload_timeout_ = node->get_parameter("payload_timeout_s").as_double();
+    // Without the mount there is nowhere to hang a payload; the rest of the
+    // feed-forward is unaffected.
+    if (!table_.has_sensor()) return;
+
+    const std::array<std::string, kSideCount> parameters = {
+        "left_payload_topic", "right_payload_topic"};
+    for (std::size_t side = 0; side < kSideCount; ++side) {
+        const auto topic = node->get_parameter(parameters[side]).as_string();
+        if (topic.empty()) continue;
+        payload_subscription_[side] =
+            node->create_subscription<geometry_msgs::msg::InertiaStamped>(
+                topic, rclcpp::SensorDataQoS().keep_last(1),
+                [this, side](geometry_msgs::msg::InertiaStamped::ConstSharedPtr message) {
+                    accept_payload(side, *message);
+                });
+    }
+}
+
+void GravityFeedforward::accept_payload(
+    std::size_t side, const geometry_msgs::msg::InertiaStamped& message) {
+    const double mass = message.inertia.m;
+    const Vector3 centre = {
+        message.inertia.com.x, message.inertia.com.y, message.inertia.com.z};
+    if (!std::isfinite(mass) || mass < 0.0 || mass > maximum_payload_mass_) return;
+    if (!std::isfinite(centre[0]) || !std::isfinite(centre[1]) ||
+        !std::isfinite(centre[2]) || norm(centre) > 1.0) {
+        return;
+    }
+    payload_buffer_[side].writeFromNonRT(PayloadCommand{
+        mass, {mass * centre[0], mass * centre[1], mass * centre[2]}});
+    payload_sequence_[side].fetch_add(1, std::memory_order_relaxed);
+}
+
+void GravityFeedforward::advance_payload(double elapsed) {
+    for (std::size_t side = 0; side < kSideCount; ++side) {
+        const uint64_t sequence = payload_sequence_[side].load(std::memory_order_relaxed);
+        if (sequence != payload_seen_[side]) {
+            payload_seen_[side] = sequence;
+            payload_age_[side] = 0.0;
+        } else {
+            payload_age_[side] += elapsed;
+        }
+        PayloadCommand target{};
+        // A publisher that died must not leave a phantom load holding the arm
+        // up, so an expired payload fades out instead of latching.
+        if (payload_age_[side] <= payload_timeout_) {
+            target = *payload_buffer_[side].readFromRT();
+        }
+        const double alpha = payload_filter_tau_ > 0.0
+            ? 1.0 - std::exp(-elapsed / payload_filter_tau_)
+            : 1.0;
+        payload_mass_[side] += alpha * (target.mass - payload_mass_[side]);
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            payload_moment_[side][axis] +=
+                alpha * (target.first_moment[axis] - payload_moment_[side][axis]);
+        }
+    }
+}
+
+void GravityFeedforward::set_payload(
+    std::size_t side, double mass, const Vector3& first_moment) {
+    payload_mass_[side] = mass;
+    payload_moment_[side] = first_moment;
 }
 
 void GravityFeedforward::append_state_interfaces(
@@ -255,6 +230,11 @@ bool GravityFeedforward::activate(
     // The steady-state offset reaches ~0.4 rad on a loaded shoulder, so
     // applying it at once would step the command by twice the current droop.
     ramp_ = 0.0;
+    for (std::size_t side = 0; side < kSideCount; ++side) {
+        payload_mass_[side] = 0.0;
+        payload_moment_[side] = Vector3{};
+        payload_age_[side] = payload_timeout_ + 1.0;
+    }
     return true;
 }
 
@@ -284,6 +264,7 @@ bool GravityFeedforward::apply(
         interfaces[offset + 3].get_value(),
     };
     if (!update_torso_gravity(orientation, elapsed)) return false;
+    advance_payload(elapsed);
 
     const std::size_t stiffness_offset = interfaces.size() - compensated_indices_.size();
     for (std::size_t index = 0; index < stiffness_.size(); ++index) {
@@ -301,55 +282,18 @@ void GravityFeedforward::load_gravity_table(
     loaded_ = false;
     compensated_indices_.clear();
 
-    const std::string resolved = resolve_path(path);
-    YAML::Node document;
-    try {
-        document = YAML::LoadFile(resolved);
-    } catch (const std::exception& error) {
-        throw std::runtime_error(
-            "cannot read gravity table " + resolved + ": " + error.what());
-    }
-    // Accept the exported file verbatim: it is written as a ROS 2 parameter
-    // file so that it can also be fed to a node directly.
-    YAML::Node table = document;
-    if (document.size() == 1 && document.begin()->second["ros__parameters"]) {
-        table = document.begin()->second["ros__parameters"];
-    }
-
-    const std::vector<double> rotation = read_doubles(table, "imu_to_torso", 9);
-    std::copy(rotation.begin(), rotation.end(), imu_to_torso_.begin());
-
+    table_.load(path);
     compensated_indices_.reserve(kSideCount * kArmJointCount);
-    for (std::size_t side = 0; side < kSideNames.size(); ++side) {
-        const YAML::Node chain = table[kSideNames[side]];
-        if (!chain) throw std::runtime_error(std::string(kSideNames[side]) + " is missing");
-        const YAML::Node names = chain["joints"];
-        if (!names || names.size() != kArmJointCount) {
-            throw std::runtime_error("joints must hold seven names");
-        }
-        const auto axes = read_doubles(chain, "axis", 3 * kArmJointCount);
-        const auto origins = read_doubles(chain, "origin_xyz", 3 * kArmJointCount);
-        const auto rotations = read_doubles(chain, "origin_rotation", 9 * kArmJointCount);
-        const auto masses = read_doubles(chain, "mass", kArmJointCount);
-        const auto centres = read_doubles(chain, "com", 3 * kArmJointCount);
-
-        arms_[side].assign(kArmJointCount, RigidBody{});
+    for (std::size_t side = 0; side < kSideCount; ++side) {
         for (std::size_t index = 0; index < kArmJointCount; ++index) {
-            RigidBody& body = arms_[side][index];
-            std::copy_n(axes.begin() + 3 * index, 3, body.axis.begin());
-            std::copy_n(origins.begin() + 3 * index, 3, body.origin.begin());
-            std::copy_n(rotations.begin() + 9 * index, 9, body.rotation.begin());
-            std::copy_n(centres.begin() + 3 * index, 3, body.com.begin());
-            body.mass = masses[index];
-            if (body.mass < 0.0) throw std::runtime_error("mass must be non-negative");
-            const auto name = names[index].as<std::string>();
+            const std::string& name = table_.joints(side)[index];
             const auto found = std::find(joint_names.begin(), joint_names.end(), name);
             if (found == joint_names.end()) {
                 throw std::runtime_error(name + " is not in the joints parameter");
             }
-            body.command_index =
+            table_.arm(side)[index].command_index =
                 static_cast<std::size_t>(std::distance(joint_names.begin(), found));
-            compensated_indices_.push_back(body.command_index);
+            compensated_indices_.push_back(table_.arm(side)[index].command_index);
         }
     }
     loaded_ = true;
@@ -357,30 +301,14 @@ void GravityFeedforward::load_gravity_table(
 
 bool GravityFeedforward::update_torso_gravity(
     const std::array<double, 4>& orientation, double elapsed) {
-    // The IMU reports the world-from-sensor rotation, so gravity in sensor
-    // coordinates is its transpose applied to straight down. State order is
-    // x, y, z, w.
-    const double x = orientation[0];
-    const double y = orientation[1];
-    const double z = orientation[2];
-    const double w = orientation[3];
-    const double square = w * w + x * x + y * y + z * z;
-    if (!std::isfinite(square) || std::abs(square - 1.0) > 0.1) return gravity_valid_;
-
-    const Vector3 torso = rotate(imu_to_torso_, {
-        -2.0 * (x * z - w * y),
-        -2.0 * (y * z + w * x),
-        -(w * w - x * x - y * y + z * z),
-    });
-    const double length = norm(torso);
-    // Only a degenerate imu_to_torso can collapse an already unit quaternion.
-    if (length < 1e-6) return gravity_valid_;
-
+    Vector3 direction{};
+    if (!torso_gravity(orientation, table_.imu_to_torso(), direction)) {
+        return gravity_valid_;
+    }
     const double alpha =
         gravity_valid_ ? 1.0 - std::exp(-2.0 * M_PI * filter_cutoff_hz_ * elapsed) : 1.0;
     for (std::size_t axis = 0; axis < 3; ++axis) {
-        const double measured = kGravityMagnitude * torso[axis] / length;
-        gravity_[axis] += alpha * (measured - gravity_[axis]);
+        gravity_[axis] += alpha * (kGravityMagnitude * direction[axis] - gravity_[axis]);
     }
     gravity_valid_ = true;
     return true;
@@ -389,15 +317,32 @@ bool GravityFeedforward::update_torso_gravity(
 void GravityFeedforward::arm_offsets(
     std::size_t side, const std::vector<double>& target, double gain,
     const std::vector<double>& stiffness, std::vector<double>& command) const {
-    const std::vector<RigidBody>& chain = arms_[side];
+    const std::vector<RigidBody>& chain = table_.arm(side);
     std::array<Vector3, kArmJointCount> origins{};
     std::array<Vector3, kArmJointCount> axes{};
     std::array<Vector3, kArmJointCount> moments{};
 
+    // The payload rides on the force sensor, which is welded to the last body,
+    // so merging the two keeps the chain seven bodies long and every joint
+    // upstream picks it up through the same backward pass.
+    constexpr std::size_t last = kArmJointCount - 1;
+    RigidBody carrier = chain[last];
+    if (payload_mass_[side] > 0.0) {
+        const Vector3 mount = rotate(
+            table_.sensor_rotation(side), payload_moment_[side]);
+        const double total = carrier.mass + payload_mass_[side];
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            carrier.com[axis] =
+                (carrier.mass * carrier.com[axis] + mount[axis] +
+                 payload_mass_[side] * table_.sensor_origin(side)[axis]) / total;
+        }
+        carrier.mass = total;
+    }
+
     Matrix3 rotation = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
     Vector3 translation{};
     for (std::size_t index = 0; index < kArmJointCount; ++index) {
-        const RigidBody& body = chain[index];
+        const RigidBody& body = index == last ? carrier : chain[index];
         // Evaluating at the requested pose rather than the measured one keeps
         // the feed-forward noise free and makes the equilibrium land on the
         // target instead of trailing behind it.
@@ -421,7 +366,7 @@ void GravityFeedforward::arm_offsets(
     double downstream_mass = 0.0;
     Vector3 downstream_moment{};
     for (std::size_t index = kArmJointCount; index-- > 0;) {
-        downstream_mass += chain[index].mass;
+        downstream_mass += index == last ? carrier.mass : chain[index].mass;
         Vector3 lever{};
         for (std::size_t axis = 0; axis < 3; ++axis) {
             downstream_moment[axis] += moments[index][axis];

@@ -26,6 +26,7 @@
     <button class="step" data-scroll="selection"><b>02</b><span>关节选择</span></button>
     <button class="step" data-scroll="capture"><b>03</b><span>被动采点</span></button>
     <button class="step" data-scroll="calibration"><b>04</b><span>自动标定</span></button>
+    <button class="step" data-scroll="forcesensor"><b>05</b><span>力传感器</span></button>
   </nav>
 
   <main>
@@ -34,7 +35,7 @@
         <div><span class="section-index">01</span><h2>参数源</h2></div>
         <div class="file-actions">
           <a class="button secondary" href="/api/file?kind=parameters" download>下载 JSON</a>
-          <button id="exportButton" class="button secondary">导出 URDF</button>
+          <button id="exportButton" class="button secondary">导出全部结果</button>
           <a class="button secondary" href="/api/file?kind=urdf" download>下载 URDF</a>
         </div>
       </div>
@@ -42,6 +43,8 @@
         <div class="file-row"><span>参数文件</span><code id="parameterPath">-</code><b id="parameterState">检测中</b></div>
         <div class="file-row"><span>源模型</span><code id="sourcePath">-</code><b id="schemaValue">-</b></div>
         <div class="file-row"><span>标定模型</span><code id="outputPath">-</code><b>同构输出</b></div>
+        <div class="file-row"><span>重力表</span><code id="tablePath">-</code><b>运行时</b></div>
+        <div class="file-row"><span>力传感器</span><code id="ftPath">-</code><b>运行时</b></div>
         <div class="file-row"><span>源校验</span><code id="sourceHash">-</code><b>SHA-256</b></div>
       </div>
     </section>
@@ -170,6 +173,30 @@
             <th>内点<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="鲁棒 EM 判定为可信的姿态比例。EM 以整个姿态（7 个关节一起）为单位判定，所以被人碰到、卡住或没真正静止的姿态会整块被剔除。明显低于 100% 就说明采集过程中有姿态受到了干扰。"></span></th>
           </tr></thead>
           <tbody id="iterationRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="forcesensor" class="section band-light">
+      <div class="section-heading">
+        <div><span class="section-index">05</span><h2>力传感器标定</h2></div>
+        <div class="file-actions">
+          <button id="ftCapture" class="button primary">记录当前朝向</button>
+          <button id="ftSolve" class="button secondary">求解</button>
+          <button id="ftAdoptOrigin" class="button secondary">采用建议取矩点重解</button>
+          <button id="ftClear" class="text-button">清空样本</button>
+        </div>
+      </div>
+      <p class="section-note">
+        不发任何 LowCmd：把手臂摆到一个朝向、松手让它自己停住（或用手扶住前臂，别碰工具），再记录。
+        至少 4 个朝向、且三根轴都要转到，才能把零偏、夹爪质量和质心分开。
+        <span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="力通道解 F = A·u + b：A 取完整 3x3 时未知量 12 个，每个朝向给 3 个方程，所以最少 4 个朝向。力矩通道解一阶矩需要至少 3 个不共面的朝向。覆盖度是重力单位向量矩阵的最小/最大奇异值之比，越接近 1 说明三根轴激励越均衡。"></span>
+      </p>
+      <div id="ftPanels" class="ft-grid"></div>
+      <div class="result-table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>侧</th><th>来源</th><th>时间</th><th>Fx / Fy / Fz (N)</th><th>Mx / My / Mz (N·m)</th><th>抖动<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="平均窗口内六个通道的标准差最大值，力和力矩分别列出。它是判断“工具那端有没有人碰”的唯一依据，超过阈值的样本在记录时就会被拒绝。"></span></th><th></th></tr></thead>
+          <tbody id="ftRows"></tbody>
         </table>
       </div>
     </section>

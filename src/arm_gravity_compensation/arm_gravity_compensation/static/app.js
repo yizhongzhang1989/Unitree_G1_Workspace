@@ -90,6 +90,8 @@ function updateFiles(snapshot) {
   ui.parameterPath.textContent = snapshot.files.parameter;
   ui.sourcePath.textContent = snapshot.files.source_urdf;
   ui.outputPath.textContent = snapshot.files.calibrated_urdf;
+  ui.tablePath.textContent = snapshot.files.gravity_table;
+  ui.ftPath.textContent = snapshot.files.ft_calibration;
   ui.sourceHash.textContent = snapshot.files.source_sha256;
   ui.schemaValue.textContent = `schema v${snapshot.files.schema_version}`;
   ui.parameterState.textContent = "READY";
@@ -250,10 +252,64 @@ async function refresh() {
     state = snapshot;
     if (firstLoad) buildJointSelection(snapshot);
     updateFiles(snapshot); updateRuntime(snapshot); updateTargets(snapshot); updateParameters(snapshot);
+    updateForceSensor(snapshot);
   } catch (error) {
     ui.connectionDot.classList.remove("online"); ui.connectionDot.classList.add("error");
     ui.phaseLabel.textContent = "连接断开"; ui.messageLabel.textContent = error.message;
   }
+}
+
+function updateForceSensor(snapshot) {
+  const sensors = snapshot.ft_sensor || {};
+  ui.ftPanels.innerHTML = ["left", "right"].map(side => {
+    const sensor = sensors[side];
+    if (!sensor) return "";
+    const online = sensor.age !== null && sensor.age < 0.5;
+    const result = sensor.result;
+    const solved = result ? result.calibration : null;
+    const diagnostics = result ? result.diagnostics : null;
+    const coverage = sensor.coverage || { count: 0, spread: 0 };
+    const rows = solved ? `
+      <div><dt>工具质量</dt><dd>${solved.tool_mass.toFixed(4)} kg（模型 ${Number(diagnostics.modelled_tool_mass ?? 0).toFixed(4)}）</dd></div>
+      <div><dt>质心 (m)</dt><dd>${solved.tool_com.map(v => v.toFixed(4)).join(" / ")}</dd></div>
+      <div><dt>模型质心 (m)</dt><dd>${(diagnostics.modelled_tool_com || []).map(v => v.toFixed(4)).join(" / ") || "-"}</dd></div>
+      <div><dt>取矩点 (m)</dt><dd>${(solved.measurement_origin || [0, 0, 0]).map(v => v.toFixed(4)).join(" / ")}</dd></div>
+      <div><dt>建议取矩点<span class="hint" tabindex="0" role="button" aria-label="说明" data-tip="传感器对自己的力矩参考点取矩，厂家把它放在工具侧法兰面上，而不是 URDF link 原点。纯重力标定解不出它（只有“质心减取矩点”可辨识），所以这里用 CAD 质心反推：量级应该正好等于一个传感器高度（KWR57 为 53 mm），对得上才说明这个假设成立。"></span></dt><dd>${(diagnostics.suggested_origin || []).map(v => v.toFixed(4)).join(" / ") || "-"}</dd></div>
+      <div><dt>力零偏 (N)</dt><dd>${solved.force_bias.map(v => v.toFixed(2)).join(" / ")}</dd></div>
+      <div><dt>力矩零偏</dt><dd>${solved.torque_bias.map(v => v.toFixed(3)).join(" / ")}</dd></div>
+      <div><dt>残差 RMS</dt><dd>${diagnostics.force_residual_rms.toFixed(3)} N · ${diagnostics.torque_residual_rms.toFixed(4)} N·m</dd></div>
+      <div><dt>安装姿态</dt><dd>${diagnostics.orientation_estimated
+        ? `已采纳 ${Number(diagnostics.misalignment_deg ?? 0).toFixed(2)}°`
+        : `名义值 (p=${Number(diagnostics.orientation_probability ?? 1).toFixed(3)})`}</dd></div>
+      <div><dt>轴增益偏差</dt><dd>${diagnostics.shape_error === undefined ? "样本不足" : `${(diagnostics.shape_error * 100).toFixed(1)}%`}</dd></div>
+      <div><dt>内点</dt><dd>${(diagnostics.inlier_fraction * 100).toFixed(1)}%</dd></div>` : "";
+    return `<div class="ft-card">
+      <div class="ft-card-head">
+        <h3>${side === "left" ? "左" : "右"} · ${sensor.frame}</h3>
+        <span class="danger-badge ${online ? "off" : ""}">${online ? "ONLINE" : "NO DATA"}</span>
+      </div>
+      <code>${sensor.topic}</code>
+      <dl class="metric-grid">
+        <div><dt>原始读数</dt><dd>${sensor.wrench ? sensor.wrench.map(v => v.toFixed(2)).join(" ") : "-"}</dd></div>
+        <div><dt>朝向覆盖</dt><dd>${coverage.count} 个 · spread ${Number(coverage.spread || 0).toFixed(3)}</dd></div>
+        ${rows}
+      </dl>
+      ${result ? `<p class="ft-stamp">解算于 ${result.calibrated_at.replace("T", " ").slice(0, 19)}</p>` : "<p class=\"ft-stamp\">尚未求解</p>"}
+    </div>`;
+  }).join("");
+
+  const samples = ["left", "right"].flatMap(side =>
+    (sensors[side] ? sensors[side].samples : []).map(item => ({ ...item, side })));
+  samples.sort((first, second) => first.id - second.id);
+  ui.ftRows.innerHTML = samples.length ? samples.map(item => `<tr>
+    <td>#${item.id}</td><td>${item.side === "left" ? "左" : "右"}</td>
+    <td>${item.source === "manual" ? "手动" : "自动"}</td>
+    <td>${item.captured_at.replace("T", " ").slice(0, 19)}</td>
+    <td>${item.wrench.slice(0, 3).map(v => v.toFixed(2)).join(" / ")}</td>
+    <td>${item.wrench.slice(3).map(v => v.toFixed(3)).join(" / ")}</td>
+    <td>${Math.max(...item.wrench_std.slice(0, 3)).toFixed(2)} / ${Math.max(...item.wrench_std.slice(3)).toFixed(3)}</td>
+    <td><button class="text-button" data-ft-remove="${item.id}">删除</button></td>
+  </tr>`).join("") : `<tr><td class="empty-row" colspan="8">尚无力传感器样本</td></tr>`;
 }
 
 function bind() {
@@ -295,7 +351,45 @@ function bind() {
     catch (error) { toast(error.message, true); }
   });
   ui.exportButton.addEventListener("click", async () => {
-    try { const result = await api("/api/export"); toast(`已写入 ${result.path}`); }
+    try {
+      const result = await api("/api/export");
+      const written = ["calibrated.urdf", "gravity_table.yaml"];
+      if (result.ft_calibration) written.push("ft_calibration.yaml");
+      toast(`已写入 ${written.join(" · ")}`);
+      await refresh();
+    }
+    catch (error) { toast(error.message, true); }
+  });
+  ui.ftCapture.addEventListener("click", async () => {
+    try { const result = await api("/api/ft/capture"); toast(`已记录：${result.sides.join(" / ")}`); await refresh(); }
+    catch (error) { toast(error.message, true); }
+  });
+  ui.ftSolve.addEventListener("click", async () => {
+    const sides = ["left", "right"].filter(side => state && state.ft_sensor[side].samples.length);
+    if (!sides.length) { toast("还没有力传感器样本", true); return; }
+    try { await api("/api/ft/solve", { sides }); toast(`已求解：${sides.join(" / ")}`); await refresh(); }
+    catch (error) { toast(error.message, true); }
+  });
+  ui.ftClear.addEventListener("click", async () => {
+    if (!confirm("删除全部力传感器样本？")) return;
+    try { const result = await api("/api/ft/clear"); toast(result.message); await refresh(); }
+    catch (error) { toast(error.message, true); }
+  });
+  ui.ftAdoptOrigin.addEventListener("click", async () => {
+    const origins = {};
+    ["left", "right"].forEach(side => {
+      const result = state && state.ft_sensor[side].result;
+      const suggested = result && result.diagnostics.suggested_origin;
+      if (suggested) origins[side] = suggested;
+    });
+    const sides = Object.keys(origins);
+    if (!sides.length) { toast("先求解一次才有建议值", true); return; }
+    try { await api("/api/ft/solve", { sides, origins }); toast(`已采用建议取矩点：${sides.join(" / ")}`); await refresh(); }
+    catch (error) { toast(error.message, true); }
+  });
+  ui.ftRows.addEventListener("click", async event => {
+    const button = event.target.closest("[data-ft-remove]"); if (!button) return;
+    try { await api("/api/ft/remove", { id: Number(button.dataset.ftRemove) }); await refresh(); }
     catch (error) { toast(error.message, true); }
   });
   [ui.leftJoints, ui.rightJoints].forEach(root =>

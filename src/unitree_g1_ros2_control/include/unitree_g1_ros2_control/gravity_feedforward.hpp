@@ -4,14 +4,19 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "geometry_msgs/msg/inertia_stamped.hpp"
 #include "hardware_interface/loaned_state_interface.hpp"
 #include "rclcpp/duration.hpp"
 #include "rclcpp/logger.hpp"
 #include "rclcpp/node_interfaces/node_parameters_interface.hpp"
+#include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
+#include "realtime_tools/realtime_buffer.hpp"
+#include "unitree_g1_ros2_control/gravity_table.hpp"
 
 namespace unitree_g1_ros2_control {
 
@@ -28,8 +33,8 @@ namespace unitree_g1_ros2_control {
 /// `arm_offsets` - touches no ROS type and can be exercised on its own.
 class GravityFeedforward {
 public:
-    static constexpr std::size_t kArmJointCount = 7;
-    static constexpr std::size_t kSideCount = 2;
+    static constexpr std::size_t kArmJointCount = GravityTable::kArmJointCount;
+    static constexpr std::size_t kSideCount = GravityTable::kSideCount;
 
     using LifecycleNode = rclcpp_lifecycle::LifecycleNode;
 
@@ -37,18 +42,6 @@ public:
     /// `update_torso_gravity` expects its argument.
     static const char* torso_imu_sensor();
     static const std::array<std::string, 4>& imu_interface_names();
-
-    /// One lumped rigid body of the reduced arm chain, as exported by the
-    /// calibration package. Every link welded to this body is already merged
-    /// into `mass` and `com`.
-    struct RigidBody {
-        std::array<double, 3> axis{};
-        std::array<double, 3> origin{};
-        std::array<double, 9> rotation{};
-        std::array<double, 3> com{};
-        double mass{0.0};
-        std::size_t command_index{0};
-    };
 
     // ---------------------------------------------------------------- //
     // Controller side
@@ -120,10 +113,30 @@ public:
         std::size_t side, const std::vector<double>& target, double gain,
         const std::vector<double>& stiffness, std::vector<double>& command) const;
 
+    /// Extra mass hanging on the force sensor, reported in the sensor frame.
+    /// It is merged into the last body of the chain, which is why the table
+    /// carries the sensor mount. Applied as given - the ramp and the limits
+    /// live where the message is received.
+    void set_payload(std::size_t side, double mass, const Vector3& first_moment);
+    double payload_mass(std::size_t side) const { return payload_mass_[side]; }
+
 private:
-    std::array<std::vector<RigidBody>, kSideCount> arms_;
+    /// Fold the newest payload message in over `payload_filter_tau_s`, and let
+    /// it decay back to nothing once its publisher goes quiet. A payload that
+    /// appears in one cycle would otherwise step the command by the whole
+    /// offset it is worth.
+    void advance_payload(double elapsed);
+    void subscribe_payload(const LifecycleNode::SharedPtr& node);
+    void accept_payload(
+        std::size_t side, const geometry_msgs::msg::InertiaStamped& message);
+
+    struct PayloadCommand {
+        double mass{0.0};
+        Vector3 first_moment{};
+    };
+
+    GravityTable table_;
     std::vector<std::size_t> compensated_indices_;
-    std::array<double, 9> imu_to_torso_{};
     std::array<double, 3> gravity_{};
     double filter_cutoff_hz_{2.0};
     bool gravity_valid_{false};
@@ -147,6 +160,18 @@ private:
     std::atomic<double> compensation_scale_{1.0};
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_;
     std::vector<double> stiffness_;
+
+    std::array<rclcpp::Subscription<geometry_msgs::msg::InertiaStamped>::SharedPtr,
+               kSideCount> payload_subscription_;
+    std::array<realtime_tools::RealtimeBuffer<PayloadCommand>, kSideCount> payload_buffer_;
+    std::array<std::atomic<uint64_t>, kSideCount> payload_sequence_{};
+    std::array<uint64_t, kSideCount> payload_seen_{};
+    std::array<double, kSideCount> payload_age_{};
+    std::array<double, kSideCount> payload_mass_{};
+    std::array<Vector3, kSideCount> payload_moment_{};
+    double payload_filter_tau_{1.0};
+    double payload_timeout_{2.0};
+    double maximum_payload_mass_{3.0};
 };
 
 }  // namespace unitree_g1_ros2_control

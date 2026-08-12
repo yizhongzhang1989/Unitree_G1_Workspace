@@ -186,13 +186,14 @@ graph LR
         K["14 × &lt;arm_joint&gt;/kp"]
     end
     T["~/commands<br/>31 个绝对位置"] --> C
+    L["/armN/payload<br/>末端负载，可选"] --> C
     Y --> C["ForwardPositionController::update()"]
     I --> C
     K --> C
     C ==>|"写 31 × &lt;joint&gt;/position"| G["G1TopicSystem → LowCmd"]
 ```
 
-除 31 个位置反馈外另读 18 个 state interface（4 个 IMU 四元数 + 14 个 `kp`），全部是同进程内的 `double` 直读，无序列化。state interface 不互斥，所以多 claim 这八个不影响任何其他 controller。
+除 31 个位置反馈外另读 18 个 state interface（4 个 IMU 四元数 + 14 个 `kp`），全部是同进程内的 `double` 直读，无序列化。state interface 不互斥，所以多 claim 这 18 个不影响任何其他 controller。
 
 电机内部执行 $\tau = k_p(q_{cmd}-q) - k_d\dot q$，想让手臂停在 $q_{target}$ 就需要
 $$q_{cmd} = q_{target} + s\,\frac{G(q_{target})}{k_p}$$
@@ -213,6 +214,19 @@ ros2 param set /forward_position_controller compensation_scale 0.95
 - **$G$ 在目标位置求值**，不是实测位置。目标无噪声、天然领先于测量，且这本就是平衡条件要求的。用速度外推测量位置反而会引入系数为 $K_g\Delta t$ 的负阻尼。
 - **不补偿 `kd`**。阻尼是稳定项，且稳态下 $\dot q \to 0$ 本就不进入偏移量。
 - **$k_p$ 从 `<joint>/kp` state interface 读**，不在 controller 配置里重写。增益不一致会把每一个补偿力矩按同比例算错而没有任何外部症状，所以只允许一个数据源。
+
+#### 自适应末端负载
+`left_payload_topic` / `right_payload_topic`（默认 `/arm0/payload`、`/arm1/payload`，`geometry_msgs/InertiaStamped`）上的质量与质心会经 `gravity_table.yaml` 里的 `payload_origin_*` 变换到腕 yaw 关节系，与最后一个刚体合成，然后照常走那一次反向遍历——所以上游七个关节自动全都吃到了它，`arm_offsets` 仍然只有七个刚体。
+
+发布者是 `payload_estimator`（见 [arm_gravity_compensation/README.md](../arm_gravity_compensation/README.md)）。这里只做三道防线，都在 `advance_payload`：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `maximum_payload_mass` | 3.0 | 超限的消息整条丢弃（质心离传感器超过 1 m 也丢） |
+| `payload_filter_tau_s` | 1.0 | 一阶滤波。负载一拍出现就会把命令阶跃整个偏移量 |
+| `payload_timeout_s` | 2.0 | 发布者不说话就衰减回零。**死掉的估计器不该留一个幻影负载把手臂顶着** |
+
+没有 payload 发布者时行为与改动前逐位相同：`activate` 把负载清零，超时立即生效。表里没有 `payload_origin_*`（旧导出）时整条负载通路自动关闭。
 
 #### 它到底多贵（实测）
 Jetson 上实测一次完整求值（IMU 滤波 + 两条链共14 个刚体）：

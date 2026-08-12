@@ -28,7 +28,7 @@ def _load_launch(name, launch_dir=LAUNCH_DIR):
     return module
 
 
-def _all_data_context(scope, topology="dual"):
+def _all_data_context(scope, topology="dual", end_effector_load="true"):
     context = LaunchContext()
     context.launch_configurations.update({
         "scope": scope,
@@ -41,6 +41,7 @@ def _all_data_context(scope, topology="dual"):
         "robot_description_topic": "/robot_description",
         "require_pr_mode": "true",
         "use_sim_time": "false",
+        "end_effector_load": end_effector_load,
     })
     return context
 
@@ -87,18 +88,34 @@ def test_all_data_scope_selects_expected_producers():
 
     whole_body = module._data_launches(
         _all_data_context("whole_body", "dual"))
-    assert len(whole_body) == 2
+    assert len(whole_body) == 3
     assert all(isinstance(action, IncludeLaunchDescription)
                for action in whole_body)
     paths = [_source_path(action) for action in whole_body]
     assert any("end_effectors_dual_bus.launch.py" in path for path in paths)
     assert any("control.launch.py" in path for path in paths)
+    assert any("end_effector_load.launch.py" in path for path in paths)
     assert all("dashboard" not in path.lower() for path in paths)
     control = next(
         action for action in whole_body
         if "control.launch.py" in _source_path(action))
     assert dict(control.launch_arguments)["arm_stiffness_scale"].perform(
         _all_data_context("whole_body", "dual")) == "2.5"
+
+
+def test_end_effector_load_needs_whole_body_and_can_be_disabled():
+    module = _load_launch("all_data.launch.py")
+
+    def paths(*args, **kwargs):
+        return [_source_path(action)
+                for action in module._data_launches(
+                    _all_data_context(*args, **kwargs))]
+
+    # 补偿节点要关节角和躯干 IMU，末端 scope 下两者都不存在。
+    assert not any("end_effector_load" in path
+                   for path in paths("end_effectors"))
+    assert not any("end_effector_load" in path
+                   for path in paths("whole_body", end_effector_load="false"))
 
 
 @parametrize("scope", ["bad", "", "all"])
@@ -159,6 +176,23 @@ def test_whole_body_dashboard_only_creates_compat_web_node():
     assert len(nodes) == 1
     assert _node_package(nodes[0]) == "robot_bringup"
     assert _node_executable(nodes[0]) == "whole_body_dashboard"
+
+
+def test_lowlevel_dashboard_expands_to_one_read_only_web_node():
+    module = _load_launch("lowlevel_dashboard.launch.py")
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "web_host": "0.0.0.0",
+        "web_port": "8210",
+        "lowstate_topic": "/lf/lowstate",
+        "secondary_imu_topic": "/lf/secondary_imu",
+        "idle_release_s": "3.0",
+    })
+    actions = module._dashboard_node(context)
+    assert len(actions) == 1
+    assert isinstance(actions[0], Node)
+    assert _node_package(actions[0]) == "robot_bringup"
+    assert _node_executable(actions[0]) == "lowlevel_dashboard"
 
 
 def test_ikt_pose_commander_uses_named_position_controllers():
