@@ -161,14 +161,22 @@ class MotionControlNode(Node):
             raise ValueError(f'ik_limit_upper 长度必须等于 arm_joints ({len(self._arm_names)})')
         joint_limits = {name: (-math.inf, high)
                         for name, high in zip(self._arm_names, limit_hi)} if limit_hi else {}
-        # 零空间偏置增益（长度同 arm_joints，0 = 该轴不偏置）。收肘限位拦不住"肘长期
-        # 顶在 1.4"，这一道在不动末端的前提下把三根自转轴拉回 0——理由见 config 注释。
+        # 零空间软偏好增益与参考值（长度同 arm_joints，0 增益 = 该轴不偏置）。
         null_gain_values = list(p('ik_null_gain', Parameter.Type.DOUBLE_ARRAY)
                                 .get_parameter_value().double_array_value)
         if null_gain_values and len(null_gain_values) != len(self._arm_names):
             raise ValueError(f'ik_null_gain 长度必须等于 arm_joints ({len(self._arm_names)})')
         null_gain = {name: gain for name, gain in zip(self._arm_names, null_gain_values)
                      if gain} if null_gain_values else {}
+        null_target_values = list(p('ik_null_target', Parameter.Type.DOUBLE_ARRAY)
+                                  .get_parameter_value().double_array_value)
+        if null_target_values and len(null_target_values) != len(self._arm_names):
+            raise ValueError(
+                f'ik_null_target 长度必须等于 arm_joints ({len(self._arm_names)})')
+        # 非零参考值是持续、无门限的软偏好；数组里的 0 保持原有“拉回 0 + 门控”语义。
+        null_target = {
+            name: target for name, target in zip(self._arm_names, null_target_values) if target
+        } if null_target_values else {}
         null_gate = list(p('ik_null_gate', [0.6, 1.2])
                          .get_parameter_value().double_array_value)
         if len(null_gate) != 2:
@@ -190,6 +198,7 @@ class MotionControlNode(Node):
             max_step_ori=p('ik_max_step_ori', 0.5).get_parameter_value().double_value,
             joint_limits=joint_limits,
             null_gain=null_gain,
+            null_target=null_target,
             null_gate=tuple(null_gate),
         )
         # 热启动陷进坏解支时的逃生阈值（m）。理由见 config 里那段注释。

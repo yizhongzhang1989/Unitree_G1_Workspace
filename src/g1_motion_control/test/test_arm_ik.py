@@ -41,7 +41,7 @@ def STAND_POSTURE(ik):
     return np.array([by_name[name] for name in ik.joint_names])
 
 
-def _configured_ik(null_gain=None):
+def _configured_ik(null_gain=None, null_target=None):
     """按 config/motion_control.yaml 里实际发布的参数建，用来卡住部署值本身。
 
     库默认值和实际跑的那一套不是一回事，只测默认值等于没测。
@@ -53,6 +53,10 @@ def _configured_ik(null_gain=None):
     if null_gain is None:
         null_gain = {name: gain
                      for name, gain in zip(arms, config['ik_null_gain']) if gain}
+    if null_target is None:
+        null_target = {name: target
+                       for name, target in zip(arms, config.get('ik_null_target', []))
+                       if target}
     return ArmIK(
         urdf.read_text(encoding='utf-8'), arms, TIP_FRAMES,
         base_frame=config['base_frame'], max_iters=config['ik_max_iters'],
@@ -62,6 +66,7 @@ def _configured_ik(null_gain=None):
         joint_limits={name: (-math.inf, high)
                       for name, high in zip(arms, config['ik_limit_upper'])},
         null_gain=null_gain,
+        null_target=null_target,
         null_gate=tuple(config['ik_null_gate']))
 
 
@@ -300,24 +305,69 @@ def test_null_gain_rejects_bad_gains(ik):
     with pytest.raises(ValueError):           # 门控上下界颠倒
         ArmIK(urdf, ARM_JOINTS, TIP_FRAMES, null_gain={'right_elbow_joint': 0.2},
               null_gate=(1.2, 0.8))
+    with pytest.raises(ValueError):
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES,
+              null_gain={'right_shoulder_roll_joint': 0.05},
+              null_target={'no_such_joint': 0.2})
+    with pytest.raises(ValueError):
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES,
+              null_gain={'right_shoulder_roll_joint': 0.05},
+              null_target={'right_shoulder_roll_joint': math.nan})
+    with pytest.raises(ValueError):           # 只有参考角、没有增益，不会产生有效偏好
+        ArmIK(urdf, ARM_JOINTS, TIP_FRAMES,
+              null_target={'right_shoulder_roll_joint': math.radians(-20.0)})
 
 
-def test_null_gate_stays_shut_during_normal_tracking(configured_ik, ik):
-    """门控存在的全部理由：正常工况必须和**完全不带偏置**逐位相同。
+def test_null_target_is_ungated_and_keeps_the_tip_fixed(configured_ik):
+    """显式参考是无门限软偏好：任务已收敛后，有零空间才继续靠近。"""
+    ik, config = configured_ik, _config()
+    targets = dict(zip(config['arm_joints'], config['ik_null_target']))
+    left_target = targets['left_shoulder_roll_joint']
+    right_target = targets['right_shoulder_roll_joint']
+    assert left_target == pytest.approx(math.radians(20.0), abs=math.radians(1.0))
+    assert right_target == pytest.approx(-left_target)
+
+    seed = STAND_POSTURE(ik)
+    goal = ik.fk(seed)
+    solved, _, _, _ = ik.solve(seed, goal)
+    for side, reference in (('left', left_target), ('right', right_target)):
+        index = ik.joint_names.index(f'{side}_shoulder_roll_joint')
+        before = abs(seed[index] - reference)
+        after = abs(solved[index] - reference)
+        assert before < config['ik_null_gate'][0], '测试起点必须落在门限内'
+        assert after < before, f'{side} 第二关节没有朝 20° 软偏好移动'
+
+        actual = ik.fk(solved)[side]
+        assert np.linalg.norm(actual[:3] - goal[side][:3]) < 1e-3
+        orientation_error = 2.0 * math.acos(min(
+            1.0, abs(float(np.dot(actual[3:], goal[side][3:])))))
+        assert orientation_error < config['ik_tol_ori']
+
+
+def test_zero_reference_null_gate_stays_shut_during_normal_tracking(ik):
+    """原三根 q_ref=0 自转轴的门控在正常工况必须与完全无偏置逐位相同。
 
     没有门控时偏置会把稳态残差从 0.858 顶到 1.933 mm，越过 ik_tol_pos(1 mm)，
     于是求解器永远判不了收敛，稳态迭代从 0 变成跑满 10 次。
     """
+    config = _config()
+    zero_reference_gain = {
+        name: gain for name, gain, target in zip(
+            config['arm_joints'], config['ik_null_gain'], config['ik_null_target'])
+        if gain and target == 0.0
+    }
+    gated_ik = _configured_ik(null_gain=zero_reference_gain, null_target={})
     stand = STAND_POSTURE(ik)
     home = ik.fk(stand)
     plain, biased = stand.copy(), stand.copy()
+    plain_iters = biased_iters = 0
     for i in range(200):                      # 3 cm 画圆，肘角远低于门控下限
         angle = 2 * math.pi * i / 100
         goal = {side: np.concatenate(
             [pose[:3] + [0.0, 0.03 * math.cos(angle), 0.03 * math.sin(angle)], pose[3:]])
             for side, pose in home.items()}
         plain, _, _, plain_iters = ik.solve(plain, goal)
-        biased, _, _, biased_iters = configured_ik.solve(biased, goal)
+        biased, _, _, biased_iters = gated_ik.solve(biased, goal)
     assert np.allclose(plain, biased), '正常跟随时门控没关严，解被偏置改了'
     assert biased_iters == plain_iters, '正常跟随时带偏置多花了迭代'
 
