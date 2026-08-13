@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Quest → Robot Bridge</title>
+  <title>VR → Robot Bridge</title>
   <style>
     :root {
       color-scheme: dark;
@@ -62,7 +62,7 @@
 </head>
 
 <body>
-  <h1>Quest → Robot Bridge</h1>
+  <h1>VR → Robot Bridge</h1>
   <p id="status">初始化中…</p>
   <button id="enterVR" disabled>Enter VR</button>
   <p style="color:#8b95a3">本页是<b>采集端</b>，需在头显浏览器里打开并进入 VR。
@@ -197,7 +197,8 @@
       const layer = session.renderState.baseLayer;
       if (!layer || !gl) return;
       gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-      gl.clearColor(0.04, 0.05, 0.07, 1);
+      // 透视模式下必须全透明，否则合成时会用不透明底色盖掉摄像头画面
+      gl.clearColor(0, 0, 0, passthrough ? 0 : 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       if (!viewerPose || !prog) return;
 
@@ -218,6 +219,9 @@
 
     /* ---------- WebXR ---------- */
     let session = null, gl = null, refSpace = null, seq = 0, lastLog = 0;
+    // environmentBlendMode 不是 opaque 就是透视：渲染结果要和摄像头画面合成
+    let passthrough = false;
+    let mode = 'immersive-ar';
 
     function poseToObj(p) {
       if (!p) return null;
@@ -281,21 +285,27 @@
     btn.onclick = async () => {
       try {
         const canvas = document.getElementById('gl');
-        gl = canvas.getContext('webgl2', { xrCompatible: true }) || canvas.getContext('webgl', { xrCompatible: true });
-        session = await navigator.xr.requestSession('immersive-vr', {
+        gl = canvas.getContext('webgl2', { xrCompatible: true, alpha: true })
+          || canvas.getContext('webgl', { xrCompatible: true, alpha: true });
+        // 优先 immersive-ar：Quest 上它就是透视（看得见外界），能看着真机器人操作
+        // 头显不支持才退回 immersive-vr 的纯黑背景
+        session = await navigator.xr.requestSession(mode, {
           optionalFeatures: ['local-floor', 'bounded-floor'],
         });
+        passthrough = session.environmentBlendMode !== 'opaque';
         await gl.makeXRCompatible();
-        session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+        session.updateRenderState({
+          baseLayer: new XRWebGLLayer(session, gl, { alpha: passthrough }),
+        });
         refSpace = await session.requestReferenceSpace('local-floor')
           .catch(() => session.requestReferenceSpace('local'));
         initGL();
         session.addEventListener('end', () => {
           session = null;
           send({ seq: seq++, session_active: false, left: null, right: null });
-          setStatus('VR 会话已结束。');
+          setStatus('VR 会话已结束');
         });
-        setStatus('VR 会话运行中，正在推送位姿数据。');
+        setStatus(`${passthrough ? '透视' : 'VR'}会话运行中，正在推送位姿数据`);
         session.requestAnimationFrame(onFrame);
       } catch (e) {
         setStatus('启动 VR 失败：' + e.message);
@@ -304,12 +314,16 @@
 
     (async () => {
       if (!navigator.xr) {
-        setStatus('navigator.xr 不可用：页面必须通过 HTTPS 或 http://localhost 访问（见 server.py 顶部说明）。');
+        setStatus('navigator.xr 不可用：页面必须通过 HTTPS 或 http://localhost 访问（见 server.py 顶部说明）');
         return;
       }
-      const ok = await navigator.xr.isSessionSupported('immersive-vr');
+      if (!await navigator.xr.isSessionSupported('immersive-ar')) {
+        mode = 'immersive-vr';
+        btn.textContent = 'Enter VR（无透视）';
+      }
+      const ok = await navigator.xr.isSessionSupported(mode);
       btn.disabled = !ok;
-      if (!ok) setStatus('当前浏览器不支持 immersive-vr。');
+      if (!ok) setStatus('当前浏览器不支持 immersive-ar / immersive-vr');
     })();
   </script>
 </body>

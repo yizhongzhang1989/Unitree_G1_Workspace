@@ -3,7 +3,7 @@ WebXR 桥接：头显浏览器读手柄/头部位姿 → WebSocket 直推给 `vr
 不需要 Unity，不需要装 APK，**也不再有独立的桥接进程**——采集页由 ROS 节点自己托管
 （`g1_motion_control/vr_teleop.py` 内嵌 aiohttp）。
 
-`vr_teleop` 是上层控制源，不做 IK：它负责 A/X 航向标定、squeeze 离合、坐标映射、
+`vr_teleop` 是上层控制源，不做 IK：它负责 squeeze 离合、坐标映射、
 tracking 重定位抑制，最后以长度 20 发布到统一 `/motion_control/command`；和 VLA / 键盘
 遵守同一个 2/4/7/14/20 分块契约，不另建 VR 专用命令话题。它只反向读取
 `/motion_control/status.limited_pose`，用于离合接合时选一个可达、无编码器静差的锚点。
@@ -163,6 +163,10 @@ adb -s 192.168.137.82:5555 shell am start -a android.intent.action.VIEW -d "http
 
 戴上头显，点页面里的 **Enter VR**。节点日志会打一行 `头显已连接`。
 
+页面优先请求 `immersive-ar`，在 Quest 上就是**透视模式**：能直接看着真机器人操作，只有
+网格和两个手柄框线叠在实景上。头显不支持 AR 时自动退回 `immersive-vr`（纯黑背景）,
+按钮会变成 `Enter VR（无透视）`。
+
 ---
 
 ## 验证数据在流
@@ -225,6 +229,7 @@ adb -s 192.168.137.82:5555 shell "curl -s -o /dev/null -w '%{http_code}' http://
 | `seq` 不涨但 HTTP 200 | 页面连上了但没进 VR，戴上头显点 Enter VR |
 | 头显报 `CERT_COMMON_NAME_INVALID` | 证书 SAN 里没有你输的那个 IP，`make_vr_cert <IP>` 重签 |
 | 页面能开但 **Enter VR 按钮点不动** | 不是安全上下文。地址栏必须是 `https://` 或 `http://localhost`，`http://192.168.x.x` 不行 |
+| **进去了看不见外界**（纯黑背景） | 头显没给到 `immersive-ar`。按钮上会写「无透视」；Quest 需在系统设置里允许应用使用透视 |
 | 日志只有明文口那一行 | 证书不在。上一行会写「证书文件不在」，跑一次 `make_vr_cert` |
 | `HTTPS 口 8443 起不来` | 端口被占。明文口不受影响，可以先用 adb 那条顶着 |
 

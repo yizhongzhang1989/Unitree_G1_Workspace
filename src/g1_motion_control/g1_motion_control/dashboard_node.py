@@ -13,8 +13,8 @@
 刻意省掉的三件事（和 ``ikt_pose_commander`` 的 dashboard 比）：
 
 * **后端不算正运动学、不依赖 pinocchio**。URDF 解析一次后把关节树发给前端，
-  three.js 的 ``Object3D`` 嵌套本来就在算矩阵，再算一遍是白花钱。
-        于是每次轮询只发手臂关节角和上层/限速位姿，不发整棵 link 变换树。
+  three.js 的 ``Object3D`` 嵌套本来就在算矩阵，再算一遍是白花钱。于是每次轮询
+  只发手臂关节角和上层/限速位姿，不发整棵 link 变换树。
 * **不订阅、不发布任何控制量，也不调用任何服务**。纯只读，所以不需要
   ``ReentrantCallbackGroup`` + ``MultiThreadedExecutor`` 那一套防死锁配置。
 * **3D 模型只保留手臂**：``base_frame`` 之下**含可动关节**的分支才留（头、雷达、相机
