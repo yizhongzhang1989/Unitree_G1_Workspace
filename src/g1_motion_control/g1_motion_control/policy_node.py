@@ -28,15 +28,17 @@ IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终
       +------- estop ---+---------------+
 
 * ``STAND``：激活 FPC，分两段把 31 轴从"当前实测位姿"插值到策略的默认位姿
-  （对应官方 ``State_FixStand`` 的 ``ts: [0, 2]`` + ``qs``），插完就停在那儿等人确认。
+  （对应官方 ``State_FixStand`` 的 ``ts: [0, 2]`` + ``qs``）。**插值一走完，手臂 14 轴
+  与夹爪就交给 IK 和透传**，下肢停在站立位姿等人确认：机器人吊着调手臂时根本
+  不该启动步态策略，上肢能不能用不该绑在策略上。
   策略绝不能从任意位姿冷启动——训练里它只见过默认位姿附近的开局。
   第一段（``stand_clear_s``）**只把 shoulder_roll 往外张**：关节空间直线不避障，
   手臂贴着身体从背后摆回来时夹爪会扫进大腿（实测 ``shoulder_pitch`` 在 +60° 附近
   ``gripper_base`` 与 ``hip_pitch_link`` 间距 0.0 mm）。这一段手臂仍走
   ``passive_targets``，IK 还没接管。
-* ``RUNNING``：策略与手臂 IK 同时接管。进入时清零 ``last_action`` 和步态相位，
-  等价于官方 ``env->reset()``；手臂目标位姿用当前实测位形正解播种，所以没人发上肢
-  指令时手臂就停在接管那一刻的姿态。
+* ``RUNNING``：在已经接管的手臂之外，再把下肢交给策略。进入时清零 ``last_action``
+  和步态相位，等价于官方 ``env->reset()``；手臂目标一个字节都不动，否则策略接管
+  那一下手臂会跳回实测位。
 * ``ESTOP``：停止发目标并反激活 FPC。反激活会触发 G1TopicSystem 的卸力斜坡——
   kp 在 ``release_ramp_s`` 内降到 0（只剩 kd，阻尼模式），最后一帧 kd 也归零
   （零力矩模式）。
@@ -302,6 +304,8 @@ class MotionControlNode(Node):
         self._arm_target = np.zeros(len(self._arm_names))
         self._pose: dict[str, np.ndarray] = {}
         self._arm_seed = False
+        # 站立插值走完（或策略接管）后置真，此后手臂与夹爪一直归 IK/透传管。
+        self._arms_live = False
         self._grip = np.zeros(len(self._gripper_slots))
         self._ik_stat = (0.0, 0.0, 0, 0.0)
 
@@ -351,7 +355,8 @@ class MotionControlNode(Node):
         self.create_service(Trigger, '~/engage', self._on_engage, callback_group=services)
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
-        self.get_logger().info('待命。~/engage 站立，~/start 启动策略，~/estop 急停。')
+        self.get_logger().info(
+            '待命。~/engage 站立（插值走完手臂即可用），~/start 启动下肢策略，~/estop 急停。')
 
     # -- 状态回调 --------------------------------------------------------------
 
@@ -425,7 +430,7 @@ class MotionControlNode(Node):
     # -- 服务 ------------------------------------------------------------------
 
     def _on_engage(self, _request, response):
-        """IDLE -> STAND：激活 FPC，插值到默认位姿。"""
+        """IDLE -> STAND：激活 FPC，插值到默认位姿；插完手臂就能用了。"""
         with self._lock:
             if self._state in ACTIVE_STATES:
                 response.success, response.message = False, f'当前是 {self._state.value}'
@@ -449,9 +454,11 @@ class MotionControlNode(Node):
             self._stand_from = start
             self._stand_via = self._clearance_pose(start)
             self._stand_start = self._now()
+            self._arms_live = False
             self._reason = ''
             self._state = State.STAND
-        self.get_logger().info(f'站立中，{self._stand_s:.1f} s 后可以 ~/start')
+        self.get_logger().info(
+            f'站立中，{self._stand_s:.1f} s 后手臂可用，也可以 ~/start 启动下肢策略')
         response.success = True
         response.message = f'standing ({self._stand_s:.1f}s)'
         return response
@@ -488,11 +495,8 @@ class MotionControlNode(Node):
             self._request = np.array([0.0, 0.0, 0.0, self._initial_height])
             self._command = self._request.copy()
             self._command_stamp = self._now()
-            # 手臂从当前实测位形接管；目标位姿的正解播种放到控制线程里做，
-            # 这样 ArmIK 内部的 pinocchio data 缓存只被一个线程碰，不用额外加锁。
-            self._arm_target = self._q[self._arm_slots].copy()
-            self._grip = self._q[self._gripper_slots].copy()
-            self._pose, self._arm_seed = {}, True
+            # 手臂在站立插值走完那一刻就已经接管，这里绝不能重播种：那会丢掉操作员
+            # 当前的末端目标，手臂在策略接管的同一帧跳回实测位。
             self._state = State.RUNNING
         self.get_logger().info('策略接管')
         response.success, response.message = True, 'running'
@@ -581,9 +585,22 @@ class MotionControlNode(Node):
                     self._command + np.clip(request - self._command, -self._cmd_rate, self._cmd_rate),
                     self._cmd_lo, self._cmd_hi)
                 command = self._command.copy()
+            # 站立插值一走完手臂就接管，不必等策略：机器人吊着调手臂时根本不该启动步态。
+            # 条件写成 RUNNING or 插值走完，是因为 ~/start 可能抢在控制线程前面把状态改掉。
+            arms = self._ik is not None and (
+                state is State.RUNNING
+                or self._now() - self._stand_start >= self._stand_s)
+            if arms:
+                if not self._arms_live:
+                    # 插值终点恒等于 _stand_pose。拿指令值而不是实测播种：实测带重力静差，
+                    # 交接这一帧命令流会踩一个台阶。
+                    self._arm_target = self._stand_pose[self._arm_slots].copy()
+                    self._grip = self._stand_pose[self._gripper_slots].copy()
+                    self._pose, self._arm_seed = {}, True
+                    self._arms_live = True
                 if self._arm_seed:
                     # 没人发上肢指令时就停在接管那一刻的姿态；setdefault 让
-                    # ~/start 与首帧之间已经收到的指令优先。
+                    # 交接与首帧之间已经收到的指令优先。
                     for side, pose in self._ik.fk(self._arm_target).items():
                         self._pose.setdefault(side, pose)
                     self._arm_seed = False
@@ -599,13 +616,15 @@ class MotionControlNode(Node):
 
         if state is State.RUNNING:
             try:
-                target = np.empty(len(self._joints))
+                # 用站立位姿打底而不是 np.empty：上肢那几个槽位现在是有条件填的。
+                target = self._stand_pose.copy()
                 target[self._policy_slots] = self._policy.step(
                     joint_pos=joint_pos, joint_vel=joint_vel, ang_vel=ang_vel,
                     quat_xyzw=quat, command=command)
             except Exception as error:  # 推理链路任何异常都当失效处理。
                 self._estop(f'推理失败: {error}')
                 return
+        if arms:
             # IK 本身不抛异常（够不着就返回尽力而为的解），这个 try 是最后一道保险：
             # 上肢出什么事都只保持上一帧手臂目标，绝不能把正在平衡的下肢一起急停。
             try:
@@ -658,6 +677,7 @@ class MotionControlNode(Node):
                 'reason': self._reason,
                 'stale': self._stale(),
                 'ik_ready': self._ik is not None,
+                'arms_live': self._arms_live,
                 'ik_pos_err': round(pos_err, 4),
                 'ik_ms': round(solve_ms, 2),
                 'grip': [round(float(v), 3) for v in self._grip],
@@ -665,7 +685,7 @@ class MotionControlNode(Node):
             # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解。它是“关节指令
             # 对应的末端”，不是编码器实测；实测末端由 dashboard 直接从 /joint_states
             # 的模型 link 得到，避免在这里再做一次 FK 并复制进 status。
-            if self._ik is not None and self._state is State.RUNNING:
+            if self._arms_live:
                 payload['limited_pose'] = {
                     side: [round(float(v), 5) for v in pose]
                     for side, pose in self._ik.fk(self._arm_target).items()}

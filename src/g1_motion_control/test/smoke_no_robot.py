@@ -161,6 +161,7 @@ def scenario(node, config):
     time.sleep(0.5)
     check('站立第一帧贴近实测位姿', np.abs(node.targets[0]).max() < 0.05)
     check('站立未完成时拒绝 start', not node.call(node.start, 'start(早)').success)
+    check('插值未走完时手臂还没接管', not node.status.get('arms_live'))
 
     time.sleep(config['stand_s'] + 0.3)
     expected = np.zeros(len(joints))
@@ -177,8 +178,37 @@ def scenario(node, config):
           increments.max() <= bound * 1.2)
     check('status 报告可以 start 了', node.status.get('ready_to_start'))
 
+    print('\n-- STAND 阶段手臂就该能动（不必等策略） --', flush=True)
+    check('插值走完后 status 报告手臂已接管', node.status.get('arms_live'))
+    stand_right = (node.status.get('limited_pose') or {}).get('right')
+    check('STAND 阶段就发布 limited_pose', stand_right is not None)
+    goal = np.asarray(stand_right, dtype=float)
+    goal[2] += 0.05                                    # 右手抬 5 cm
+    arm_message = Float64MultiArray()
+    arm_message.data = [float(v) for v in goal]
+    node.targets.clear()
+    for _ in range(40):
+        node.command.publish(arm_message)
+        time.sleep(0.02)
+    moved = np.asarray(node.targets)
+    check('STAND 阶段右臂跟着动了',
+          np.abs(moved[-1][passive_slots] - expected[passive_slots]).max() > 0.01)
+    # 这才是这条路径的全部意义：手臂在动，腿和腰逐位不动。
+    check('STAND 阶段下肢/腰逐位不动',
+          np.abs(moved[:, policy_slots] - expected[policy_slots]).max() < 1e-9)
+    stand_reached = (node.status.get('limited_pose') or {}).get('right')
+    stand_err = float(np.linalg.norm(np.asarray(stand_reached)[:3] - goal[:3]))
+    check(f'STAND 阶段右手末端到位（残差 {stand_err * 1e3:.2f} mm）', stand_err < 3e-3)
+
     print('\n-- start --', flush=True)
+    # 删掉 _on_start 里的手臂重播种之后，策略接管不能再把手臂拽回实测位。
+    before_start = np.asarray(node.targets[-1])
     node.call(node.start, 'start')
+    time.sleep(0.2)
+    step = config['arm_rate_limit'] / config['control_rate_hz']
+    check(f'策略接管时手臂/夹爪目标不跳（≤ 一步限速 {step:.3f} rad）',
+          np.abs(np.asarray(node.targets[-1])[passive_slots]
+                 - before_start[passive_slots]).max() <= step + 1e-9)
     node.targets.clear()
     node.stamps.clear()
     node.status_log.clear()

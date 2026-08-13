@@ -10,11 +10,24 @@ ROS 图、也不想连 VR 桥。
 import numpy as np
 import pytest
 
-from g1_motion_control.vr_teleop import _BASE_MAP, VRTeleop, _matrix
+from g1_motion_control.vr_teleop import (
+    VRTeleop,
+    _axis_map,
+    _level,
+    _matrix,
+)
 
 OPEN = 2.76377472169236       # eccentric 全开
 CLOSED = 0.0                  # eccentric 闭合
 UNIT = (0.0, 0.0, 0.0, 1.0)   # 单位四元数 xyzw
+# 参考空间（local-floor）里的“前/上/右”，分别落到躯干 +X / +Z / -Y。
+GRIP_FWD = np.array([0.0, 0.0, -1.0])
+GRIP_UP = np.array([0.0, 1.0, 0.0])
+GRIP_RIGHT = np.array([1.0, 0.0, 0.0])
+# 采集页画的那根 15 cm 朝向线（vr/index.html 里的 (0,0,-0.15)），也就是“滚手腕”的轴。
+GRIP_LINE = np.array([0.0, 0.0, -1.0])
+# gripper_base 的伸出/指向轴（URDF 里 +Z），线应该落到它上面。
+EE_POINT = [0.0, 0.0, 1.0]
 
 
 class _Silent:
@@ -62,10 +75,23 @@ def node():
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
                     'right': np.array([0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])}
     teleop._grip = np.zeros(2)
-    teleop._map = _BASE_MAP.copy()
-    teleop._calib_held = {'left': True, 'right': True}
     teleop.get_logger = lambda: _Silent()
     return teleop
+
+
+@pytest.mark.parametrize('spec', ['+x +y', 'x y w', '+x +x +z', '+x -y +z', 'x y z t'])
+def test_axis_map_rejects_anything_that_is_not_a_rotation(spec):
+    """不是 det=+1 的轴排列就带镜像，共轭出来的转动会反向——宁可启动就报错。"""
+    with pytest.raises(ValueError):
+        _axis_map(spec)
+
+
+def test_axis_map_reads_the_spec_column_by_column():
+    """三个记号依次是输入系 X / Y / Z 的去向。"""
+    matrix = _axis_map('+z +x +y')
+    assert np.allclose(matrix @ np.array([1.0, 0.0, 0.0]), [0.0, 0.0, 1.0])
+    assert np.allclose(matrix @ np.array([0.0, 1.0, 0.0]), [1.0, 0.0, 0.0])
+    assert np.allclose(matrix @ np.array([0.0, 0.0, 1.0]), [0.0, 1.0, 0.0])
 
 
 def test_below_threshold_does_not_move_the_arm(node):
@@ -88,13 +114,62 @@ def test_clutch_engages_without_any_jump(node):
 
 
 def test_controller_displacement_maps_to_robot_axes(node):
-    """WebXR 是 Y 上、-Z 前；机器人是 X 前、Y 左。"""
+    """grip 系的前/上/右（见文件头常量）分别映到机器人 +X / +Z / -Y。"""
     before = node._pose['right'][:3].copy()
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
-    _arms(node, 1.0, 0.0, [0.525, 0.85, -0.35])
-    _arms(node, 1.0, 0.0, [0.55, 0.9, -0.4])                # 两帧走到右 5、上 10、前 10 cm
+    start = np.array([0.5, 0.8, -0.3])
+    step = GRIP_FWD * 0.05 + GRIP_UP * 0.05 + GRIP_RIGHT * 0.025
+    _arms(node, 1.0, 0.0, start)
+    _arms(node, 1.0, 0.0, start + step)
+    _arms(node, 1.0, 0.0, start + step * 2)                 # 两帧走前 10、上 10、右 5 cm
     delta = node._pose['right'][:3] - before
-    assert np.allclose(delta, [0.10, -0.05, 0.10])
+    assert np.allclose(delta, [0.10, -0.05, 0.10])          # 末端：前 10、右 5、上 10 cm
+
+
+def test_translation_is_measured_in_the_controller_frame(node):
+    """位移只脱掉手柄的**偏航**：操作员面朝哪、参考空间朝哪都不影响，不需要方向标定。
+
+    同一个"沿手柄指向推 5 cm"的动作，手柄先后指三个不同航向，末端必须走同一个
+    方向；旧的世界系实现下三次会各走各的。
+    """
+    want = None
+    for angle in (0.0, np.pi, np.pi / 2):
+        node._clutch['right'] = None
+        node._pose['right'][:3] = [0.30, -0.15, 0.05]
+        grip = _spin(GRIP_UP, angle)                           # 绕竖直轴换三个握法
+        forward = _matrix(grip) @ GRIP_FWD                     # 手柄指向在参考空间里的方向
+        start = np.array([0.5, 0.8, -0.3])
+        _arms(node, 1.0, 0.0, start, grip)                     # 接合
+        before = node._pose['right'][:3].copy()
+        _arms(node, 1.0, 0.0, start + forward * 0.05, grip)    # 沿指向推 5 cm
+        delta = node._pose['right'][:3] - before
+        if want is None:
+            want = delta
+        assert np.allclose(delta, want)
+    assert np.allclose(want, [0.05, 0.0, 0.0])                 # 末端往机器人正前方
+
+
+@pytest.mark.parametrize('tilt', [
+    _spin([0.0, 0.0, -1.0], 0.6),                              # 绕朝向线滚手腕
+    _spin([1.0, 0.0, 0.0], 0.5),                               # 抬手柄头（俯仰）
+])
+def test_a_tilted_hold_does_not_tilt_the_translation(node, tilt):
+    """握歪只该改朝向，不该改上下。
+
+    ``local-floor`` 是重力对齐的，竖直方向本来就准，没有任何理由让它跟着手腕转。
+    早先整个 ``origin_rot.T`` 都脱掉，滚手腕 0.6 rad 再直上抬 5 cm，末端会走成
+    右 2.8 上 4.1——这就是"平移怪怪的"。
+    """
+    node._clutch['right'] = None
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start, tilt)                         # 歪着接合
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + np.array([0.0, 0.05, 0.0]), tilt)
+    assert np.allclose(node._pose['right'][:3] - before, [0.0, 0.0, 0.05])
+
+
+def test_level_gives_up_when_the_controller_points_straight_up():
+    """手柄指天时水平朝向无从谈起，只能让调用方退回上一次的基准。"""
+    assert _level(_matrix(_spin([1.0, 0.0, 0.0], np.pi / 2))) is None
 
 
 def test_release_freezes_the_arm(node):
@@ -116,11 +191,12 @@ def test_clutch_anchors_on_the_limited_pose(node):
     """
     node._pose['right'] = np.array([0.90, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])  # 够不着
     limited = {'right': [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], limited=limited)
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start, limited=limited)
     assert np.allclose(node._pose['right'], limited['right'])
     # 接合后的位移从限速后的位置起算，不是从那个飞出去的目标起算。
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.35], limited=limited)
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.4], limited=limited)     # 两帧往前 10 cm
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05, limited=limited)
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.10, limited=limited)   # 两帧沿指向推 10 cm
     assert node._pose['right'][0] == pytest.approx(0.40)
     # 另一侧 status 里没给，退回上一帧目标，同样往前 10 cm，且仍然零跳变。
     assert np.allclose(node._pose['left'][:3], [0.40, 0.15, 0.05])
@@ -175,7 +251,7 @@ def test_flickering_emulated_flag_does_not_swallow_hand_motion(node):
     _arms(node, 1.0, 0.0, start)
     before = node._pose['right'][:3].copy()
     for step in range(60):
-        frame = _frame(1.0, 0.0, start + [0.0, 0.0, -0.003 * (step + 1)])
+        frame = _frame(1.0, 0.0, start + GRIP_FWD * (0.003 * (step + 1)))
         for side in ('left', 'right'):
             frame[side]['grip']['emulated_position'] = step % 2 == 0
         node._update_arms(frame, {})
@@ -223,10 +299,7 @@ def test_malformed_grip_never_raises(node, junk):
     frame = _frame(1.0, 0.0, [0.6, 0.8, -0.3])
     for side in ('left', 'right'):
         frame[side]['grip'] = dict(junk)
-        frame[side]['buttons']['a_x'] = True
-    node._calib_held = {'left': False, 'right': False}
     node._update_arms(frame, {})
-    node._check_calibration(frame)          # 标定路径同样不能抛
     for side in ('left', 'right'):
         assert np.array_equal(node._pose[side], before[side])
 
@@ -240,18 +313,19 @@ def test_command_never_leads_the_reachable_pose_by_more_than_the_leash(node):
     node._lead = 0.02
     reach = [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]     # 策略层卡在这儿不动
     limited = {'right': reach, 'left': [0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], limited=limited)
-    for step in range(200):                              # 手往前推 60 cm
-        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3 - 0.003 * (step + 1)], limited=limited)
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start, limited=limited)
+    for step in range(200):                              # 手沿指向推 60 cm
+        _arms(node, 1.0, 0.0, start + GRIP_FWD * (0.003 * (step + 1)), limited=limited)
     lead = float(np.linalg.norm(node._pose['right'][:3] - np.asarray(reach[:3])))
     assert lead == pytest.approx(0.02, abs=1e-9)
     # 手再往回拉 2 cm 就该马上见动静，不用空推 60 cm。
     for step in range(7):
-        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.9 + 0.003 * (step + 1)], limited=limited)
+        _arms(node, 1.0, 0.0, start + GRIP_FWD * (0.6 - 0.003 * (step + 1)), limited=limited)
     assert node._pose['right'][0] < 0.32
 
 
-# --------------------------------------------------------------------- 姿态与标定
+# --------------------------------------------------------------------- 姿态
 
 def test_orientation_follows_the_controller(node):
     """手转了多少度，末端就转多少度（轴系不同，转角必须相等）。"""
@@ -270,59 +344,41 @@ def test_clutch_engage_leaves_orientation_untouched(node):
     assert np.allclose(node._pose['right'], before)
 
 
+def test_wrist_roll_turns_the_gripper_about_its_own_axis(node):
+    """滚手腕就是滚夹爪：转动在手柄系算再右乘，与夹爪当前指向无关。
+
+    曾经是在世界系算完左乘，那等于"绕机器人基座的轴转"——夹爪一旦偏开，同一个
+    手腕动作就不再是绕夹爪自己的轴。这里用两个差别很大的起始朝向钉住这个区别：
+    左乘实现下两次得到的局部转动不可能相同。
+    """
+    for anchor_spin in ([0, 0, 1], [0, 1, 0]):
+        node._clutch['right'] = None
+        node._pose['right'][3:] = _spin(anchor_spin, np.pi / 2)
+        anchor = _matrix(node._pose['right'][3:])
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)          # 接合
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin(GRIP_LINE, 0.4))
+        local = anchor.T @ _matrix(node._pose['right'][3:])
+        # 手柄绕那根朝向线滚 0.4 -> 夹爪绕自己的伸出轴滚 0.4，两个起始朝向下逐位相同。
+        assert np.allclose(local, _matrix(_spin(EE_POINT, 0.4)))
+
+
+@pytest.mark.parametrize('grip_axis, ee_axis', [
+    ([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]),        # 朝向线 -> 伸出轴
+    ([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),        # 穿出手背 -> 张合轴反向
+    ([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]),         # 沿小臂 -> 侧向
+])
+def test_each_grip_rotation_axis_lands_on_its_gripper_axis(node, grip_axis, ee_axis):
+    """三根轴的**转向**都钉住：符号错了就是"手顺时针夹爪逆时针"，实机上很难分辨是哪根。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)              # 接合
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin(grip_axis, 0.4))
+    assert np.allclose(_matrix(node._pose['right'][3:]), _matrix(_spin(ee_axis, 0.4)))
+
+
 def test_quaternion_stays_unit(node):
     _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)
     _arms(node, 1.0, 0.0, [0.6, 0.9, -0.5], _spin([1, 2, 3], 2.0))
     for side in ('left', 'right'):
         assert np.linalg.norm(node._pose[side][3:]) == pytest.approx(1.0)
-
-
-def test_calibration_redefines_forward(node):
-    """手柄指哪儿，那儿就是机器人正前方。"""
-    node._calibrate('right', _matrix(UNIT))            # 指参考空间 -Z，即默认前方
-    assert np.allclose(node._map, _BASE_MAP)
-    for angle in (np.pi / 2, -np.pi / 2, np.pi, 0.7):
-        node._calibrate('right', _matrix(_spin([0, 1, 0], angle)))
-        pointing = _matrix(_spin([0, 1, 0], angle)) @ np.array([0.0, 0.0, -1.0])
-        assert np.allclose(node._map @ pointing, [1.0, 0.0, 0.0], atol=1e-9)
-        assert np.allclose(node._map @ node._map.T, np.eye(3))
-
-
-def test_calibration_keeps_up_as_up(node):
-    """只取航向：不管怎么标定，手往上抬永远是末端往上。"""
-    for angle in (0.0, 1.2, -2.5):
-        node._calibrate('right', _matrix(_spin([0, 1, 0], angle)))
-        assert np.allclose(node._map @ np.array([0.0, 1.0, 0.0]), [0.0, 0.0, 1.0])
-
-
-def test_calibration_drops_engaged_clutches(node):
-    """换了映射还用旧原点算位移，方向会瞬间变——必须强制重新接合。"""
-    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
-    assert node._clutch['right'] is not None
-    node._calibrate('right', _matrix(_spin([0, 1, 0], 0.6)))
-    assert all(node._clutch[side] is None for side in ('left', 'right'))
-
-
-def test_calibration_ignores_a_vertical_controller(node):
-    node._calibrate('right', _matrix(_spin([0, 1, 0], 0.6)))
-    expected = node._map.copy()
-    node._calibrate('right', _matrix(_spin([1, 0, 0], np.pi / 2)))   # 手柄指向正上/正下
-    assert np.allclose(node._map, expected)                  # 标定被忽略
-
-
-def test_calibration_button_needs_a_rising_edge(node):
-    calls = []
-    node._calibrate = lambda side, rotation: calls.append(side)
-    pressed = {'left': {'buttons': {'a_x': True}, 'grip': {'orientation': UNIT}},
-               'right': {'buttons': {'a_x': False}, 'grip': {'orientation': UNIT}}}
-    released = {'left': {'buttons': {'a_x': False}}, 'right': {'buttons': {'a_x': False}}}
-    node._check_calibration(pressed)          # 初始是“按着”，不算
-    assert calls == []
-    node._check_calibration(released)
-    node._check_calibration(pressed)          # 松手后再按才算
-    assert calls == ['left']
-    node._check_calibration(pressed)          # 按住不重复
-    assert calls == ['left']
 
 
 def test_trigger_maps_to_gripper_the_right_way_round(node):

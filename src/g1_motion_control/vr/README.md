@@ -3,7 +3,7 @@ WebXR 桥接：头显浏览器读手柄/头部位姿 → WebSocket 直推给 `vr
 不需要 Unity，不需要装 APK，**也不再有独立的桥接进程**——采集页由 ROS 节点自己托管
 （`g1_motion_control/vr_teleop.py` 内嵌 aiohttp）。
 
-`vr_teleop` 是上层控制源，不做 IK：它负责 A/X 航向标定、squeeze 离合、坐标映射、
+`vr_teleop` 是上层控制源，不做 IK：它负责 squeeze 离合、坐标映射、
 tracking 重定位抑制，最后以长度 20 发布到统一 `/motion_control/command`；和 VLA / 键盘
 遵守同一个 2/4/7/14/20 分块契约，不另建 VR 专用命令话题。它只反向读取
 `/motion_control/status.limited_pose`，用于离合接合时选一个可达、无编码器静差的锚点。
