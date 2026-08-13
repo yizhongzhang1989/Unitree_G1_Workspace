@@ -1,14 +1,12 @@
 """VR 头显遥操作桥。
 
-本节点**自己托管** WebXR 采集页（默认 ``0.0.0.0:8000``），头显直连过来，
-不需要另外起桥接进程。
+本节点**自己托管** WebXR 采集页，头显直连过来，不需要另外起桥接进程。明文口
+（默认 ``0.0.0.0:8000``）与 TLS 口（默认 8443）**同时**开着，两条路服务同一份页面：
+``https://<机器人IP>:8443`` 直连，或 ``adb reverse`` 之后开 ``http://localhost:8000``。
+WebXR 只在安全上下文里可用，所以只有这两种进法；证书与 adb 见 ``vr/README.md``。
 
-前置条件：
-
-1. 控制栈已经起来（``all_data.launch.py`` + ``motion_control.launch.py``）。
-   不需要先手动 engage/start——戴上头显后用 B/Y 推就行。
-2. ``adb reverse tcp:8000 tcp:8000`` 已建（见 ``vr/README.md``），头显里打开
-   ``http://localhost:8000`` 点 Enter VR。``curl localhost:8000/state`` 里 ``seq`` 在涨。
+前置：控制栈已经起来（``all_data.launch.py`` + ``motion_control.launch.py``）。
+不需要先手动 engage/start——戴上头显后用 B/Y 推就行。
 
 启动：
 
@@ -32,45 +30,20 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from g1_motion_control.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
-
-_ARGUMENTS = {
-    'bind_host': '0.0.0.0',
-    'bind_port': '8000',
-    'tls_port': str(DEFAULT_TLS_PORT),
-    'token': '',
-    'tls_cert': str(DEFAULT_DIR / 'cert.pem'),
-    'tls_key': str(DEFAULT_DIR / 'key.pem'),
-    'rate_hz': '50.0',
-    'vx_max': '0.5',
-    'vy_max': '0.4',
-    'wz_max': '1.5',
-    'height': '0.78',
-    'height_min': '0.50',
-    'height_max': '0.78',
-    'height_rate': '0.15',
-    'stick_deadzone': '0.08',
-    'squeeze_threshold': '0.5',
-    'arm_scale': '1.0',
-    # 末端命令允许领先 limited_pose 的最大距离（m），防够不着时目标无界累积。
-    # 别调到 0.03 以上：会把残差顶过 ik_rescue_err，逃生种子一直开着反而更跳。0 = 关闭。
-    'arm_lead_limit': '0.02',
-    'gripper_open': '2.76377472169236',
-    'gripper_closed': '0.0',
-    'frame_timeout_s': '0.3',
-    'button_cooldown_s': '1.0',
-    'policy_node': '/motion_control',
+# 可以从命令行覆盖的参数名与类型。**默认值只写在 vr_teleop.py 的 declare_parameter 里**，
+# 这里一律留空、留空就不覆盖：抄第二份早晚会像以前的 vx_max / height 那样悄悄跑偏。
+_OVERRIDABLE = {
+    'bind_host': str, 'bind_port': int, 'tls_port': int, 'token': str,
+    'tls_cert': str, 'tls_key': str, 'rate_hz': float,
+    'vx_max': float, 'vy_max': float, 'wz_max': float,
+    'height': float, 'height_min': float, 'height_max': float, 'height_rate': float,
+    'stick_deadzone': float, 'squeeze_threshold': float,
+    'arm_scale': float, 'arm_lead_limit': float,
+    'gripper_open': float, 'gripper_closed': float,
+    'frame_timeout_s': float, 'button_cooldown_s': float,
     # 和键盘 / VLA 共用 motion_control 的标准分块命令总线。VR 发全量 20 值。
-    'command_topic': '/motion_control/command',
-    'status_topic': '/motion_control/status',
+    'policy_node': str, 'command_topic': str, 'status_topic': str,
 }
-
-_FLOATS = ('rate_hz', 'vx_max', 'vy_max', 'wz_max', 'height', 'height_min', 'height_max',
-           'height_rate', 'stick_deadzone', 'squeeze_threshold', 'arm_scale',
-           'arm_lead_limit', 'gripper_open', 'gripper_closed',
-           'frame_timeout_s', 'button_cooldown_s')
-
-_INTS = ('bind_port', 'tls_port')
 
 # 同 motion_control.launch.py：小矩阵上 OpenBLAS 多线程是纯开销，还会多出
 # 一堆自旋线程和实时链路抢 CPU。
@@ -79,14 +52,10 @@ _SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
 
 def _nodes(context):
     overrides = {}
-    for name in _ARGUMENTS:
+    for name, cast in _OVERRIDABLE.items():
         value = LaunchConfiguration(name).perform(context)
-        if name in _FLOATS:
-            overrides[name] = float(value)
-        elif name in _INTS:
-            overrides[name] = int(value)
-        else:
-            overrides[name] = value
+        if value:
+            overrides[name] = cast(value)
 
     return [Node(
         package='g1_motion_control',
@@ -101,6 +70,5 @@ def _nodes(context):
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
-        [DeclareLaunchArgument(name, default_value=default)
-         for name, default in _ARGUMENTS.items()]
+        [DeclareLaunchArgument(name, default_value='') for name in _OVERRIDABLE]
         + [OpaqueFunction(function=_nodes)])

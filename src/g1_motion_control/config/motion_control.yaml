@@ -9,7 +9,8 @@
     # 和下面的 policy_joints 对不上会直接拒绝启动。
     policy_path: package://g1_motion_control/config/policy.onnx
 
-    # 策略控制的 15 轴，顺序必须与 ONNX metadata 的 joint_names 前 15 项一致。
+    # 策略控制的 15 轴，顺序必须与 ONNX metadata 的 action_joint_names 逐项一致
+    #（不是 joint_names 的前 15 项，那是全部 31 轴，截前 N 个会错位）。
     # 正好是真机电机索引 0..14。
     policy_joints:
       - left_hip_pitch_joint
@@ -29,6 +30,8 @@
       - waist_pitch_joint
 
     # 失控保护边界 = 训练模型里 MuJoCo 算的 ctrlrange（jnt_range ± effort_limit / stiffness）。
+    # 换权重后要重算：effort_limit / stiffness == ONNX metadata 的 action_scale / 0.25，
+    # jnt_range 取 URDF 的 <limit>。抄错了不会报错，只是保护网变松。
     #
     # **故意不是关节行程限位。** 底层是 PD：tau = kp*(q_target - q) - kd*dq，关节靠到行程
     # 边上还想要力，就只能把目标顶到行程之外。mjlab 建 <position> 执行器时显式设了
@@ -225,7 +228,7 @@
     # 而是按这个速率走过去。
     arm_rate_limit: 10.0
 
-    # 站立插值时长，对应官方 deploy 的 FSM.FixStand.ts=[0,2]。这里给到 3 s，因为
+    # 站立插值总时长，对应官方 deploy 的 FSM.FixStand.ts=[0,2]。多出来的半秒是因为
     # 除了腿还要把手臂收到 passive_targets。
     stand_s: 2.5
 
@@ -235,13 +238,13 @@
     stand_clear_s: 0.4
 
     # 指令限幅 [vx_lo, vx_hi, vy_lo, vy_hi, wz_lo, wz_hi, h_lo, h_hi]。
-    # 训练分布是 vx[-0.5,1.0] vy[-0.5,0.5] wz[-1.57,1.57] h[0.52,0.78]（play 模式），
-    # 下面这组是首次上机用的保守子集，实机调稳之后可以逐档放开到训练分布。
+    # 训练分布（play 模式）是 vx[-0.5,1.0] vy[-0.5,0.5] wz[-1.57,1.57] h[0.52,0.79]，
+    # 下面这组基本开到了训练分布，只把 vx 上界留在 0.8。
     #
     # 高度上界 0.78：在编译出来的模型上量过，足底 site 正好落在鞋底，所以这个数就是
-    # 卷尺量的骨盆离地高度。完全直腿是 0.7919 m 的硬上限，0.78 给承载留下约 1 cm 屈膝。
+    # 卷尺量的骨盆离地高度。完全直腿是 0.7919 m 的硬上限，0.78 给承载留下约 1 cm 屈膝。大于0.78视为站直
     # 下界 0.50 对应膝关节弯 115 度。
-    command_limits: [-0.5, 0.8, -0.5, 0.5, -1.5, 1.5, 0.50, 0.78]
+    command_limits: [-0.5, 0.8, -0.5, 0.5, -1.5, 1.5, 0.50, 0.79]
 
     # 指令限速。高度这一项不是"可选的平滑"：训练里高度指令按 0.15 m/s 缓变
     # （BaseHeightCommandCfg.max_rate），策略从没见过高度阶跃。

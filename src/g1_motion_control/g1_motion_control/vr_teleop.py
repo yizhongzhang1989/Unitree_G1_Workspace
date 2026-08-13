@@ -202,37 +202,29 @@ class VRTeleop(Node):
         self._cert = p('tls_cert', str(DEFAULT_DIR / 'cert.pem')).get_parameter_value().string_value
         self._key = p('tls_key', str(DEFAULT_DIR / 'key.pem')).get_parameter_value().string_value
         self._rate = float(p('rate_hz', 50.0).get_parameter_value().double_value)
-        # 限幅与 teleop_keyboard.py 同一组。高度上界取 0.78 而不是键盘的 0.80：
-        # 策略层 command_limits 就是裁到 0.78，写 0.80 只会让摇杆顶端摸起来像卡住了。
-        self._vx_max = float(p('vx_max', 0.8).get_parameter_value().double_value)
-        self._vy_max = float(p('vy_max', 0.4).get_parameter_value().double_value)
-        self._wz_max = float(p('wz_max', 1.5).get_parameter_value().double_value)
-        self._height0 = float(p('height', 0.76).get_parameter_value().double_value)
+        # 限幅与 teleop_keyboard.py 同一组，且与策略层 command_limits 对齐：写得比它大
+        # 只会让摇杆顶端摸起来像卡住。
+        self._vx_max = float(p('vx_max', 0.4).get_parameter_value().double_value)
+        self._vy_max = float(p('vy_max', 0.2).get_parameter_value().double_value)
+        self._wz_max = float(p('wz_max', 1.0).get_parameter_value().double_value)
+        self._height0 = float(p('height', 0.80).get_parameter_value().double_value)
         self._h_lo = float(p('height_min', 0.50).get_parameter_value().double_value)
         self._h_hi = float(p('height_max', 0.80).get_parameter_value().double_value)
         # 摇杆推到底时的高度变化率。策略层自己也按 0.15 m/s 限速（训练里高度指令
         # 就是这个速率缓变），所以这里取同值，再大也过不去。
-        self._height_rate = float(
-            p('height_rate', 0.15).get_parameter_value().double_value)
+        self._height_rate = float(p('height_rate', 0.15).get_parameter_value().double_value)
         # 死区：摇杆回中会残留零点漂移，不处理机器人会一直慢慢走。
-        self._deadzone = float(
-            p('stick_deadzone', 0.08).get_parameter_value().double_value)
+        self._deadzone = float(p('stick_deadzone', 0.05).get_parameter_value().double_value)
         # squeeze 是模拟量，按到底才是 1.0；用 0.5 判定"按下"，怕误触就往上调。
-        self._squeeze_on = float(
-            p('squeeze_threshold', 0.5).get_parameter_value().double_value)
+        self._squeeze_on = float(p('squeeze_threshold', 0.5).get_parameter_value().double_value)
         # 模拟按钮在阈值附近有噪声。接合后降到 80% 阈值才释放，避免一帧帧断开/重建原点。
         self._squeeze_off = 0.8 * self._squeeze_on
-        self._arm_scale = float(
-            p('arm_scale', 1.0).get_parameter_value().double_value)
+        self._arm_scale = float(p('arm_scale', 1.0).get_parameter_value().double_value)
         # 末端命令允许领先 limited_pose 的最大距离（m，<=0 关闭）。理由见 _leash。
-        self._lead = float(
-            p('arm_lead_limit', 0.02).get_parameter_value().double_value)
-        self._timeout = float(
-            p('frame_timeout_s', 0.3).get_parameter_value().double_value)
-        self._grip_open = float(
-            p('gripper_open', 2.76377472169236).get_parameter_value().double_value)
-        self._grip_closed = float(
-            p('gripper_closed', 0.0).get_parameter_value().double_value)
+        self._lead = float(p('arm_lead_limit', 0.02).get_parameter_value().double_value)
+        self._timeout = float(p('frame_timeout_s', 0.3).get_parameter_value().double_value)
+        self._grip_open = float(p('gripper_open', 2.76377472169236).get_parameter_value().double_value)
+        self._grip_closed = float(p('gripper_closed', 0.0).get_parameter_value().double_value)
         # 双手 B/Y 两次推进之间的最小间隔，防按键抖动连发。
         self._button_cooldown = float(
             p('button_cooldown_s', 1.0).get_parameter_value().double_value)

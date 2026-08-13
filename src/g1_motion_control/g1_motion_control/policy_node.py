@@ -36,7 +36,7 @@ IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终
   手臂贴着身体从背后摆回来时夹爪会扫进大腿（实测 ``shoulder_pitch`` 在 +60° 附近
   ``gripper_base`` 与 ``hip_pitch_link`` 间距 0.0 mm）。这一段手臂仍走
   ``passive_targets``，IK 还没接管。
-* ``RUNNING``：在已经接管的手臂之外，再把下肢交给策略。进入时清零 ``last_action``
+* ``RUNNING``：在已经接管的手臂之外，再把下肢交给策略。进入时清零 GRU 隐状态
   和步态相位，等价于官方 ``env->reset()``；手臂目标一个字节都不动，否则策略接管
   那一下手臂会跳回实测位。
 * ``ESTOP``：停止发目标并反激活 FPC。反激活会触发 G1TopicSystem 的卸力斜坡——
@@ -216,7 +216,7 @@ class MotionControlNode(Node):
         if arm_rate <= 0.0:
             raise ValueError('arm_rate_limit 必须为正（rad/s）')
         self._arm_rate = arm_rate * dt
-        self._stand_s = float(p('stand_s', 3.0).get_parameter_value().double_value)
+        self._stand_s = float(p('stand_s', 2.5).get_parameter_value().double_value)
 
         # 先让手张开再到前面
         self._clear_roll = float(p('stand_clear_roll', 0.7).get_parameter_value().double_value)
@@ -244,7 +244,7 @@ class MotionControlNode(Node):
             .get_parameter_value().string_value.rstrip('/')
 
         # -- 指令限幅与限速 ----------------------------------------------------
-        limits = p('command_limits', [-0.3, 0.5, -0.3, 0.3, -0.5, 0.5, 0.62, 0.76]) \
+        limits = p('command_limits', [-0.5, 0.8, -0.5, 0.5, -1.5, 1.5, 0.50, 0.78]) \
             .get_parameter_value().double_array_value
         if len(limits) != 8:
             raise ValueError('command_limits 必须是 8 个数: vx/vy/wz/h 的上下界')

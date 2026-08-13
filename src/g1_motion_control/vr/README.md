@@ -76,7 +76,7 @@ ros2 run g1_motion_control make_vr_cert
 ```
 
 它会自动把**本机所有网卡的 IPv4** 写进证书 SAN，输出到 `~/.ros/g1_vr/`（私钥 0600），
-正是 `vr_teleop.launch.py` 默认去找的位置——签完直接起节点就有 HTTPS，不用传参数。
+正是 `vr_teleop` 默认去找的位置——签完直接起节点就有 HTTPS，不用传参数。
 
 换了网段、或者命令输出里没看到头显能访问的那个 IP，就手动指定后重签：
 
