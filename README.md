@@ -8,6 +8,7 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 | `unitree_g1_ros2_control` | 把 FPC/JTC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
 | `g1_motion_control` | FPC 之上的整机 31 轴运动控制层：下肢 15 轴走 ONNX 策略（输入 `vx/vy/w/h`），上肢 14 轴走双臂 IK，夹爪 2 轴透传；内附 VR / 键盘遥操 |
 | `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
+| `head_sensors` | 头部传感器：Livox MID-360 雷达接入（TF、空点过滤、IMU 单位修正）+ RealSense D435i（官方 realsense2_camera） |
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
 | `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
@@ -68,6 +69,22 @@ ROS 环境由容器自动装配，**不需要手动 `source`**。只有当 `inst
 消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；对应系统包为 `ros-humble-can-msgs`，已装在开发镜像里。
 
 
+## 头部传感器
+
+头顶两个传感器由 [`head_sensors`](src/head_sensors/README.md) 接入，两者的驱动来源完全不同：
+
+- **Livox MID-360 雷达**（`192.168.123.120`）：由机器人内部的 `lidar_driver` 服务驱动，直接以 DDS 发
+  `/utlidar/cloud_livox_mid360`（10 Hz）和 `/utlidar/imu_livox_mid360`（200 Hz），**本机不装 Livox SDK**。
+  `head_lidar_node` 只补 `mid360_link → livox_frame` 静态 TF、过滤约 55% 的无回波空点、并把 Livox 以 g 为单位的
+  IMU 加速度换算成 m/s²。
+- **RealSense D435i 深度相机**：USB 直连本机 NX，用官方 `realsense2_camera` 驱动，话题收在 `/head/camera/*`。
+  依赖 `ros-humble-librealsense2`、`ros-humble-realsense2-camera{,-msgs}`、`ros-humble-realsense2-description`，
+  已写进 `.devcontainer/Dockerfile`。`head_camera.launch.py` 额外补一条 `d435_link → camera_link` 挂载 TF ——
+  官方驱动只发相机自己那棵子树，不知道相机装在机器人哪里。
+
+`ros2 run head_sensors head_sensors_probe` 可以一次性确认这两路当前是否有数据。
+
+
 ## 宇树 G1
 
 机器人本体使用官方 [`unitree_ros2`](https://github.com/unitreerobotics/unitree_ros2) 消息定义。G1 只需要以下两个包：
@@ -97,6 +114,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── can_bridge_ros/           通用 ROS 2 CAN bridge（多通道）【已经被 canalystii_native_bridge 取代】
     ├── canalystii_native_bridge/ 生产用 C++ CANalyst-II/KWR57 bridge
     ├── camera_node/              左右 IP 相机 RTSP、ROS 图像与 Web 预览
+    ├── head_sensors/             头部 Livox MID-360 雷达接入与 RealSense D435i 集成
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）【已经被 canalystii_native_bridge 取代】
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
     ├── inverse_kinematics_toolkit/ [git submodule] Pinocchio IK、Pose Commander 与 Dashboard

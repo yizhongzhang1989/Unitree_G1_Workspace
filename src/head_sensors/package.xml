@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>head_sensors</name>
+  <version>0.1.0</version>
+  <description>G1 头部传感器调用层：Livox MID-360 雷达接入与 RealSense D435i 集成</description>
+  <maintainer email="dev@example.com">Unitree G1 Workspace</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>unitree_api</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- 头部 RealSense D435i 官方驱动（apt: ros-humble-realsense2-camera） -->
+  <exec_depend>realsense2_camera</exec_depend>
+  <exec_depend>realsense2_description</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
