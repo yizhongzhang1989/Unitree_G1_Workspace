@@ -308,7 +308,7 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 |---|---|
 | `IDLE` | 不发目标。FPC 处于 inactive |
 | `STAND` | 激活 FPC，分两段插值到「策略默认位姿 + `passive_targets`」：前 `stand_clear_s` **只把 shoulder_roll 往外张**（腿不动），剩下的时间再全身走到位。对应官方 `State_FixStand` 的 `ts:[0,2]` + `qs`，多出来的第一段是为了避开夹爪扫大腿。**插值一走完，手臂 14 轴与夹爪就交给 IK 和透传**，下肢停在站立位姿等确认（插值那几秒里手臂仍走 `passive_targets`，IK 还没接管） |
-| `RUNNING` | 在已经接管的手臂之外，**再把下肢交给策略**。进入时清零 `last_action` 与步态相位（等价于官方 `env->reset()`）；**手臂目标一个字节都不动** |
+| `RUNNING` | 在已经接管的手臂之外，**再把下肢交给策略**。进入时清零 **GRU 隐状态**与步态相位（等价于官方 `env->reset()`）；**手臂目标一个字节都不动** |
 | `ESTOP` | 停止发目标 + 反激活 FPC。`G1TopicSystem::release_body()` 负责卸力斜坡：kp 在 `release_ramp_s` 内降到 0（kd 保留＝阻尼模式），最后一帧 kd 也归零（＝零力矩模式） |
 
 分成两步（`engage` 再 `start`）而不是一步，是为了防终端按键自动重复：按住 `G` 会连发
@@ -350,7 +350,7 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 
 这一节是整个部署里最要命的部分：错一位就是错一个策略。层内的 `policy_runtime.py` 把关节顺序、默认位姿、动作缩放**全部从 ONNX 的 metadata 里读**，不在代码里抄第二份；启动时再和 `config/motion_control.yaml` 的 `policy_joints` 逐个比对，对不上直接拒绝启动。
 
-### 观测（57 维，顺序即拼接顺序）
+### 观测（42 维，顺序即拼接顺序）
 
 | # | 项 | 维 | 实机来源 | 训练侧对应 |
 |---|---|---|---|---|
@@ -361,7 +361,13 @@ IDLE ──~/engage──► STAND ──~/start──► RUNNING
 | 4 | `phase` | 2 | `[sin, cos]`，`period=0.6 s`；`‖[vx,vy,wz]‖<0.1` 时置零 | `mdp.phase` |
 | 5 | `joint_pos` | 15 | `q_meas - q_default` | `joint_pos_rel` |
 | 6 | `joint_vel` | 15 | `dq_meas` | `joint_vel_rel` |
-| 7 | `actions` | 15 | 上一拍策略**原始**（未裁剪）输出 | `last_action` |
+
+**没有 `actions` 项。** GRU 的隐状态本来就记得自己上一拍输出了什么，再从输入喂回去等于
+给策略接了一条显式正反馈通路，所以训练侧把它从 actor 观测里去掉了。部署侧因此也不再
+维护"上一拍动作"这个状态。
+
+**隐状态**（`h_in` / `h_out`，形状 `(1,1,32)`）逐拍回喂，并在急停/接管时清零——训练里它
+就是每个 episode 开头归零的，不清就会把上一次跑飞前的状态带进下一次接管。
 
 归一化已经在导出时折进 ONNX 图里（`Sub`/`Div`），**不要**在外面再减均值。
 

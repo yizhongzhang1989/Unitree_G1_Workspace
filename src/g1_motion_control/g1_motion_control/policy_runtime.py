@@ -1,7 +1,7 @@
-"""下肢策略的观测装配与推理，不依赖 ROS，可离线单测。
+"""下肢 GRU 策略的观测装配与推理，不依赖 ROS，可离线单测。
 
-观测布局必须和训练侧 ``src/tasks/lower_body/lower_body_env_cfg.py`` 的
-``actor`` 组逐项对齐，顺序也一样（顺序写死在观测向量里，错一位就是错一个策略）：
+对应训练侧 ``G1-Gloria-LowerBody-Flat-GRU``。观测布局必须和该任务 ``actor`` 组逐项
+对齐，顺序也一样（顺序写死在观测向量里，错一位就是错一个策略）：
 
 ===  ==================  ====  ==========================================
 序   项                   维度  实机来源
@@ -13,8 +13,13 @@
 4    phase                 2   [sin, cos]，指令接近零时置零
 5    joint_pos            15   q_meas - q_default
 6    joint_vel            15   dq_meas
-7    actions              15   上一拍策略原始输出
 ===  ==================  ====  ==========================================
+
+共 42 维。**没有 ``actions`` 项**——GRU 的隐状态本来就记得自己上一拍输出了什么，再从
+输入喂回去等于给策略接了一条显式正反馈通路。部署侧因此也不再维护“上一拍动作”这个状态。
+
+隐状态（``h_in`` / ``h_out``，形状 (1,1,32)）逐拍回喂，并在 :meth:`LocomotionPolicy.reset`
+里清零——训练里它就是每个 episode 开头归零的，不清就会把上一次急停前的状态带进下一次接管。
 
 动作到关节目标：``q_target = q_default + action_scale * action``，和训练侧
 ``JointPositionActionCfg(use_default_offset=True)`` 一致。
@@ -31,7 +36,9 @@ the joint range would produce zero force when the joint is at its limit”。CPU
 所以裁在这里物理上是空操作（上述五个场景里越界率 **0%**），只用来拦真正跑飞的输出。
 
 关节顺序、默认位姿、动作缩放全部从 ONNX 的 metadata 里读，不在这里抄一遍：
-抄一遍就多一个会和权重不同步的副本。
+抄一遍就多一个会和权重不同步的副本。metadata 里的 ``joint_names`` 是模型的**全部 31 轴**，
+拿它截前 N 个去猜动作关节会错位（``left_eccentric_joint`` 夹在左右臂中间），所以动作
+关节一律按训练侧写的 ``action_joint_names`` 取；缺这一项直接拒绝启动。
 """
 
 from __future__ import annotations
@@ -51,7 +58,6 @@ EXPECTED_OBS_TERMS: tuple[tuple[str, int], ...] = (
     ('phase', 2),
     ('joint_pos', 15),
     ('joint_vel', 15),
-    ('actions', 15),
 )
 
 GAIT_PERIOD_S = 0.6
@@ -73,6 +79,10 @@ class PolicySpec:
     """动作缩放。"""
     obs_dim: int
     action_dim: int
+    hidden_name: str
+    """隐状态输入名，训练侧导出为 ``h_in``。"""
+    hidden_shape: tuple[int, ...]
+    """隐状态张量形状，当前权重为 ``(1, 1, 32)``。"""
 
 
 def _metadata(session) -> dict[str, str]:
@@ -88,7 +98,7 @@ def load_policy(path: str):
     import onnxruntime
 
     options = onnxruntime.SessionOptions()
-    # 50 Hz 的 57->512->256->128->15 MLP 是微秒级负载，多线程只会引入调度抖动。
+    # 50 Hz 的 42->GRU(32)->256->128->15 是微秒级负载，多线程只会引入调度抖动。
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
     session = onnxruntime.InferenceSession(
@@ -96,7 +106,7 @@ def load_policy(path: str):
 
     meta = _metadata(session)
     missing = {'joint_names', 'default_joint_pos', 'action_scale',
-               'observation_names'} - meta.keys()
+               'observation_names', 'action_joint_names'} - meta.keys()
     if missing:
         raise ValueError(f'{path} 缺少 metadata: {sorted(missing)}')
 
@@ -104,7 +114,7 @@ def load_policy(path: str):
     expected = tuple(name for name, _ in EXPECTED_OBS_TERMS)
     if obs_terms != expected:
         raise ValueError(
-            f'观测项不匹配，这个 ONNX 不是下肢任务导出的\n'
+            f'观测项不匹配，这个 ONNX 不是 GRU 版下肢任务导出的\n'
             f'  期望: {expected}\n  实际: {obs_terms}')
 
     names = meta['joint_names'].split(',')
@@ -114,15 +124,33 @@ def load_policy(path: str):
     if len(names) != len(defaults):
         raise ValueError('joint_names 与 default_joint_pos 长度不一致')
 
-    # 训练侧动作项按模型关节顺序解析，且下肢关节正好排在最前，所以前 N 个就是策略
-    # 关节。下面 spec_matches() 会拿它和期望列表逐个比对，写错了不会静默通过。
-    count = len(scales)
+    # ``joint_names`` 是模型的**全部** 31 轴，``action_scale`` 只覆盖策略驱动的那几轴，
+    # 拿前 N 个去猜会错位（``left_eccentric_joint`` 夹在左右臂中间）。按名取。
+    action_names = tuple(meta['action_joint_names'].split(','))
+    slot = {name: i for i, name in enumerate(names)}
+    unknown = [name for name in action_names if name not in slot]
+    if unknown:
+        raise ValueError(f'action_joint_names 里的关节不在 joint_names 里: {unknown}')
+    if len(action_names) != len(scales):
+        raise ValueError(
+            f'动作关节 {len(action_names)} 个，但 action_scale 有 {len(scales)} 项')
+
+    # 隐状态输入输出是必需的，没有就不是这个任务的权重，拒绝启动。
+    inputs = session.get_inputs()
+    if len(inputs) != 2:
+        raise ValueError(
+            f'期望两个输入（obs + 隐状态），实际 {len(inputs)} 个: '
+            f'{[i.name for i in inputs]}')
+
     spec = PolicySpec(
-        joint_names=tuple(names[:count]),
-        default_pos=np.asarray(defaults[:count], dtype=np.float64),
+        joint_names=action_names,
+        default_pos=np.asarray([defaults[slot[n]] for n in action_names],
+                               dtype=np.float64),
         action_scale=scales,
-        obs_dim=int(session.get_inputs()[0].shape[-1]),
-        action_dim=count,
+        obs_dim=int(inputs[0].shape[-1]),
+        action_dim=len(scales),
+        hidden_name=inputs[1].name,
+        hidden_shape=tuple(int(d) for d in inputs[1].shape),
     )
 
     expected_obs = sum(dim for _, dim in EXPECTED_OBS_TERMS)
@@ -162,7 +190,7 @@ def gait_phase(elapsed_s: float, command: Sequence[float],
 
 
 class LocomotionPolicy:
-    """一拍策略推理。持有上一拍动作和相位计时器，所以是有状态的。"""
+    """一拍策略推理。持有隐状态和相位计时器，所以是有状态的。"""
 
     def __init__(self, session, spec: PolicySpec, *,
                  control_dt: float,
@@ -181,13 +209,17 @@ class LocomotionPolicy:
         self._upper = target_upper
         self._gait_period_s = float(gait_period_s)
         self._obs = np.zeros((1, spec.obs_dim), dtype=np.float32)
-        self._last_action = np.zeros(spec.action_dim)
         self._steps = 0
+        self._hidden = np.zeros(spec.hidden_shape, dtype=np.float32)
 
     def reset(self) -> None:
-        """回到刚复位的状态：上一拍动作清零，相位从 0 重新计时。"""
-        self._last_action[:] = 0.0
+        """回到刚复位的状态：隐状态清零，相位从 0 重新计时。
+
+        隐状态必须在这里清——训练里它就是每个 episode 开头归零的。不清的话，
+        上一次跑飞/急停时的状态会被带进下一次接管。
+        """
         self._steps = 0
+        self._hidden[:] = 0.0
 
     def observe(self, *, joint_pos: np.ndarray, joint_vel: np.ndarray,
                 ang_vel: Sequence[float], quat_xyzw: Sequence[float],
@@ -201,7 +233,6 @@ class LocomotionPolicy:
             gait_phase(self._steps * self._control_dt, command, self._gait_period_s),
             joint_pos - self._spec.default_pos,
             joint_vel,
-            self._last_action,
         )
         obs = np.concatenate(parts)
         if obs.shape != (self._spec.obs_dim,):
@@ -225,13 +256,16 @@ class LocomotionPolicy:
             raise ValueError('观测里有非有限值')
 
         self._obs[0, :] = obs
-        action = np.asarray(
-            self._session.run(None, {self._input: self._obs})[0], dtype=np.float64).reshape(-1)
+        outputs = self._session.run(
+            None, {self._input: self._obs, self._spec.hidden_name: self._hidden})
+        action = np.asarray(outputs[0], dtype=np.float64).reshape(-1)
         if action.shape != (self._spec.action_dim,) or not np.all(np.isfinite(action)):
             raise ValueError(f'策略输出非法: {action}')
+        new_hidden = np.asarray(outputs[1], dtype=np.float32)
+        if not np.all(np.isfinite(new_hidden)):
+            raise ValueError('隐状态出现非有限值')
+        self._hidden = new_hidden
 
-        # 先存原始动作再裁剪：下一拍的 ``actions`` 观测在训练里就是未裁剪的原始输出。
-        self._last_action[:] = action
         self._steps += 1
         target = self._spec.default_pos + self._spec.action_scale * action
         return np.clip(target, self._lower, self._upper)
