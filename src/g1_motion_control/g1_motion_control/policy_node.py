@@ -376,8 +376,8 @@ class MotionControlNode(Node):
         velocity = (np.asarray(message.velocity)
                     if len(message.velocity) == len(names) else None)
         with self._lock:
-            # 一律存成 FPC 顺序的 31 轴，策略的 15 轴用 _policy_slots 现取（花式索引
-            # 本就会拷贝）。另存一份 15 轴等于多一张会和它跑掉的表。
+            # 另存一份 15 轴等于多一张会和它跑掉的表；策略要用时 _policy_slots
+            # 现取即可（花式索引本就会拷贝）。
             self._q = position[self._js_index]
             if velocity is not None:
                 self._dq = velocity[self._js_index]
@@ -495,8 +495,8 @@ class MotionControlNode(Node):
             self._request = np.array([0.0, 0.0, 0.0, self._initial_height])
             self._command = self._request.copy()
             self._command_stamp = self._now()
-            # 手臂在站立插值走完那一刻就已经接管，这里绝不能重播种：那会丢掉操作员
-            # 当前的末端目标，手臂在策略接管的同一帧跳回实测位。
+            # 手臂早已接管，这里绝不能重播种：那会丢掉操作员当前的末端目标，
+            # 手臂在策略接管的同一帧跳回实测位。
             self._state = State.RUNNING
         self.get_logger().info('策略接管')
         response.success, response.message = True, 'running'
@@ -585,7 +585,6 @@ class MotionControlNode(Node):
                     self._command + np.clip(request - self._command, -self._cmd_rate, self._cmd_rate),
                     self._cmd_lo, self._cmd_hi)
                 command = self._command.copy()
-            # 站立插值一走完手臂就接管，不必等策略：机器人吊着调手臂时根本不该启动步态。
             # 条件写成 RUNNING or 插值走完，是因为 ~/start 可能抢在控制线程前面把状态改掉。
             arms = self._ik is not None and (
                 state is State.RUNNING
