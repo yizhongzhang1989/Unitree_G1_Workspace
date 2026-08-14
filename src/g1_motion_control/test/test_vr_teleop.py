@@ -68,8 +68,6 @@ def node():
     teleop._squeeze_on = 0.5
     teleop._squeeze_off = 0.4
     teleop._arm_scale = 1.0
-    # 默认关掉领先量夹紧，让几何用例只测映射本身；它有专门的用例。
-    teleop._lead = 0.0
     teleop._grip_open, teleop._grip_closed = OPEN, CLOSED
     teleop._clutch = {'left': None, 'right': None}
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
@@ -304,25 +302,26 @@ def test_malformed_grip_never_raises(node, junk):
         assert np.array_equal(node._pose[side], before[side])
 
 
-def test_command_never_leads_the_reachable_pose_by_more_than_the_leash(node):
-    """够不着时目标不能无界累积，否则回程先是一大段空推、接着一下大动作。
+def test_target_mapping_stays_absolute_while_the_clutch_is_engaged(node):
+    """接合期间手↔手臂的映射必须是绝对的：手回到接合位置，目标就回到接合位姿。
 
-    实测（真 URDF + 真 IK + arm_rate_limit）胸前平放后后撤 80 cm 再推回来：关闭时
-    目标飘出可达域 204 mm、回程空推 108 mm、末端单帧 47 mm；20 mm 时是 20 / 0 / 3.4。
+    曾经把可达性修正量同步减进锚点，于是够不着的那段位移被吸进锚点、把整个映射
+    平移了：实测（真 URDF + 真 IK）前推 80 cm 再把手原路收回接合点，手臂停在接合点
+    **后方 383 mm**；推出后只缩 5 cm（人手仍够不着）手臂就已经后退 35 mm。
     """
-    node._lead = 0.02
-    reach = [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]     # 策略层卡在这儿不动
-    limited = {'right': reach, 'left': [0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
+    # limited_pose 卡在可达域边界不动，模拟手伸到了够不着的地方。
+    limited = {'right': [0.35, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0],
+               'left': [0.35, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
     start = np.array([0.5, 0.8, -0.3])
     _arms(node, 1.0, 0.0, start, limited=limited)
+    engaged = {side: pose.copy() for side, pose in node._pose.items()}
     for step in range(200):                              # 手沿指向推 60 cm
         _arms(node, 1.0, 0.0, start + GRIP_FWD * (0.003 * (step + 1)), limited=limited)
-    lead = float(np.linalg.norm(node._pose['right'][:3] - np.asarray(reach[:3])))
-    assert lead == pytest.approx(0.02, abs=1e-9)
-    # 手再往回拉 2 cm 就该马上见动静，不用空推 60 cm。
-    for step in range(7):
+    assert node._pose['right'][0] == pytest.approx(engaged['right'][0] + 0.60, abs=1e-9)
+    for step in range(200):                              # 原路收回
         _arms(node, 1.0, 0.0, start + GRIP_FWD * (0.6 - 0.003 * (step + 1)), limited=limited)
-    assert node._pose['right'][0] < 0.32
+    for side in ('left', 'right'):
+        assert np.allclose(node._pose[side], engaged[side], atol=1e-9)
 
 
 # --------------------------------------------------------------------- 姿态

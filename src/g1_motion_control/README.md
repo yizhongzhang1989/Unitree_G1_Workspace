@@ -30,7 +30,7 @@ flowchart TD
     IMU(["/pelvis_imu_broadcaster/imu<br/>sensor_msgs/Imu · 100 Hz"]) --> POL
     RD(["/robot_description<br/>std_msgs/String · latched"]) --> POL
 
-    POL --> STAT(["/motion_control/status<br/>std_msgs/String · JSON · 10 Hz<br/>状态机 + IK 状态 + limited_pose"])
+    POL --> STAT(["/motion_control/status<br/>std_msgs/String · JSON · 50 Hz<br/>状态机 + IK 状态 + limited_pose"])
     STAT --> OP
     STAT --> VR
     POL -- "/forward_position_controller/commands<br/>Float64MultiArray[31]" --> FPC
@@ -128,7 +128,7 @@ flowchart TD
 | 内容 | 话题 / 服务 | 类型 | 频率 | 消费者 |
 |---|---|---|---|---|
 | 31 轴位置目标 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray[31]` | 50 Hz | FPC。下肢 15 槽来自策略，上肢 14 槽来自 IK，夹爪 2 槽透传 |
-| 层状态 | `/motion_control/status` | `std_msgs/String`（JSON） | 10 Hz | 遥控台；要接 dashboard 也从这里取 |
+| 层状态 | `/motion_control/status` | `std_msgs/String`（JSON） | 50 Hz | 遥控台；要接 dashboard 也从这里取 |
 | 使能 / 启动 / 急停 | `/motion_control/engage`、`/start`、`/estop` | `std_srvs/Trigger` | 按需 | 遥控台或人工 `ros2 service call` |
 | 控制器开关 | `/controller_manager/switch_controller` | `controller_manager_msgs/SwitchController` | 按需 | 本节点**调用**它，用来激活 / 反激活 FPC |
 
@@ -137,6 +137,7 @@ flowchart TD
 `grip` 与 `limited_pose`。`limited_pose` 是 **IK 解经过 `arm_rate_limit` 后真正下发的
 关节目标之正解**；它是可达、无编码器静差的末端指令，**不是实测末端**。真正的实测末端
 只能从 `/joint_states` 做 FK，dashboard 在浏览器已有的关节树上直接完成，不让控制层重复算。
+它跟着控制环发（而不是更慢的固定速率），因为 VR 离合接合拿它当锚点，那一下要求位移恒为 0。
 
 再往下游（不归本包管）：FPC 写 command interface → `G1TopicSystem::write()` 补上
 `default_29dof_param.yaml` 的 kp/kd → `/lowcmd`（500 Hz，前 29 轴）与
@@ -203,12 +204,14 @@ PICO 4；手柄读的是 `xr-standard` 标准映射。
 * **离合接合瞬间位移与转角恒为 0**（手柄位置、手柄姿态、末端位姿三个原点一起锁），
   松开即冻结在最后一帧。
 * **WebXR tracking 失效不等于通信掉线**：`emulatedPosition` 期间冻结目标但保留离合，
-  恢复时只有跨帧位移超过 0.1 m 才无跳变重锚。一律重锚会按比例吞掉手部运动，
-  完全不锚则每次丢跟踪都漂一个 `arm_lead_limit`——两条歧路的实测数字在
-  `vr_teleop.py` 的 `_update_arms` 注释里。
-* **末端命令始终被夹在 `limited_pose` 周围 `arm_lead_limit`(0.02 m) 的球里**，否则离合期间
-  它是个无界积分器。六档实测对比见 `vr_teleop.py` 的 `_leash` docstring；
-  **别调到 0.03 以上**，那会把残差顶过 `ik_rescue_err`，逃生种子一直开着反而更跳。
+  恢复时只有跨帧位移超过 0.1 m 才无跳变重锚。一律重锚会按比例吞掉手部运动（实测
+  1/2 抖动下手走 900 mm 而目标走 0 mm）——实测数字在 `vr_teleop.py` 的
+  `_update_arms` 注释里。
+* **一次按住期间是绝对映射，允许越界**：手伸到可达域外时末端停在边界上，要让它
+  重新动起来必须把越界那一段**原样空推回去**；想省掉就松开 squeeze 再按一次，
+  重新接合拿当前 `limited_pose` 做锚点，越界那段作废。**别拿可达性反馈去修锚点**：
+  那样够不着的位移会被吸进锚点、把整个映射平移，实测前推 80 cm 再原路收回接合点，
+  手臂停在接合点**后方 383 mm**。细节见 `vr_teleop.py` 的 `_update_arms` docstring。
 * **帧超时（`frame_timeout_s` 0.3 s）或退出 VR 会话**：速度归零、双臂冻结、夹爪保持。
   不卸力——要卸力用策略层的 `~/estop`。
 * **站立插值走完那一刻夹爪会弹到全开**（trigger 松开 = 0 = 完全打开）。手里有东西就先扣

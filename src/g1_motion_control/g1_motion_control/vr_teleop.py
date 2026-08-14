@@ -21,8 +21,10 @@
   松手停在当前值、不回弹）。
 * **上肢**：``squeeze`` 是离合。按下的瞬间同时锁住「手柄位置」「手柄姿态」「策略层
   已限速的末端指令 ``limited_pose``」三个原点，之后下发的全是**相对量**，从来不是
-  绝对位姿（映射见下面「坐标系」）。松开就冻结在最后一帧。命令始终被夹在
-  ``limited_pose`` 周围 ``arm_lead_limit`` 的球内，够不着时目标不会飘出可达域。
+  绝对位姿（映射见下面「坐标系」）。松开就冻结在最后一帧。
+  **一次按住期间是绝对映射，允许越界**：手伸到可达域外时末端停在边界上，要让它
+  重新动起来必须把越界那一段**原样空推回去**；想省掉这段就松开再按一次，重新接合
+  会拿当前 ``limited_pose`` 重做锦点，越界那段作废。
 * **夹爪**：``trigger`` 直接映射，**0 = 完全打开、1 = 夹紧**。注意 ``eccentric_joint``
   是 **0 rad 闭合、2.76377 rad 打开**（见 unitree_g1_description/model/Gloria-M/README.md），
   所以这里是**反向**映射；写反了就是该松手的时候夹紧。
@@ -41,7 +43,7 @@
 安全
 ----
 * 只在策略层报 ``arms_live`` 之后才发指令；播种与接管原点取策略层的
-  ``limited_pose``（IK + 关节限速后的可达指令），本节点不自己建 IK。
+  ``limited_pose``（IK + 关节限速后的可达指令），本节点不自己建 IK，也不做可达性夹紧。
 * VR 帧超时（``frame_timeout_s``）或退出 VR 会话：速度立刻归零、双臂冻结、高度保持。
 * squeeze 有接合/释放迟滞；WebXR 报推算位置时冻结但保留离合，距上一帧真实跟踪位置
   超过 ``_MAX_HAND_STEP_M`` 才无跳变重锚。策略层 IK 出口的 ``arm_rate_limit`` 是最后
@@ -220,8 +222,6 @@ class VRTeleop(Node):
         # 模拟按钮在阈值附近有噪声。接合后降到 80% 阈值才释放，避免一帧帧断开/重建原点。
         self._squeeze_off = 0.8 * self._squeeze_on
         self._arm_scale = float(p('arm_scale', 1.0).get_parameter_value().double_value)
-        # 末端命令允许领先 limited_pose 的最大距离（m，<=0 关闭）。理由见 _leash。
-        self._lead = float(p('arm_lead_limit', 0.02).get_parameter_value().double_value)
         self._timeout = float(p('frame_timeout_s', 0.3).get_parameter_value().double_value)
         self._grip_open = float(p('gripper_open', 2.76377472169236).get_parameter_value().double_value)
         self._grip_closed = float(p('gripper_closed', 0.0).get_parameter_value().double_value)
@@ -437,7 +437,6 @@ class VRTeleop(Node):
             return
         with self._lock:
             self._status = status
-
     # -- 控制环 ----------------------------------------------------------------
 
     def _tick(self) -> None:
@@ -565,7 +564,22 @@ class VRTeleop(Node):
         return (position, rotation, fresh, self._pose[side].copy(), position)
 
     def _update_arms(self, frame: dict, limited: dict) -> None:
-        """手柄位姿 -> 最终末端目标；``limited`` 提供可达锚点与领先量上限。"""
+        """手柄位姿 -> 末端目标；``limited`` 只用来选离合接合时的锦点。
+
+        接合期间是**绝对映射**：目标每帧从锦点重算，不接受任何可达性反馈。越界是
+        允许的：末端停在边界上，要让它重新动起来就得把越界那段原样空推回去；
+        松开再按一次则重新以 ``limited_pose`` 为锦，越界那段作废。
+
+        **别拿可达性反馈去修锦点来“取消空推”。** 那样够不着的那段位移会被吸进锦点、
+        把整个手↔手臂映射平移：实测（真 URDF + 真 IK）前推 80 cm 再把手原路收回接合点，
+        手臂停在接合点**后方 383 mm**；推出后只缩 5 cm（人手仍够不着）手臂就已经后退 35 mm。
+        现在这三项实测是 0 mm / 1 mm，而重按后缩 5 cm 手臂跟着退 49 mm。
+
+        越界时不需要额外保护：目标飘出可达域后 IK 本就只能停在边界上，而
+        ``ik_limit_upper``（肘收到 1.4）与 ``ik_max_step_pos`` 已经把卡死和抖动都採了。
+        实测推远-拉回 8 轮 × 4 个方向：末端单帧最大 10.3~10.8 mm、逃生种子 0 次、
+        回原位残差 0.4~1.0 mm。再加一道可达性夹紧反而把单帧推到 13.5~14.6 mm。
+        """
         for index, side in enumerate(SIDES):
             hand = frame.get(side)
             if not hand:
@@ -608,7 +622,6 @@ class VRTeleop(Node):
                     _BASE_MAP @ level @ (position - origin))
                 turn = _TOOL_MAP @ origin_rot.T @ rotation @ _TOOL_MAP.T
                 pose[3:] = _quat(_matrix(anchor[3:]) @ turn)
-                self._leash(side, anchor, limited.get(side))
                 self._clutch[side] = (origin, origin_rot, level, anchor, position)
             elif clutch is not None:
                 self._clutch[side] = None       # 松开就冻结在最后一帧。
@@ -618,36 +631,6 @@ class VRTeleop(Node):
                 trigger = min(max(float(buttons['trigger'] or 0.0), 0.0), 1.0)
                 self._grip[index] = self._grip_open + \
                     (self._grip_closed - self._grip_open) * trigger
-
-    def _leash(self, side: str, anchor: np.ndarray, reach) -> None:
-        """把末端命令夹在 ``limited_pose`` 周围的球里，并把修正量还给锚点。
-
-        离合接合期间末端目标本来是个**无界积分器**：只在接合那一瞬间取过可达位姿，
-        之后再没有可达性反馈。实测（真 URDF + 真 IK + 限速）胸前平放后后撤 80 cm，
-        再推回来（目标发散 / 回程死区 / 末端单帧最大 / 逃生种子触发）：
-
-            关闭  204 mm / 108 mm / 47.0 mm / 7
-             5 mm    5 mm /   0 mm /  3.5 mm / 0
-            20 mm   20 mm /   0 mm /  3.4 mm / 0     <- 默认
-            30 mm   29 mm /   9 mm /  3.5 mm / 0
-            50 mm   45 mm /  12 mm / 46.6 mm / 1
-           100 mm    6 mm /   0 mm / 69.5 mm / 4
-
-        **别调到 30 mm 以上**：那会把稳态残差顶到 ``ik_rescue_err``(10 mm) 之上，
-        策略层的逃生种子就一直开着，频繁换解支反而把单帧跳变顶到 47~92 mm。
-        可达工况零代价：±3 cm 跟随 p50 0.395 / p99 0.978 mm，与关闭时逐位相同。
-        修正量必须同步减进 ``anchor``，否则下一帧又从未夹的值算起，等于没夹。
-        """
-        if self._lead <= 0.0 or reach is None:
-            return
-        pose = self._pose[side]
-        offset = pose[:3] - np.asarray(reach, dtype=np.float64)[:3]
-        distance = float(np.linalg.norm(offset))
-        if distance <= self._lead:
-            return
-        correction = offset * (1.0 - self._lead / distance)
-        pose[:3] -= correction
-        anchor[:3] -= correction
 
     def shutdown(self) -> None:
         self._alive = False

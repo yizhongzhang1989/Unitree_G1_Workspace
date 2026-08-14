@@ -38,7 +38,7 @@ _OVERRIDABLE = {
     'vx_max': float, 'vy_max': float, 'wz_max': float,
     'height': float, 'height_min': float, 'height_max': float, 'height_rate': float,
     'stick_deadzone': float, 'squeeze_threshold': float,
-    'arm_scale': float, 'arm_lead_limit': float,
+    'arm_scale': float,
     'gripper_open': float, 'gripper_closed': float,
     'frame_timeout_s': float, 'button_cooldown_s': float,
     # 和键盘 / VLA 共用 motion_control 的标准分块命令总线。VR 发全量 20 值。

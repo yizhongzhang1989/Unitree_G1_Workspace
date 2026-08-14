@@ -311,6 +311,7 @@ class MotionControlNode(Node):
         self._ik: ArmIK | None = None
         self._arm_slots: list[int] = []
         self._arm_target = np.zeros(len(self._arm_names))
+        self._reached: dict[str, np.ndarray] = {}
         self._pose: dict[str, np.ndarray] = {}
         self._arm_seed = False
         # 站立插值走完（或策略接管）后置真，此后手臂与夹爪一直归 IK/透传管。
@@ -357,7 +358,11 @@ class MotionControlNode(Node):
             .get_parameter_value().string_value,
             self._on_description, latched, callback_group=services)
         self.create_timer(dt, self._control, callback_group=control)
-        self.create_timer(0.1, self._publish_status, callback_group=control)
+        # 状态跟着控制环走：离合接合时拿 ``limited_pose`` 当锦点，那一下要求位移恒为 0；
+        # 10 Hz 时这份锦点最陈能差 100 ms，手臂正在动的时候接合就会跳。自己一组，别去和
+        # _control 抢那个互斥组；正解控制环里已经算过，这里不再重做。
+        self.create_timer(dt, self._publish_status,
+                          callback_group=MutuallyExclusiveCallbackGroup())
 
         self._switch = self.create_client(
             SwitchController, f'{manager}/switch_controller', callback_group=services)
@@ -604,13 +609,14 @@ class MotionControlNode(Node):
                     # 交接这一帧命令流会踩一个台阶。
                     self._arm_target = self._stand_pose[self._arm_slots].copy()
                     self._grip = self._stand_pose[self._gripper_slots].copy()
+                    self._reached = self._ik.fk(self._arm_target)
                     self._pose, self._arm_seed = {}, True
                     self._arms_live = True
                 if self._arm_seed:
                     # 没人发上肢指令时就停在接管那一刻的姿态；setdefault 让
                     # 交接与首帧之间已经收到的指令优先。
-                    for side, pose in self._ik.fk(self._arm_target).items():
-                        self._pose.setdefault(side, pose)
+                    for side, pose in self._reached.items():
+                        self._pose.setdefault(side, pose.copy())
                     self._arm_seed = False
                 poses, grip = dict(self._pose), self._grip.copy()
 
@@ -652,6 +658,7 @@ class MotionControlNode(Node):
                         iters += alt_iters
                 self._arm_target = self._arm_target + np.clip(
                     solved - self._arm_target, -self._arm_rate, self._arm_rate)
+                self._reached = self._ik.fk(self._arm_target)
                 self._ik_stat = (pos_err, ori_err, iters, (time.monotonic() - clock) * 1e3)
             except Exception as error:
                 self.get_logger().warning(f'手臂 IK 异常，保持上一帧: {error}',
@@ -690,13 +697,13 @@ class MotionControlNode(Node):
                 'ik_ms': round(solve_ms, 2),
                 'grip': [round(float(v), 3) for v in self._grip],
             }
-            # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解。它是“关节指令
-            # 对应的末端”，不是编码器实测；实测末端由 dashboard 直接从 /joint_states
-            # 的模型 link 得到，避免在这里再做一次 FK 并复制进 status。
-            if self._arms_live:
+            # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解，控制环里已经算过
+            # 一次，这里直接复用。它是“关节指令对应的末端”，不是编码器实测；实测末端由
+            # dashboard 直接从 /joint_states 的模型 link 得到。
+            if self._arms_live and self._reached:
                 payload['limited_pose'] = {
                     side: [round(float(v), 5) for v in pose]
-                    for side, pose in self._ik.fk(self._arm_target).items()}
+                    for side, pose in self._reached.items()}
         self._status_publisher.publish(String(data=json.dumps(payload)))
 
     def shutdown(self) -> None:
