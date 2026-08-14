@@ -26,7 +26,8 @@ setup(
     entry_points={
         'console_scripts': [
             'head_lidar_node = head_sensors.head_lidar_node:main',
-            'head_sensors_probe = head_sensors.probe:main',
+            'render_head_view = head_sensors.render_head_view:main',
+            'verify_head_view = head_sensors.verify_head_view:main',
         ],
     },
 )

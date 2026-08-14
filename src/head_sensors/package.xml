@@ -13,11 +13,16 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
-  <exec_depend>unitree_api</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <!-- 头部 RealSense D435i 官方驱动（apt: ros-humble-realsense2-camera） -->
   <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>realsense2_description</exec_depend>
+  <!-- render_head_view：URDF 正运动学与可视网格加载 -->
+  <exec_depend>pinocchio</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>unitree_g1_description</exec_depend>
+  <!-- verify_head_view：摆姿势再拍照（FPC 全量命令 + controller 切换） -->
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

@@ -14,6 +14,7 @@
 """
 
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -21,19 +22,41 @@ from launch.actions import (
     DeclareLaunchArgument,
     GroupAction,
     IncludeLaunchDescription,
+    OpaqueFunction,
     ResetLaunchConfigurations,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+
+def _reject_second_instance(context):
+    """D435i 只能被一个进程打开，第二个实例的报错完全看不出根因。
+
+    实测症状是 `xioctl(UVCIOC_CTRL_QUERY) failed`、`Cannot open '/dev/video6'`，
+    以及退出时 SIGSEGV —— 没一条指向「设备已被占用」。
+    """
+    try:
+        running = subprocess.run(['pgrep', '-f', 'realsense2_camera_node'],
+                                 capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids = [p for p in running.stdout.split() if p != str(os.getpid())]
+    if pids:
+        raise RuntimeError(
+            'realsense2_camera_node 已经在跑（pid %s），D435i 不能被两个进程同时打开。\n'
+            '先停掉它：pgrep -f head_camera.launch | xargs -r kill -INT'
+            % ', '.join(pids))
+    return []
+
+
 _ARGS = {
     'camera_namespace': 'head',
     'camera_name': 'camera',
-    # 848x480x30 需要 USB3 链路（实测 5000 Mbps 下双流稳定 30 fps）。相机接在 USB2 口时
-    # 这一档会被驱动判为 invalid 并回落，那种接法要显式降到 640x480x15。
-    'color_profile': '848x480x30',
-    'depth_profile': '848x480x30',
+    # 424x240 是 848x480 的恰好一半：内参整除（fx 608.451 → 304.226）、FOV 不变（仍 69.74°x43.03°）。
+    # 别改成 320x240：那是从 16:9 横向裁出来的，水平 FOV 会掍到 55.48°。
+    'color_profile': '424x240x30',
+    'depth_profile': '424x240x30',
     'align_depth': 'false',
     'pointcloud': 'false',
     'enable_gyro': 'false',
@@ -52,6 +75,7 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         *[DeclareLaunchArgument(k, default_value=v) for k, v in _ARGS.items()],
+        OpaqueFunction(function=_reject_second_instance),
         # rs_launch.py 会遍历整个上下文，对每个它不认识的 launch configuration 打一条
         # 警告并附上完整参数表。ResetLaunchConfigurations 先求值再清空，只把它认得的
         # 键传进去，日志才干净。

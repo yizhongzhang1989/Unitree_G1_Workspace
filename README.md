@@ -73,17 +73,12 @@ ROS 环境由容器自动装配，**不需要手动 `source`**。只有当 `inst
 
 头顶两个传感器由 [`head_sensors`](src/head_sensors/README.md) 接入，两者的驱动来源完全不同：
 
-- **Livox MID-360 雷达**（`192.168.123.120`）：由机器人内部的 `lidar_driver` 服务驱动，直接以 DDS 发
-  `/utlidar/cloud_livox_mid360`（10 Hz）和 `/utlidar/imu_livox_mid360`（200 Hz），**本机不装 Livox SDK**。
-  `head_lidar_node` 只补 `mid360_link → livox_frame` 静态 TF、过滤约 55% 的无回波空点、并把 Livox 以 g 为单位的
-  IMU 加速度换算成 m/s²。
-- **RealSense D435i 深度相机**：USB 直连本机 NX，用官方 `realsense2_camera` 驱动，话题收在 `/head/camera/*`。
-  依赖 `ros-humble-librealsense2`、`ros-humble-realsense2-camera{,-msgs}`、`ros-humble-realsense2-description`，
-  已写进 `.devcontainer/Dockerfile`。`head_camera.launch.py` 额外补一条 `d435_link → camera_link` 挂载 TF ——
-  官方驱动只发相机自己那棵子树，不知道相机装在机器人哪里。
+- **Livox MID-360 雷达**（`192.168.123.120`）：由机器人内部的 `lidar_driver` 服务驱动，直接以 DDS 发 `/utlidar/cloud_livox_mid360`（10 Hz）和 `/utlidar/imu_livox_mid360`（200 Hz），**本机不装 Livox SDK**。`head_lidar_node` 只补 `mid360_link → livox_frame` 静态 TF、过滤约 55% 的无回波空点、并把 Livox 以 g 为单位的 IMU 加速度换算成 m/s²。
+- **RealSense D435i 深度相机**：USB 直连本机 NX，用官方 `realsense2_camera` 驱动，话题收在 `/head/camera/*`，默认 424x240x30。依赖 `ros-humble-librealsense2`、`ros-humble-realsense2-camera{,-msgs}`、`ros-humble-realsense2-description`，已写进 `.devcontainer/Dockerfile`。`head_camera.launch.py` 额外补一条 `d435_link → camera_link` 挂载 TF —— 官方驱动只发相机自己那棵子树，不知道相机装在机器人哪里。
 
-`ros2 run head_sensors head_sensors_probe` 可以一次性确认这两路当前是否有数据。
+头是可转的，撞歪了用 `verify_head_view` 校：它拍一张实拍图、读当前关节角、用 URDF 渲染同一视角，把轮廓叠到实拍图上，对不齐就转头再拍。注意投影时必须从 TF 取 `d435_link → camera_color_optical_frame` 的实测外参（彩色镜头偏离挂载原点 15.3 mm），当成纯旋转会让渲染整体横移十几个像素。
 
+`head_sensors` 里的 URDF 渲染部分（`urdf_view.py` + `render_head_view.py`）**不依赖 ROS**，可以单独拷走交付，只要 pinocchio / numpy / opencv。
 
 ## 宇树 G1
 
@@ -279,6 +274,15 @@ ros2 launch arm_gravity_compensation gravity_calibration.launch.py \
 ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual
 ```
 
+头部雷达与相机（不在 `all_data` 里，需要时单独起）：
+```bash
+ros2 launch head_sensors head_sensors.launch.py                # 雷达 + 相机
+ros2 launch head_sensors head_sensors.launch.py camera:=false  # 只要雷达
+ros2 launch head_sensors head_camera.launch.py                 # 只要相机
+```
+
+点云和图像要挂到机器人模型上需要整机 TF，先起 `all_data.launch.py scope:=whole_body`（提供 `robot_state_publisher`）。头部挂载角的校准步骤见 [head_sensors/README.md](src/head_sensors/README.md)。
+
 `scope:=whole_body` 在同一末端拓扑之外启动唯一的真实 `controller_manager`、统一硬件插件、`robot_state_publisher`、100 Hz JointState/IMU broadcaster，以及保持 `inactive` 的 FPC/JTC。manager 的更新率为 500 Hz；未 Engage 时 31 个 command interface 均未 claim，插件不会发布 `/lowcmd` 或 Gloria-M MIT 命令。
 
 | 参数 | 可选值 | 默认值 | 含义 |
@@ -352,11 +356,14 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 | `robot_bringup/ikt_pose_commander.launch.py` | G1 适配 Commander、可选 8180 Dashboard | FPC 连续跟踪、JTC Snap/return-to-start |
 | `unitree_g1_ros2_control/control.launch.py` | 唯一 manager、硬件插件、RSP、broadcaster、inactive FPC/JTC | 独立整机控制入口 |
 | `unitree_g1_description/description.launch.py` | 仅模型、RSP 和 TF | 已有 `/joint_states` 时查看模型 |
+| `head_sensors/head_sensors.launch.py` | 头部雷达节点 + RealSense，可用 `lidar` / `camera` 单开 | 头部传感器，不在 `all_data` 里 |
+| `head_sensors/head_camera.launch.py` | 仅 RealSense + `d435_link → camera_link` 挂载 TF | 只要头部相机 |
 
 单设备调试入口仍由 `kwr57_ros`、`gloria_ros`、`can_bridge_ros` 和 `camera_node` 各包提供；相机相关 launch 未改变。
 
 ### 运行约束
 - 同一时刻只能有一个 `can_bridge_ros` 进程独占同一台 CANalyst-II；不要同时运行 `all_data`、单设备 `*_debug.launch.py` 或独立 bridge。
+- D435i 同样只能被一个进程打开。起第二份时的报错完全不指向根因（`xioctl(UVCIOC_CTRL_QUERY) failed`、`Cannot open '/dev/video6'`），还会连累第一份；`head_camera.launch.py` 启动前会检查并直接拒绝。
 - 同一 ROS graph 只能启动一个目标路径相同的 `controller_manager`。Dashboard 不负责启动或代理 manager。
 - 单总线下非共享活动 CAN ID 必须互不冲突；双总线下不同物理通道可以复用 CAN ID。
 - 双总线 Gloria-M 明确发布 `left_eccentric_joint`、`right_eccentric_joint`；硬件插件仍校验消息位置为有限值。

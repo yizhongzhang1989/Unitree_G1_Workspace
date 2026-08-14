@@ -151,7 +151,7 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
 # 2.策略层
 ros2 launch g1_motion_control motion_control.launch.py
-#   换策略试跑：  policy_path:=/abs/path/to/policy.onnx
+# 换策略试跑：policy_path:=/abs/path/to/policy.onnx
 
 # 3.遥控台（需要真终端，不要用 launch 包）
 ros2 run g1_motion_control teleop_keyboard
