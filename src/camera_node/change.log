@@ -1,0 +1,126 @@
+# camera_node 改动记录
+
+## 来源
+
+本目录复制自
+<https://github.com/yizhongzhang1989/robot_dc/tree/94d4030db170edaa986b8d1243fd8ae27d45cffd/colcon_ws/src/camera_node>
+（`yizhongzhang1989/robot_dc`，commit `94d4030`）。
+自 2026-08-17 起由本工作区独立维护，不再与上游同步。
+
+---
+
+## 2026-08-17 整份重写
+
+起因：腕相机实际帧率只有个位数。定位到三处开销，顺带把用不上的功能全部拆掉。
+
+### 一、性能（这是重点）
+
+1. **`Image.data` 不再经 `cv_bridge`，改为直接赋 `array.array('B', raw)`。**
+   rclpy 生成的 `uint8[]` setter 只对 `array.array` 短路，赋 `bytes`（`cv_bridge`
+   内部就是 `tobytes()`）会走 `__debug__` 里的逐元素断言。实测 640x360 一帧
+   **102 ms → 0.066 ms**；1080p 一帧约 920 ms，也就是说旧实现的发布上限只有约 1 fps。
+   **这是帧率低的真凶。**
+2. **缩放与限帧下沉到 ffmpeg**（`-vf fps=N,scale=W:H`），管道上只走目标分辨率。
+   旧实现从 ffmpeg 取 1080p 裸帧（6.2 MB/帧）再在 Python 里 `cv2.resize`。
+3. **默认改用相机子码流 `/stream1`**（640x360 HEVC）。主码流 `/stream0` 是 1080p
+   H.264，同样出 426x240 时开销 42.5% 单核 vs 12.2% 单核，3.5 倍，而下游
+   （VLA 模型高 240、网页 800 宽）都用不到。
+4. **`scale` 指定 `flags=area`**。20 s 流的 ffmpeg CPU 时间实测：
+
+   | flags | CPU-s | 相对默认 |
+   |---|---:|---:|
+   | lanczos | 3.36 | +20% |
+   | bicubic（ffmpeg 默认） | 2.79 | —— |
+   | bilinear | 2.70 | −3% |
+   | **area** | **2.45** | **−12%** |
+   | fast_bilinear | 2.33 | −17%，但有 aliasing |
+   | （完全不缩放，参照） | 2.24 | |
+
+   `area` 是下采样的盒式平均，省 12% 且不 aliasing，两头都赢。`fast_bilinear`
+   还能再省 5% 但画质掉得能看见：vs area 仅 28.2 dB，而下游 JPEG q90 往返是
+   36.6 dB —— **插值差异比压缩失真更大**，不能指望被 JPEG 淹没。
+
+单台相机稳态实测（`stream1` → 426x240 @15 fps，Orin NX，`/proc` 增量）：
+ffmpeg 10.4% 单核 + 节点 8.1% 单核 = **18.5% 单核**，两台约占 8 核机器的 4.6%。
+其中 4.6% 是 CycloneDDS 的**每进程**后台线程（空节点什么都不干也要这么多；
+同进程放 1/2/4 个 Node 实测 4.6%/4.8%/4.8%）。
+
+**GPU 硬解走不通**（已实测，非推测）：容器里没有 tegra 用户态库、没有 CUDA、
+没有 gstreamer 插件，`hevc_cuvid` 直接 segfault（JetPack 5 无 `libnvcuvid`），
+`hevc_v4l2m2m` 找不到设备。要开得改 `.devcontainer` 并重建容器；按测得的数字，
+NVDEC 最多拿走两台合计 17.4% 单核（机器的 2.2%），当前分辨率下不划算。
+
+### 二、按需拉流（新增）
+
+监管线程每秒看一眼 `get_subscription_count()` 和网页观众数：
+
+- 都是 0 → kill ffmpeg，一个字节都不走网络。
+- 有订阅者或网页在看 → 拉起 ffmpeg。只有网页在看时不组装 `Image` 消息。
+- ffmpeg 退出、或 `stale_timeout_s` 没有新帧 → kill 掉重连。
+
+代价：订阅者接上后要等 1~3 秒（轮询周期 + RTSP 握手）才有第一帧。
+
+### 三、分辨率（新增）
+
+- `image_width` / `image_height` **只给一边时，另一边按原生宽高比自动补**（取偶数）。
+  只需要高度 240 时写 `image_height:=240` 即可，640x360 会出 426x240。
+- `rtsp_url` / `fps` / `image_width` / `image_height` / `jpeg_quality`
+  **运行时可改**，`ros2 param set` 后下一拍重开流，不用重启节点。
+  非法值（负数、空 URL）在 `on_set_parameters` 回调里直接拒绝。
+
+### 四、Web 预览
+
+- **默认不开**。旧实现每次启动都强制拉起一个 Flask 服务；现在 `server_port`
+  默认 `0` 表示不开，此时连 `cv2` 都不 import。
+- 改用标准库 `http.server`（与本工作区 8770 面板一致），**去掉 Flask 依赖**。
+- 只保留 `/`、`/video_feed`、`/status` 三个路由。删掉了约 400 行内联 HTML/CSS/JS
+  控制页，以及 `/start`、`/stop`、`/restart`、`/snapshot`、`/download_snapshot`、
+  `/ros_image_publish` —— 启停已由按需拉流接管，其余用 ROS 原生工具即可。
+- `/status` 增加 `state` 字段（`idle` / `streaming` / `error`）。`is_running`
+  只在 `error` 时为 false，否则 8770 面板会把「没人看所以没拉流」误报成相机离线。
+- 只有 `/video_feed` 算观众，`/status` 轮询不算，所以 8770 开着但没人看时流不会起。
+- **断连检测不能只靠 write**：相机断线时 MJPEG 循环没帧可写，一个字节也不发，
+  浏览器关掉也发现不了，观众数永远挂着，节点就会一直重试拉一个连不上的相机
+  （实测断开后 15 s 又重试 5 次）。超时那一拍改为用 `MSG_DONTWAIT | MSG_PEEK`
+  探对端（`preview.connected`），修后断开后 15 s 只多 1 次。
+
+### 五、删除
+
+| 删除项 | 原因 |
+|---|---|
+| `RTSPStream` 重连状态机（generation / expected / wake event） | 由 1 Hz 监管线程一个函数覆盖 |
+| 独立的 ROS 发布线程 + `frame_ready_event` | 直接在读帧线程里发，少一次线程切换和一次拷贝 |
+| `~/take_snapshot`、`/restart_*_node` 服务 | 截图用 `image_saver`，重启已自动化 |
+| `launch/ur10e_cam_launch.py`、`launch/ur15_cam_launch.py` | 依赖上游 `common.config_manager`，本工作区没有，早已跑不起来 |
+| `launch/robot_arm_cam_launch.py`、`single_stream_test.py`、`double_camera_launch.py` | 针对上游 `192.168.1.x` 台架，与本机无关 |
+| `setup.py` 的 `camera_calibrate_node` entry point | 指向不存在的模块 |
+| `setup.py` 的 `config/*.yaml` data_files | 该目录不存在 |
+| `README.md`（上游英文文档） | 描述的实现已不存在，统一到 `README.zh.md` |
+| `cv_bridge`、`python3-flask`、`std_msgs`、`std_srvs` 依赖 | 不再使用 |
+
+代码量：`camera_node.py` 1290 行 → `camera_node.py` 345 行 + `preview.py` 105 行。
+
+### 六、参数重命名
+
+| 旧 | 新 | 说明 |
+|---|---|---|
+| `rtsp_url_main` | `rtsp_url` | 只有一路流，不必带 `_main` |
+| `ros_topic_name` | `image_topic` | |
+| `camera_name` | `frame_id` | 旧值同时用于服务名、截图目录和日志，现在只剩 `header.frame_id`，默认取节点名 |
+| `stream_fps` | `fps` | 现在同时管 ROS 和网页，不再是「网页专用」 |
+| `max_width` | `image_width` / `image_height` | 缩放已下沉到 ffmpeg |
+| `publish_ros_image` | —— | 由订阅者数量决定 |
+| `auto_reconnect`、`reconnect_interval_s` | `poll_period_s`、`stale_timeout_s` | 重连恒开 |
+| `camera_ip` | —— | 只用于网页展示 |
+
+### 七、下游同步改动
+
+- `robot_bringup/robot_bringup/end_effectors/nodes.py`：左右腕相机改用新参数，
+  走 `/stream1`、高度 240、15 fps，仍保留 8010 / 8011 预览页。
+- `robot_bringup/README.md`、`g1_vla_bridge/README.md`：更新已过时的相机描述。
+
+### 八、测试
+
+`test/test_stream_reconnect.py` → `test/test_camera_node.py`，覆盖 ffmpeg 命令拼装、
+宽高比补边、按需拉流与重连判据、运行时改参数、读帧线程的整帧切分与 kill 唤醒、
+`Image` 载荷类型。链路本身在实机上验。

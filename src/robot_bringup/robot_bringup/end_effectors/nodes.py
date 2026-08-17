@@ -77,18 +77,12 @@ def camera(side: str, ip_address: str, server_port: int) -> Node:
         package="camera_node", executable="camera_node",
         name=camera_name, output="screen", emulate_tty=True,
         parameters=[{
-            "camera_name": camera_name,
-            "rtsp_url_main": (
-                f"rtsp://admin:123456@{ip_address}/stream0"),
-            "camera_ip": ip_address,
+            # stream1 是 640x360 子码流；主码流 stream0 是 1080p，解码开销约 9 倍
+            "rtsp_url": f"rtsp://admin:123456@{ip_address}/stream1",
+            "image_topic": f"/{camera_name}/image_raw",
+            "image_height": 240,
+            "fps": 15,
             "server_port": server_port,
-            "stream_fps": 25,
-            "jpeg_quality": 75,
-            "max_width": 800,
-            "publish_ros_image": True,
-            "ros_topic_name": f"/{camera_name}/image_raw",
-            "auto_reconnect": True,
-            "reconnect_interval_s": 5.0,
         }])
 
 
