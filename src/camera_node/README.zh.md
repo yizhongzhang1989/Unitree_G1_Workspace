@@ -26,8 +26,15 @@ flowchart LR
 | ffmpeg 退了 / `stale_timeout_s` 没新帧 | kill 掉重连 |
 | 只有网页在看 | 拉流但**不**组装 `Image` 消息 |
 
-代价是订阅者接上后要等 1~3 s（轮询周期 + RTSP 握手）才有第一帧。`vla_bridge`
-那边的 `image_timeout_s` 会正常重试，不用管。
+代价是订阅者接上后要等 1~3 s（轮询周期 + RTSP 握手 + 等相机的第一个 IDR）才有第一帧。
+`vla_bridge` 那边的 `image_timeout_s` 会正常重试，不用管。
+
+**订阅后头一两秒的图不能当真。** RTSP 握手加等 IDR 是物理下限，相机 IDR 间隔实测 3.0 s。
+消费端如果对图像有效性敏感，自己加一道判据——`camera_node` 不知道什么叫「有效」。
+
+> 别往 `ffmpeg_command()` 里加 `-fflags nobuffer`。它会丢掉入场的 IDR，导致之后
+> **整整一个 GOP（3.4 s、32 帧）输出凭空造的灰图**，而稳态延迟一点都省不到
+> （实测 ±0 ms）。真正管延迟的是 `-flags low_delay`。详见 [`change.log`](change.log)。
 
 ## 性能：钱花在哪（Orin NX 实测）
 

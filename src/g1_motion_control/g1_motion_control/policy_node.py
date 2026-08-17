@@ -530,6 +530,7 @@ class MotionControlNode(Node):
             was_active = self._state in ACTIVE_STATES
             self._state = State.ESTOP
             self._reason = reason
+            self._arms_live = False
         self.get_logger().error(f'急停: {reason}')
         if was_active:
             ok, detail = self._switch_controller(activate=False)

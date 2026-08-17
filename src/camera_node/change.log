@@ -90,7 +90,7 @@ NVDEC 最多拿走两台合计 17.4% 单核（机器的 2.2%），当前分辨�
 |---|---|
 | `RTSPStream` 重连状态机（generation / expected / wake event） | 由 1 Hz 监管线程一个函数覆盖 |
 | 独立的 ROS 发布线程 + `frame_ready_event` | 直接在读帧线程里发，少一次线程切换和一次拷贝 |
-| `~/take_snapshot`、`/restart_*_node` 服务 | 截图用 `image_saver`，重启已自动化 |
+| `~/take_snapshot`、`/restart_*_node` 服务 | 重启已由按需拉流接管；拍照改为订阅话题取最新帧 |
 | `launch/ur10e_cam_launch.py`、`launch/ur15_cam_launch.py` | 依赖上游 `common.config_manager`，本工作区没有，早已跑不起来 |
 | `launch/robot_arm_cam_launch.py`、`single_stream_test.py`、`double_camera_launch.py` | 针对上游 `192.168.1.x` 台架，与本机无关 |
 | `setup.py` 的 `camera_calibrate_node` entry point | 指向不存在的模块 |
@@ -124,3 +124,36 @@ NVDEC 最多拿走两台合计 17.4% 单核（机器的 2.2%），当前分辨�
 `test/test_stream_reconnect.py` → `test/test_camera_node.py`，覆盖 ffmpeg 命令拼装、
 宽高比补边、按需拉流与重连判据、运行时改参数、读帧线程的整帧切分与 kill 唤醒、
 `Image` 载荷类型。链路本身在实机上验。
+
+---
+
+## 2026-08-17 补：去掉 `-fflags nobuffer`，冷启动不再吐灰帧
+
+拉起流后**头 3.4 秒发出去的全是均值 128、标准差 0.3 的纯灰图**，一共 32 张。
+`vla_bridge` 只查图像新鲜度不查有效性，会拿这些灰图去推理。
+
+根因是 `-fflags nobuffer`。它的字面含义是「初始流分析阶段不缓存」，代价是把**入场
+的那个 IDR 一起丢掉**；解码器没有参考帧，只能对 P 帧做错误隐藏——libavcodec 凭空造
+一张 Y=128 的灰帧当参考（`Could not find ref with POC nn` 就是它在报这件事），一直
+灰到**下一个** IDR。相机 IDR 间隔实测 3.0 s，0.4 s 连上 + 3.0 s 等一整个 GOP ≈ 3.4 s，
+与实测吻合。
+
+拆开实测（各 4 次冷启动，重复性极好）：
+
+| 组合 | 灰帧 | 首张可用图（中位） |
+|---|---:|---:|
+| `nobuffer` + `low_delay`（原） | 32 | 3.41 s |
+| 只 `nobuffer` | 32 | 3.76 s |
+| **只 `low_delay`（现）** | **0** | **1.22 s** |
+| 两个都不要 | 0 | 1.25 s |
+| 加 `-ec 0` | 32 | 3.40 s（无效） |
+| `-fflags +discardcorrupt` | 32 | 3.42 s（无效，灰帧没被标 corrupt） |
+
+**稳态延迟没有代价**：同时拉两路解同一个流、用帧内容哈希配对比对到达时刻，两轮的
+中位差是 **−1 ms 和 +0 ms**（10/90 分位在 ±20 ms 内，25 fps 一帧就是 40 ms，属噪声）。
+
+两个 flag 作用在不同层，所以能拆：`nobuffer` 在解复用层、只影响开头；`low_delay`
+在编解码层、管解码器重排序缓冲，**它才是真正压稳态延迟的那个**，保留。
+
+剩余的冷启动窗口 1.2 s 是物理下限（RTSP 握手 + 等 IDR），配合按需拉流意味着
+**订阅后头一两秒的图不能当真**。要彻底堵住得在消费端加有效性判据。
