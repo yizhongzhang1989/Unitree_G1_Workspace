@@ -20,13 +20,14 @@
 1. 本模块的 ``joint_limits`` 把肘上限收到 1.4。shoulder_yaw 与 wrist_roll 都是沿肢体
    长轴的自转轴，肘一伸直两者共线（实测 1.571 处夹角 0.0°，雅可比最差点在 1.44），而
    URDF 行程 ``[-1.047, 2.094]`` 把这一段夹在中间，热启动被推过去就再也回不来。
-2. 本模块的 ``null_gain`` 在**零空间**里把那三根自转轴拉回 0。收限位只能拦住"足尖推过头"，
-   拦不住"肘长期顶在 1.4"：目标够不着时肘就得伸直，而那里 3<->5 夹角只剩 9.8°。
-   实测 VR 幅度（OU 15 cm）下肘顶限位的帧占 16.6%。
+2. 本模块的 ``null_gain`` / ``null_target`` 在**零空间**里施加软偏好。三根自转轴以 0 为
+    参考并按偏离角门控；每臂第二关节以镜像的 20° 为参考且无门限。偏好只取投影后可用的
+    分量，不要求关节最终到参考值。收限位仍拦不住"肘长期顶在 1.4"：目标够不着时肘就得
+    伸直，而那里 3<->5 夹角只剩 9.8°。实测 VR 幅度（OU 15 cm）下肘顶限位占 16.6% 帧。
 3. 肩上还有一条镜像解支陷阱，收限位治不好，那一道放在**节点**里（``ik_rescue_err``
    残差超限就换站立位形重解）。本模块对此无感——只是被多调了一次。
 
-``null_gain`` 对应的梯度必须投影到零空间，不能直接加进步长：实测同一个向量的末端污染
+``null_gain`` 对应的 ``-k*(q-q_ref)`` 必须投影到零空间，不能直接加进步长：实测同一个向量的末端污染
 ``||J b|| = 0.30``，而那个构型下要修的任务残差才 0.0725 m——直接加的话偏置项会把手
 拽偏、任务项再拉回来，两边对抗，位形没改善而跟随变差。
 
@@ -56,6 +57,7 @@ class ArmIK:
                  tol_ori: float = 3.5e-3, joint_limits: dict | None = None,
                  max_step_pos: float = 0.1, max_step_ori: float = 0.5,
                  null_gain: dict | None = None,
+                 null_target: dict | None = None,
                  null_gate: tuple = (0.6, 1.2)) -> None:
         full = pin.buildModelFromXML(urdf_xml)
         missing = [name for name in arm_joints if not full.existJointName(name)]
@@ -113,8 +115,9 @@ class ArmIK:
         # 稳定性参数，不是精度参数——理由见文件头。
         self._max_step_pos = float(max_step_pos)
         self._max_step_ori = float(max_step_ori)
-        # 零空间偏置增益，按 joint_names 排。全零等于关闭，走原来那条不算投影的快路径。
+        # 零空间软偏好，按 joint_names 排；显式参考轴无门限，其余增益轴以 0 为参考并门控。
         self._null_gain = None
+        self._null_target = np.full(self.model.nq, np.nan)
         self._null_eye = {}
         gate_lo, gate_hi = (float(v) for v in null_gate)
         if not 0.0 <= gate_lo < gate_hi:
@@ -133,6 +136,16 @@ class ArmIK:
                 self._null_gain = gains
                 self._null_eye = {side: np.eye(cols.size)
                                   for side, (_, cols) in self._tip.items()}
+        for name, target in (null_target or {}).items():
+            if name not in self.joint_names:
+                raise ValueError(f'null_target 里的 {name} 不在手臂关节里')
+            value = float(target)
+            if not np.isfinite(value):
+                raise ValueError(f'{name} 的 null_target 必须是有限值')
+            index = self.joint_names.index(name)
+            if self._null_gain is None or self._null_gain[index] <= 0.0:
+                raise ValueError(f'{name} 的 null_target 需要正的 null_gain')
+            self._null_target[index] = value
 
     def _place(self, q: np.ndarray) -> None:
         """computeJointJacobians 内部已经做过正运动学，不必再单独调一次。"""
@@ -182,29 +195,44 @@ class ArmIK:
                     if side_ori > self._max_step_ori > 0.0:
                         capped[3:] *= self._max_step_ori / side_ori
                     errors[side] = capped
-            if not errors:
+            has_ungated = any(np.isfinite(
+                self._null_target[self._tip[side][1]]).any() for side in goal)
+            if not errors and not has_ungated:
                 return q, pos_err, ori_err, step
             # 两条手臂是彼此独立的分支，雅可比不含对方的列，同一轮里各更新各的 7 列。
-            for side, error in errors.items():
+            for side in goal:
                 fid, cols = self._tip[side]
+                error = errors.get(side)
+                target = self._null_target[cols]
+                ungated = np.isfinite(target)
+                if error is None and not ungated.any():
+                    continue
                 jac = pin.getFrameJacobian(
                     self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:, cols]
                 # 阻尼最小二乘：加了 lambda^2*I 之后矩阵恒正定，solve 不会奇异。
                 jjt = jac @ jac.T
-                gain = None
+                preference = None
                 if self._null_gain is not None:
-                    # 逐轴门控：只有那根轴自己偏离 0 超过 gate_lo 才开始偏置。
-                    gain = self._null_gain[cols] * np.clip(
-                        (np.abs(q[cols]) - self._gate_lo) / self._gate_span, 0.0, 1.0)
-                    if not gain.any():
-                        gain = None
-                if gain is None:
+                    offset = q[cols] - np.where(ungated, target, 0.0)
+                    gate = np.where(ungated, 1.0, np.clip(
+                        (np.abs(offset) - self._gate_lo) / self._gate_span, 0.0, 1.0)
+                    )
+                    candidate = -self._null_gain[cols] * gate * offset
+                    if candidate.any():
+                        preference = candidate
+                if preference is None:
+                    if error is None:
+                        continue
                     task = jac.T @ np.linalg.solve(jjt + self._lambda2 * _I6, error)
                 else:
                     # 要显式取伪逆才能构造零空间投影 (I - J# J)，比 solve 略贵；
                     # 正常构型下门全关，走上面那条快路径，开销与不带偏置时一致。
                     sharp = jac.T @ np.linalg.inv(jjt + self._lambda2 * _I6)
-                    task = sharp @ error + (
-                        self._null_eye[side] - sharp @ jac) @ (-gain * q[cols])
+                    task = (self._null_eye[side] - sharp @ jac) @ preference
+                    if error is not None:
+                        task += sharp @ error
                 q[cols] = np.clip(q[cols] + task, self.lower[cols], self.upper[cols])
+            # 任务已到位时每帧只尝试一次软偏好；投影为零就自然不动，不设角度门限。
+            if not errors:
+                return q, pos_err, ori_err, step + 1
         return q, pos_err, ori_err, self._iters

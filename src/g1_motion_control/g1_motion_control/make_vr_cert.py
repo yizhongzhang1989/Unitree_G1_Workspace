@@ -11,7 +11,7 @@ WebXR 只在**安全上下文**里可用，所以头显要么走 ``http://localh
     ros2 run g1_motion_control make_vr_cert 192.168.137.149
     ros2 run g1_motion_control make_vr_cert -o /tmp/mycert
 
-默认写到 ``~/.ros/g1_vr/``，正是 ``vr_teleop.launch.py`` 默认去找的位置——签完
+默认写到 ``~/.ros/g1_vr/``，正是 ``vr_teleop`` 默认去找的位置——签完
 直接起节点就是 HTTPS，不用传参数。放在 ``~/.ros`` 而不是源码树里有两个原因：
 私钥不该待在 git 仓库旁边，而且它不会被 ``colcon build`` 或删 ``build/`` 清掉。
 
@@ -29,8 +29,8 @@ import socket
 import struct
 from pathlib import Path
 
-# 证书位置与 TLS 端口的**唯一定义**，vr_teleop.py 和 vr_teleop.launch.py 都从这里
-# import。各写一遍的话，改了一处另一处就静默地去找不存在的文件、退回明文。
+# 证书位置与 TLS 端口的**唯一定义**，vr_teleop.py 从这里 import。各写一遍的话，
+# 改了一处另一处就静默地去找不存在的文件、退回明文。
 DEFAULT_DIR = Path.home() / '.ros' / 'g1_vr'
 DEFAULT_TLS_PORT = 8443
 _SIOCGIFADDR = 0x8915       # <linux/sockios.h>，取某个网卡的 IPv4 地址

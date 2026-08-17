@@ -60,6 +60,10 @@ RUN set -eux; \
       ros-humble-rmw-cyclonedds-cpp \
       ros-humble-yaml-cpp-vendor \
       ros-humble-pinocchio \
+      ros-humble-librealsense2 \
+      ros-humble-realsense2-camera \
+      ros-humble-realsense2-camera-msgs \
+      ros-humble-realsense2-description \
       ros-humble-ament-cmake-gtest \
       ros-humble-ament-cmake-pytest \
       ros-humble-ament-cmake-python \
@@ -76,6 +80,10 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 # canalystii 与 libusb-package 是 CAN-SDK 的 [canalystii] extra，只供 Python 调试
 # 链路使用；生产链路是 C++ 的 canalystii_native_bridge，不依赖它们。
+# realsense2-* 是 G1 头顶 RealSense D435i 的官方驱动（src/head_sensors 用它）。相机走 USB
+# 直连本机 NX，不是 DDS 设备；容器已经是 privileged + /dev:/dev，不需要额外装 udev 规则。
+# 头部 Livox MID-360 反过来不需要任何本地驱动：机器人内部的 lidar_driver 服务直接发
+# /utlidar/* 的标准 sensor_msgs，所以这里没有 livox SDK。
 # adb + aiohttp + cryptography 供 src/g1_lower_body_policy/vr 的 WebXR 桥接用。WebXR 只在
 # 安全上下文里可用，所以头显接入有两条并存的路：
 #   - HTTPS 直连 https://<本机IP>:8443，证书由 `ros2 run g1_lower_body_policy make_vr_cert`

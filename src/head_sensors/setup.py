@@ -1,8 +1,9 @@
-from setuptools import setup
 import os
 from glob import glob
 
-package_name = 'camera_node'
+from setuptools import setup
+
+package_name = 'head_sensors'
 
 setup(
     name=package_name,
@@ -11,21 +12,22 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
-        ('share/' + package_name,
-            ['package.xml', 'README.zh.md', 'change.log']),
+        ('share/' + package_name, ['package.xml', 'README.md']),
         (os.path.join('share', package_name, 'launch'),
             glob(os.path.join('launch', '*.py'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='yizhongzhang1989',
-    maintainer_email='yizhongzhang1989@gmail.com',
-    description='Generic IP camera node for RTSP streaming and control',
+    maintainer='Unitree G1 Workspace',
+    maintainer_email='dev@example.com',
+    description='G1 头部传感器调用层：Livox MID-360 雷达接入与 RealSense D435i 集成',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'camera_node = camera_node.camera_node:main',
+            'head_lidar_node = head_sensors.head_lidar_node:main',
+            'render_head_view = head_sensors.render_head_view:main',
+            'verify_head_view = head_sensors.verify_head_view:main',
         ],
     },
 )

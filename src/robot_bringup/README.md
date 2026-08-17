@@ -118,7 +118,7 @@ G1 的 LowCmd 编码在 C++ 硬件插件内完成；Gloria 协议仍由独立 `g
 | `camera_left` | `192.168.123.97` | `8010` | `/camera_left/image_raw` |
 | `camera_right` | `192.168.123.98` | `8011` | `/camera_right/image_raw` |
 
-两台相机当前均使用 `rtsp://admin:123456@<IP>/stream0`，详细接口和排障方式见 [`camera_node/README.zh.md`](../camera_node/README.zh.md)。
+两台相机当前均使用 `rtsp://admin:123456@<IP>/stream1` 子码流（640x360，限 15 fps），详细接口和排障方式见 [`camera_node/README.zh.md`](../camera_node/README.zh.md)。
 
 `end_effectors_dual_bus.launch.py` 描述每条总线一台 KWR57 和一台 Gloria-M；不同物理通道可以复用相同 CAN ID。
 
@@ -138,7 +138,7 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual
 ```
 
-两个 scope 都启动末端设备；`whole_body` 额外 include `unitree_g1_ros2_control/control.launch.py`，启动唯一的真实 `controller_manager`、500 Hz 硬件循环、100 Hz JointState/IMU broadcaster、一份展开 URDF 和一个 TF 发布器。夹爪节点显式把状态命名为 `left_eccentric_joint`、`right_eccentric_joint`。两种 scope 均不启动 8770/8200 Dashboard。左右相机节点按现有一体化设计同时提供 ROS Image 和 8010/8011 内置页面；相机主机必须具备到 `192.168.123.0/24` 的路由。
+两个 scope 都启动末端设备；`whole_body` 额外 include `unitree_g1_ros2_control/control.launch.py`，启动唯一的真实 `controller_manager`、500 Hz 硬件循环、100 Hz JointState/IMU broadcaster、一份展开 URDF 和一个 TF 发布器。夹爪节点显式把状态命名为 `left_eccentric_joint`、`right_eccentric_joint`。两种 scope 均不启动 8770/8200 Dashboard。左右相机节点同时提供 ROS Image 和 8010/8011 内置页面，但两条路都是按需拉流，没人订阅就不连相机；相机主机必须具备到 `192.168.123.0/24` 的路由。
 
 生产拓扑默认在启动后自动配置并使能两只 Gloria-M。需要上电保持失能时传入 `enable_grippers_on_start:=false`；这不会改变 `gloria_ros` 独立调试入口默认失能的安全行为，也不会改变 controller 默认保持 `inactive` 的行为。
 
@@ -174,7 +174,7 @@ Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅接收原有两路 `Wrench
 
 浏览器打开 `http://<机器人 IP>:8770`。页面固定为 CAN0 左手、CAN1 右手两栏，每栏同时显示手部相机画面、KWR57 六轴数据、Gloria-M 位置/速度/力矩以及设备在线状态。夹爪只开放 MIT 单次目标和 MIT 往返；往返会先调用设备现有的 `enable` 服务，停止时自动调用 `disable`。
 
-网页节点通过同源 URL `/api/cameras/<left|right>/video_feed` 代理两台相机的 MJPEG，因此远程访问只需转发 `8770`。网页后台独立探测相机 `/status`；相机未连接、启动失败或中途断流时，对应栏显示离线占位，KWR57、夹爪及另一台相机不受影响。`camera_node` 默认每 5 秒在后台尝试恢复期望运行的 RTSP 流，相机后接入或网络恢复后页面会自动重新加载画面；通过相机 Web 的“停止”操作主动停流时不会自动拉起。
+网页节点通过同源 URL `/api/cameras/<left|right>/video_feed` 代理两台相机的 MJPEG，因此远程访问只需转发 `8770`。网页后台独立探测相机 `/status`；相机未连接、启动失败或中途断流时，对应栏显示离线占位，KWR57、夹爪及另一台相机不受影响。`camera_node` 是**按需拉流**的：没有 ROS 订阅者、也没人在看网页时它根本不连相机，`/status` 报 `idle` 但仍算在线；网页一打开 `/video_feed` 流就会自己起来，断流后每秒自动重连。
 
 也可以不经过 launch，直接追加网页节点：
 

@@ -55,17 +55,18 @@ class Teleop(Node):
             float(p('wz_step', 0.1).get_parameter_value().double_value),
         )
         self._limit = (
-            float(p('vx_max', 0.8).get_parameter_value().double_value),
-            float(p('vy_max', 0.4).get_parameter_value().double_value),
-            float(p('wz_max', 1.5).get_parameter_value().double_value),
+            float(p('vx_max', 0.4).get_parameter_value().double_value),
+            float(p('vy_max', 0.3).get_parameter_value().double_value),
+            float(p('wz_max', 1.0).get_parameter_value().double_value),
         )
         self._h_step = float(p('height_step', 0.01).get_parameter_value().double_value)
+        # 上界跟策略层的 command_limits 对齐：写得更高只会让 I 键在 0.78 之后像卡住。
         self._h_range = (
             float(p('height_min', 0.50).get_parameter_value().double_value),
             float(p('height_max', 0.80).get_parameter_value().double_value),
         )
         self._height = min(max(
-            float(p('initial_height', 0.76).get_parameter_value().double_value),
+            float(p('initial_height', 0.80).get_parameter_value().double_value),
             self._h_range[0]), self._h_range[1])
         self._hold_timeout = float(
             p('hold_timeout_s', 0.4).get_parameter_value().double_value)
@@ -117,16 +118,25 @@ class Teleop(Node):
             self._idle = self._hold_timeout  # 无关按键不算"还按着"。
         return True
 
-    def request(self, client, label: str) -> None:
+    def request(self, client, label: str):
+        """发一个 Trigger，返回 future；服务不在就返回 None，表示压根没发出去。"""
         if not client.service_is_ready():
             self.notice = f'{label}失败：策略节点服务不在'
-            return
+            return None
         self.notice = f'{label}请求已发出…'
-        client.call_async(Trigger.Request()).add_done_callback(
-            lambda future: self._on_result(label, future))
+        future = client.call_async(Trigger.Request())
+        future.add_done_callback(lambda f: self.settle(label, f))
+        return future
 
-    def _on_result(self, label: str, future) -> None:
-        result = future.result()
+    def settle(self, label: str, future) -> None:
+        """把请求结果写进状态行。
+
+        rclpy 在响应到达时先给 future 绑上 executor，``add_done_callback`` 的回调于是
+        被排成下一轮 executor 任务而不是内联执行。等 ``future.done()`` 就退出的路径
+        永远转不到那一轮，所以它得自己再调一次。
+        """
+        result = (future.result()
+                  if future.done() and future.exception() is None else None)
         self.notice = (f'{label}: {result.message}' if result is not None
                        else f'{label}失败：无响应')
 
@@ -156,8 +166,8 @@ class Teleop(Node):
     def stop(self) -> None:
         self._vel = [0.0, 0.0, 0.0]
 
-    def estop(self, label: str) -> None:
-        self.request(self._estop_client, label)
+    def estop(self, label: str):
+        return self.request(self._estop_client, label)
 
     def render(self) -> str:
         vx, vy, wz = self._vel
@@ -228,12 +238,14 @@ def main(args=None) -> None:
         # 退出即急停：终端一关就没人再发指令，机器人不能停在最后一帧目标上。
         node.stop()
         node.tick(dt)
-        node.estop('退出急停')
-        deadline = time.monotonic() + 20.0
-        while rclpy.ok() and time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=0.1)
-            if node.notice.startswith('退出急停: '):
-                break
+        future = node.estop('退出急停')
+        if future is not None:
+            # 卸力斜坡要 release_ramp_s（默认 2 s）才回话，这几秒没提示就像卡死了。
+            print('正在急停，等待策略节点回应…', flush=True)
+            deadline = time.monotonic() + 20.0
+            while rclpy.ok() and not future.done() and time.monotonic() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.1)
+            node.settle('退出急停', future)
         print(node.notice)
         node.destroy_node()
         if rclpy.ok():

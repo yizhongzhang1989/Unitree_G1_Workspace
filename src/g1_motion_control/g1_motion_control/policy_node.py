@@ -36,7 +36,7 @@ IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终
   手臂贴着身体从背后摆回来时夹爪会扫进大腿（实测 ``shoulder_pitch`` 在 +60° 附近
   ``gripper_base`` 与 ``hip_pitch_link`` 间距 0.0 mm）。这一段手臂仍走
   ``passive_targets``，IK 还没接管。
-* ``RUNNING``：在已经接管的手臂之外，再把下肢交给策略。进入时清零 ``last_action``
+* ``RUNNING``：在已经接管的手臂之外，再把下肢交给策略。进入时清零 GRU 隐状态
   和步态相位，等价于官方 ``env->reset()``；手臂目标一个字节都不动，否则策略接管
   那一下手臂会跳回实测位。
 * ``ESTOP``：停止发目标并反激活 FPC。反激活会触发 G1TopicSystem 的卸力斜坡——
@@ -161,14 +161,22 @@ class MotionControlNode(Node):
             raise ValueError(f'ik_limit_upper 长度必须等于 arm_joints ({len(self._arm_names)})')
         joint_limits = {name: (-math.inf, high)
                         for name, high in zip(self._arm_names, limit_hi)} if limit_hi else {}
-        # 零空间偏置增益（长度同 arm_joints，0 = 该轴不偏置）。收肘限位拦不住"肘长期
-        # 顶在 1.4"，这一道在不动末端的前提下把三根自转轴拉回 0——理由见 config 注释。
+        # 零空间软偏好增益与参考值（长度同 arm_joints，0 增益 = 该轴不偏置）。
         null_gain_values = list(p('ik_null_gain', Parameter.Type.DOUBLE_ARRAY)
                                 .get_parameter_value().double_array_value)
         if null_gain_values and len(null_gain_values) != len(self._arm_names):
             raise ValueError(f'ik_null_gain 长度必须等于 arm_joints ({len(self._arm_names)})')
         null_gain = {name: gain for name, gain in zip(self._arm_names, null_gain_values)
                      if gain} if null_gain_values else {}
+        null_target_values = list(p('ik_null_target', Parameter.Type.DOUBLE_ARRAY)
+                                  .get_parameter_value().double_array_value)
+        if null_target_values and len(null_target_values) != len(self._arm_names):
+            raise ValueError(
+                f'ik_null_target 长度必须等于 arm_joints ({len(self._arm_names)})')
+        # 非零参考值是持续、无门限的软偏好；数组里的 0 保持原有“拉回 0 + 门控”语义。
+        null_target = {
+            name: target for name, target in zip(self._arm_names, null_target_values) if target
+        } if null_target_values else {}
         null_gate = list(p('ik_null_gate', [0.6, 1.2])
                          .get_parameter_value().double_array_value)
         if len(null_gate) != 2:
@@ -190,6 +198,7 @@ class MotionControlNode(Node):
             max_step_ori=p('ik_max_step_ori', 0.5).get_parameter_value().double_value,
             joint_limits=joint_limits,
             null_gain=null_gain,
+            null_target=null_target,
             null_gate=tuple(null_gate),
         )
         # 热启动陷进坏解支时的逃生阈值（m）。理由见 config 里那段注释。
@@ -216,7 +225,7 @@ class MotionControlNode(Node):
         if arm_rate <= 0.0:
             raise ValueError('arm_rate_limit 必须为正（rad/s）')
         self._arm_rate = arm_rate * dt
-        self._stand_s = float(p('stand_s', 3.0).get_parameter_value().double_value)
+        self._stand_s = float(p('stand_s', 2.5).get_parameter_value().double_value)
 
         # 先让手张开再到前面
         self._clear_roll = float(p('stand_clear_roll', 0.7).get_parameter_value().double_value)
@@ -244,7 +253,7 @@ class MotionControlNode(Node):
             .get_parameter_value().string_value.rstrip('/')
 
         # -- 指令限幅与限速 ----------------------------------------------------
-        limits = p('command_limits', [-0.3, 0.5, -0.3, 0.3, -0.5, 0.5, 0.62, 0.76]) \
+        limits = p('command_limits', [-0.5, 0.8, -0.5, 0.5, -1.5, 1.5, 0.50, 0.78]) \
             .get_parameter_value().double_array_value
         if len(limits) != 8:
             raise ValueError('command_limits 必须是 8 个数: vx/vy/wz/h 的上下界')
@@ -302,6 +311,7 @@ class MotionControlNode(Node):
         self._ik: ArmIK | None = None
         self._arm_slots: list[int] = []
         self._arm_target = np.zeros(len(self._arm_names))
+        self._reached: dict[str, np.ndarray] = {}
         self._pose: dict[str, np.ndarray] = {}
         self._arm_seed = False
         # 站立插值走完（或策略接管）后置真，此后手臂与夹爪一直归 IK/透传管。
@@ -348,7 +358,11 @@ class MotionControlNode(Node):
             .get_parameter_value().string_value,
             self._on_description, latched, callback_group=services)
         self.create_timer(dt, self._control, callback_group=control)
-        self.create_timer(0.1, self._publish_status, callback_group=control)
+        # 状态跟着控制环走：离合接合时拿 ``limited_pose`` 当锦点，那一下要求位移恒为 0；
+        # 10 Hz 时这份锦点最陈能差 100 ms，手臂正在动的时候接合就会跳。自己一组，别去和
+        # _control 抢那个互斥组；正解控制环里已经算过，这里不再重做。
+        self.create_timer(dt, self._publish_status,
+                          callback_group=MutuallyExclusiveCallbackGroup())
 
         self._switch = self.create_client(
             SwitchController, f'{manager}/switch_controller', callback_group=services)
@@ -595,13 +609,14 @@ class MotionControlNode(Node):
                     # 交接这一帧命令流会踩一个台阶。
                     self._arm_target = self._stand_pose[self._arm_slots].copy()
                     self._grip = self._stand_pose[self._gripper_slots].copy()
+                    self._reached = self._ik.fk(self._arm_target)
                     self._pose, self._arm_seed = {}, True
                     self._arms_live = True
                 if self._arm_seed:
                     # 没人发上肢指令时就停在接管那一刻的姿态；setdefault 让
                     # 交接与首帧之间已经收到的指令优先。
-                    for side, pose in self._ik.fk(self._arm_target).items():
-                        self._pose.setdefault(side, pose)
+                    for side, pose in self._reached.items():
+                        self._pose.setdefault(side, pose.copy())
                     self._arm_seed = False
                 poses, grip = dict(self._pose), self._grip.copy()
 
@@ -643,6 +658,7 @@ class MotionControlNode(Node):
                         iters += alt_iters
                 self._arm_target = self._arm_target + np.clip(
                     solved - self._arm_target, -self._arm_rate, self._arm_rate)
+                self._reached = self._ik.fk(self._arm_target)
                 self._ik_stat = (pos_err, ori_err, iters, (time.monotonic() - clock) * 1e3)
             except Exception as error:
                 self.get_logger().warning(f'手臂 IK 异常，保持上一帧: {error}',
@@ -681,13 +697,13 @@ class MotionControlNode(Node):
                 'ik_ms': round(solve_ms, 2),
                 'grip': [round(float(v), 3) for v in self._grip],
             }
-            # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解。它是“关节指令
-            # 对应的末端”，不是编码器实测；实测末端由 dashboard 直接从 /joint_states
-            # 的模型 link 得到，避免在这里再做一次 FK 并复制进 status。
-            if self._arms_live:
+            # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解，控制环里已经算过
+            # 一次，这里直接复用。它是“关节指令对应的末端”，不是编码器实测；实测末端由
+            # dashboard 直接从 /joint_states 的模型 link 得到。
+            if self._arms_live and self._reached:
                 payload['limited_pose'] = {
                     side: [round(float(v), 5) for v in pose]
-                    for side, pose in self._ik.fk(self._arm_target).items()}
+                    for side, pose in self._reached.items()}
         self._status_publisher.publish(String(data=json.dumps(payload)))
 
     def shutdown(self) -> None:

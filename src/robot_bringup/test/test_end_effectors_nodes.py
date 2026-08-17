@@ -90,18 +90,11 @@ class EndEffectorsNodesTest(unittest.TestCase):
             package="camera_node", executable="camera_node",
             name="camera_left", output="screen", emulate_tty=True,
             parameters=[{
-                "camera_name": "camera_left",
-                "rtsp_url_main": (
-                    "rtsp://admin:123456@192.168.123.97/stream0"),
-                "camera_ip": "192.168.123.97",
+                "rtsp_url": "rtsp://admin:123456@192.168.123.97/stream1",
+                "image_topic": "/camera_left/image_raw",
+                "image_height": 240,
+                "fps": 15,
                 "server_port": 8010,
-                "stream_fps": 25,
-                "jpeg_quality": 75,
-                "max_width": 800,
-                "publish_ros_image": True,
-                "ros_topic_name": "/camera_left/image_raw",
-                "auto_reconnect": True,
-                "reconnect_interval_s": 5.0,
             }])
 
     def test_gripper_accepts_bringup_enable_override(self) -> None:
