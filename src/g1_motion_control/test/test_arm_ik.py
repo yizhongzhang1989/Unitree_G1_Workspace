@@ -63,6 +63,7 @@ def _configured_ik(null_gain=None, null_target=None):
         damping=config['ik_damping'], tol_pos=config['ik_tol_pos'],
         tol_ori=config['ik_tol_ori'],
         max_step_pos=config['ik_max_step_pos'], max_step_ori=config['ik_max_step_ori'],
+        rotation_weight=config['ik_rotation_weight'],
         joint_limits={name: (-math.inf, high)
                       for name, high in zip(arms, config['ik_limit_upper'])},
         null_gain=null_gain,
@@ -125,6 +126,32 @@ def test_solving_one_side_leaves_the_other_untouched(ik):
 def test_seed_outside_limits_is_clamped(ik):
     q, _, _, _ = ik.solve(np.full(14, 1e3), {})
     assert np.allclose(q, ik.upper)
+
+
+def test_rotation_weight_zero_releases_orientation_and_updates_live(ik):
+    seed = np.zeros(14)
+    target = ik.fk(seed)['right'].copy()
+    half = math.sin(math.pi / 8.0)
+    target[3:7] = [0.0, 0.0, half, math.cos(math.pi / 8.0)]
+
+    ik.set_rotation_weight(0.0)
+    position_only, pos_err, ori_err, iters = ik.solve(seed, {'right': target})
+    assert np.array_equal(position_only, seed)
+    assert pos_err == pytest.approx(0.0)
+    assert ori_err > 0.5
+    assert iters == 0
+
+    ik.set_rotation_weight(1.0)
+    full_pose, _, full_ori_err, iters = ik.solve(seed, {'right': target})
+    assert not np.allclose(full_pose, seed)
+    assert full_ori_err < ori_err
+    assert iters > 0
+
+
+def test_rotation_weight_rejects_invalid_values(ik):
+    for bad in (-0.01, 1.01, math.nan, math.inf):
+        with pytest.raises(ValueError):
+            ik.set_rotation_weight(bad)
 
 
 def test_redundant_dof_does_not_drift_along_a_closed_path(configured_ik):
@@ -344,7 +371,7 @@ def test_null_target_is_ungated_and_keeps_the_tip_fixed(configured_ik):
         assert orientation_error < config['ik_tol_ori']
 
 
-def test_zero_reference_null_gate_stays_shut_during_normal_tracking(ik):
+def test_zero_reference_null_gate_stays_shut_during_normal_tracking():
     """原三根 q_ref=0 自转轴的门控在正常工况必须与完全无偏置逐位相同。
 
     没有门控时偏置会把稳态残差从 0.858 顶到 1.933 mm，越过 ik_tol_pos(1 mm)，
@@ -356,9 +383,11 @@ def test_zero_reference_null_gate_stays_shut_during_normal_tracking(ik):
             config['arm_joints'], config['ik_null_gain'], config['ik_null_target'])
         if gain and target == 0.0
     }
+    # 对照组必须也用部署配置，只差零空间增益这一项，否则比的是别的参数。
+    plain_ik = _configured_ik(null_gain={}, null_target={})
     gated_ik = _configured_ik(null_gain=zero_reference_gain, null_target={})
-    stand = STAND_POSTURE(ik)
-    home = ik.fk(stand)
+    stand = STAND_POSTURE(plain_ik)
+    home = plain_ik.fk(stand)
     plain, biased = stand.copy(), stand.copy()
     plain_iters = biased_iters = 0
     for i in range(200):                      # 3 cm 画圆，肘角远低于门控下限
@@ -366,7 +395,7 @@ def test_zero_reference_null_gate_stays_shut_during_normal_tracking(ik):
         goal = {side: np.concatenate(
             [pose[:3] + [0.0, 0.03 * math.cos(angle), 0.03 * math.sin(angle)], pose[3:]])
             for side, pose in home.items()}
-        plain, _, _, plain_iters = ik.solve(plain, goal)
+        plain, _, _, plain_iters = plain_ik.solve(plain, goal)
         biased, _, _, biased_iters = gated_ik.solve(biased, goal)
     assert np.allclose(plain, biased), '正常跟随时门控没关严，解被偏置改了'
     assert biased_iters == plain_iters, '正常跟随时带偏置多花了迭代'

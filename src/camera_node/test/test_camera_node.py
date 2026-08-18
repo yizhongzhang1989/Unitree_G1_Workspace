@@ -84,6 +84,13 @@ class FfmpegCommandTest(unittest.TestCase):
             '-i', 'rtsp://camera/stream1',
             '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'])
 
+    def test_keeps_low_delay_but_never_nobuffer(self) -> None:
+        """nobuffer 会丢掉入场 IDR，之后一整个 GOP 都在输出灰帧"""
+        command = ffmpeg_command('rtsp://camera/stream1')
+
+        self.assertIn('low_delay', command)
+        self.assertNotIn('nobuffer', command)
+
     def test_fps_and_scale_run_inside_ffmpeg(self) -> None:
         command = ffmpeg_command(
             'rtsp://camera/stream0', fps=15, scale=(640, 360))

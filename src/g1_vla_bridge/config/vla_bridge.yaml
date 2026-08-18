@@ -1,0 +1,75 @@
+/vla_bridge:
+  ros__parameters:
+    # ========================================================================
+    # 与哪家 VLA 无关的通用参数。
+    #
+    # 每家 VLA 自己的参数（服务地址、坐标系标定、图像预处理…）在
+    # config/backends/<vla_backend>.yaml，launch 会按下面这个值自动加载那一份。
+    # 两边的键不许重叠，test_config_layout.py 会核对。
+    # ========================================================================
+
+    # 选哪一家 VLA。对应 g1_vla_bridge/backends/<名字>.py 与
+    # config/backends/<名字>.yaml，那两个文件里装着这家的请求协议、坐标系规格、
+    # 图像要求和夹爪换算。
+    vla_backend: a2d_omnipicker
+
+    # -- 任务 ----------------------------------------------------------------
+    # 空字符串时 ~/start 会拒绝，必须先发 ~/task 或在这里写死。
+    # 实测语言是模型最强的输入（换个物体名输出差 0.114 m，是噪声底 0.019 的 5.6 倍）。
+    task_description: 'Pick up the green potato chip bag using the right arm.'
+    # has_* 是**发给模型**的协议字段，改它等于改模型的输入分布。
+    has_left: true
+    has_right: true
+    # hold_* 只管**执行**：置真的这一侧照常发给模型、照常收到规划，但不下发，
+    # 位姿和夹爪都冻结在 ~/start 那一刻。单臂调试用它，不要去改 has_*。
+    hold_left: false
+    hold_right: false
+
+    # -- 相机 ----------------------------------------------------------------
+    # 头部 D435i 默认就是 424x240，正好是模型要的高度，不会被重采样。
+    head_image_topic: /head/camera/color/image_raw
+    left_image_topic: /camera_left/image_raw
+    right_image_topic: /camera_right/image_raw
+    head_camera_info_topic: /head/camera/color/camera_info
+    # 任一路图像超过这个时间没更新就跳过本轮推理，宁可不动也不拿旧图决策。
+    # 3 s 不是拍脑袋：腕相机走 640x360 子码流限 15 fps，起流初期抖动比这大。
+    image_timeout_s: 3.0
+
+    # 把**实际发给模型的**那几张图（编码之后的字节）写到这个目录，文件名就是槽位名，
+    # 每轮推理原子覆盖一次。出问题时直接看它，比猜画面靠谱。置空关掉。
+    debug_image_dir: '/tmp/vla_bridge'
+
+    # -- 坐标系（必须与 motion_control.yaml 一致）-----------------------------
+    base_frame: torso_link
+    left_tip_frame: left_gripper_base
+    right_tip_frame: right_gripper_base
+    camera_optical_frame: camera_color_optical_frame
+
+    # -- 下发 ----------------------------------------------------------------
+    command_topic: /motion_control/command
+    status_topic: /motion_control/status
+    action_rate_hz: 30.0
+
+    # 增量控制：只取模型整段的**形状**，叠到上一段留下的指令值上。位置和姿态分开选：
+    #   delta_position —— 相减时 model_origin_in_base 和 tool_offset **完全抵消**，
+    #     而这两项现在都不确定，所以位置是最该用增量的一项。
+    #   delta_rotation —— 姿态的标定（tool_rotation_rpy 那道绕 Z 的 180°）是确定的，
+    #     模型给的绝对姿态本身就对，一般不用增量。
+    # **位置用增量也不能省 model_rotation_rpy**：Δp_model = R · Δp_base，方向不抵消。
+    # 两个都 false = 纯绝对模式。只有 backend 声明 action_semantics='absolute' 时可开。
+    # 锚点为什么必须是指令值而不是实测值，见 README。
+    delta_position: false
+    delta_rotation: false
+    # 每段动作最多用前几个 waypoint，0 = 用 backend 返回的全部（A2D 是 30）。
+    # 调小 = 更早换用新观测的结果，代价是推理跟不上时缓冲会提前见底。
+    action_horizon: 0
+
+    # -- 安全 ----------------------------------------------------------------
+    # 单帧笛卡尔步长上限，**这是现在唯一的运动安全限制**。30 Hz 下 0.02 m/帧 = 0.6 m/s；
+    # 模型输出跳变时只是变慢，不会把手臂甩出去。它在 motion_control 的 IK 限幅之上再加
+    # 一道，两者不冲突。首点距实测的距离只记录不拦截，见 ~/status 的 jump 字段。
+    max_step_pos: 0.02
+    max_step_ori: 0.10
+
+    # 推理失败后隔多久重试，同时也是日志和服务端的限流阀。
+    retry_delay_s: 1.0

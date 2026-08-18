@@ -187,3 +187,21 @@ ros2 run gloria_ros web_gripper --ros-args \
 
 ## SDK 参数能力边界
 节点只读取并核验 PMAX、VMAX、TMAX，不暴露 SDK 的通用寄存器写入、`save()` 或 `apply_limits()`；这些操作可能改变 CAN ID、控制环、保护阈值、通信配置或写入 Flash，应仅在受控环境中通过独立本机维护工具执行。
+
+## 一次性 PMAX 维护脚本
+
+[`scripts/set_grip_arm1_pmax.py`](../../scripts/set_grip_arm1_pmax.py) 用于将双总线右夹爪的固件 `PMAX` 从 `12.5` 一次性改为 `3.14`，不修改 ROS 参数或关闭量程校验。详细限制和保护流程见脚本开头注释。
+
+停止其他占用 CANalyst-II 的进程后，在两个终端分别运行：
+
+```bash
+# 终端 A
+source scripts/env.sh
+ros2 launch robot_bringup end_effectors_dual_bus.launch.py enable_grippers_on_start:=false
+
+# 终端 B
+source scripts/env.sh
+python3 scripts/set_grip_arm1_pmax.py
+```
+
+成功后停止终端 A；夹爪保持失能，可再按正常整机流程启动。

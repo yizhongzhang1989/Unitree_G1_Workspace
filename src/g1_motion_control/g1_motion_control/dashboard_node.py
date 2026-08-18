@@ -15,8 +15,11 @@
 * **后端不算正运动学、不依赖 pinocchio**。URDF 解析一次后把关节树发给前端，
   three.js 的 ``Object3D`` 嵌套本来就在算矩阵，再算一遍是白花钱。于是每次轮询
   只发手臂关节角和上层/限速位姿，不发整棵 link 变换树。
-* **不订阅、不发布任何控制量，也不调用任何服务**。纯只读，所以不需要
-  ``ReentrantCallbackGroup`` + ``MultiThreadedExecutor`` 那一套防死锁配置。
+* **只订阅，不发布任何控制量**。唯一的写入是 IK 姿态权重那一个滑条，它走
+  ``motion_control`` 的标准参数服务（``set_parameters``），不新开私有控制协议；
+  且 HTTP 线程只暂存值，真正的调用由 ROS 定时器异步发出（所以仍不需要
+  ``ReentrantCallbackGroup`` + ``MultiThreadedExecutor`` 那一套防死锁配置）。
+  改完的实际值从 ``/motion_control/status`` 回读，页面不自己猬状态。
 * **3D 模型只保留手臂**：``base_frame`` 之下**含可动关节**的分支才留（头、雷达、相机
   那些 fixed 分支自动被剪掉）。不必配置关节名单，换 URDF 也不用改。
 
@@ -39,6 +42,9 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import rclpy
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+from rcl_interfaces.msg import Parameter as ParameterMsg
+from rcl_interfaces.msg import ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -237,6 +243,14 @@ class DashboardNode(Node):
         self._last_poll = 0.0
         self.create_timer(0.2, self._gate)
 
+        # 滑条写回：HTTP 线程只往 _pending_weight 放值，这个定时器才真的发服务请求。
+        control = p('motion_control_node', '/motion_control') \
+            .get_parameter_value().string_value.rstrip('/')
+        self._param_client = self.create_client(
+            SetParameters, f'{control}/set_parameters')
+        self._pending_weight: float | None = None
+        self.create_timer(0.1, self._push_weight)
+
         self._server = ThreadingHTTPServer((self._host, self._port), _handler(self))
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
@@ -276,6 +290,29 @@ class DashboardNode(Node):
             self._joint_sub = None
             with self._lock:
                 self._joints = None
+
+    def _push_weight(self) -> None:
+        """把页面暂存的 IK 姿态权重发给 motion_control。不在 HTTP 线程里碰 ROS 实体。"""
+        with self._lock:
+            value = self._pending_weight
+            self._pending_weight = None
+        if value is None:
+            return
+        if not self._param_client.service_is_ready():
+            self.get_logger().warning('motion_control 参数服务不可用，权重没改成',
+                                      throttle_duration_sec=5.0)
+            return
+        request = SetParameters.Request()
+        request.parameters = [ParameterMsg(
+            name='ik_rotation_weight',
+            value=ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                 double_value=value))]
+        self._param_client.call_async(request)
+
+    def request_rotation_weight(self, value: float) -> None:
+        """HTTP 线程的入口：只暂存最后一次拖动的值，由 ``_push_weight`` 真正发出。"""
+        with self._lock:
+            self._pending_weight = value
 
     def _on_status(self, message: String) -> None:
         try:
@@ -319,6 +356,8 @@ class DashboardNode(Node):
             'limited_pose': status.get('limited_pose') or {},
             'ik_pos_err': status.get('ik_pos_err'),
             'ik_ms': status.get('ik_ms'),
+            # 滑条的回显值以 motion_control 的实际参数为准，页面不自己猬。
+            'ik_rotation_weight': status.get('ik_rotation_weight'),
         }
 
     def model(self) -> dict | None:
@@ -396,6 +435,26 @@ def _handler(node: DashboardNode):
                 return self._send(404, b'not found', 'text/plain')
             body, kind = found
             return self._send(200, body, kind, 'no-cache')
+
+        def do_POST(self) -> None:          # noqa: N802 (BaseHTTPRequestHandler 的约定)
+            if urlparse(self.path).path != '/api/ik_weight':
+                return self._send(404, b'not found', 'text/plain')
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+            except ValueError:
+                length = -1
+            # 这个端点只收一个数，限长度是为了不给超大 body 留口子。
+            if not 0 < length <= 128:
+                return self._send(400, b'{"error":"bad length"}', 'application/json')
+            try:
+                value = float(json.loads(self.rfile.read(length))['value'])
+            except (ValueError, TypeError, KeyError, IndexError):
+                return self._send(400, b'{"error":"bad body"}', 'application/json')
+            # NaN / inf 过不了这一关（与 NaN 的比较恒为 False）。
+            if not 0.0 <= value <= 1.0:
+                return self._send(400, b'{"error":"out of range"}', 'application/json')
+            node.request_rotation_weight(value)
+            return self._json({'ok': True, 'value': value})
 
     return Handler
 

@@ -20,9 +20,10 @@ from launch_ros.parameter_descriptions import ParameterValue
 CONTROLLERS = ["forward_position_controller"]
 
 
-def _parameters(path: Path) -> dict:
+def _parameters(path: Path, node: str | None = None) -> dict:
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return next(iter(document.values()))["ros__parameters"]
+    parameters = document[node] if node else next(iter(document.values()))
+    return parameters["ros__parameters"]
 
 
 def _resolve(reference: str) -> Path:
@@ -35,12 +36,14 @@ def _resolve(reference: str) -> Path:
 
 
 def generate_launch_description() -> LaunchDescription:
-    # The demo target must use exactly the controller's joint order, so read it
-    # from the same file the controller is configured with.
+    # The demo target must use exactly the controller's canonical joint order.
+    common = _parameters(
+        Path(get_package_share_directory("unitree_g1_ros2_control")) /
+        "config" / "default_31dof_param.yaml", "/**")
     controller = _parameters(
         Path(get_package_share_directory("unitree_g1_ros2_control")) /
         "config" / "forward_position_controller.yaml")
-    joints = controller["joints"]
+    joints = common["joints"]
     # Only the joints the controller actually compensates may float; anything
     # else would be commanded to its own measurement and go limp.
     table = _parameters(_resolve(controller["gravity_table"]))

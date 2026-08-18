@@ -349,10 +349,10 @@ def build_params(path: Path) -> dict:
     document = yaml.safe_load(
         (share / 'config' / 'motion_control.yaml').read_text(encoding='utf-8'))
     config = document['/motion_control']['ros__parameters']
-    controller = yaml.safe_load(
+        common = yaml.safe_load(
         (Path(get_package_share_directory('unitree_g1_ros2_control')) /
-         'config' / 'forward_position_controller.yaml').read_text(encoding='utf-8'))
-    config['joints'] = controller['/forward_position_controller']['ros__parameters']['joints']
+            'config' / 'default_31dof_param.yaml').read_text(encoding='utf-8'))
+        config['joints'] = common['/**']['ros__parameters']['joints']
     path.write_text(yaml.safe_dump(document, allow_unicode=True), encoding='utf-8')
     return config
 

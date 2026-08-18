@@ -62,7 +62,9 @@ def ffmpeg_command(url, fps=0, scale=None):
         filters.append(f'scale={scale[0]}:{scale[1]}:flags=area')
     command = [
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
-        '-rtsp_transport', 'tcp', '-fflags', 'nobuffer', '-flags', 'low_delay',
+        # 别加 -fflags nobuffer：它会丢掉入场的 IDR，之后整整一个 GOP 都在拿
+        # 凭空造的灰帧当参考帧解码。low_delay 才是管稳态延迟的那个
+        '-rtsp_transport', 'tcp', '-flags', 'low_delay',
         '-an', '-i', url,
     ]
     if filters:

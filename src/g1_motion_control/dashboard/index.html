@@ -104,6 +104,16 @@
       <button id="fit" type="button">复位视角</button>
     </div>
 
+    <div class="row">
+      <label for="rotw">姿态IK权重</label>
+      <!-- 对数刻度：值是 log10(w)，满行程 0.001~1。线性刻度下 0.1 以上几乎看不出区别 -->
+      <input type="range" id="rotw" min="-3" max="0" step="0.05" value="0" disabled>
+      <span id="rotw-val">—</span>
+    </div>
+    <div class="row hint">
+      <span>调小就把自由度让给位置（对数刻度 0.001~1）1 = 与位置同权</span>
+    </div>
+
     <div class="row foot">
       <span id="ikms">—</span>
       <span id="fps">—</span>

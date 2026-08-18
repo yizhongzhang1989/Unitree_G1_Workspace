@@ -47,8 +47,6 @@ _HARDWARE_ARGUMENTS = {
     "state_timeout_s": "0.25",
     "gripper_state_timeout_s": "0.75",
     "require_pr_mode": "true",
-    "gripper_kp": "10.0",
-    "gripper_kd": "5.0",
     "gripper_service_timeout_s": "3.0",
     "manage_motion_mode": "true",
     "restore_motion_mode": "true",
@@ -69,7 +67,7 @@ def _robot_description(context, package_share: Path, topology: str) -> str:
         for name in _HARDWARE_ARGUMENTS
     })
     mappings["gain_file"] = str(
-        package_share / "config" / "default_29dof_param.yaml")
+        package_share / "config" / "default_31dof_param.yaml")
     document = cast(Document, xacro.process_file(
         str(package_share / "urdf" / "g1_with_ros2_control.urdf.xacro"),
         mappings=mappings,
@@ -97,6 +95,8 @@ def _control_nodes(context):
         raise ValueError("controller_manager basename must be 'controller_manager'")
     manager_namespace = "/" + "/".join(manager_parts[:-1]) if len(manager_parts) > 1 else "/"
     controllers = str(package_share / "config" / "controllers.yaml")
+    common_controller_parameters = str(
+        package_share / "config" / "default_31dof_param.yaml")
     forward_position_parameters = str(
         package_share / "config" / "forward_position_controller.yaml")
     joint_trajectory_parameters = str(
@@ -163,6 +163,7 @@ def _control_nodes(context):
             executable="spawner",
             arguments=[
                 "forward_position_controller",
+                "--param-file", common_controller_parameters,
                 "--param-file", forward_position_parameters,
                 "--inactive",
                 "--controller-manager", controller_manager,
@@ -175,6 +176,7 @@ def _control_nodes(context):
             executable="spawner",
             arguments=[
                 "joint_trajectory_controller",
+                "--param-file", common_controller_parameters,
                 "--param-file", joint_trajectory_parameters,
                 "--inactive",
                 "--controller-manager", controller_manager,

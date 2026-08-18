@@ -140,7 +140,7 @@ flowchart TD
 它跟着控制环发（而不是更慢的固定速率），因为 VR 离合接合拿它当锚点，那一下要求位移恒为 0。
 
 再往下游（不归本包管）：FPC 写 command interface → `G1TopicSystem::write()` 补上
-`default_29dof_param.yaml` 的 kp/kd → `/lowcmd`（500 Hz，前 29 轴）与
+`default_31dof_param.yaml` 的 kp/kd → `/lowcmd`（500 Hz，前 29 轴）与
 `/grip_arm{0,1}/mit_command`（100 Hz，第 30/31 轴）。
 
 ---
@@ -386,8 +386,10 @@ q_target = clip(q_target, target_lower_limits, target_upper_limits)   # 不是�
 
 ### PD 增益与频率
 
-kp/kd 就是 `unitree_g1_ros2_control/config/default_29dof_param.yaml`（ONNX metadata 里的
-`joint_stiffness/joint_damping` 与之逐项相同），硬件侧从同一个文件加载，**两边天然一致**。
+前 29 个本体关节的 kp/kd 来自
+`unitree_g1_ros2_control/config/default_31dof_param.yaml`（ONNX metadata 里的
+`joint_stiffness/joint_damping` 与其前 29 项逐项相同），硬件侧从同一个文件加载，
+**两边天然一致**；最后两项分别用于左右夹爪。
 
 训练是 sim dt 0.005 × decimation 4 = **50 Hz**，实机必须一致——这个频率同时决定步态
 相位的推进速度。单拍推理实测 p50 **0.052 ms** / p99 0.079 ms，占 20 ms 预算的 0.3%。
@@ -610,7 +612,7 @@ wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
 | `robot_description_topic` | `/robot_description` | latched（TRANSIENT_LOCAL），正常只进来一次 |
 
 `joints`（FPC 的 31 轴顺序）由 launch 从
-`unitree_g1_ros2_control/config/forward_position_controller.yaml` 读进来后注入，本包
+`unitree_g1_ros2_control/config/default_31dof_param.yaml` 读进来后注入，本包
 不抄第二份——两份不同步就是左右腿指令互换级别的事故。
 
 ### 为什么高度必须限速

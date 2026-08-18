@@ -1,0 +1,57 @@
+/vla_bridge:
+  ros__parameters:
+    # ========================================================================
+    # backend a2d_omnipicker 专属。文件名必须与 g1_vla_bridge/backends/ 下的模块同名，
+    # 键必须都在那个模块的 PARAMETERS 里 —— test_config_layout.py 会核对。
+    # 换 VLA 就换这个文件，通用参数在 ../vla_bridge.yaml，两边互不干扰。
+    #
+    # -- 训练机是智元 A2D，不是 G1 -------------------------------------------
+    # A2D_Omnipicker/A2D.urdf：带升降柱的双臂移动机器人（底盘 + joint_lift_body
+    # 0~0.5 m 升降 + 躯干俯仰 0~60° + 头部 yaw/pitch），跟 G1 完全不是一个构型。
+    # 逐段几何（pinocchio 正解，米）  A2D / G1 / 比值：
+    #     肩间距        0.4260 / 0.2004 / 2.13
+    #     上臂          0.3050 / 0.2259 / 1.35
+    #     前臂          0.3785 / 0.1895 / 2.00
+    #     法兰→夹爪     0.2300 / 0.0945 / 2.43
+    #     肩→夹爪最大   0.9135 / 0.5083 / 1.797
+    # 比值 1.35~2.43，**不是均匀缩放，没有任何单一尺度能对齐**。就算坐标系完全标对，
+    # 模型输出也会大量落在 G1 够不着的地方（我们的包络：torso_link 下半径 ≤ 0.765 m、
+    # x ≤ 0.48）。跨本体迁移能靠坐标变换做到的到此为止，剩下只能靠泛化或微调。
+    #
+    # 头部相机外参（HEAD_TO_CAM，写死在 backends/a2d_omnipicker.py）是相对
+    # joint_head_pitch 的，**约定是 T_head←cam**，不是标定文件常见的 T_cam←head——
+    # 判据是「双手在 3D 里严格对称，投影就该关于主点对称」，两者不对称度 11 px vs 232 px。
+    # ========================================================================
+
+    server_url: http://robogarage-4.guest.corp.microsoft.com:5502/api/inference
+    # 一次推理的 HTTP 超时。走 ssh SOCKS 隧道时别设太小，链路抖动会误杀。
+    request_timeout_s: 30.0
+    # 留空 = 用 ALL_PROXY / all_proxy 环境变量；显式指定形如 socks5h://127.0.0.1:1080。
+    proxy: ''
+
+    # 头部图按训练相机的内参逐像素重采样，把镜头尺度对齐（两台相机焦距差 1.42 倍）。
+    # 代价是画布只填得满约 49%，边上是外推出来的——**那本身也是分布偏移**，先用
+    # test/smoke_preflight.py 做 A/B。训练相机的内参/畸变写死在 backend 里。
+    head_reproject: true
+
+    # -- 坐标系标定（ros2 run g1_vla_bridge calibrate_frame 生成）--------------
+    #
+    # model_origin_in_base：**VLA 坐标系的原点落在 base_frame 的哪里**，米。
+    #   这个 VLA 泛化很差，**相机位置差一点就不行**，所以原点不按几何真值取，而是取
+    #   能把我们的相机挪到训练相机那个位置上的那个值：
+    #     训练相机（lift=0.28 m / body_pitch=30° / head_pitch=0）在训练系 [0.520, -0.018, 1.027]
+    #     我们的相机在 torso_link 下                                  [0.057,  0.033, 0.431]
+    #     相减                                                        [-0.463, 0.051, -0.596]
+    #   换训练关节值或换相机安装位置都要重算。
+    # model_rotation_rpy：保持 0，即**只挪原点、不掰坐标系**。掰了两台相机朝向也能对上
+    #   （calibrate_frame 的 [B] 解），但模型系会被掰斜，重力方向就错了、末端 state 跟着歪。
+    #   代价：两台相机俯角仍差 17.8°（他们 +29.8° / 我们 +47.6°），这是物理视角差，
+    #   head_reproject 只改得了焦距/畸变，改不了它。
+    model_origin_in_base: [-0.4633, 0.0508, -0.5964]
+    model_rotation_rpy: [0.0, 0.0, 0.0]
+
+    # 我方 tip frame（gripper_base）-> VLA 的 joint7 frame。两者 Z 轴同向（差约 4°），
+    # 差一道绕 Z 的 180°：X/Y 互为反号。**不补这一道，姿态会整个反过来。**
+    tool_rotation_rpy: [0.0, 0.0, 3.141592653589793]
+    # joint7 原点在 gripper_base 后方 28 mm（沿夹爪 Z）。
+    tool_offset: [0.0, 0.0, -0.0281]

@@ -162,7 +162,7 @@ namespace unitree_g1_ros2_control {
 
 G1TopicSystem::~G1TopicSystem() {
     if (executor_) {
-        on_deactivate(rclcpp_lifecycle::State());
+        shutdown();
     }
 }
 
@@ -347,8 +347,6 @@ void G1TopicSystem::configure_parameters() {
         double_parameter("gripper_command_rate_hz", gripper_command_rate_hz_);
     arm_stiffness_scale_ =
         double_parameter("arm_stiffness_scale", arm_stiffness_scale_);
-    gripper_kp_ = double_parameter("gripper_kp", gripper_kp_);
-    gripper_kd_ = double_parameter("gripper_kd", gripper_kd_);
     gripper_service_timeout_s_ =
         double_parameter("gripper_service_timeout_s", gripper_service_timeout_s_);
     motion_switch_timeout_s_ =
@@ -369,17 +367,15 @@ void G1TopicSystem::configure_parameters() {
     restore_motion_mode_ = bool_parameter("restore_motion_mode", restore_motion_mode_);
     fallback_motion_mode_ = string_parameter("fallback_motion_mode", fallback_motion_mode_);
 
-    const std::array<double, 10> positive_values = {
+    const std::array<double, 8> positive_values = {
         state_timeout_s_,          gripper_state_timeout_s_,  gripper_command_rate_hz_,
         gripper_service_timeout_s_, motion_switch_timeout_s_, motion_select_timeout_s_,
-        lowcmd_quiet_period_s_,    lowcmd_quiet_timeout_s_,   gripper_kp_ + 1.0,
-        gripper_kd_ + 1.0,
+        lowcmd_quiet_period_s_,    lowcmd_quiet_timeout_s_,
     };
     if (!std::all_of(positive_values.begin(), positive_values.end(), finite_positive) ||
         !finite_positive(arm_stiffness_scale_) || arm_stiffness_scale_ > 4.0 ||
         motion_release_attempts_ <= 0 || !std::isfinite(motion_release_retry_s_) ||
-        motion_release_retry_s_ < 0.0 || gripper_kp_ < 0.0 || gripper_kp_ > 500.0 ||
-        gripper_kd_ < 0.0 || gripper_kd_ > 5.0 ||
+        motion_release_retry_s_ < 0.0 ||
         !std::isfinite(release_ramp_s_) || release_ramp_s_ < 0.0 ||
         release_ramp_s_ > 30.0) {
         throw std::invalid_argument("invalid ros2_control hardware safety parameter");
@@ -405,40 +401,45 @@ void G1TopicSystem::configure_parameters() {
     if (gain_file.empty() || !load_gains(gain_file)) {
         throw std::invalid_argument("gain_file is missing or invalid");
     }
-    // Mirror the effective gains onto the controlled-joint layout, including
-    // the two Gloria eccentrics, so controllers can read them as state.
-    std::copy(stiffness_.begin(), stiffness_.end(), gain_stiffness_.begin());
-    std::copy(damping_.begin(), damping_.end(), gain_damping_.begin());
-    for (std::size_t index = kG1JointCount; index < kControlledJointCount; ++index) {
-        gain_stiffness_[index] = gripper_kp_;
-        gain_damping_[index] = gripper_kd_;
-    }
     RCLCPP_INFO(
         rclcpp::get_logger("G1TopicSystem"),
-        "Loaded G1 gains with arm stiffness scale %.2f (arm kd unchanged)",
+        "Loaded 31 controlled-joint gains with arm stiffness scale %.2f (arm kd unchanged)",
         arm_stiffness_scale_);
 }
 
 bool G1TopicSystem::load_gains(const std::string& path) {
     const YAML::Node config = YAML::LoadFile(path);
-    const auto names = config["joint_names"];
-    const auto stiffness = config["stiffness"];
-    const auto damping = config["damping"];
-    if (!names || !stiffness || !damping || names.size() != kG1JointCount ||
-        stiffness.size() != kG1JointCount || damping.size() != kG1JointCount) {
+    const auto common = config["/**"];
+    const auto gain_table = config["/g1_gain_table"];
+    if (!common || !gain_table) {
         return false;
     }
-    for (std::size_t index = 0; index < kG1JointCount; ++index) {
+    const auto common_parameters = common["ros__parameters"];
+    const auto gain_parameters = gain_table["ros__parameters"];
+    if (!common_parameters || !gain_parameters) {
+        return false;
+    }
+    const auto names = common_parameters["joints"];
+    const auto stiffness = gain_parameters["stiffness"];
+    const auto damping = gain_parameters["damping"];
+    if (!names || !stiffness || !damping || names.size() != kControlledJointCount ||
+        stiffness.size() != kControlledJointCount ||
+        damping.size() != kControlledJointCount) {
+        return false;
+    }
+    for (std::size_t index = 0; index < kControlledJointCount; ++index) {
         if (names[index].as<std::string>() != kExpectedJointNames[index]) {
             return false;
         }
-        stiffness_[index] = stiffness[index].as<double>();
-        damping_[index] = damping[index].as<double>();
-        if (index >= kFirstArmJointIndex) {
-            stiffness_[index] *= arm_stiffness_scale_;
+        gain_stiffness_[index] = stiffness[index].as<double>();
+        gain_damping_[index] = damping[index].as<double>();
+        if (index >= kFirstArmJointIndex && index < kG1JointCount) {
+            gain_stiffness_[index] *= arm_stiffness_scale_;
         }
-        if (!std::isfinite(stiffness_[index]) || stiffness_[index] < 0.0 ||
-            !std::isfinite(damping_[index]) || damping_[index] < 0.0) {
+        if (!std::isfinite(gain_stiffness_[index]) || gain_stiffness_[index] < 0.0 ||
+            !std::isfinite(gain_damping_[index]) || gain_damping_[index] < 0.0 ||
+            (index >= kG1JointCount &&
+             (gain_stiffness_[index] > 500.0 || gain_damping_[index] > 5.0))) {
             return false;
         }
     }
@@ -570,6 +571,11 @@ hardware_interface::CallbackReturn G1TopicSystem::on_activate(const rclcpp_lifec
 }
 
 hardware_interface::CallbackReturn G1TopicSystem::on_deactivate(const rclcpp_lifecycle::State&) {
+    shutdown();
+    return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+void G1TopicSystem::shutdown() {
     if (active_) {
         release_body();
         clear_output();
@@ -592,7 +598,6 @@ hardware_interface::CallbackReturn G1TopicSystem::on_deactivate(const rclcpp_lif
     }
     stop_release_channel();
     active_ = false;
-    return hardware_interface::CallbackReturn::SUCCESS;
 }
 
 void G1TopicSystem::on_lowstate(const unitree_hg::msg::LowState::SharedPtr message) {
@@ -808,8 +813,8 @@ hardware_interface::return_type G1TopicSystem::write(const rclcpp::Time&, const 
             command.q = static_cast<float>(value);
             command.dq = 0.0F;
             command.tau = 0.0F;
-            command.kp = static_cast<float>(stiffness_[index]);
-            command.kd = static_cast<float>(damping_[index]);
+            command.kp = static_cast<float>(gain_stiffness_[index]);
+            command.kd = static_cast<float>(gain_damping_[index]);
         }
         {
             std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
@@ -850,8 +855,8 @@ hardware_interface::return_type G1TopicSystem::write(const rclcpp::Time&, const 
             gloria_ros::msg::MitCommand command;
             command.q = value;
             command.dq = 0.0;
-            command.kp = gripper_kp_;
-            command.kd = gripper_kd_;
+            command.kp = gain_stiffness_[index];
+            command.kd = gain_damping_[index];
             command.tau = 0.0;
             gripper_publishers_[side]->publish(command);
         }
@@ -1248,10 +1253,10 @@ void G1TopicSystem::release_body() {
                                                         : state_position_[index]);
             command.dq = 0.0F;
             command.tau = 0.0F;
-            command.kp = owned ? static_cast<float>(stiffness_[index] * scale) : 0.0F;
+            command.kp = owned ? static_cast<float>(gain_stiffness_[index] * scale) : 0.0F;
             // kd carries the whole descent and only goes on the last frame, where
             // the pose is at rest and removing it moves nothing.
-            command.kd = owned && !last ? static_cast<float>(damping_[index]) : 0.0F;
+            command.kd = owned && !last ? static_cast<float>(gain_damping_[index]) : 0.0F;
         }
         message.crc = lowcmd_crc(message);
         release_lowcmd_publisher_->publish(message);

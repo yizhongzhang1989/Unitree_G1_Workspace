@@ -12,8 +12,8 @@
 
 namespace unitree_g1_ros2_control {
 
-class ThrottledJointStateBroadcaster :
-    public joint_state_broadcaster::JointStateBroadcaster {
+template <typename Broadcaster>
+class ThrottledBroadcaster : public Broadcaster {
 public:
     controller_interface::CallbackReturn on_init() override;
     rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_configure(
@@ -29,22 +29,11 @@ private:
     Clock::time_point next_publish_{};
 };
 
-class ThrottledImuSensorBroadcaster :
-    public imu_sensor_broadcaster::IMUSensorBroadcaster {
-public:
-    controller_interface::CallbackReturn on_init() override;
-    rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_configure(
-        const rclcpp_lifecycle::State& previous_state) override;
-    rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_activate(
-        const rclcpp_lifecycle::State& previous_state) override;
-    controller_interface::return_type update(
-        const rclcpp::Time& time, const rclcpp::Duration& period) override;
+class ThrottledJointStateBroadcaster final :
+    public ThrottledBroadcaster<joint_state_broadcaster::JointStateBroadcaster> {};
 
-private:
-    using Clock = std::chrono::steady_clock;
-    Clock::duration publish_period_{};
-    Clock::time_point next_publish_{};
-};
+class ThrottledImuSensorBroadcaster final :
+    public ThrottledBroadcaster<imu_sensor_broadcaster::IMUSensorBroadcaster> {};
 
 }  // namespace unitree_g1_ros2_control
 
