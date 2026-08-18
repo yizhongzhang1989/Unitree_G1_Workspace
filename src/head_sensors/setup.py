@@ -19,7 +19,7 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Unitree G1 Workspace',
-    maintainer_email='dev@example.com',
+    maintainer_email='liruigang20131115@126.com',
     description='G1 头部传感器调用层：Livox MID-360 雷达接入与 RealSense D435i 集成',
     license='MIT',
     tests_require=['pytest'],
