@@ -3,8 +3,12 @@
 只测和“画得对不对”直接相关的纯逻辑：URDF 裁剪出来的确实只有两条手臂、
 rpy 用的是固定轴约定（写反了夹爪会被甩出手掌）、mimic 能被前端那套**单遍**
 解算还原，以及静态文件 / mesh 的路径容纳不会被穿越。
+
+外加一组：姿态权重那个 **写入** 端点的参数校验（它会改变求解行为）。
 """
 
+import io
+import json
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +20,7 @@ from std_msgs.msg import Float64MultiArray
 
 from g1_motion_control.dashboard_node import (
     DashboardNode,
+    _handler,
     mesh_url,
     parse_urdf,
     rpy_to_quat,
@@ -202,3 +207,40 @@ def test_dashboard_observes_arm_blocks_without_clearing_other_fields():
     node._on_command(Float64MultiArray(data=[0.7, 0.8, 0.9, 0.0, 0.0, 0.0, 1.0]))
     assert node._command_pose['left'][:3] == [0.1, 0.2, 0.3]
     assert node._command_pose['right'][:3] == [0.7, 0.8, 0.9]
+
+
+def _post(node, body: bytes, length=None):
+    """不起 HTTP，直接跑 do_POST：只想验那几条校验，不验 socket。"""
+    handler = _handler(node).__new__(_handler(node))
+    handler.path = '/api/ik_weight'
+    handler.headers = {'Content-Length':
+                       str(len(body) if length is None else length)}
+    handler.rfile = io.BytesIO(body)
+    sent = {}
+    handler._send = lambda code, payload, kind, cache='no-store': sent.update(
+        code=code, body=payload)
+    handler._json = lambda payload: sent.update(
+        code=200, body=json.dumps(payload).encode())
+    handler.do_POST()
+    return sent
+
+
+def test_ik_weight_endpoint_accepts_only_sane_values():
+    """这是页面上唯一会改变求解行为的写入口，越界值必须在进 ROS 之前就被拦住。"""
+    node = DashboardNode.__new__(DashboardNode)
+    node._lock = threading.Lock()
+    node._pending_weight = None
+
+    assert _post(node, b'{"value": 0.03}')['code'] == 200
+    assert node._pending_weight == pytest.approx(0.03)
+
+    node._pending_weight = None
+    for bad in (b'{"value": 1.5}', b'{"value": -0.1}', b'{"value": NaN}',
+                b'{"value": Infinity}', b'{"value": "x"}', b'{}', b'not json'):
+        assert _post(node, bad)['code'] == 400, bad
+        assert node._pending_weight is None, bad
+
+    # 超大 body 不读；声明长度为 0 也不读。
+    assert _post(node, b'{"value": 0.5}', length=999)['code'] == 400
+    assert _post(node, b'', length=0)['code'] == 400
+    assert node._pending_weight is None

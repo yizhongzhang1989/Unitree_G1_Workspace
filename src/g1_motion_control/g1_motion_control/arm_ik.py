@@ -56,6 +56,7 @@ class ArmIK:
                  damping: float = 0.05, tol_pos: float = 1e-3,
                  tol_ori: float = 3.5e-3, joint_limits: dict | None = None,
                  max_step_pos: float = 0.1, max_step_ori: float = 0.5,
+                 rotation_weight: float = 1.0,
                  null_gain: dict | None = None,
                  null_target: dict | None = None,
                  null_gate: tuple = (0.6, 1.2)) -> None:
@@ -115,6 +116,9 @@ class ArmIK:
         # 稳定性参数，不是精度参数——理由见文件头。
         self._max_step_pos = float(max_step_pos)
         self._max_step_ori = float(max_step_ori)
+        # 笛卡尔任务刚度 [x y z rx ry rz] = [1 1 1 w w w]。solve 每次只读一次，
+        # dashboard 在控制线程求解期间热更新也不会让同一轮混用新旧值。
+        self.set_rotation_weight(rotation_weight)
         # 零空间软偏好，按 joint_names 排；显式参考轴无门限，其余增益轴以 0 为参考并门控。
         self._null_gain = None
         self._null_target = np.full(self.model.nq, np.nan)
@@ -147,6 +151,17 @@ class ArmIK:
                 raise ValueError(f'{name} 的 null_target 需要正的 null_gain')
             self._null_target[index] = value
 
+    @property
+    def rotation_weight(self) -> float:
+        return self._rotation_weight
+
+    def set_rotation_weight(self, value: float) -> None:
+        """设置旋转相对位置的任务权重；0 = 只跟位置，1 = 与位置同权。"""
+        weight = float(value)
+        if not np.isfinite(weight) or not 0.0 <= weight <= 1.0:
+            raise ValueError('rotation_weight 必须是 [0, 1] 内的有限值')
+        self._rotation_weight = weight
+
     def _place(self, q: np.ndarray) -> None:
         """computeJointJacobians 内部已经做过正运动学，不必再单独调一次。"""
         pin.computeJointJacobians(self.model, self.data, q)
@@ -173,6 +188,11 @@ class ArmIK:
             pin.Quaternion(np.asarray(pose[3:7], dtype=np.float64)).matrix(),
             np.asarray(pose[:3], dtype=np.float64))
             for side, pose in targets.items() if side in self._tip}
+        rotation_weight = self._rotation_weight
+        task_scale = np.array([1.0, 1.0, 1.0,
+                               np.sqrt(rotation_weight),
+                               np.sqrt(rotation_weight),
+                               np.sqrt(rotation_weight)])
         pos_err = ori_err = 0.0
         for step in range(self._iters):
             self._place(q)
@@ -187,7 +207,9 @@ class ArmIK:
                 ori_err = max(ori_err, side_ori)
                 # 收敛判据按侧算：已经到位的一侧这一轮完全不碰，省一次 DLS 求解，
                 # 也保证“只发右臂指令时左臂位形一动不动”。
-                if side_pos > self._tol_pos or side_ori > self._tol_ori:
+                # 权重为 0 时姿态不进代价，也就不该再拿它拖着不判收敛。
+                chasing_ori = rotation_weight > 0.0 and side_ori > self._tol_ori
+                if side_pos > self._tol_pos or chasing_ori:
                     # 报出去的 pos_err/ori_err 仍是**真实**误差，只有喂给 DLS 的这份限幅。
                     capped = error.copy()
                     if side_pos > self._max_step_pos > 0.0:
@@ -209,8 +231,9 @@ class ArmIK:
                     continue
                 jac = pin.getFrameJacobian(
                     self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:, cols]
+                weighted_jac = task_scale[:, None] * jac
                 # 阻尼最小二乘：加了 lambda^2*I 之后矩阵恒正定，solve 不会奇异。
-                jjt = jac @ jac.T
+                jjt = weighted_jac @ weighted_jac.T
                 preference = None
                 if self._null_gain is not None:
                     offset = q[cols] - np.where(ungated, target, 0.0)
@@ -223,14 +246,15 @@ class ArmIK:
                 if preference is None:
                     if error is None:
                         continue
-                    task = jac.T @ np.linalg.solve(jjt + self._lambda2 * _I6, error)
+                    task = weighted_jac.T @ np.linalg.solve(
+                        jjt + self._lambda2 * _I6, task_scale * error)
                 else:
                     # 要显式取伪逆才能构造零空间投影 (I - J# J)，比 solve 略贵；
                     # 正常构型下门全关，走上面那条快路径，开销与不带偏置时一致。
-                    sharp = jac.T @ np.linalg.inv(jjt + self._lambda2 * _I6)
-                    task = (self._null_eye[side] - sharp @ jac) @ preference
+                    sharp = weighted_jac.T @ np.linalg.inv(jjt + self._lambda2 * _I6)
+                    task = (self._null_eye[side] - sharp @ weighted_jac) @ preference
                     if error is not None:
-                        task += sharp @ error
+                        task += sharp @ (task_scale * error)
                 q[cols] = np.clip(q[cols] + task, self.lower[cols], self.upper[cols])
             # 任务已到位时每帧只尝试一次软偏好；投影为零就自然不动，不设角度门限。
             if not errors:

@@ -62,6 +62,7 @@ import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import SwitchController
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -196,6 +197,9 @@ class MotionControlNode(Node):
             tol_ori=p('ik_tol_ori', 0.0035).get_parameter_value().double_value,
             max_step_pos=p('ik_max_step_pos', 0.1).get_parameter_value().double_value,
             max_step_ori=p('ik_max_step_ori', 0.5).get_parameter_value().double_value,
+            # 姿态相对位置的任务刚度，dashboard 可在运行时改；位置恒为 1。
+            rotation_weight=p('ik_rotation_weight', 1.0)
+            .get_parameter_value().double_value,
             joint_limits=joint_limits,
             null_gain=null_gain,
             null_target=null_target,
@@ -369,6 +373,8 @@ class MotionControlNode(Node):
         self.create_service(Trigger, '~/engage', self._on_engage, callback_group=services)
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
+        # 必须排在全部 declare_parameter 之后：声明本身会触发这个回调。
+        self.add_on_set_parameters_callback(self._on_set_parameters)
         self.get_logger().info(
             '待命。~/engage 站立（插值走完手臂即可用），~/start 启动下肢策略，~/estop 急停。')
 
@@ -421,6 +427,31 @@ class MotionControlNode(Node):
                     self._pose[name] = chunk[name]
             if 'grip' in chunk:
                 self._grip = np.clip(chunk['grip'], self._grip_lo, self._grip_hi)
+
+    def _on_set_parameters(self, parameters):
+        """只放行 ``ik_rotation_weight``，校验通过后立刻作用到在跑的求解器上。"""
+        for parameter in parameters:
+            if parameter.name != 'ik_rotation_weight':
+                continue
+            value = parameter.value
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return SetParametersResult(
+                    successful=False, reason='ik_rotation_weight 必须是数值')
+            with self._lock:
+                ik = self._ik
+            try:
+                # 校验只写在 ArmIK 一处，节点这边不复制一份区间判断。
+                if ik is not None:
+                    ik.set_rotation_weight(value)
+                elif not 0.0 <= float(value) <= 1.0 or not math.isfinite(float(value)):
+                    raise ValueError('rotation_weight 必须是 [0, 1] 内的有限值')
+            except ValueError as error:
+                return SetParametersResult(successful=False, reason=str(error))
+            # 建模还没完成时先记下来，_on_description 会用这份新值建 ArmIK。
+            with self._lock:
+                self._ik_kwargs['rotation_weight'] = float(value)
+            self.get_logger().info(f'IK 姿态权重改为 {float(value):.3f}')
+        return SetParametersResult(successful=True)
 
     def _on_description(self, message: String) -> None:
         """/robot_description 是 latched 的，正常只会进来一次。"""
@@ -696,6 +727,8 @@ class MotionControlNode(Node):
                 'arms_live': self._arms_live,
                 'ik_pos_err': round(pos_err, 4),
                 'ik_ms': round(solve_ms, 2),
+                'ik_rotation_weight': round(
+                    float(self._ik_kwargs['rotation_weight']), 4),
                 'grip': [round(float(v), 3) for v in self._grip],
             }
             # IK 解 + arm_rate_limit 后实际发给 FPC 的关节目标之正解，控制环里已经算过

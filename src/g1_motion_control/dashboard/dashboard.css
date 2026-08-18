@@ -91,6 +91,19 @@ body {
   padding-top: 8px;
 }
 
+#rotw {
+  flex: 1;
+  min-width: 0;
+  accent-color: #d8b25a;
+}
+
+#rotw-val {
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
 table {
   width: 100%;
   margin-top: 10px;
