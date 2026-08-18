@@ -30,7 +30,6 @@ find_package(realtime_tools REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
-find_package(trajectory_msgs REQUIRED)
 find_package(unitree_api REQUIRED)
 find_package(unitree_hg REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
@@ -110,6 +109,7 @@ install(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
+  find_package(trajectory_msgs REQUIRED)
   ament_add_gtest(
     test_periodic_deadline
     test/test_periodic_deadline.cpp

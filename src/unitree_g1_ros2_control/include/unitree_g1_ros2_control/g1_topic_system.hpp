@@ -103,6 +103,7 @@ private:
     std::uint32_t next_claim_mask(
         const std::vector<std::string>& start_interfaces,
         const std::vector<std::string>& stop_interfaces) const;
+    void shutdown();
     void clear_output();
     void release_body();
     void restore_motion_on_shutdown();
@@ -113,8 +114,6 @@ private:
     std::vector<double> state_velocity_;
     std::vector<double> state_effort_;
     std::vector<double> command_position_;
-    std::array<double, kG1JointCount> stiffness_{};
-    std::array<double, kG1JointCount> damping_{};
     // 停止时把 `kp` 降到零的时长；`kd` 全程保留，只在最后一帧归零。
     double release_ramp_s_{2.0};
     // The gains actually written into every command, exported as state so that
@@ -166,8 +165,6 @@ private:
     double state_timeout_s_{0.25};
     double gripper_state_timeout_s_{0.75};
     double gripper_command_rate_hz_{100.0};
-    double gripper_kp_{10.0};
-    double gripper_kd_{5.0};
     double gripper_service_timeout_s_{3.0};
     double motion_switch_timeout_s_{1.0};
     double motion_select_timeout_s_{10.0};

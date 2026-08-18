@@ -5,7 +5,7 @@
 
 > 简单理解：FPC/JTC 只写目标位置；`G1TopicSystem` 再填齐 MIT 命令所需的其他字段，然后发布 G1 `LowCmd` 或夹爪 `MitCommand`。
 
-具体来说，`q` 来自 position interface，`kp/kd` 来自[默认增益表](config/default_29dof_param.yaml)，`dq/tau` 固定为 `0`，`mode` 固定为 MIT 模式，`mode_machine` 跟随 `/lowstate`，CRC 在发布前计算。夹爪的 `q` 同样来自 position interface，其他 MIT 参数使用夹爪配置。实际位置闭环由设备底层完成。
+具体来说，`q` 来自 position interface，`kp/kd` 来自[默认增益表](config/default_31dof_param.yaml)，`dq/tau` 固定为 `0`，`mode` 固定为 MIT 模式，`mode_machine` 跟随 `/lowstate`，CRC 在发布前计算。夹爪的 `q` 同样来自 position interface，后两项增益分别写入左右夹爪命令。实际位置闭环由设备底层完成。
 
 | 组件 | 负责 |
 |---|---|
@@ -124,7 +124,7 @@ flowchart LR
   FPC <-.->|"互斥：同一组 command interface<br/>只能一个 active"| JTC
 ```
 
-- **互斥（FPC ↔ JTC）**：两者 `joints` 顺序完全相同、请求同一组 31 个 `<joint>/position`。ResourceManager 拒绝重复 claim，所以 `switch_controller` 激活其中一个时必须同时停掉另一个。这不是约定，是硬约束。
+- **互斥（FPC ↔ JTC）**：两者从 `default_31dof_param.yaml` 的 `/**.ros__parameters.joints` 读取同一组 31 个 `<joint>/position`。ResourceManager 拒绝重复 claim，所以 `switch_controller` 激活其中一个时必须同时停掉另一个。这不是约定，是硬约束。
 - **重力补偿不是第三个 controller**，而是这两个 controller 内部各自的一段前馈（见下节），参数名和含义完全一致。「要不要补偿」是 `compensation_scale` 参数，不是「激活哪个 controller」。
 
 ### `G1TopicSystem` 的接口
@@ -165,9 +165,9 @@ G1 有两颗 IMU，中间隔着三个腰关节，弯腰时重力方向相差可�
 
 manager 以 500 Hz 调用 `read()`/`write()`。G1 命令直接从 `write()` 发布；Gloria-M 在同一路径内用 steady clock 固定相位 deadline 降采样到 100 Hz。若一次 `write()` 错过一个或多个时隙，deadline 直接前移到下一个未来时隙，不补发过期命令，也不按“当前时刻 + 10 ms”累积漂移。KWR57 raw 保持设备节点原有 1 kHz 话题，插件用每侧原子快照读取，不增加转发节点。FT 数值按 `9.80665` 从 kgf/kgf m 转为 SI；Unitree 四元数从 `w,x,y,z` 转为 ROS `x,y,z,w` 并归一化。
 
-G1 增益表保持物理电机顺序不变。`arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，腿、腰和全部 `kd` 不变。唯一数值默认值由底层 `G1TopicSystem` 持有，为 `1.0`；上层 launch/xacro 的默认值为空，因此默认生成的 URDF 不包含该字段。需要覆盖时显式传入（例如 `arm_stiffness_scale:=2.5`），xacro 才会把它写入 ros2_control hardware 参数；允许范围为 `(0, 4]`。
+`default_31dof_param.yaml` 是 31 轴顺序的唯一来源：`/**.ros__parameters.joints` 由 ROS 2 wildcard 同时注入 FPC 和 JTC，`/g1_gain_table.ros__parameters` 保存同序的 `stiffness`/`damping`。Humble 的 spawner 依次加载这份公共文件和 controller 专属文件；后者只保留各自不同的参数。前 29 项保持 G1 物理电机顺序，最后两项分别是 `left_eccentric_joint` 和 `right_eccentric_joint`。`arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，夹爪、腿、腰和全部 `kd` 不变。唯一数值默认值由底层 `G1TopicSystem` 持有，为 `1.0`；上层 launch/xacro 的默认值为空，因此默认生成的 URDF 不包含该字段。需要覆盖时显式传入（例如 `arm_stiffness_scale:=2.5`），xacro 才会把它写入 ros2_control hardware 参数；允许范围为 `(0, 4]`。
 
-**缩放后的最终增益以 `<joint>/kp`、`<joint>/kd` state interface 导出**。它们是 `write()` 写进 `LowCmd` 的同一份数据，不是副本，所以任何需要知道增益的 controller（如重力补偿）都不必重复声明增益文件，也不会在 `arm_stiffness_scale` 变化时遗漏同步。夹爪两项填 `gripper_kp`/`gripper_kd`。
+**缩放后的最终增益以 `<joint>/kp`、`<joint>/kd` state interface 导出**。它们也是 `write()` 写入本体 `LowCmd` 和左右夹爪 `MitCommand` 的同一份数据，所以任何需要知道增益的 controller（如重力补偿）都不必重复声明增益文件，也不会遗漏同步。
 
 硬件导出的 31 个 command interface 由 `forward_position_controller`（FPC）或 `joint_trajectory_controller`（JTC）互斥 claim。ros2_control 的 claim 只提供命令资源互斥，不检查反馈是否新鲜；feedback freshness 是 `G1TopicSystem` 自己实现的安全策略。G1 使用 `state_timeout_s=0.25 s`，Gloria 使用独立的 `gripper_state_timeout_s=0.75 s`。单侧夹爪 stale 时只跳过该侧 MIT 输出，G1 LowCmd 和另一侧不受影响；反馈恢复后该侧自然恢复。
 
@@ -372,7 +372,7 @@ ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 - `joint_trajectory_controller`：已配置但 inactive；
 - `left_ft_broadcaster`、`right_ft_broadcaster`：已注册但默认不启动。
 
-`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。`joint_trajectory_controller` 类型为上游标准 `joint_trajectory_controller/JointTrajectoryController`，动作接口为 `/joint_trajectory_controller/follow_joint_trajectory`。两者的 31 个 `joints` 顺序完全相同，并请求同一组 position command interface；controller_manager 的 resource claim 保证它们互斥 active。两者都只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
+`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。`joint_trajectory_controller` 类型为上游标准 `joint_trajectory_controller/JointTrajectoryController`，动作接口为 `/joint_trajectory_controller/follow_joint_trajectory`。两者共享公共参数文件中的 31 个 `joints`，并请求同一组 position command interface；controller_manager 的 resource claim 保证它们互斥 active。两者都只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
 
 FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也只暴露最新样本；短暂调度繁忙后不会依次执行过时 setpoint。可靠发布者仍可与该订阅匹配，G1 Pose Commander 则直接使用相同的 BEST_EFFORT latest-only 配置。
 

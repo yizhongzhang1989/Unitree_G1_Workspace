@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import math
 from xml.etree import ElementTree
 
 import yaml
@@ -27,25 +28,32 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     trajectory_config = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "joint_trajectory_controller.yaml").read_text(
             encoding="utf-8"))
-    gain_config = yaml.safe_load(
-        (PACKAGE_ROOT / "config" / "default_29dof_param.yaml").read_text(
+    gain_document = yaml.safe_load(
+        (PACKAGE_ROOT / "config" / "default_31dof_param.yaml").read_text(
             encoding="utf-8"))
+    joints = gain_document["/**"]["ros__parameters"]["joints"]
+    gain_config = gain_document["/g1_gain_table"]["ros__parameters"]
 
     forward_parameters = forward_config[
         "/forward_position_controller"]["ros__parameters"]
-    joints = forward_parameters["joints"]
     trajectory_parameters = trajectory_config[
         "/joint_trajectory_controller"]["ros__parameters"]
-    assert joints[:29] == gain_config["joint_names"]
+    assert "joints" not in forward_parameters
+    assert "joints" not in trajectory_parameters
     assert joints[29:] == [
         "left_eccentric_joint",
         "right_eccentric_joint",
     ]
     assert len(joints) == 31
+    assert len(gain_config["stiffness"]) == len(joints)
+    assert len(gain_config["damping"]) == len(joints)
+    assert all(math.isfinite(value) and value >= 0.0
+               for value in gain_config["stiffness"])
+    assert all(math.isfinite(value) and value >= 0.0
+               for value in gain_config["damping"])
     # The gravity feed-forward is a parameter of this controller now, not a
     # second controller relaying into it.
     assert set(forward_parameters) == {
-        "joints",
         "gravity_table",
         "gravity_filter_cutoff_hz",
         "offset_ramp_s",
@@ -54,7 +62,6 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     assert forward_parameters["gravity_table"] == \
         "package://arm_gravity_compensation/config/gravity_table.yaml"
     assert forward_parameters["compensation_scale"] == 1.0
-    assert trajectory_parameters["joints"] == joints
     assert trajectory_parameters["command_interfaces"] == ["position"]
     assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
     # Humble 的 JTC 没有“不发布状态”这个概念（校验下限 0.1 Hz），也没有理由
@@ -132,6 +139,24 @@ def test_arm_stiffness_explicit_override_reaches_hardware_plugin():
     assert parameters["arm_stiffness_scale"] == "2.5"
 
 
+def test_gripper_gains_only_come_from_gain_file():
+    module = _load_control_launch()
+    assert "gripper_kp" not in module._HARDWARE_ARGUMENTS
+    assert "gripper_kd" not in module._HARDWARE_ARGUMENTS
+
+    context = LaunchContext()
+    context.launch_configurations.update(module._HARDWARE_ARGUMENTS)
+    description = module._robot_description(context, PACKAGE_ROOT, "dual")
+    hardware = ElementTree.fromstring(description).find(
+        "./ros2_control/hardware")
+    parameters = {
+        parameter.get("name"): parameter.text
+        for parameter in hardware.findall("param")
+    }
+    assert "gripper_kp" not in parameters
+    assert "gripper_kd" not in parameters
+
+
 def test_control_launch_loads_both_motion_controllers_inactive():
     module = _load_control_launch()
     context = LaunchContext()
@@ -150,7 +175,17 @@ def test_control_launch_loads_both_motion_controllers_inactive():
         if isinstance(node, Node) and
         node._Node__node_executable == "spawner"
     }
+    def parameter_files(arguments):
+        return [
+            Path(arguments[index + 1]).name
+            for index, argument in enumerate(arguments)
+            if argument == "--param-file"
+        ]
 
     assert "--inactive" in spawners["forward_position_controller"]
     assert "--inactive" in spawners["joint_trajectory_controller"]
+    assert parameter_files(spawners["forward_position_controller"]) == [
+        "default_31dof_param.yaml", "forward_position_controller.yaml"]
+    assert parameter_files(spawners["joint_trajectory_controller"]) == [
+        "default_31dof_param.yaml", "joint_trajectory_controller.yaml"]
     assert "arm_gravity_compensation" not in spawners

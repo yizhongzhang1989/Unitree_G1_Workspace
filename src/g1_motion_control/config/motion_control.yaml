@@ -1,7 +1,7 @@
 /motion_control:
   ros__parameters:
     # `joints`（FPC 的 31 轴顺序）由 launch 从
-    # unitree_g1_ros2_control/config/forward_position_controller.yaml 读取后注入，
+    # unitree_g1_ros2_control/config/default_31dof_param.yaml 读取后注入，
     # 不在这里抄第二份——两份不同步就是左右腿指令互换级别的事故。
 
     # 策略权重。训练侧 scripts/train.py 每次存档都会重新导出 policy.onnx，

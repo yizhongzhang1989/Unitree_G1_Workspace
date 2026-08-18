@@ -34,12 +34,12 @@ _SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
 def _nodes(context):
     share = Path(get_package_share_directory('g1_motion_control'))
     config = share / 'config' / 'motion_control.yaml'
-    # 31 轴的顺序只能有一个来源，就是控制器自己的参数文件；抄一份到本包的 config
+    # 31 轴的顺序只能有一个来源，就是控制栈的公共参数文件；抄一份到本包的 config
     # 里，早晚会有一次改了这边忘了那边。
-    controller = _parameters(
+    common = _parameters(
         Path(get_package_share_directory('unitree_g1_ros2_control')) /
-        'config' / 'forward_position_controller.yaml')
-    overrides = {'joints': controller['joints']}
+        'config' / 'default_31dof_param.yaml')
+    overrides = {'joints': common['joints']}
 
     policy_path = LaunchConfiguration('policy_path').perform(context)
     if policy_path:

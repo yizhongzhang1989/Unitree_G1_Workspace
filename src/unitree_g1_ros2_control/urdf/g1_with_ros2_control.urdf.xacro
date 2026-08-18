@@ -12,14 +12,12 @@
   <xacro:arg name="right_wrench_topic" default="/arm1/wrench_raw"/>
   <xacro:arg name="left_wrench_scale" default="9.80665"/>
   <xacro:arg name="right_wrench_scale" default="9.80665"/>
-  <xacro:arg name="gain_file" default="$(find unitree_g1_ros2_control)/config/default_29dof_param.yaml"/>
+  <xacro:arg name="gain_file" default="$(find unitree_g1_ros2_control)/config/default_31dof_param.yaml"/>
   <xacro:arg name="gripper_command_rate_hz" default="100.0"/>
   <xacro:arg name="arm_stiffness_scale" default=""/>
   <xacro:arg name="state_timeout_s" default="0.25"/>
   <xacro:arg name="gripper_state_timeout_s" default="0.75"/>
   <xacro:arg name="require_pr_mode" default="true"/>
-  <xacro:arg name="gripper_kp" default="10.0"/>
-  <xacro:arg name="gripper_kd" default="5.0"/>
   <xacro:arg name="gripper_service_timeout_s" default="3.0"/>
   <xacro:arg name="manage_motion_mode" default="true"/>
   <xacro:arg name="restore_motion_mode" default="true"/>
@@ -57,8 +55,6 @@
       <param name="state_timeout_s">$(arg state_timeout_s)</param>
       <param name="gripper_state_timeout_s">$(arg gripper_state_timeout_s)</param>
       <param name="require_pr_mode">$(arg require_pr_mode)</param>
-      <param name="gripper_kp">$(arg gripper_kp)</param>
-      <param name="gripper_kd">$(arg gripper_kd)</param>
       <param name="gripper_service_timeout_s">$(arg gripper_service_timeout_s)</param>
       <param name="manage_motion_mode">$(arg manage_motion_mode)</param>
       <param name="restore_motion_mode">$(arg restore_motion_mode)</param>
