@@ -46,6 +46,18 @@ def main(argv=None) -> int:
     parser.add_argument('--vfov', type=float, default=None)
     parser.add_argument('--width', type=int, default=None)
     parser.add_argument('--height', type=int, default=None)
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    background_candidates = [
+        os.path.join(package_dir, 'resource', 'bg.jpg'),
+        os.path.join(package_dir, os.pardir, 'resource', 'bg.jpg'),
+        os.path.join(package_dir, os.pardir, os.pardir, os.pardir, os.pardir,
+                     'share', 'head_sensors', 'resource', 'bg.jpg'),
+    ]
+    default_background = next((os.path.abspath(path) for path in background_candidates
+                               if os.path.isfile(path)), None)
+    parser.add_argument('--background',
+                        default=default_background,
+                        help='彩色图背景图片；默认使用 resource/bg.jpg')
     parser.add_argument('--out', default='/tmp/head_view')
     args = parser.parse_args(argv)
 
@@ -65,7 +77,8 @@ def main(argv=None) -> int:
     # camera 是 NamedTuple（tuple 子类），% 会把它当参数列表展开，必须再包一层。
     print('相机          : %s' % (camera,))
     shot = shoot(joints, urdf=args.urdf, camera=camera, frame=frame,
-                 optical=not args.link_frame, extrinsic=extrinsic, out=args.out)
+                 optical=not args.link_frame, extrinsic=extrinsic,
+                 background=args.background, out=args.out)
 
     hit = np.isfinite(shot.depth)
     print('%-13s : 世界系位置 [%.3f %.3f %.3f]' % (frame, *shot.cam_pos))
@@ -74,7 +87,7 @@ def main(argv=None) -> int:
         print('深度范围      : %.3f ~ %.3f m' % (shot.depth[hit].min(), shot.depth[hit].max()))
         seen = [shot.names[i] for i in np.unique(shot.label) if i >= 0]
         print('可见部件(%d)   : %s' % (len(seen), ', '.join(seen)))
-    print('输出          : %s_{depth16,depth,parts}.png' % args.out)
+    print('输出          : %s_{color,depth16,depth,parts}.png' % args.out)
     return 0
 
 
