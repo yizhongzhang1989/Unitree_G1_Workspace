@@ -74,6 +74,60 @@ def _inertial_parameters(link: ET.Element) -> Optional[Dict[str, object]]:
     }
 
 
+def _digest_attributes(element, keys) -> str:
+    if element is None:
+        return ""
+    values = []
+    for key in keys:
+        text = element.get(key)
+        if text is None:
+            values.append("")
+            continue
+        try:
+            # 数值归一：0.10 和 0.1 是同一个模型，不该算成两个。
+            values.append(" ".join(
+                "%.12g" % float(part) for part in text.split()))
+        except ValueError:
+            values.append(text.strip())
+    return ",".join(values)
+
+
+def urdf_model_digest(urdf_xml: str) -> str:
+    """Digest of what changes the model, ignoring how it is drawn.
+
+    Hashing the whole file treats a new render colour as a new robot. Only the
+    kinematics and the inertias can invalidate a calibration, so only those are
+    read: joint connectivity, origin, axis and limits, plus link inertials.
+    ``visual``, ``collision``, ``material`` and anything else are ignored.
+    """
+    root = ET.fromstring(urdf_xml)
+    parts = []
+    for joint in sorted(root.findall("joint"), key=lambda e: e.get("name") or ""):
+        parent, child = joint.find("parent"), joint.find("child")
+        parts.append("joint|%s|%s|%s|%s|%s|%s|%s" % (
+            joint.get("name") or "",
+            joint.get("type") or "",
+            "" if parent is None else parent.get("link") or "",
+            "" if child is None else child.get("link") or "",
+            _digest_attributes(joint.find("origin"), ("xyz", "rpy")),
+            _digest_attributes(joint.find("axis"), ("xyz",)),
+            _digest_attributes(joint.find("limit"),
+                               ("lower", "upper", "effort", "velocity")),
+        ))
+    for link in sorted(root.findall("link"), key=lambda e: e.get("name") or ""):
+        inertial = link.find("inertial")
+        if inertial is None:
+            continue
+        parts.append("link|%s|%s|%s|%s" % (
+            link.get("name") or "",
+            _digest_attributes(inertial.find("origin"), ("xyz", "rpy")),
+            _digest_attributes(inertial.find("mass"), ("value",)),
+            _digest_attributes(inertial.find("inertia"),
+                               ("ixx", "ixy", "ixz", "iyy", "iyz", "izz")),
+        ))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 def create_parameter_document(urdf_xml: str, source_path: str) -> dict:
     root = ET.fromstring(urdf_xml)
     links = root.findall("link")
@@ -156,7 +210,8 @@ def create_parameter_document(urdf_xml: str, source_path: str) -> dict:
         "updated_at": utc_now(),
         "source_urdf": {
             "path": str(Path(source_path).expanduser().resolve()),
-            "sha256": hashlib.sha256(urdf_xml.encode("utf-8")).hexdigest(),
+            "digest_kind": "model",
+            "sha256": urdf_model_digest(urdf_xml),
             "robot_name": root.get("name", ""),
         },
         "model_scope": {
@@ -242,17 +297,40 @@ class ParameterStore:
     def exists(self) -> bool:
         return Path(self.path).is_file()
 
-    def initialize(self, urdf_path: str, *, force: bool = False) -> dict:
+    def initialize(self, urdf_path: str, *, force: bool = False,
+                   rebind: bool = False) -> dict:
         if self.exists and not force:
             document = self.load()
             source = Path(urdf_path).expanduser().resolve()
             with open(source, "r", encoding="utf-8") as stream:
-                digest = hashlib.sha256(stream.read().encode("utf-8")).hexdigest()
+                text = stream.read()
+            digest = urdf_model_digest(text)
             stored_source = document["source_urdf"]
+            if stored_source.get("digest_kind") != "model":
+                # 早期文件存的是整份文件的摘要，改个渲染颜色就会不认。内容真没变
+                # 就地升级成模型摘要；变了则落到下面的检查，报同样的错。
+                legacy = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                if stored_source["sha256"] == legacy:
+                    stored_source["digest_kind"] = "model"
+                    stored_source["sha256"] = digest
+                    self.save(document)
+                    document = self.load()
+                    stored_source = document["source_urdf"]
             if stored_source["sha256"] != digest:
-                raise ValueError(
-                    "existing parameter file belongs to a different URDF; "
-                    "back it up and reinitialize explicitly")
+                if not rebind:
+                    raise ValueError(
+                        "existing parameter file belongs to a different URDF; "
+                        "rerun with rebind_urdf:=true to keep the captured "
+                        "poses and adopt this URDF, or back it up and "
+                        "reinitialize explicitly")
+                # 重绑只换身份，不动采样点和分组配置——质量参数本来就要重标，
+                # 但手工配好的 model_scope 没有理由跟着一起丢。
+                stored_source["digest_kind"] = "model"
+                stored_source["sha256"] = digest
+                stored_source["path"] = str(source)
+                self.save(document)
+                document = self.load()
+                stored_source = document["source_urdf"]
             # 同一份模型换个路径看到（工作区搬家、或容器里透过 bind mount 看同一棵树）
             # 不是换了模型：内容摘要才是身份，路径只是出处记录。
             if Path(stored_source["path"]).resolve() != source:

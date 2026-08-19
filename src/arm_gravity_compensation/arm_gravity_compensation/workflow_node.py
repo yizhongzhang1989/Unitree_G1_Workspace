@@ -101,6 +101,10 @@ class ArmGravityWorkflow(Node):
         self._output_urdf = str(Path(self.declare_parameter(
             "calibrated_urdf", str(default_data / "calibrated.urdf")
         ).get_parameter_value().string_value).expanduser().resolve())
+        # 一次性接受当前 URDF：早期参数文件按整份文件做摘要，渲染改动也会让它
+        # 对不上，而那种摘要没法反推出模型部分变没变，只能人来确认一次。
+        self._rebind_urdf = self.declare_parameter(
+            "rebind_urdf", False).get_parameter_value().bool_value
         # Lumped rigid-body chain consumed by the ros2_control gravity
         # compensation controller, written as a ready-to-load parameter file.
         self._gravity_table_path = str(Path(self.declare_parameter(
@@ -134,6 +138,11 @@ class ArmGravityWorkflow(Node):
         self._stability_position_range = self.declare_parameter(
             "stability_position_range", 0.02
         ).get_parameter_value().double_value
+        # 退到哪里再回来。必须大于死区 2*tau_s/kp，否则关节根本没挪到另一侧，
+        # 两次采的是同一个静止点，平均下来等于没消。本臂实测死区最大 0.107 rad。
+        # 置 0 则退回旧的单向采样。
+        self._approach_offset = self.declare_parameter(
+            "approach_offset_rad", 0.12).get_parameter_value().double_value
         self._imu_duration = self.declare_parameter(
             "imu_duration_s", 1.0).get_parameter_value().double_value
         self._imu_samples = self.declare_parameter(
@@ -243,7 +252,8 @@ class ArmGravityWorkflow(Node):
 
         self._store = ParameterStore(self._parameter_path)
         with self._file_lock:
-            document = self._store.initialize(self._urdf_path)
+            document = self._store.initialize(
+                self._urdf_path, rebind=self._rebind_urdf)
         self._model = TorsoArmGravityModel.from_urdf_file(self._urdf_path)
         self._load_model_parameters(document)
 
@@ -760,20 +770,9 @@ class ArmGravityWorkflow(Node):
                         stage="move", iteration=len(samples) + 1)
 
                     target_array = self._store.target_positions(target, side)
-                    with self._lock:
-                        self._require_fresh_state_locked()
-                        side_position = self._side_values(self._position, side)
-                    controller = TorquePoseController(**self._controller_kwargs)
-                    controller.start(
-                        time.monotonic(), side_position, target_array,
-                        initial_torque=self._last_feedforward(side))
-                    hold_controllers[side] = controller
-                    self._move_until_stable(
-                        side, controller, hold_gravity, hold_controllers)
-                    self._set_progress(stage="static_average")
-                    sample = self._sample_static_pose(
+                    sample = self._sample_from_both_sides(
                         int(target["id"]), side, target_array,
-                        controller, hold_gravity, hold_controllers)
+                        hold_gravity, hold_controllers)
                     samples.append(sample)
                     hold_gravity = sample.gravity.copy()
                     self._set_message(
@@ -818,6 +817,8 @@ class ArmGravityWorkflow(Node):
                                              for value in sample.estimated_torque],
                         "velocity_std": [float(value)
                                          for value in sample.velocity_std],
+                        "friction": [float(value)
+                                     for value in sample.friction],
                     } for sample in samples],
                 }
                 with self._file_lock:
@@ -828,6 +829,7 @@ class ArmGravityWorkflow(Node):
                     self._store.export_calibrated_urdf(self._output_urdf)
                 self._model.set_arm_parameters(
                     side, fit.mass_scales, fit.torque_bias)
+                self._report_friction(side, samples)
                 self._set_message(
                     "%s batch complete: %d poses, RMSE %.4f -> %.4f, "
                     "rank %d, nullity %d, cond %.1f"
@@ -925,6 +927,96 @@ class ArmGravityWorkflow(Node):
             "(target error %.4f rad, velocity %.4f rad/s, "
             "position range %.4f rad)"
             % (error, stability.max_velocity, stability.max_position_range))
+
+    def _settle_at(
+        self,
+        side: str,
+        goal: np.ndarray,
+        gravity: np.ndarray,
+        controllers: Dict[str, TorquePoseController],
+    ) -> TorquePoseController:
+        """Drive one arm to ``goal`` and wait for it to stop there."""
+        with self._lock:
+            self._require_fresh_state_locked()
+            side_position = self._side_values(self._position, side)
+        controller = TorquePoseController(**self._controller_kwargs)
+        controller.start(
+            time.monotonic(), side_position, goal,
+            initial_torque=self._last_feedforward(side))
+        controllers[side] = controller
+        self._move_until_stable(side, controller, gravity, controllers)
+        return controller
+
+    def _sample_from_both_sides(
+        self,
+        target_id: int,
+        side: str,
+        target: np.ndarray,
+        gravity: np.ndarray,
+        controllers: Dict[str, TorquePoseController],
+    ) -> StaticSample:
+        """Record the pose twice, reached from below and then from above.
+
+        A joint at rest satisfies ``tau_applied + tau_g + tau_f = 0`` with the
+        friction free to take any value in ``[-tau_s, +tau_s]``, so one static
+        sample carries up to ``tau_s`` of error - measured on this arm at
+        0.05 to 0.77 N.m, which is five to fifty percent of the gravity load
+        being identified. Approaching from either side pins the friction to a
+        known sign, and averaging the pair cancels it exactly. What survives is
+        the asymmetry between the two directions, a second-order term.
+        """
+        if self._approach_offset <= 0.0:
+            controller = self._settle_at(side, target, gravity, controllers)
+            self._set_progress(stage="static_average")
+            return self._sample_static_pose(
+                target_id, side, target, controller, gravity, controllers)
+
+        offset = np.full(7, self._approach_offset)
+        pair = []
+        for index, sign in enumerate((-1.0, 1.0)):
+            self._set_progress(
+                stage="approach_below" if sign < 0.0 else "approach_above")
+            # 先退开再回来，最后一段的运动方向才是确定的；直接走到目标点的话
+            # 方向取决于手臂原先在哪，两次可能同向，摩擦就消不掉。
+            self._settle_at(side, target + sign * offset, gravity, controllers)
+            controller = self._settle_at(side, target, gravity, controllers)
+            self._set_progress(stage="static_average", iteration=index + 1)
+            pair.append(self._sample_static_pose(
+                target_id, side, target, controller, gravity, controllers))
+
+        below, above = pair
+        # 和给重力，差给摩擦：同一对样本的两个无关分量。差不进拟合，只落盘。
+        return StaticSample(
+            target_id=target_id,
+            q=0.5 * (below.q + above.q),
+            gravity=0.5 * (below.gravity + above.gravity),
+            applied_torque=0.5 * (below.applied_torque + above.applied_torque),
+            estimated_torque=0.5 * (
+                below.estimated_torque + above.estimated_torque),
+            position_error=0.5 * (below.position_error + above.position_error),
+            # 两次各自的抖动都要能被离群点检测看见，所以取大的那个。
+            velocity_std=np.maximum(below.velocity_std, above.velocity_std),
+            friction=0.5 * (below.applied_torque - above.applied_torque),
+        )
+
+    def _report_friction(self, side: str, samples) -> None:
+        """Log the half difference the gravity fit throws away.
+
+        每个位姿的两次逼近相减就是那一点的摩擦力矩，与拟合无关，白拿的。跨位姿取
+        中位数而不是平均：摩擦随姿态变，个别位姿没停稳会给出离谱值。
+        """
+        friction = np.asarray([sample.friction for sample in samples])
+        if friction.size == 0 or not np.any(friction):
+            return
+        median = np.median(np.abs(friction), axis=0)
+        spread = np.percentile(np.abs(friction), 90, axis=0) - median
+        names = [name.replace(side + "_", "").replace("_joint", "")
+                 for name in ARM_JOINTS[side]]
+        self.get_logger().info(
+            "%s 摩擦力矩（%d 个位姿的双向半差，中位 +p90 增量，N·m）: %s"
+            % (side, len(samples), "  ".join(
+                "%s %.3f+%.3f" % (name, value, extra)
+                for name, value, extra in zip(names, median, spread))))
 
     def _sample_static_pose(
         self,

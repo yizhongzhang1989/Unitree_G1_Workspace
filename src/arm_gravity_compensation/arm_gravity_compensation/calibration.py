@@ -18,6 +18,13 @@ class StaticSample:
     estimated_torque: np.ndarray
     position_error: np.ndarray
     velocity_std: np.ndarray
+    # 双向采样的**半差**，与 applied_torque 那个半和同一批数据。不进回归（回归只看
+    # 重力），只是顺手把摩擦留下来。单向采样时没有这个量，为零。
+    friction: np.ndarray = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.friction is None:
+            object.__setattr__(self, "friction", np.zeros(7))
 
 
 @dataclass(frozen=True)

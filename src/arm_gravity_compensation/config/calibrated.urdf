@@ -539,8 +539,8 @@
   <link name="left_shoulder_pitch_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0.035892 -0.011628" />
-      <mass value="0.64885876347088633" />
-      <inertia ixx="0.00038777896296010773" ixy="-8.3140677213539749e-06" ixz="5.7836992844201569e-06" iyy="0.00040937746497536425" iyz="2.0423688098108678e-05" izz="0.00038226637457964473" />
+      <mass value="0.57569378657234782" />
+      <inertia ixx="0.00034405320866043798" ixy="-7.3765777666651807e-06" ixz="5.131532359419256e-06" iyy="0.00036321627481514425" iyz="1.812072364419925e-05" izz="0.00033916221688036648" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -566,8 +566,8 @@
   <link name="left_shoulder_roll_link">
     <inertial>
       <origin rpy="0 0 0" xyz="-0.000227 0.00727 -0.063243" />
-      <mass value="0.84214224073079758" />
-      <inertia ixx="0.00080900662845943025" ixy="-1.3097079949157037e-06" ixz="1.1394459555766623e-05" iyy="0.00090527016608573448" iyz="-6.9414523730532304e-06" izz="0.00051000029322017507" />
+      <mass value="0.60930923021085548" />
+      <inertia ixx="0.00058533485458980622" ixy="-9.4760377948811109e-07" ixz="8.2441528815465669e-06" iyy="0.00065498373238218239" iyz="-5.0223000312869891e-06" izz="0.00036899691173267044" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -593,8 +593,8 @@
   <link name="left_shoulder_yaw_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.010773 -0.002949 -0.072009" />
-      <mass value="1.4666459619647374" />
-      <inertia ixx="0.0019957574752185012" ixy="1.5785426566105486e-05" ixz="0.0002821395229283664" iyy="0.0021190436548550466" iyz="-5.7147240479824923e-05" izz="0.00086999680087118084" />
+      <mass value="0.89388254204489592" />
+      <inertia ixx="0.0012163622384120463" ixy="9.6208066514368911e-06" ixz="0.00017195669609909985" iyy="0.0012915019561833953" iyz="-3.4829755725455069e-05" izz="0.00053024040709311678" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -620,8 +620,8 @@
   <link name="left_elbow_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.064956 0.004454 -0.010062" />
-      <mass value="0.80908115271697001" />
-      <inertia ixx="0.00038984226875079337" ixy="8.8054998787363573e-05" ixz="2.3193659711219809e-05" iyy="0.00055988415768014332" iyz="-7.5514240920250535e-06" izz="0.00056595226632552055" />
+      <mass value="0.61526775453980498" />
+      <inertia ixx="0.00029645651306242936" ixy="6.6961640619082113e-05" ixz="1.7637675630141078e-05" iyy="0.00042576528614154507" iyz="-5.7424990423715131e-06" izz="0.00043037979430059361" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -654,8 +654,8 @@
   <link name="left_wrist_roll_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.01713944778 0.00053759094 0.00000048864" />
-      <mass value="0.082447764775937349" />
-      <inertia ixx="4.6524152438812743e-05" ixy="-4.0962014157181607e-06" ixz="4.9268835040781594e-09" iyy="3.5923082749181342e-05" iyz="-1.1919202443429282e-09" izz="5.2898067337483782e-05" />
+      <mass value="0.08533403118227012" />
+      <inertia ixx="4.8152833320971007e-05" ixy="-4.2395980083594524e-06" ixz="5.0993599609521753e-09" iyy="3.7180649733958286e-05" iyz="-1.2336460493980941e-09" izz="5.4749881211771719e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -681,8 +681,8 @@
   <link name="left_wrist_pitch_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.02549150483 -0.00054042511 -0.00054143853" />
-      <mass value="0.46737746040628725" />
-      <inertia ixx="0.00017491806956244896" ixy="-5.8885260890186869e-06" ixz="-5.8594606978834736e-06" iyy="0.00048947025150968058" iyz="-9.5625975039430946e-08" izz="0.00048918834899528644" />
+      <mass value="0.83710792661614175" />
+      <inertia ixx="0.00031329132220418466" ixy="-1.0546789870693517e-05" ixz="-1.0494731585109239e-05" iyy="0.00087667776495975469" iyz="-1.71273260859261e-07" izz="0.00087617285650925473" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -708,8 +708,8 @@
   <link name="left_wrist_yaw_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.02200381568 0.00049485096 0.00053861123" />
-      <mass value="0.11303829598388193" />
-      <inertia ixx="6.5878881372342577e-05" ixy="-6.1126484798207545e-07" ixz="5.9591175561096857e-06" iyy="7.9834966392295758e-05" iyz="5.776072729351356e-07" izz="5.249969668548325e-05" />
+      <mass value="0.10651770614449303" />
+      <inertia ixx="6.2078672241730283e-05" ixy="-5.7600416643839878e-07" ixz="5.6153671390507322e-06" iyy="7.5229703493076314e-05" iyz="5.4428812138321361e-07" izz="4.9471262951599169e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -728,8 +728,8 @@
   <link name="right_shoulder_pitch_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 -0.035892 -0.011628" />
-      <mass value="0.64885876347088633" />
-      <inertia ixx="0.00038777896296010773" ixy="8.3140677213539749e-06" ixz="5.7836992844201569e-06" iyy="0.00040937746497536425" iyz="-2.0423688098108678e-05" izz="0.00038226637457964473" />
+      <mass value="0.6668104711265247" />
+      <inertia ixx="0.00039850748351029494" ixy="8.5440896021783109e-06" ixz="5.9437145058631723e-06" iyy="0.0004207035423681277" iyz="-2.0988741848829328e-05" izz="0.00039284238062189405" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -755,8 +755,8 @@
   <link name="right_shoulder_roll_link">
     <inertial>
       <origin rpy="0 0 0" xyz="-0.000227 -0.00727 -0.063243" />
-      <mass value="0.84214224073079758" />
-      <inertia ixx="0.00080900662845943025" ixy="1.3097079949157037e-06" ixz="1.1394459555766623e-05" iyy="0.00090527016608573448" iyz="6.9414523730532304e-06" izz="0.00051000029322017507" />
+      <mass value="0.65880103167832693" />
+      <inertia ixx="0.00063287931145832434" ixy="1.024573921739233e-06" ixz="8.9137931191313285e-06" iyy="0.00070818549470615794" iyz="5.4302417852179352e-06" izz="0.00039896908512525737" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -782,8 +782,8 @@
   <link name="right_shoulder_yaw_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.010773 0.002949 -0.072009" />
-      <mass value="1.4666459619647374" />
-      <inertia ixx="0.0019957574752185012" ixy="-1.5785426566105486e-05" ixz="0.0002821395229283664" iyy="0.0021190436548550466" iyz="5.7147240479824923e-05" izz="0.00086999680087118084" />
+      <mass value="0.94745609323914526" />
+      <inertia ixx="0.0012892631415902702" ixy="-1.0197415717424044e-05" ixz="0.00018226267079750314" iyy="0.0013689062491554682" iyz="3.6917226521307299e-05" izz="0.00056201959536283908" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -809,8 +809,8 @@
   <link name="right_elbow_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.064956 -0.004454 -0.010062" />
-      <mass value="0.80908115271697001" />
-      <inertia ixx="0.00038984226875079337" ixy="-8.8054998787363573e-05" ixz="2.3193659711219809e-05" iyy="0.00055988415768014332" iyz="7.5514240920250535e-06" izz="0.00056595226632552055" />
+      <mass value="0.61140767133954499" />
+      <inertia ixx="0.00029459659630710406" ixy="-6.6541534897453816e-05" ixz="1.7527019911733625e-05" iyy="0.00042309410856696515" iyz="5.7064715991690867e-06" izz="0.00042767966610201175" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -843,8 +843,8 @@
   <link name="right_wrist_roll_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.01713944778 -0.00053759094 0.00000048864" />
-      <mass value="0.082447764775937349" />
-      <inertia ixx="4.6524152438812743e-05" ixy="4.0962014157181607e-06" ixz="4.9268835040781594e-09" iyy="3.5923082749181342e-05" iyz="1.1919202443429282e-09" izz="5.2898067337483782e-05" />
+      <mass value="0.082703031117021292" />
+      <inertia ixx="4.6668195763666516e-05" ixy="4.1088836558076877e-06" ixz="4.9421376171332652e-09" iyy="3.6034304125755464e-05" iyz="1.1956105459595233e-09" izz="5.3061844926073943e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -870,8 +870,8 @@
   <link name="right_wrist_pitch_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.02549150483 0.00054042511 -0.00054143853" />
-      <mass value="0.46737746040628725" />
-      <inertia ixx="0.00017491806956244896" ixy="5.8885260890186869e-06" ixz="5.8594606978834736e-06" iyy="0.00048947025150968058" iyz="-9.5625975039430946e-08" izz="0.00048918834899528644" />
+      <mass value="0.86725681746081107" />
+      <inertia ixx="0.00032457467716403714" ixy="1.0926638163205279e-05" ixz="1.0872704970551389e-05" iyy="0.00090825178475020427" iyz="-1.7744175918794095e-07" izz="0.00090772869175112145" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -897,8 +897,8 @@
   <link name="right_wrist_yaw_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.02200381568 -0.00049485096 0.00053861123" />
-      <mass value="0.11303829598388193" />
-      <inertia ixx="6.5878881372342577e-05" ixy="6.1126484798207545e-07" ixz="5.9591175561096857e-06" iyy="7.9834966392295758e-05" iyz="-5.776072729351356e-07" izz="5.249969668548325e-05" />
+      <mass value="0.10158771506854486" />
+      <inertia ixx="5.9205466356660964e-05" ixy="5.4934479211430121e-07" ixz="5.3554694104408116e-06" iyy="7.1747824467593117e-05" iyz="-5.1909667032507825e-07" izz="4.718156958797731e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -917,16 +917,16 @@
   <link name="left_kwr57b_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0.0265" />
-      <mass value="0.34749566819009242" />
-      <inertia ixx="0.00015190628345068146" ixy="0" ixz="0" iyy="0.00015190628345068146" iyz="0" izz="0.00014112667824370129" />
+      <mass value="0.32745045516286253" />
+      <inertia ixx="0.00014314360209754886" ixy="0" ixz="0" iyy="0.00014314360209754886" iyz="0" izz="0.00013298581610301756" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0.0265" />
       <geometry>
         <cylinder length="0.053" radius="0.0285" />
       </geometry>
-      <material name="left_kwr57b_gray">
-        <color rgba="0.35 0.37 0.40 1" />
+      <material name="left_kwr57b_silver">
+        <color rgba="0.7 0.7 0.7 1" />
       </material>
     </visual>
     <collision>
@@ -943,15 +943,18 @@
   </joint>
   <link name="left_gripper_base">
     <inertial>
-      <mass value="0.44722251443870648" />
+      <mass value="0.42142457969267316" />
       <origin rpy="0 0 0" xyz="-9.4e-7 -0.00337385 0.03285995" />
-      <inertia ixx="0.00022744928004842278" ixy="-5.3460872029244987e-08" ixz="1.3365218007311247e-08" iyy="0.00039995414886878899" iyz="-3.2878436297985669e-06" izz="0.00034026508524813702" />
+      <inertia ixx="0.00021432891715236901" ixy="-5.0376993101978852e-08" ixz="1.2594248275494713e-08" iyy="0.00037688287964417926" iyz="-3.0981850757716995e-06" izz="0.00032063696684581989" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/gripper_base.stl" />
       </geometry>
+      <material name="left_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -962,15 +965,18 @@
   </link>
   <link name="left_eccentric">
     <inertial>
-      <mass value="0.029687330116124018" />
+      <mass value="0.027974822850963324" />
       <origin rpy="0 0 0" xyz="-5.9e-7 3e-7 -0.00523699" />
-      <inertia ixx="5.2792611128879429e-06" ixy="-1.4434435447896147e-06" ixz="0" iyy="3.1541914497254537e-06" iyz="0" izz="7.7250960082259002e-06" />
+      <inertia ixx="4.9747280688204121e-06" ixy="-1.3601788137534291e-06" ixz="0" iyy="2.9722425930167521e-06" iyz="0" izz="7.2794755032359437e-06" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/eccentric.stl" />
       </geometry>
+      <material name="left_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -981,15 +987,18 @@
   </link>
   <link name="left_left_slider">
     <inertial>
-      <mass value="0.087085448352924824" />
+      <mass value="0.082061942958171888" />
       <origin rpy="0 0 0" xyz="-0.00350049 0.01234977 0.14115772" />
-      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+      <inertia ixx="2.1863615006258821e-05" ixy="0" ixz="0" iyy="1.6649596220204012e-05" iyz="4.4961466343516123e-06" izz="2.6662023599222304e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/left_slider.stl" />
       </geometry>
+      <material name="left_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1000,15 +1009,18 @@
   </link>
   <link name="left_left_connecting_rod">
     <inertial>
-      <mass value="0.008590079552441076" />
+      <mass value="0.0080945626573776866" />
       <origin rpy="0 0 0" xyz="0.00108395 -0.02207129 -0.00254398" />
-      <inertia ixx="1.9245913930528195e-06" ixy="9.3556526051178733e-08" ixz="0" iyy="9.3556526051178733e-08" iyz="4.0095654021933732e-08" izz="1.9780522650820645e-06" />
+      <inertia ixx="1.8135717516712387e-06" ixy="8.8159737928462991e-08" ixz="0" iyy="8.8159737928462991e-08" iyz="3.7782744826484132e-08" izz="1.8639487447732175e-06" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/left_connecting_rod.stl" />
       </geometry>
+      <material name="left_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1019,15 +1031,18 @@
   </link>
   <link name="left_right_slider">
     <inertial>
-      <mass value="0.087085448352924824" />
+      <mass value="0.082061942958171888" />
       <origin rpy="0 0 0" xyz="-0.00300049 0.01384977 0.14115772" />
-      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+      <inertia ixx="2.1863615006258821e-05" ixy="0" ixz="0" iyy="1.6649596220204012e-05" iyz="4.4961466343516123e-06" izz="2.6662023599222304e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/right_slider.stl" />
       </geometry>
+      <material name="left_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1038,15 +1053,18 @@
   </link>
   <link name="left_right_connecting_rod">
     <inertial>
-      <mass value="0.008590079552441076" />
+      <mass value="0.0080945626573776866" />
       <origin rpy="0 0 0" xyz="-0.02207129 -0.00108395 -0.00254398" />
-      <inertia ixx="9.3556526051178733e-08" ixy="-9.3556526051178733e-08" ixz="4.0095654021933732e-08" iyy="1.9245913930528195e-06" iyz="0" izz="1.9780522650820645e-06" />
+      <inertia ixx="8.8159737928462991e-08" ixy="-8.8159737928462991e-08" ixz="3.7782744826484132e-08" iyy="1.8135717516712387e-06" iyz="0" izz="1.8639487447732175e-06" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/right_connecting_rod.stl" />
       </geometry>
+      <material name="left_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1359,6 +1377,9 @@
       <geometry>
         <mesh filename="camera_mount/mesh/cam-main.STL" scale="0.001 0.001 -0.001" />
       </geometry>
+      <material name="left_camera_mount_white">
+        <color rgba="0.9 0.9 0.9 1" />
+      </material>
     </visual>
     <collision name="left_camera_mount_main_collision">
       <origin rpy="0 0 0" xyz="-0.037308144 -0.0031 0.07915" />
@@ -1371,6 +1392,9 @@
       <geometry>
         <mesh filename="camera_mount/mesh/cam-ring.STL" scale="0.001 0.001 -0.001" />
       </geometry>
+      <material name="left_camera_mount_white">
+        <color rgba="0.9 0.9 0.9 1" />
+      </material>
     </visual>
     <collision name="left_camera_mount_ring_collision">
       <origin rpy="0 0 0" xyz="-0.037308144 -0.0345 0.03" />
@@ -1387,16 +1411,16 @@
   <link name="right_kwr57b_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0.0265" />
-      <mass value="0.34749566819009242" />
-      <inertia ixx="0.00015190628345068146" ixy="0" ixz="0" iyy="0.00015190628345068146" iyz="0" izz="0.00014112667824370129" />
+      <mass value="0.31229496712054389" />
+      <inertia ixx="0.00013651844364771611" ixy="0" ixz="0" iyy="0.00013651844364771611" iyz="0" izz="0.00012683079352183088" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0.0265" />
       <geometry>
         <cylinder length="0.053" radius="0.0285" />
       </geometry>
-      <material name="right_kwr57b_gray">
-        <color rgba="0.35 0.37 0.40 1" />
+      <material name="right_kwr57b_silver">
+        <color rgba="0.7 0.7 0.7 1" />
       </material>
     </visual>
     <collision>
@@ -1413,15 +1437,18 @@
   </joint>
   <link name="right_gripper_base">
     <inertial>
-      <mass value="0.44722251443870648" />
+      <mass value="0.4019196589403265" />
       <origin rpy="0 0 0" xyz="-9.4e-7 -0.00337385 0.03285995" />
-      <inertia ixx="0.00022744928004842278" ixy="-5.3460872029244987e-08" ixz="1.3365218007311247e-08" iyy="0.00039995414886878899" iyz="-3.2878436297985669e-06" izz="0.00034026508524813702" />
+      <inertia ixx="0.00020440906732528523" ixy="-4.8045379557006751e-08" ixz="1.2011344889251688e-08" iyy="0.0003594394958108567" iyz="-2.9547908427559152e-06" izz="0.00030579682953545871" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/gripper_base.stl" />
       </geometry>
+      <material name="right_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1432,15 +1459,18 @@
   </link>
   <link name="right_eccentric">
     <inertial>
-      <mass value="0.029687330116124018" />
+      <mass value="0.026680055699111641" />
       <origin rpy="0 0 0" xyz="-5.9e-7 3e-7 -0.00523699" />
-      <inertia ixx="5.2792611128879429e-06" ixy="-1.4434435447896147e-06" ixz="0" iyy="3.1541914497254537e-06" iyz="0" izz="7.7250960082259002e-06" />
+      <inertia ixx="4.7444812312544168e-06" ixy="-1.2972252480391822e-06" ixz="0" iyy="2.8346773938633978e-06" iyz="0" izz="6.9425573459874752e-06" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/eccentric.stl" />
       </geometry>
+      <material name="right_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1451,15 +1481,18 @@
   </link>
   <link name="right_left_slider">
     <inertial>
-      <mass value="0.087085448352924824" />
+      <mass value="0.078263845335698162" />
       <origin rpy="0 0 0" xyz="-0.00350049 0.01234977 0.14115772" />
-      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+      <inertia ixx="2.0851694727740929e-05" ixy="0" ixz="0" iyy="1.5878997943590732e-05" iyz="4.2880501254628526e-06" izz="2.542801713054582e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/left_slider.stl" />
       </geometry>
+      <material name="right_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1470,15 +1503,18 @@
   </link>
   <link name="right_left_connecting_rod">
     <inertial>
-      <mass value="0.008590079552441076" />
+      <mass value="0.0077199195758749549" />
       <origin rpy="0 0 0" xyz="0.00108395 -0.02207129 -0.00254398" />
-      <inertia ixx="1.9245913930528195e-06" ixy="9.3556526051178733e-08" ixz="0" iyy="9.3556526051178733e-08" iyz="4.0095654021933732e-08" izz="1.9780522650820645e-06" />
+      <inertia ixx="1.7296336640522429e-06" ixy="8.4079414224761821e-08" ixz="0" iyy="8.4079414224761821e-08" iyz="3.6034034667755057e-08" izz="1.7776790436092497e-06" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/left_connecting_rod.stl" />
       </geometry>
+      <material name="right_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1489,15 +1525,18 @@
   </link>
   <link name="right_right_slider">
     <inertial>
-      <mass value="0.087085448352924824" />
+      <mass value="0.078263845335698162" />
       <origin rpy="0 0 0" xyz="-0.00300049 0.01384977 0.14115772" />
-      <inertia ixx="2.3202018460692321e-05" ixy="0" ixz="0" iyy="1.7668818205665466e-05" iyz="4.771382828610115e-06" izz="2.8294166521477905e-05" />
+      <inertia ixx="2.0851694727740929e-05" ixy="0" ixz="0" iyy="1.5878997943590732e-05" iyz="4.2880501254628526e-06" izz="2.542801713054582e-05" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/right_slider.stl" />
       </geometry>
+      <material name="right_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1508,15 +1547,18 @@
   </link>
   <link name="right_right_connecting_rod">
     <inertial>
-      <mass value="0.008590079552441076" />
+      <mass value="0.0077199195758749549" />
       <origin rpy="0 0 0" xyz="-0.02207129 -0.00108395 -0.00254398" />
-      <inertia ixx="9.3556526051178733e-08" ixy="-9.3556526051178733e-08" ixz="4.0095654021933732e-08" iyy="1.9245913930528195e-06" iyz="0" izz="1.9780522650820645e-06" />
+      <inertia ixx="8.4079414224761821e-08" ixy="-8.4079414224761821e-08" ixz="3.6034034667755057e-08" iyy="1.7296336640522429e-06" iyz="0" izz="1.7776790436092497e-06" />
     </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
         <mesh filename="Gloria-M/meshes/right_connecting_rod.stl" />
       </geometry>
+      <material name="right_gloria_black_plastic">
+        <color rgba="0.065 0.070 0.075 1" />
+      </material>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
@@ -1829,6 +1871,9 @@
       <geometry>
         <mesh filename="camera_mount/mesh/cam-main.STL" scale="0.001 0.001 -0.001" />
       </geometry>
+      <material name="right_camera_mount_white">
+        <color rgba="0.9 0.9 0.9 1" />
+      </material>
     </visual>
     <collision name="right_camera_mount_main_collision">
       <origin rpy="0 0 0" xyz="-0.037308144 -0.0031 0.07915" />
@@ -1841,6 +1886,9 @@
       <geometry>
         <mesh filename="camera_mount/mesh/cam-ring.STL" scale="0.001 0.001 -0.001" />
       </geometry>
+      <material name="right_camera_mount_white">
+        <color rgba="0.9 0.9 0.9 1" />
+      </material>
     </visual>
     <collision name="right_camera_mount_ring_collision">
       <origin rpy="0 0 0" xyz="-0.037308144 -0.0345 0.03" />
