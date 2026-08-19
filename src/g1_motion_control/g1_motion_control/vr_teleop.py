@@ -29,16 +29,27 @@
   是 **0 rad 闭合、2.76377 rad 打开**（见 unitree_g1_description/model/Gloria-M/README.md），
   所以这里是**反向**映射；写反了就是该松手的时候夹紧。
 
-坐标系：**平移和转角脱掉的东西不一样**，别合并。
+坐标系：平移和转角**各自**可选「世界」或「局部」，随便搭配出四种手感。参数是
+``arm_position_frame`` / ``arm_rotation_frame``，取值 ``world`` / ``local``；默认
+``world`` + ``local``。
 
-* **平移**只脱接合时刻的**偏航**（``_level``），落到躯干系。``local-floor`` 重力
-  对齐，+Y 真的是上，竖直方向天然准确，未知的只有「你面朝哪」。连滚转俯仰
-  一起脱的话，握歪 0.6 rad 再直上抬 5 cm，末端会走成「左 2.8 上 4.1」。
-* **转角**脱掉整个握姿再**右乘**到锚点姿态，落到 ``gripper_base`` 自身轴系
-  （+Z 伸出、+X 张合），于是滚手腕就是滚夹爪。轴怎么对上的见 ``_TOOL_AXIS_MAP``。
+* **世界（``world``）**：delta 原样留在 WebXR 参考空间（``local-floor``）的轴上，按
+  ``_BASE_AXIS_MAP`` 落到躯干轴，**跟你怎么握手柄、按 squeeze 那一刻指哪都没关系**。
+  转身面对机器人往自己前方推手，末端就往机器人身后收——这才是世界系该有的样子。
+  转角走这一支时 delta 同样留在世界轴上，**左乘**到锚点姿态：绕竖直轴拧手 = 绕躯干
+  竖直轴拧夹爪。``local-floor`` 重力对齐，+Y 真的是上，所以竖直方向天然准确；
+  **水平朝向要自己校准**：进 VR（或长按头显的重定位键）那一刻你面朝哪，参考空间的
+  -Z 就是哪，所以进 VR 时要和机器人同向站。接合日志会打印朝向线在参考空间里的方向，
+  手柄水平指向机器人正前方时读数接近 ``[0, 0, -1]`` 就说明校准对了。
+* **局部（``local``）**：把手柄当成夹爪本身（认为两者朝向一致）。delta 脱掉**整个
+  握姿**（``origin_rot.T``）读成手柄自身轴上的量，按 ``_TOOL_AXIS_MAP`` 换到
+  ``gripper_base`` 自身轴系（+Z 伸出、+X 张合），再搬到夹爪身上：平移转到锚点姿态
+  下加到锚点位置，转角**右乘**到锚点姿态。于是「沿手柄指向推」= 夹爪沿自己的伸出
+  方向前伸、「滚手腕」= 滚夹爪，两者都**跟着夹爪当前朝向走**，不需要方向校准。
 
-两者都只算相对量，所以参考空间的朝向不进入映射：转身、换地方站都不影响手感，
-**不需要方向标定**。代价只是按侧键那一刻朝向线指哪就算正前方，重按一次即重定。
+两条都只算相对量，所以参考空间的**原点**不进入映射：换地方站不影响手感。参考系在
+**接合那一刻锁死**：中途 ``ros2 param set`` 换系不会把正在跟随的目标掰过去，松手再按
+一次才生效。
 
 安全
 ----
@@ -66,6 +77,7 @@ import pinocchio as pin
 import rclpy
 from aiohttp import WSMsgType, web
 from ament_index_python.packages import get_package_share_directory
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -87,11 +99,14 @@ _ADVANCE = {'idle': ('engage', '站立'), 'estop': ('engage', '站立'),
 # 方向，所以“绕线滚手腕”= grip -Z -> gripper +Z。定死 Z 后 det=+1 还剩 X/Y 一对符号，
 # 实机试出来是这个（另一个 '+x -y -z' 绕这两根轴转向相反）。
 _TOOL_AXIS_MAP = '-x +y -z'
-# 平移「摆正后的 local-floor」(+X 右, +Y 上, -Z 前) -> 躯干 (+X 前, +Y 左, +Z 上)。
+# 平移 local-floor (+X 右, +Y 上, -Z 前) -> 躯干 (+X 前, +Y 左, +Z 上)。
 _BASE_AXIS_MAP = '-y +z -x'
 _MAX_HAND_STEP_M = 0.1
-# 朝向线的水平分量短于这个就取不出偏航（手柄指天或指地）。
-_MIN_HEADING = 0.2
+# 平移与转角各自的参考系。含义见模块 docstring 的「坐标系」。
+_FRAME_MODES = ('world', 'local')
+# 参数名 -> 存在节点上的属性名。默认值只写在 declare_parameter 那里。
+_FRAME_PARAMS = {'arm_position_frame': '_pos_frame',
+                 'arm_rotation_frame': '_rot_frame'}
 
 
 def _vector(value, size: int):
@@ -138,21 +153,6 @@ _TOOL_MAP = _axis_map(_TOOL_AXIS_MAP)
 _BASE_MAP = _axis_map(_BASE_AXIS_MAP)
 
 
-def _level(rotation: np.ndarray) -> np.ndarray | None:
-    """接合时刻的握姿 -> 参考系到「水平且朝向对齐」系的旋转；手柄太竖时返回 ``None``。
-
-    **只取偏航**：竖直方向靠 local-floor 的重力对齐本来就准，不该跟着手腕转。
-    """
-    forward = -rotation[:, 2]                 # 采集页那根朝向线在参考空间里的方向
-    forward = np.array([forward[0], 0.0, forward[2]])
-    norm = float(np.linalg.norm(forward))
-    if norm < _MIN_HEADING:
-        return None
-    forward /= norm
-    up = np.array([0.0, 1.0, 0.0])
-    return np.column_stack((np.cross(forward, up), up, -forward)).T
-
-
 def _grip_pose(grip) -> tuple:
     """WebXR ``grip`` -> ``(position, rotation)``；不可用的那一半给 ``None``。
 
@@ -176,6 +176,31 @@ def _grip_pose(grip) -> tuple:
 def _quat(matrix: np.ndarray) -> np.ndarray:
     coeffs = np.asarray(pin.Quaternion(matrix).coeffs(), dtype=np.float64)
     return coeffs / np.linalg.norm(coeffs)
+
+
+def _frame_mode(value, name: str) -> str:
+    """校验一个参考系参数。写错宁可报错：静默回退到默认值的话，手感不对时没人知道为什么。"""
+    mode = str(value).strip().lower()
+    if mode not in _FRAME_MODES:
+        raise ValueError(f'{name} 只能是 {" / ".join(_FRAME_MODES)}，收到 {value!r}')
+    return mode
+
+
+def _move_map(mode: str, origin_rot: np.ndarray, anchor_rot: np.ndarray) -> np.ndarray:
+    """手柄位移（参考空间）-> 末端位移（躯干系）的 3x3。"""
+    if mode == 'world':
+        return _BASE_MAP                              # 参考空间轴 -> 躯干轴，与握法无关
+    return anchor_rot @ _TOOL_MAP @ origin_rot.T      # 手柄自身轴 -> 夹爪自身轴 -> 躯干
+
+
+def _turn_pose(mode: str, rotation: np.ndarray, origin_rot: np.ndarray,
+               anchor_rot: np.ndarray) -> np.ndarray:
+    """手柄握姿 -> 末端目标姿态（躯干系 3x3）；``rotation is origin_rot`` 时恰好是锚点。"""
+    if mode == 'local':
+        # 脱掉整个握姿、换到夹爪自身轴系后**右乘**：滚手腕就是滚夹爪。
+        return anchor_rot @ (_TOOL_MAP @ origin_rot.T @ rotation @ _TOOL_MAP.T)
+    # delta 留在世界轴上、共轭到躯干轴后**左乘**：绕竖直轴拧手就是绕躯干竖直轴拧夹爪。
+    return (_BASE_MAP @ rotation @ origin_rot.T @ _BASE_MAP.T) @ anchor_rot
 
 
 async def _safe_send(ws, text: str) -> None:
@@ -222,6 +247,13 @@ class VRTeleop(Node):
         # 模拟按钮在阈值附近有噪声。接合后降到 80% 阈值才释放，避免一帧帧断开/重建原点。
         self._squeeze_off = 0.8 * self._squeeze_on
         self._arm_scale = float(p('arm_scale', 1.0).get_parameter_value().double_value)
+        # 平移与转角各自选参考系，四种搭配（含义见模块 docstring 的「坐标系」）。
+        self._pos_frame = _frame_mode(
+            p('arm_position_frame', 'world').get_parameter_value().string_value,
+            'arm_position_frame')
+        self._rot_frame = _frame_mode(
+            p('arm_rotation_frame', 'local').get_parameter_value().string_value,
+            'arm_rotation_frame')
         self._timeout = float(p('frame_timeout_s', 0.3).get_parameter_value().double_value)
         self._grip_open = float(p('gripper_open', 2.76377472169236).get_parameter_value().double_value)
         self._grip_closed = float(p('gripper_closed', 0.0).get_parameter_value().double_value)
@@ -268,6 +300,7 @@ class VRTeleop(Node):
             name: self.create_client(Trigger, f'{policy}/{name}', callback_group=slow)
             for name in ('engage', 'start', 'estop')
         }
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         self._alive = True
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -275,7 +308,26 @@ class VRTeleop(Node):
         self.get_logger().info(
             '头显里打开采集页并 Enter VR。'
             '双手同时按 B/Y 推进：站立 -> 启动策略 -> 急停；'
-            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）。')
+            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）。'
+            f'上肢参考系：平移 {self._pos_frame} / 转角 {self._rot_frame}。')
+
+    def _on_set_parameters(self, parameters):
+        """现场换上肢参考系。改完的那套要**下一次离合接合**才生效：正按着的时候换系，
+        目标会从锚点按新映射重算、凭空跳一下。"""
+        pending = {}
+        for parameter in parameters:
+            attribute = _FRAME_PARAMS.get(parameter.name)
+            if attribute is None:
+                continue
+            try:
+                pending[attribute] = _frame_mode(parameter.value, parameter.name)
+            except ValueError as error:
+                return SetParametersResult(successful=False, reason=str(error))
+            self.get_logger().info(
+                f'{parameter.name} -> {pending[attribute]}（松开 squeeze 再按一次才生效）')
+        for attribute, mode in pending.items():
+            setattr(self, attribute, mode)
+        return SetParametersResult(successful=True)
 
     def _now(self) -> float:
         return self.get_clock().now().nanoseconds * 1e-9
@@ -554,14 +606,13 @@ class VRTeleop(Node):
             self._height - right[1] * self._height_rate / self._rate,
             self._h_lo), self._h_hi)
 
-    def _rebase(self, side: str, position, rotation, level=None) -> tuple:
-        """以当前手柄位姿为原点、当前末端目标为锚重建基准；``level`` 是取不出偏航时的退路。"""
-        fresh = _level(rotation)
-        if fresh is None:
-            fresh = np.eye(3) if level is None else level
-            self.get_logger().warning(
-                f'{side} 手柄近乎竖直，取不出水平朝向；松手、把朝向线水平指向机器人再按一次')
-        return (position, rotation, fresh, self._pose[side].copy(), position)
+    def _rebase(self, side: str, position, rotation) -> tuple:
+        """以当前手柄位姿为原点、当前末端目标为锚重建基准。
+
+        两条映射各走哪套参考系也在这里**锁死**，中途换系不会抽掉正在跟的那一次。
+        """
+        return (position, rotation, self._pose[side].copy(), position,
+                (self._pos_frame, self._rot_frame))
 
     def _update_arms(self, frame: dict, limited: dict) -> None:
         """手柄位姿 -> 末端目标；``limited`` 只用来选离合接合时的锦点。
@@ -603,26 +654,29 @@ class VRTeleop(Node):
                     self._pose[side] = np.asarray(
                         limited.get(side, self._pose[side]), dtype=np.float64)
                     clutch = self._clutch[side] = self._rebase(side, position, rotation)
+                    # world 系的水平朝向只由参考空间决定，所以这行是唯一的校准自检：
+                    # 手柄水平指向机器人正前方时读数应接近 [0, 0, -1]。
                     self.get_logger().info(
                         f'{side} 离合接合｜朝向线指向参考空间 '
-                        f'{np.round(-rotation[:, 2], 2)}（+Y 上, -Z 前）')
-                origin, origin_rot, level, anchor, previous = clutch
+                        f'{np.round(-rotation[:, 2], 2)}（+Y 上, -Z 前）'
+                        f'｜平移 {self._pos_frame} / 转角 {self._rot_frame}')
+                origin, origin_rot, anchor, previous, modes = clutch
                 # 距上一帧**真实跟踪到**的位置超过这么多，就不可能是人手的运动。
                 # 冻结期间这个差会累积，所以长时丢跟踪 + 大幅挪手自然落进这一支。
                 if np.linalg.norm(position - previous) > _MAX_HAND_STEP_M:
-                    origin, origin_rot, level, anchor, previous = self._rebase(
-                        side, position, rotation, level)
+                    origin, origin_rot, anchor, previous, modes = self._rebase(
+                        side, position, rotation)
                     self.get_logger().warning(
                         f'{side} 手柄单帧跳变超过 {_MAX_HAND_STEP_M:.2f} m，已无跳变重置原点',
                         throttle_duration_sec=1.0)
                 pose = self._pose[side]
-                # 平移只脱偏航（竖直方向靠 local-floor 的重力对齐保真），转角脱整个握姿
-                # 并右乘。理由见模块 docstring 的「坐标系」。
+                pos_frame, rot_frame = modes
+                anchor_rot = _matrix(anchor[3:])
+                # 两条 delta 各走各的参考系，别合并。理由见模块 docstring 的「坐标系」。
                 pose[:3] = anchor[:3] + self._arm_scale * (
-                    _BASE_MAP @ level @ (position - origin))
-                turn = _TOOL_MAP @ origin_rot.T @ rotation @ _TOOL_MAP.T
-                pose[3:] = _quat(_matrix(anchor[3:]) @ turn)
-                self._clutch[side] = (origin, origin_rot, level, anchor, position)
+                    _move_map(pos_frame, origin_rot, anchor_rot) @ (position - origin))
+                pose[3:] = _quat(_turn_pose(rot_frame, rotation, origin_rot, anchor_rot))
+                self._clutch[side] = (origin, origin_rot, anchor, position, modes)
             elif clutch is not None:
                 self._clutch[side] = None       # 松开就冻结在最后一帧。
                 self.get_logger().info(f'{side} 离合断开，手臂冻结')

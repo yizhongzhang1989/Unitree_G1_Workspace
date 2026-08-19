@@ -13,8 +13,9 @@ import pytest
 from g1_motion_control.vr_teleop import (
     VRTeleop,
     _axis_map,
-    _level,
+    _frame_mode,
     _matrix,
+    _quat,
 )
 
 OPEN = 2.76377472169236       # eccentric 全开
@@ -68,6 +69,8 @@ def node():
     teleop._squeeze_on = 0.5
     teleop._squeeze_off = 0.4
     teleop._arm_scale = 1.0
+    # 默认这套（平移看世界、转角看夹爪自身）就是实机验过、一直在用的映射。
+    teleop._pos_frame, teleop._rot_frame = 'world', 'local'
     teleop._grip_open, teleop._grip_closed = OPEN, CLOSED
     teleop._clutch = {'left': None, 'right': None}
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
@@ -112,7 +115,7 @@ def test_clutch_engages_without_any_jump(node):
 
 
 def test_controller_displacement_maps_to_robot_axes(node):
-    """grip 系的前/上/右（见文件头常量）分别映到机器人 +X / +Z / -Y。"""
+    """参考空间的前/上/右（见文件头常量）分别映到机器人 +X / +Z / -Y。"""
     before = node._pose['right'][:3].copy()
     start = np.array([0.5, 0.8, -0.3])
     step = GRIP_FWD * 0.05 + GRIP_UP * 0.05 + GRIP_RIGHT * 0.025
@@ -123,51 +126,65 @@ def test_controller_displacement_maps_to_robot_axes(node):
     assert np.allclose(delta, [0.10, -0.05, 0.10])          # 末端：前 10、右 5、上 10 cm
 
 
-def test_translation_is_measured_in_the_controller_frame(node):
-    """位移只脱掉手柄的**偏航**：操作员面朝哪、参考空间朝哪都不影响，不需要方向标定。
-
-    同一个"沿手柄指向推 5 cm"的动作，手柄先后指三个不同航向，末端必须走同一个
-    方向；旧的世界系实现下三次会各走各的。
-    """
-    want = None
-    for angle in (0.0, np.pi, np.pi / 2):
-        node._clutch['right'] = None
-        node._pose['right'][:3] = [0.30, -0.15, 0.05]
-        grip = _spin(GRIP_UP, angle)                           # 绕竖直轴换三个握法
-        forward = _matrix(grip) @ GRIP_FWD                     # 手柄指向在参考空间里的方向
-        start = np.array([0.5, 0.8, -0.3])
-        _arms(node, 1.0, 0.0, start, grip)                     # 接合
-        before = node._pose['right'][:3].copy()
-        _arms(node, 1.0, 0.0, start + forward * 0.05, grip)    # 沿指向推 5 cm
-        delta = node._pose['right'][:3] - before
-        if want is None:
-            want = delta
-        assert np.allclose(delta, want)
-    assert np.allclose(want, [0.05, 0.0, 0.0])                 # 末端往机器人正前方
-
-
-@pytest.mark.parametrize('tilt', [
-    _spin([0.0, 0.0, -1.0], 0.6),                              # 绕朝向线滚手腕
+@pytest.mark.parametrize('grip', [
+    UNIT,
+    _spin(GRIP_UP, np.pi),                                     # 转过身面对机器人
+    _spin(GRIP_UP, np.pi / 2),
+    _spin([0.0, 0.0, -1.0], 0.6),                              # 绕指向滚手腕
     _spin([1.0, 0.0, 0.0], 0.5),                               # 抬手柄头（俯仰）
 ])
-def test_a_tilted_hold_does_not_tilt_the_translation(node, tilt):
-    """握歪只该改朝向，不该改上下。
+def test_world_translation_ignores_how_the_controller_is_held(node, grip):
+    """世界系平移：只看参考空间里的 delta，手柄怎么握、什么时候按 squeeze 都不改答案。
 
-    ``local-floor`` 是重力对齐的，竖直方向本来就准，没有任何理由让它跟着手腕转。
-    早先整个 ``origin_rot.T`` 都脱掉，滚手腕 0.6 rad 再直上抬 5 cm，末端会走成
-    右 2.8 上 4.1——这就是"平移怪怪的"。
+    前三个握法钉的是实机上那个现象：和机器人同向校准好之后**转过身面对机器人**，
+    往自己前方推手（= 参考空间 +Z），末端必须**往回收**。曾经在接合那一帧按手柄朝向
+    脱掉偏航，于是转完身“你的前”又被重新当成“机器人的前”，world 就退化成了局部。
+    后两个是滚转/俯仰：``local-floor`` 重力对齐，竖直方向也不该跟着手腕转。
     """
-    node._clutch['right'] = None
     start = np.array([0.5, 0.8, -0.3])
-    _arms(node, 1.0, 0.0, start, tilt)                         # 歪着接合
+    _arms(node, 1.0, 0.0, start, grip)                         # 接合
     before = node._pose['right'][:3].copy()
-    _arms(node, 1.0, 0.0, start + np.array([0.0, 0.05, 0.0]), tilt)
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05, grip)       # 沿参考空间 -Z 推 5 cm
+    assert np.allclose(node._pose['right'][:3] - before, [0.05, 0.0, 0.0])
+    _arms(node, 1.0, 0.0, start - GRIP_FWD * 0.05, grip)       # 反方向：末端要收手
+    assert np.allclose(node._pose['right'][:3] - before, [-0.05, 0.0, 0.0])
+    _arms(node, 1.0, 0.0, start + GRIP_UP * 0.05, grip)        # 直上抬：只该走躯干 +Z
     assert np.allclose(node._pose['right'][:3] - before, [0.0, 0.0, 0.05])
 
 
-def test_level_gives_up_when_the_controller_points_straight_up():
-    """手柄指天时水平朝向无从谈起，只能让调用方退回上一次的基准。"""
-    assert _level(_matrix(_spin([1.0, 0.0, 0.0], np.pi / 2))) is None
+@pytest.mark.parametrize('anchor_spin, want', [
+    (None, [0.0, 0.0, 0.05]),                                   # 伸出轴朝上 -> 末端往上走
+    (_spin([0.0, 1.0, 0.0], np.pi / 2), [0.05, 0.0, 0.0]),      # 伸出轴朝前 -> 末端往前走
+])
+def test_local_position_follows_the_gripper_own_axis(node, anchor_spin, want):
+    """局部平移：手柄当成夹爪本身，沿指向推 = 夹爪沿**自己的伸出轴**前伸。
+
+    同一个手部动作，世界系下两个起始姿态都走机器人正前方（见上一个测例），
+    局部系必须给出两个不同的答案——写反了两者就退化成同一套。
+    """
+    node._pos_frame = 'local'
+    if anchor_spin is not None:
+        node._pose['right'][3:] = anchor_spin
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start)                                # 接合
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05)              # 沿手柄指向推 5 cm
+    assert np.allclose(node._pose['right'][:3] - before, want)
+
+
+def test_position_frames_are_latched_at_clutch_engage(node):
+    """中途 ``ros2 param set`` 换系不能把正在跟的目标掰过去（那就是一次凭空跳变）。"""
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start)                                # 按默认 world 接合
+    node._pos_frame = 'local'                                   # 相当于现场改参数
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05)
+    assert np.allclose(node._pose['right'][:3] - before, [0.05, 0.0, 0.0])   # 仍走 world
+    _arms(node, 0.0, 0.0, start + GRIP_FWD * 0.05)              # 松手
+    _arms(node, 1.0, 0.0, start)                                # 重按 -> 才换成 local
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05)
+    assert np.allclose(node._pose['right'][:3] - before, [0.0, 0.0, 0.05])
 
 
 def test_release_freezes_the_arm(node):
@@ -378,6 +395,52 @@ def test_quaternion_stays_unit(node):
     _arms(node, 1.0, 0.0, [0.6, 0.9, -0.5], _spin([1, 2, 3], 2.0))
     for side in ('left', 'right'):
         assert np.linalg.norm(node._pose[side][3:]) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize('engage', [UNIT, _spin(GRIP_UP, np.pi)])
+@pytest.mark.parametrize('anchor_spin', [
+    None,
+    _spin([0.0, 1.0, 0.0], np.pi / 2),
+    _spin([1.0, 0.0, 0.0], 0.9),
+])
+def test_world_rotation_turns_about_a_torso_fixed_axis(node, anchor_spin, engage):
+    """世界系转角：绕参考空间某根轴拧手 = 绕对应的躯干轴拧夹爪，与夹爪朝向、握法都无关。
+
+    和 ``test_wrist_roll_turns_the_gripper_about_its_own_axis`` 刚好互为对照：那边是
+    右乘、夹爪自身轴上的转动恒定，这边是左乘、躯干轴上的转动恒定。``engage`` 取两个
+    相差 180° 的握法：若还拿接合时刻的偏航去对齐世界系，两者会得到相反的转向。
+    """
+    node._rot_frame = 'world'
+    if anchor_spin is not None:
+        node._pose['right'][3:] = anchor_spin
+    anchor = _matrix(node._pose['right'][3:])
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], engage)                # 接合
+    # 在参考空间里再绕 +X（GRIP_RIGHT）拧 0.4，与接合时怎么握无关。
+    turn = _quat(_matrix(_spin(GRIP_RIGHT, 0.4)) @ _matrix(engage))
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], turn)
+    world = _matrix(node._pose['right'][3:]) @ anchor.T
+    assert np.allclose(world, _matrix(_spin([0.0, -1.0, 0.0], 0.4)))
+
+
+@pytest.mark.parametrize('rot_frame', ['world', 'local'])
+@pytest.mark.parametrize('pos_frame', ['world', 'local'])
+def test_every_frame_combination_engages_without_a_jump(node, pos_frame, rot_frame):
+    """四种搭配都得在接合那一帧严格零位移零转角——上肢不限速，这是唯一的防跳保护。"""
+    node._pos_frame, node._rot_frame = pos_frame, rot_frame
+    node._pose['right'][3:] = _spin([0.2, -0.7, 0.4], 0.8)         # 夹爪起始就是歪的
+    before = node._pose['right'].copy()
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin([0.3, 0.5, -0.8], 1.1))
+    assert np.allclose(node._pose['right'][:3], before[:3], atol=1e-12)
+    # 四元数可能整体变号，比矩阵才能只盯旋转本身。
+    assert np.allclose(_matrix(node._pose['right'][3:]), _matrix(before[3:]), atol=1e-12)
+
+
+def test_frame_mode_normalizes_and_rejects_typos():
+    """写错宁可启动就报错：静默回退到默认值的话，手感不对时没人知道为什么。"""
+    assert _frame_mode(' World ', 'arm_position_frame') == 'world'
+    for junk in ('gripper', 'body', '', 'wrold'):
+        with pytest.raises(ValueError):
+            _frame_mode(junk, 'arm_position_frame')
 
 
 def test_trigger_maps_to_gripper_the_right_way_round(node):
