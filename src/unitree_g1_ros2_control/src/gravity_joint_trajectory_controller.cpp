@@ -14,6 +14,7 @@ controller_interface::CallbackReturn GravityJointTrajectoryController::on_init()
     if (result != controller_interface::CallbackReturn::SUCCESS) return result;
     try {
         GravityFeedforward::declare_parameters(get_node());
+        AdaptiveStiffness::declare_parameters(get_node());
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare parameters: %s", error.what());
         return controller_interface::CallbackReturn::ERROR;
@@ -26,7 +27,16 @@ GravityJointTrajectoryController::state_interface_configuration() const {
     // The base class matches its own interfaces by name, so the extra ones are
     // simply ignored by it.
     auto configuration = JointTrajectoryController::state_interface_configuration();
-    gravity_.append_state_interfaces(params_.joints, configuration.names);
+    gravity_.append_state_interfaces(configuration.names);
+    // Last: the gain interfaces are located by counting back from the end.
+    stiffness_.append_interfaces(configuration.names);
+    return configuration;
+}
+
+controller_interface::InterfaceConfiguration
+GravityJointTrajectoryController::command_interface_configuration() const {
+    auto configuration = JointTrajectoryController::command_interface_configuration();
+    stiffness_.append_interfaces(configuration.names);
     return configuration;
 }
 
@@ -36,6 +46,9 @@ controller_interface::CallbackReturn GravityJointTrajectoryController::on_config
     if (result != controller_interface::CallbackReturn::SUCCESS) return result;
 
     if (!gravity_.configure(get_node(), params_.joints)) {
+        return controller_interface::CallbackReturn::ERROR;
+    }
+    if (!stiffness_.configure(get_node(), params_.joints, gravity_.compensated_indices())) {
         return controller_interface::CallbackReturn::ERROR;
     }
     if (gravity_.loaded()) {
@@ -75,9 +88,12 @@ controller_interface::CallbackReturn GravityJointTrajectoryController::on_activa
     }
     // The base class claimed its own interfaces first, so ours are the trailing
     // ones it never looked at.
-    if (!gravity_.activate(state_interfaces_, get_node()->get_logger())) {
+    if (!gravity_.activate(state_interfaces_, get_node()->get_logger()) ||
+        !stiffness_.activate(
+            state_interfaces_, command_interfaces_, get_node()->get_logger())) {
         return controller_interface::CallbackReturn::ERROR;
     }
+    stiffness_.reset();
     // Nothing has been commanded yet: until the base class writes a setpoint,
     // the interfaces keep whatever the previous controller left there and must
     // not be touched, or the hand-over would step by a whole offset.
@@ -89,6 +105,7 @@ controller_interface::CallbackReturn GravityJointTrajectoryController::on_deacti
     const rclcpp_lifecycle::State& previous_state) {
     target_valid_ = false;
     gravity_.reset();
+    stiffness_.reset();
     return JointTrajectoryController::on_deactivate(previous_state);
 }
 
@@ -120,7 +137,22 @@ controller_interface::return_type GravityJointTrajectoryController::update(
     }
     if (!target_valid_) return result;
 
-    if (!gravity_.apply(state_interfaces_, period, target_, command_)) return result;
+    // Slot 0 of the state interfaces is position too, but grouped per type -
+    // this controller interleaves position and velocity, unlike the forward
+    // one, so the lookup cannot be shared.
+    auto& states = joint_state_interface_[0];
+    measured_.resize(states.size());
+    for (std::size_t index = 0; index < states.size(); ++index) {
+        measured_[index] = states[index].get().get_value();
+    }
+    // Before the feed-forward, which sizes its offset against the gains the
+    // motor will really be given.
+    const auto& stiffness = stiffness_.update(
+        target_, measured_, state_interfaces_, command_interfaces_, period.seconds());
+    if (!gravity_.apply(
+            state_interfaces_, period, target_, measured_, stiffness, command_)) {
+        return result;
+    }
     for (std::size_t index = 0; index < commands.size(); ++index) {
         commands[index].get().set_value(command_[index]);
     }

@@ -20,6 +20,7 @@ controller_interface::CallbackReturn ForwardPositionController::on_init() {
     try {
         auto_declare<std::vector<std::string>>("joints", {});
         GravityFeedforward::declare_parameters(get_node());
+        AdaptiveStiffness::declare_parameters(get_node());
     } catch (const std::exception& error) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare parameters: %s", error.what());
         return CallbackReturn::ERROR;
@@ -34,6 +35,7 @@ ForwardPositionController::command_interface_configuration() const {
     for (const auto& joint_name : joint_names_) {
         configuration.names.push_back(joint_name + "/" + hardware_interface::HW_IF_POSITION);
     }
+    stiffness_.append_interfaces(configuration.names);
     return configuration;
 }
 
@@ -44,7 +46,9 @@ ForwardPositionController::state_interface_configuration() const {
     for (const auto& joint_name : joint_names_) {
         configuration.names.push_back(joint_name + "/" + hardware_interface::HW_IF_POSITION);
     }
-    gravity_.append_state_interfaces(joint_names_, configuration.names);
+    gravity_.append_state_interfaces(configuration.names);
+    // Last: the gain interfaces are located by counting back from the end.
+    stiffness_.append_interfaces(configuration.names);
     return configuration;
 }
 
@@ -63,8 +67,14 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_configur
         return CallbackReturn::ERROR;
     }
     if (!gravity_.configure(get_node(), joint_names_)) return CallbackReturn::ERROR;
+    // Only the joints the gravity table binds have the extra gain interfaces,
+    // and it reports them in the order both sides index.
+    if (!stiffness_.configure(get_node(), joint_names_, gravity_.compensated_indices())) {
+        return CallbackReturn::ERROR;
+    }
 
     target_.assign(joint_names_.size(), 0.0);
+    measured_.assign(joint_names_.size(), 0.0);
     command_.assign(joint_names_.size(), 0.0);
     target_valid_ = false;
 
@@ -83,16 +93,23 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_configur
 
 ForwardPositionController::CallbackReturn ForwardPositionController::on_activate(
     const rclcpp_lifecycle::State&) {
-    const std::size_t expected_states = joint_names_.size() + gravity_.state_interface_count();
-    if (command_interfaces_.size() != joint_names_.size() || state_interfaces_.size() != expected_states) {
+    const std::size_t expected_states = joint_names_.size() +
+                                        gravity_.state_interface_count() +
+                                        stiffness_.interface_count();
+    const std::size_t expected_commands = joint_names_.size() + stiffness_.interface_count();
+    if (command_interfaces_.size() != expected_commands ||
+        state_interfaces_.size() != expected_states) {
         RCLCPP_ERROR(
             get_node()->get_logger(), "Expected %zu command and %zu state interfaces",
-            joint_names_.size(), expected_states);
+            expected_commands, expected_states);
         return CallbackReturn::ERROR;
     }
-    if (!gravity_.activate(state_interfaces_, get_node()->get_logger())) {
+    if (!gravity_.activate(state_interfaces_, get_node()->get_logger()) ||
+        !stiffness_.activate(
+            state_interfaces_, command_interfaces_, get_node()->get_logger())) {
         return CallbackReturn::ERROR;
     }
+    stiffness_.reset();
     // Start from where the joints physically are, so activation cannot jump.
     for (std::size_t index = 0; index < joint_names_.size(); ++index) {
         const double position = state_interfaces_[index].get_value();
@@ -112,6 +129,7 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_deactiva
     const rclcpp_lifecycle::State&) {
     target_valid_ = false;
     gravity_.reset();
+    stiffness_.reset();
     command_buffer_.writeFromNonRT(std::shared_ptr<CommandSample>());
     return CallbackReturn::SUCCESS;
 }
@@ -121,13 +139,13 @@ controller_interface::return_type ForwardPositionController::update(
     const auto sample = *command_buffer_.readFromRT();
     if (sample && sample->sequence != processed_sequence_) {
         processed_sequence_ = sample->sequence;
-        if (sample->positions.size() != command_interfaces_.size() ||
+        if (sample->positions.size() != joint_names_.size() ||
             !std::all_of(sample->positions.begin(), sample->positions.end(),
                          [](double value) { return std::isfinite(value); })) {
             RCLCPP_WARN(
                 get_node()->get_logger(),
                 "Discarding invalid position command: expected %zu finite values",
-                command_interfaces_.size());
+                joint_names_.size());
         } else {
             target_ = sample->positions;
             target_valid_ = true;
@@ -139,7 +157,18 @@ controller_interface::return_type ForwardPositionController::update(
     // keep following the torso attitude and the activation ramp even while the
     // target stands still, and dropping the offset has to take effect at once
     // instead of waiting for the next setpoint.
-    write_command(gravity_.apply(state_interfaces_, period, target_, command_) ? command_ : target_);
+    // This controller's state interfaces are one position per joint, in order.
+    for (std::size_t index = 0; index < measured_.size(); ++index) {
+        measured_[index] = state_interfaces_[index].get_value();
+    }
+    // Before the feed-forward, which sizes its offset against the gains the
+    // motor will really be given.
+    const auto& stiffness = stiffness_.update(
+        target_, measured_, state_interfaces_, command_interfaces_, period.seconds());
+    write_command(
+        gravity_.apply(state_interfaces_, period, target_, measured_, stiffness, command_)
+            ? command_
+            : target_);
     return controller_interface::return_type::OK;
 }
 

@@ -32,6 +32,8 @@ setup(
         'console_scripts': [
             'end_effectors_dashboard = '
             'robot_bringup.end_effectors.dashboard_node:main',
+            'enter_debug_mode = '
+            'robot_bringup.enter_debug_mode:main',
             'exit_debug_mode = '
             'robot_bringup.exit_debug_mode:main',
             'gravity_float_demo = '

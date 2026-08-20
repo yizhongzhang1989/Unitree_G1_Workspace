@@ -13,6 +13,7 @@
 #include "rclcpp_lifecycle/state.hpp"
 #include "realtime_tools/realtime_buffer.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "unitree_g1_ros2_control/adaptive_stiffness.hpp"
 #include "unitree_g1_ros2_control/gravity_feedforward.hpp"
 
 namespace unitree_g1_ros2_control {
@@ -59,8 +60,10 @@ private:
     rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr command_subscription_;
 
     GravityFeedforward gravity_;
+    AdaptiveStiffness stiffness_;
     // Scratch buffers, sized once at configure so the loop never allocates.
     std::vector<double> target_;
+    std::vector<double> measured_;
     std::vector<double> command_;
     bool target_valid_{false};
 };

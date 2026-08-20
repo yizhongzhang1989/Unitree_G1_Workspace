@@ -63,7 +63,7 @@ flowchart TB
 
   FPC ==> |"写 31 × &lt;joint&gt;/position"| HW
   JTC ==> |"写 31 × &lt;joint&gt;/position"| HW
-  HW ==> |"读 14 × kp + torso_imu 四元数"| FPC
+  HW ==> |"读 torso_imu 四元数 + 14 组 kp/kd 表值"| FPC
   HW ==> |"读 position/velocity/effort + pelvis_imu"| BC
 
   HW -. "/lowcmd（含 CRC，500 Hz）" .-> G1
@@ -104,9 +104,9 @@ flowchart TB
 | plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `unitree_g1_joint_trajectory_controller/JointTrajectoryController`（上游官方类的子类） |
 | **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) | 话题 `~/joint_trajectory`<br/>+ action `~/follow_joint_trajectory`<br/>（`control_msgs/FollowJointTrajectory`） |
 | **输出** | 写 command interface（含重力偏移） | 写 command interface（含重力偏移） |
-| claim 的 command interface | 31 × `<joint>/position` | 31 × `<joint>/position`（同一组） |
-| 读的 state interface | 31 × `<joint>/position`<br/>+ 4 × `torso_imu/orientation.{x,y,z,w}`<br/>+ 14 × `<arm_joint>/kp` | 31 × `position`、`velocity`<br/>+ 同样 4 + 14 个 |
-| 运行时可调参数 | `compensation_scale`（无锁写，active 时可改） | 同左，另加标准 JTC 容差等 |
+| claim 的 command interface | 31 × `<joint>/position`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` | 同左（同一组） |
+| 读的 state interface | 31 × `<joint>/position`<br/>+ 4 × `torso_imu/orientation.{x,y,z,w}`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` | 31 × `position`、`velocity`<br/>+ 同样 4 + 28 个 |
+| 运行时可调参数 | `compensation_scale`、`friction_scale`、`friction_load_ratio`、`friction_offset_nm`、`friction_error_epsilon`、`friction_velocity_epsilon`、`adaptive_stiffness_scale`、`adaptive_stiffness_b`、`adaptive_stiffness_power`（均为无锁写，active 时可改；两个表的路径只在配置时读） | 同左，另加标准 JTC 容差等 |
 
 两个 broadcaster 方向相反——它们只读 state interface，往外发话题：`joint_state_broadcaster` → `/joint_states`（100 Hz），`pelvis_imu_broadcaster` → `sensor_name: pelvis_imu` / `frame_id: pelvis`（100 Hz）。
 
@@ -129,7 +129,7 @@ flowchart LR
 
 ### `G1TopicSystem` 的接口
 
-它有上下两个面。**对上（面向 controller，同进程指针）**就是[硬件资源](#硬件资源)那张表里的 state / command interface；简言之只有 31 个 position **可写**，其余全部只读。
+它有上下两个面。**对上（面向 controller，同进程指针）**就是[硬件资源](#硬件资源)那张表里的 state / command interface；简言之 31 个 position 加双臂 14 组 `kp`/`kd` **可写**，其余全部只读。
 
 **对下（面向设备，DDS）**：
 
@@ -155,8 +155,9 @@ flowchart LR
 | 资源 | 数量 | 输入/输出 |
 |---|---:|---|
 | 关节 position command | 31 | G1 `/lowcmd`，双 Gloria-M `~/mit_command` |
+| 双臂 `kp`/`kd` command | 28 | 同上，缺省即增益表的值 |
 | 关节 position/velocity/effort state | 93 | `/lowstate` 与双 Gloria-M `JointState` |
-| 关节 `kp`/`kd` state | 62 | 插件实际写入命令的增益 |
+| 关节 `kp`/`kd` state | 62 | 增益表的值（含 `arm_stiffness_scale`），恒定 |
 | 双 FT state | 12 | 左右 KWR57 原始 `WrenchStamped` |
 | `pelvis_imu` state | 10 | `/lowstate.imu_state`（**盆骨**） |
 | `torso_imu` state | 10 | `/secondary_imu`（**躯干**，`torso_imu_topic` 可改） |
@@ -167,7 +168,9 @@ manager 以 500 Hz 调用 `read()`/`write()`。G1 命令直接从 `write()` 发�
 
 `default_31dof_param.yaml` 是 31 轴顺序的唯一来源：`/**.ros__parameters.joints` 由 ROS 2 wildcard 同时注入 FPC 和 JTC，`/g1_gain_table.ros__parameters` 保存同序的 `stiffness`/`damping`。Humble 的 spawner 依次加载这份公共文件和 controller 专属文件；后者只保留各自不同的参数。前 29 项保持 G1 物理电机顺序，最后两项分别是 `left_eccentric_joint` 和 `right_eccentric_joint`。`arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，夹爪、腿、腰和全部 `kd` 不变。唯一数值默认值由底层 `G1TopicSystem` 持有，为 `1.0`；上层 launch/xacro 的默认值为空，因此默认生成的 URDF 不包含该字段。需要覆盖时显式传入（例如 `arm_stiffness_scale:=2.5`），xacro 才会把它写入 ros2_control hardware 参数；允许范围为 `(0, 4]`。
 
-**缩放后的最终增益以 `<joint>/kp`、`<joint>/kd` state interface 导出**。它们也是 `write()` 写入本体 `LowCmd` 和左右夹爪 `MitCommand` 的同一份数据，所以任何需要知道增益的 controller（如重力补偿）都不必重复声明增益文件，也不会遗漏同步。
+**增益有两个方向，背后是两块内存**。`<joint>/kp`、`<joint>/kd` **state** interface 是增益表的值（已含 `arm_stiffness_scale`），加载后恒定不变；双臂 14 组同名的 **command** interface 才是 `write()` 真正写进 `LowCmd` 的那份，缺省等于表值。两者刻意不共用一块内存：若 controller 写回它读到的那份，下一拍读到的就是自己上拍的输出，每个周期复乘一次，运行时调 `adaptive_stiffness_scale` 会发散而不是收敛。腿、腰和夹爪没有 command 方向，只能用表值。
+
+`write()` 对命令增益做一道卫生检查：非有限、为负、或超过表值的 10 倍一律退回表值。这不是调参上限，而是因为 controller 崩溃时最后一次写入会留在接口里，而固件没有看门狗。
 
 硬件导出的 31 个 command interface 由 `forward_position_controller`（FPC）或 `joint_trajectory_controller`（JTC）互斥 claim。ros2_control 的 claim 只提供命令资源互斥，不检查反馈是否新鲜；feedback freshness 是 `G1TopicSystem` 自己实现的安全策略。G1 使用 `state_timeout_s=0.25 s`，Gloria 使用独立的 `gripper_state_timeout_s=0.75 s`。单侧夹爪 stale 时只跳过该侧 MIT 输出，G1 LowCmd 和另一侧不受影响；反馈恢复后该侧自然恢复。
 
@@ -183,17 +186,19 @@ graph LR
     end
     subgraph S["state interface（每周期，进程内直读）"]
         I["torso_imu/orientation.xyzw"]
-        K["14 × &lt;arm_joint&gt;/kp"]
+        K["14 × &lt;arm_joint&gt;/kp、kd（表值）"]
     end
-    T["~/commands<br/>31 个绝对位置"] --> C
+    T["~/commands<br/>31 个绝对位置"] --> A
     L["/armN/payload<br/>末端负载，可选"] --> C
-    Y --> C["ForwardPositionController::update()"]
+    Y --> C["GravityFeedforward::apply()"]
     I --> C
-    K --> C
+    K --> A["AdaptiveStiffness::update()"]
+    A ==>|"写 14 × kp、kd"| G
+    A -->|"实际 kp"| C
     C ==>|"写 31 × &lt;joint&gt;/position"| G["G1TopicSystem → LowCmd"]
 ```
 
-除 31 个位置反馈外另读 18 个 state interface（4 个 IMU 四元数 + 14 个 `kp`），全部是同进程内的 `double` 直读，无序列化。state interface 不互斥，所以多 claim 这 18 个不影响任何其他 controller。
+除 31 个位置反馈外另读 32 个 state interface（4 个 IMU 四元数 + 14 组 `kp`/`kd`），全部是同进程内的 `double` 直读，无序列化。state interface 不互斥，所以多 claim 这些不影响任何其他 controller。重力补偿在 `on_activate` 时**按接口名**找到 IMU 那四个、之后用索引直取；增益那 28 个则固定追加在最末尾、按倒数定位，激活时校验一遍名字对不对——顺序接错的话 `kd` 会落进 `kp` 的槽位，力矩静默地差一个 $k_d/k_p$ 倍。
 
 电机内部执行 $\tau = k_p(q_{cmd}-q) - k_d\dot q$，想让手臂停在 $q_{target}$ 就需要
 $$q_{cmd} = q_{target} + s\,\frac{G(q_{target})}{k_p}$$
@@ -208,12 +213,98 @@ ros2 param set /forward_position_controller compensation_scale 0.95
 
 > 设为 `0.0` 时激活斜坡也会**回到 0 并按住**，所以重新拧回 `1.0` 是按 `offset_ramp_s` 重新爬升的。否则斜坡早就满了，一开就是整个 ~0.4 rad 阶跃——正是斜坡要防的那个冲击。順带跳过了每拍的 28 次 sin/cos，但那只是 0.9 µs，不是重点（见下）。
 
-> 需要这个倍率本身就是一个待修缺陷：静态标定把静摩擦当成了质量，系统性抬高约 5%。修法（双向逼近）和另一个零空间漂移缺陷见 [arm_gravity_compensation/README.md](../arm_gravity_compensation/README.md) 的「两个已知缺陷」。
+> 这个倍率曾是在替一个缺陷擦屁股：单向逼近的静态标定把静摩擦当成了质量，系统性抬高约 5%。
+> **2026-08-19 已改成双向逼近标定**，摩擦项在两个方向的平均里恒等消去，这一项系统偏差不再存在，
+> 顺带把零空间漂移一并解决了（rank 10→11、rmse 0.53→0.14）。
+> 重新标定后应先把 $s$ 放回 **1.0** 再看需不需要拧；仍需大幅偏离 1.0 的话先怀疑末端换过没重标。
+> 详见 [arm_gravity_compensation/README.md](../arm_gravity_compensation/README.md)，
+> 数学推导见 [CALIBRATION.md](../arm_gravity_compensation/CALIBRATION.md)。
 
 三个关键选择：
 - **$G$ 在目标位置求值**，不是实测位置。目标无噪声、天然领先于测量，且这本就是平衡条件要求的。用速度外推测量位置反而会引入系数为 $K_g\Delta t$ 的负阻尼。
 - **不补偿 `kd`**。阻尼是稳定项，且稳态下 $\dot q \to 0$ 本就不进入偏移量。
-- **$k_p$ 从 `<joint>/kp` state interface 读**，不在 controller 配置里重写。增益不一致会把每一个补偿力矩按同比例算错而没有任何外部症状，所以只允许一个数据源。
+- **$k_p$ 用的是这一拍电机真正会拿到的值**，由 `AdaptiveStiffness` 算完后传进来，而不是重新读一遍增益表。偏移是 $G/k_p$，分母对不上就会把每一个补偿力矩按同比例算错而没有任何外部症状，所以只允许一个数据源。
+
+#### 摩擦前馈
+
+重力补上了，手臂却还是「目标点在动、手不动，差到一定程度才突然跟上」。那是静摩擦的死区：位置环要攒够 $k_p\Delta q > \tau_f$ 才推得动，所以死区宽 $2\tau_f/k_p$。2026-08-19 实测（11 位姿 × 7 关节 × 两侧，取自双向标定的半差）：
+
+| | 摩擦中位 | 死区 @ kp 标称 | 死区 @ `arm_stiffness_scale=2` |
+|---|---|---|---|
+| 肩 pitch / roll | 0.70 ~ 1.03 N·m | **5.6° ~ 8.2°** | 2.8° ~ 4.1° |
+| 肘 | 0.54 ~ 0.64 N·m | 4.3° ~ 5.1° | 2.1° ~ 2.6° |
+| 腕三轴 | 0.10 ~ 0.31 N·m | 0.8° ~ 2.4° | 0.4° ~ 1.2° |
+
+40 cm 臂展下 8° 就是末端 5.6 cm。把 $k_p$ 翻倍只能砍一半，所以得直接补：
+
+$$q_{cmd} = q_{target} + \frac{s\,G + s_f\,\tau_f}{k_p},\qquad
+\tau_f = \bigl(\mu\,|G| + \tau_0\bigr)\tanh\Bigl(\frac{e}{\varepsilon_e} + \frac{\dot q_{target}}{\varepsilon_v}\Bigr),
+\quad e = q_{target}-q$$
+
+$s_f$ 是 `friction_scale`，当前 0.95。四个决定：
+
+- **摩擦按载荷算，不是常数，而且逐关节给**（`friction_table` 指向的文件里每侧 7 个 `load_ratio` 与 `offset`）。实测 $\tau_f$ 与 $|G|$ 在肩部的相关系数 0.90~0.96——减速器载荷相关损耗的典型特征。**这不是精度问题而是安全问题**：同一关节的摩擦跨位姿能差 11 倍（左肩 roll 0.106~1.205 N·m），按中位数做常数补偿会在轻载位姿过补 10 倍，等于给关节接了负阻尼。$|G|$ 是重力补偿本来就在算的量，所以这一项几乎不要钱。
+
+  | | 左 $\mu$ | 左 $\tau_0$ | 右 $\mu$ | 右 $\tau_0$ | $r$（左/右） |
+  |---|---|---|---|---|---|
+  | shoulder_pitch | 0.171 | 0.149 | 0.148 | 0.129 | 0.90 / 0.90 |
+  | shoulder_roll | 0.132 | 0.230 | 0.119 | 0.155 | 0.96 / 0.87 |
+  | shoulder_yaw | 0.213 | 0† | 0.169 | 0† | 0.95 / 0.83 |
+  | elbow | 0.148 | 0.142 | 0.092 | 0.395 | 0.91 / 0.48 |
+  | wrist_roll | 0.133 | 0.156 | 0.064 | 0.098 | 0.71 / **0.17** |
+  | wrist_pitch | 0.173 | 0.138 | 0.157 | 0.169 | 0.86 / 0.62 |
+  | wrist_yaw | 0.216 | 0.091 | 0.223 | 0.135 | 0.83 / 0.53 |
+
+  † 两个 `shoulder_yaw` 拟合出的截距略为负（−0.065 / −0.030），那是外推到采样载荷以下的产物，导出时裁成 0；代码另有一道 $\max(0,\cdot)$ 兜底，否则轻载时补偿会**反向**推、把死区撑得更宽。
+
+  **为什么必须逐关节**：跨关节的差异比载荷带来的差异还大，$\mu$ 从右腕 roll 的 0.064 到右腕 yaw 的 0.223，差 3.5 倍。全臂一个系数会让一头过补另一头欠补，现场表现就是「有的关节跟得上、有的跟不上，轨迹整体偏掉」。右腕 roll 和右肘的 $r$ 只有 0.17 / 0.48，载荷相关性其实不成立，但它们的摩擦绝对值本来就最小（右腕 roll 中位 0.095 N·m），拟合值在实测载荷范围内仍是最小二乘最优。
+  - **这些数不在本包里，也不该手抄**。它们由 `arm_gravity_compensation` 从双向标定的半差拟合后导出到 `config/friction_table.yaml`，和重力表是同一次「导出」写出来的。放两个文件是因为重力表还被 `ft_wrench_compensator` 与 `payload_estimator` 读，而摩擦是驱动器特性、跟连杆参数无关。代价是失去了「同一个文件必然同源」，所以摩擦表里带着关节名，加载时与重力表逐个比对，对不上直接拒绝启动。
+  - `friction_load_ratio` / `friction_offset_nm` 两个参数**正常留空**，填了就覆盖文件里的值，只用于临时试参数。保守性只交给 `friction_scale` 一个旋钮：先前把保守性埋进系数里（全臂统一 0.13/0.10「宁可欠补」），结果是 $s_f=1.0$ 时实际只补掉 81% 而使用者并不知情。
+- **驱动量以位置误差为主，目标速度为辅**（`friction_error_epsilon` $\varepsilon_e$ = 0.05 rad、`friction_velocity_epsilon` $\varepsilon_v$ = 0.02 rad/s，任一置 0 即关掉该项）。死区的定义就是误差要攒到 $k_p e > \tau_f$ 才动，所以**不管目标爬得多慢，$e$ 都会长到整个死区宽**。只用目标速度则恰恰在精细动作时失效：末端 5 mm/s 在关节上约 0.0125 rad/s，$\varepsilon_v = 0.02$ 下 $\tanh$ 只给 55%，1 mm/s 只给 12%——**越精细补得越少，正好补反**。
+  - 用误差驱动**不是**正反馈：$\tanh(e/\varepsilon_e)$ 的符号始终指向减小 $e$ 的方向，是负反馈。真正的代价在别处——它在 $|e| < \varepsilon_e$ 区间把等效刚度从 $k_p$ 抬到 $k_p + \tau_f/\varepsilon_e$，而 $k_d$ 不会跟着涨，所以 $\varepsilon_e$ 调小是拿阻尼比换死区，调过头就会振。默认 0.05 对肩部约合 $+1.1k_p$。
+  - 两项**相加**：目标掉头时误差还指向旧方向、速度已经反号，两者相消，补偿减弱——那一刻方向确实不明，退让是对的。
+- **`tanh` 不是可选的平滑**。硬 `sign()` 会在驱动量过零时让命令跳 $2\tau_f/k_p$，正好是一整个死区宽度的阶跃——那恰恰是激起自激的最佳激励。
+- **目标速度按「目标保持了多久」算，不是逐拍差分**。上层 50 Hz、这里 500 Hz，目标是阶梯波；逐拍差分得到的是 1/10 占空比、幅值 10 倍的脉冲串，再低通只会得到 50 Hz 纹波而不是均值（实测 0.3 rad/s 的目标会摆在 0.22~0.39 之间）。除以目标真正静止的时长则在它变化的那一拍就精确还原出速度。目标连续 50 ms 没变化就当作「让它停这儿」，速度按 `target_velocity_cutoff_hz` 衰减到零。
+
+> 静止**且已到位**时两项都是 0，补偿恒为 0。但若手臂停在离目标还差一截的地方（正是死区的表现），误差项会一直推——这是有意的，那本来就是要消掉的静差。
+
+上机顺序（手臂必须吊起来或有支撑）：
+
+```bash
+ros2 param set /forward_position_controller friction_scale 0.3   # 再 0.5 -> 0.8
+```
+
+每档让手臂慢速走一段直线，听有没有嗡声、看有没有来回抖。有就退回上一档：那是过补偿。$s_f=1.0$ 是「按模型全额补」，不是上限，但没有理由超过它。四个参数都是无锁写，controller 活动时随时可改。
+
+> 摩擦值来自 `arm_gravity_compensation` 双向标定的副产物（`parameters.json` 的 `iterations[].samples[].friction`），**不是**独立跑出来的。曾经用梯形波反转法单独测过，那批数据被黏滑污染（$\tau_s/\tau_c$ 比值 0.31~25，物理上不可能），而且它在固定位姿下扫单关节，结构上就测不出上面这条载荷相关性，已经删掉。
+
+#### 误差自适应刚度
+
+死区宽 $2\tau_f/k_p$，所以精细动作要的是**更大的 $k_p$**。但全程加大要付阻尼比：$\zeta = k_d/(2\sqrt{Jk_p})$，而大误差处根本不需要那份刚度。[`AdaptiveStiffness`](include/unitree_g1_ros2_control/adaptive_stiffness.hpp) 把它做成误差的函数，只在需要的地方花：
+
+$$k_p' = k_p\Bigl(1+\frac{s_a}{(|e|/b)^{p}+1}\Bigr),\qquad
+k_d' = k_d\sqrt{k_p'/k_p},\qquad e = q_{target}-q$$
+
+三个参数正交：$s_a$（`adaptive_stiffness_scale`）就是零误差处的额外倍数，$b$ 是增量的半衰点，$p$ 是陡峭度。当前 $s_a=2$、$b=0.08$ rad（4.6°）、$p=3$：
+
+| $\|e\|$ | 0 | 1° | 2° | 5° | 10° | 20° | 45° |
+|---|---|---|---|---|---|---|---|
+| $k_p'/k_p$ | 3.00 | 2.98 | 2.85 | **1.87** | 1.18 | 1.02 | 1.00 |
+
+四个决定：
+
+- **只增不减，尾部回到标称 $k_p$**。这样大误差处就是改动前已经验证过的行为，力矩也不封顶——顶住物体时能一直推到 25 N·m 的电机上限。代价是「误差再大力也恒定」做不到：那需要 $k_p'\to0$，而重力前馈的偏移是 $G/k_p'$，肩部 $|G|_{max}=11.1$ N·m 会被放大到几 rad 顶出关节限位。
+- **误差先按 $b$ 归一化再取幂**，而不是 $1/(k|e|^p+b)$。后者三个参数互相牵扯：截距 $1+s_a/b$ 被 $b$ 拽着，而且 1 rad 以下 $|e|^2<|e|$，加大 $p$ 反而衰减更慢、$k$ 得跟着放大。归一化后 $|e|/b$ 无量纲，$p$ 只管形状，半衰点始终在 $b$。
+- **$p$ 越大尾巴越干净，代价是过渡带的增量刚度凹陷**。$|e|\gg b$ 后残留 $\propto(b/|e|)^p$，所以 45° 相对 10° 的残留：$p=1$ 是 22%（这是下限，$b$ 取多大都一样，因为相对衰减率在原点最大、之后单调减，没有拐点），$p=2$ 降到 4.9%，$p=3$ 降到 **1.1%**。代价在 $\mathrm d\tau/\mathrm de$：$s_a=2$ 时 $p=2$ 凹到 $0.75k_p$，$p=3$ 凹到 $0.33k_p$（在 $|e|=0.10$ rad）。**仍为正，不失稳**，但再大就会转负——那一段里拉得越远力反而越小。
+- **$k_d$ 按 $\sqrt{\cdot}$ 跟随，不是线性**。$\zeta \propto k_d/\sqrt{k_p}$，所以平方根恰好把阻尼比钉在标称值上。实测全臂最差的肩 roll（$J_{med}=0.269$、$\zeta_0=0.229$）在零误差的 3 倍刚度下：不缩放 $\zeta=0.132$ 会振，线性缩放 $\zeta=0.397$ 太粘，$\sqrt{\cdot}$ 正好回到 0.229。
+
+嫌太硬就一档档往回退，四个参数都是无锁写，controller 活动时随时可改：
+
+```bash
+ros2 param set /forward_position_controller adaptive_stiffness_scale 1.0
+```
+
+> 这一层和摩擦前馈**作用范围不同**，不是重复：$\tanh(e/\varepsilon_e)$ 在 $\varepsilon_e=0.05$ rad（2.9°）就饱和、之后只给恒定的 $\tau_f$；这一层管的是它之上那一段。顺序上 $k_p'$ **先算**，重力和摩擦补偿再拿新的 $k_p'$ 去除，所以前馈力矩恒为 $G$，与缩放无关。
 
 #### 自适应末端负载
 `left_payload_topic` / `right_payload_topic`（默认 `/arm0/payload`、`/arm1/payload`，`geometry_msgs/InertiaStamped`）上的质量与质心会经 `gravity_table.yaml` 里的 `payload_origin_*` 变换到腕 yaw 关节系，与最后一个刚体合成，然后照常走那一次反向遍历——所以上游七个关节自动全都吃到了它，`arm_offsets` 仍然只有七个刚体。
@@ -288,7 +379,12 @@ $$\tau_i = -\,a_i \cdot \Big[\Big(\textstyle\sum_{j\ge i} p_j - t_i \sum_{j\ge i
 
 Pinocchio 仍然用在**导出那一步**：标定包里用它读 `final.urdf`、`buildReducedModel` 做归并、写出表。这和“源码 → 编译产物”是一回事，controller 拿到的是编译好的东西。
 
-表中不包含力矩偏置。标定出的 `torque_bias` 留在 `parameters.json` 里，**不导出到运行时**：它在拟合中的作用是吸收静摩擦和传感器偏移以保护质量估计，而静摩擦是反抗运动方向的、不是恒定单向的。把它回放到运行时等于持续朝一个方向推关节，在位置保持模式下被 $k_p$ 吐掉看不出来，在手臂浮起来时则直接表现为单向爬行。实测 `right_shoulder_roll` 的偏置到了 0.813 N·m，而其余 13 个关节绝对值的中位数只有 0.122。双向逼近标定后它才有资格导出。
+表中不包含力矩偏置。标定出的 `torque_bias` 留在 `parameters.json` 里，**仍未导出到运行时**。
+
+原因曾经是：单向标定下它的作用是吸收静摩擦和传感器偏移以保护质量估计，而静摩擦是反抗运动方向的、不是恒定单向的。把它回放到运行时等于持续朝一个方向推关节，在位置保持模式下被 $k_p$ 吐掉看不出来，在手臂浮起来时则直接表现为单向爬行。实测 `right_shoulder_roll` 的偏置到了 0.813 N·m，而其余 13 个关节绝对值的中位数只有 0.122。
+
+**2026-08-19 改成双向逼近后，这个阻碍已经消失**（摩擦不再被吸进 `torque_bias`），但**导出本身仍未实现**：重力表 schema 、`GravityTable` 的解析和 `arm_offsets()` 都还没有偏置项。
+要加的话需要先用新标定重新确认偏置的量级（应该显著小于 0.813），再同时改导出与读取两端。
 
 #### 安全限制
 偏移量**不设人为上限**，与本包其他环节一致（见下面「安全切换」）。它是纯前馈量 $G(q_{target})/k_p$，输入只有已校验的重力表（质量有限非负）和归一化到 9.81 的重力方向，没有反馈回路，因此天然由标定时的负载定界；人为 clamp 只会在负载变重时悄悄削弱补偿。
@@ -297,7 +393,7 @@ Pinocchio 仍然用在**导出那一步**：标定包里用它读 `final.urdf`�
 
 激活时偏移从 0 线性升到全量（`offset_ramp_s`，默认 2 s）。肩部稳态偏移可达 0.4–0.8 rad（`arm_stiffness_scale=2` 时约 0.4 rad），若直接施加，命令会相对当前下垂位置阶跃两倍偏移量，产生接近电机上限的力矩冲击。
 
-其余保护：IMU 四元数模长偏离 1 超过 0.1 时保持上一个有效重力方向；从未收到过有效姿态时只写裸目标（不加偏移）；没收到过 `~/commands` 就不写任何命令；激活时任一 `kp` 非正则拒绝。
+其余保护：IMU 四元数模长偏离 1 超过 0.1 时保持上一个有效重力方向；从未收到过有效姿态时只写裸目标（不加偏移）；没收到过 `~/commands` 就不写任何命令；激活时 IMU 或增益接口没被 claim 到预期位置则拒绝。
 
 > FPC 不读 `MotorState.mode`，无法感知电机已失去使能。电机不再跟随位置指令时只剩绕组阻尼，**手感是“紧”而不是“软”**——排查“手臂不听指令”时应先查 `/lowstate` 的 `mode`、`temperature` 和 `motorstate`，再查控制链路。字段含义与实测记录见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
 
@@ -308,7 +404,7 @@ ros2 control unload_controller forward_position_controller
 ros2 control load_controller forward_position_controller --set-state configure
 ```
 
-临时不想要补偿时把 `compensation_scale` 设为 `0.0`；彻底关闭则把 `gravity_table` 置空，那 18 个额外 state interface 也不再声明。
+临时不想要补偿时把 `compensation_scale` 设为 `0.0`；彻底关闭则把 `gravity_table` 置空，那 32 个额外 state interface 和 28 个增益 command interface 也不再声明。
 
 ### 关闭时的卸力斜坡
 

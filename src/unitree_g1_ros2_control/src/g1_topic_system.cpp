@@ -396,11 +396,13 @@ void G1TopicSystem::configure_parameters() {
     if (restore_motion_mode_ && !safe_mode_name(fallback_motion_mode_)) {
         throw std::invalid_argument("fallback_motion_mode contains unsupported characters");
     }
-
     const std::string gain_file = string_parameter("gain_file", "");
     if (gain_file.empty() || !load_gains(gain_file)) {
         throw std::invalid_argument("gain_file is missing or invalid");
     }
+    // The command interfaces are exported before any controller can write
+    // them, so they have to already read as the table values.
+    reset_commanded_gains();
     RCLCPP_INFO(
         rclcpp::get_logger("G1TopicSystem"),
         "Loaded 31 controlled-joint gains with arm stiffness scale %.2f (arm kd unchanged)",
@@ -548,19 +550,51 @@ std::vector<hardware_interface::StateInterface> G1TopicSystem::export_state_inte
 
 std::vector<hardware_interface::CommandInterface> G1TopicSystem::export_command_interfaces() {
     std::vector<hardware_interface::CommandInterface> interfaces;
-    interfaces.reserve(kControlledJointCount);
+    interfaces.reserve(kControlledJointCount + 2 * (kG1JointCount - kFirstArmJointIndex));
     for (std::size_t index = 0; index < info_.joints.size(); ++index) {
         interfaces.emplace_back(
             info_.joints[index].name, hardware_interface::HW_IF_POSITION,
             &command_position_[index]);
     }
+    // Arms only. The legs and waist carry the robot and the grippers speak a
+    // different protocol, so neither has any business being softened by a
+    // controller that only reasons about arm tracking error.
+    for (std::size_t index = kFirstArmJointIndex; index < kG1JointCount; ++index) {
+        interfaces.emplace_back(
+            info_.joints[index].name, "kp", &command_stiffness_[index]);
+        interfaces.emplace_back(
+            info_.joints[index].name, "kd", &command_damping_[index]);
+    }
     return interfaces;
+}
+
+void G1TopicSystem::reset_commanded_gains() {
+    command_stiffness_ = gain_stiffness_;
+    command_damping_ = gain_damping_;
+}
+
+namespace {
+double sanitised_gain(double value, double nominal, double maximum_scale) {
+    return std::isfinite(value) && value >= 0.0 && value <= maximum_scale * nominal
+               ? value
+               : nominal;
+}
+}  // namespace
+
+double G1TopicSystem::commanded_stiffness(std::size_t index) const {
+    return sanitised_gain(
+        command_stiffness_[index], gain_stiffness_[index], kMaximumGainScale);
+}
+
+double G1TopicSystem::commanded_damping(std::size_t index) const {
+    return sanitised_gain(command_damping_[index], gain_damping_[index], kMaximumGainScale);
 }
 
 hardware_interface::CallbackReturn G1TopicSystem::on_activate(const rclcpp_lifecycle::State&) {
     if (active_) {
         return hardware_interface::CallbackReturn::SUCCESS;
     }
+    reset_commanded_gains();
     executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     executor_->add_node(node_);
     executor_thread_ = std::thread([executor = executor_]() { executor->spin(); });
@@ -813,8 +847,8 @@ hardware_interface::return_type G1TopicSystem::write(const rclcpp::Time&, const 
             command.q = static_cast<float>(value);
             command.dq = 0.0F;
             command.tau = 0.0F;
-            command.kp = static_cast<float>(gain_stiffness_[index]);
-            command.kd = static_cast<float>(gain_damping_[index]);
+            command.kp = static_cast<float>(commanded_stiffness(index));
+            command.kd = static_cast<float>(commanded_damping(index));
         }
         {
             std::lock_guard<realtime_tools::prio_inherit_mutex> lock(state_mutex_);
@@ -954,6 +988,9 @@ hardware_interface::return_type G1TopicSystem::prepare_command_mode_switch(
 hardware_interface::return_type G1TopicSystem::perform_command_mode_switch(
     const std::vector<std::string>&, const std::vector<std::string>&) {
     std::lock_guard<std::mutex> switch_lock(switch_mutex_);
+    // A controller that goes away leaves its last gains sitting in the
+    // interface; the next one inherits gains it never asked for.
+    reset_commanded_gains();
     claimed_joint_mask_.store(prepared_joint_mask_, std::memory_order_release);
     output_inhibited_.store(prepared_joint_mask_ == 0U, std::memory_order_release);
     next_gripper_publish_ = Clock::now();
@@ -1253,10 +1290,14 @@ void G1TopicSystem::release_body() {
                                                         : state_position_[index]);
             command.dq = 0.0F;
             command.tau = 0.0F;
-            command.kp = owned ? static_cast<float>(gain_stiffness_[index] * scale) : 0.0F;
+            // The controller's own gains, not the table value: the droop stored
+            // in command_position_ was sized against the stiffened gain, so
+            // fading from the nominal one would start the ramp at a fraction of
+            // the torque the motor is actually holding.
+            command.kp = owned ? static_cast<float>(commanded_stiffness(index) * scale) : 0.0F;
             // kd carries the whole descent and only goes on the last frame, where
             // the pose is at rest and removing it moves nothing.
-            command.kd = owned && !last ? static_cast<float>(gain_damping_[index]) : 0.0F;
+            command.kd = owned && !last ? static_cast<float>(commanded_damping(index)) : 0.0F;
         }
         message.crc = lowcmd_crc(message);
         release_lowcmd_publisher_->publish(message);

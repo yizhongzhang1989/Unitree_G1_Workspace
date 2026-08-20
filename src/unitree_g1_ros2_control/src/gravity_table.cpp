@@ -209,6 +209,56 @@ void GravityTable::load(const std::string& path) {
     loaded_ = true;
 }
 
+void FrictionTable::load(
+    const std::string& path,
+    const std::array<std::vector<std::string>, kSideCount>& joints) {
+    loaded_ = false;
+    for (auto& side : load_ratio_) side.fill(0.0);
+    for (auto& side : offset_) side.fill(0.0);
+
+    const std::string resolved = resolve_path(path);
+    YAML::Node document;
+    try {
+        document = YAML::LoadFile(resolved);
+    } catch (const std::exception& error) {
+        throw std::runtime_error(
+            "cannot read friction table " + resolved + ": " + error.what());
+    }
+    YAML::Node table = document;
+    if (document.size() == 1 && document.begin()->second["ros__parameters"]) {
+        table = document.begin()->second["ros__parameters"];
+    }
+
+    for (std::size_t side = 0; side < kSideCount; ++side) {
+        const YAML::Node block = table[GravityTable::side_names()[side]];
+        // A side with no two-sided samples is left out rather than zero
+        // filled, so absence here is "not measured", not "no friction".
+        if (!block) continue;
+        const YAML::Node names = block["joints"];
+        if (!names || names.size() != kArmJointCount) {
+            throw std::runtime_error("friction table joints must hold seven names");
+        }
+        for (std::size_t index = 0; index < kArmJointCount; ++index) {
+            if (names[index].as<std::string>() != joints[side][index]) {
+                throw std::runtime_error(
+                    "friction table joint order does not match the gravity table: " +
+                    names[index].as<std::string>() + " where " + joints[side][index] +
+                    " was expected");
+            }
+        }
+        const auto ratios = read_doubles(block, "load_ratio", kArmJointCount);
+        const auto offsets = read_doubles(block, "offset", kArmJointCount);
+        for (std::size_t index = 0; index < kArmJointCount; ++index) {
+            if (ratios[index] < 0.0) {
+                throw std::runtime_error("load_ratio must be non-negative");
+            }
+            load_ratio_[side][index] = ratios[index];
+            offset_[side][index] = offsets[index];
+        }
+    }
+    loaded_ = true;
+}
+
 Matrix3 GravityTable::sensor_orientation(
     std::size_t side, const std::array<double, kArmJointCount>& angles) const {
     Matrix3 rotation = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};

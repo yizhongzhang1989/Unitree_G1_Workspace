@@ -6,15 +6,14 @@
 而这里一步物理都不用算 —— 只是「给定关节角，把机器人自己的网格投影到相机像平面」。
 
     URDF --pinocchio--> 关节树 + 可视网格 --FK--> 各网格在世界系的位姿
-         --相机外参--> 相机系顶点 --针孔内参--> 像素 --光栅化--> 深度图 / 部件图
+         --相机外参--> 相机系顶点 --针孔内参--> 像素 --光栅化--> 彩色图 / 深度图 / 部件图
 
 **渲染的是机器人自身**（URDF 里只有机器人）。所以输出等价于「相机能看到自己身体的
 哪些部分」——用于验证挂载变换、算自遮挡掩膜、检查 FOV 覆盖。要往场景里放桌子、
 物体、光照和材质，那才轮到真正的渲染器或仿真器。
 
-深度用**逐三角形常数**（取三角形重心深度）而不是逐像素平面插值：G1 的网格三角形
-边长在毫米量级，这个近似带来的深度误差同量级，对掩膜/覆盖分析足够，换来的是能直接
-用 OpenCV 的多边形填充、不必在 Python 里逐像素循环。
+遮挡使用逐像素 z-buffer，并透视正确地插值三角形顶点的逆深度。彩色图按 URDF 材质、
+表面法线和主光源生成明暗，再合成到可选背景图；深度图和部件标签仍只包含机器人自身。
 """
 
 import json
@@ -92,6 +91,8 @@ class UrdfSceneRenderer:
         self.geom_data = self.geom_model.createData()
         self._meshes = [self._extract(go) for go in self.geom_model.geometryObjects]
         self.names = [go.name for go in self.geom_model.geometryObjects]
+        self.colors = [np.asarray(go.meshColor, dtype=np.float32)
+                       for go in self.geom_model.geometryObjects]
 
     @staticmethod
     def _extract(geom_object) -> Optional[Tuple[np.ndarray, np.ndarray]]:
@@ -101,6 +102,8 @@ class UrdfSceneRenderer:
             tris = np.fromiter(
                 (idx for i in range(g.num_tris) for idx in _tri(g.tri_indices(i))),
                 dtype=np.int32, count=3 * g.num_tris).reshape(-1, 3)
+            if np.prod(np.asarray(geom_object.meshScale)) < 0.0:
+                tris = tris[:, [0, 2, 1]]
             return verts, tris
         if type(g).__name__ == 'Cylinder':
             return _cylinder_mesh(g.radius, g.halfLength * 2.0)
@@ -153,17 +156,21 @@ class UrdfSceneRenderer:
                near: float = 0.05, far: float = 20.0):
         """渲染一帧。
 
-        返回 `(depth, label)`：`depth` 是 float32 米（无命中为 inf），
-        `label` 是命中的几何体下标（无命中为 -1）。
+        返回 `(depth, label, light)`：`depth` 是 float32 米（无命中为 inf），
+        `label` 是命中的几何体下标（无命中为 -1），`light` 是表面光照强度。
         """
         pin.forwardKinematics(self.model, self.data, q)
         pin.updateGeometryPlacements(self.model, self.data,
                                      self.geom_model, self.geom_data)
 
         polys: List[np.ndarray] = []
-        depths: List[float] = []
-        labels: List[int] = []
+        camera_tris: List[np.ndarray] = []
+        depths: List[np.ndarray] = []
+        labels: List[np.ndarray] = []
+        lights: List[np.ndarray] = []
         rot_t = cam_rot.T
+        light_dir = np.array([-0.35, -0.45, -1.0], dtype=np.float32)
+        light_dir /= np.linalg.norm(light_dir)
         for gi, mesh in enumerate(self._meshes):
             if mesh is None:
                 continue
@@ -194,25 +201,71 @@ class UrdfSceneRenderer:
 
             tris = tris[visible]
             poly = np.stack([pu[visible], pv[visible]], axis=2)
-            polys.append(np.round(poly * 16.0).astype(np.int32))  # cv2 定点 shift=4
+            polys.append(poly.astype(np.float32))
+            camera_tris.append(cam[tris].astype(np.float32))
             depths.append(cam[tris, 2].mean(axis=1))
             labels.append(np.full(tris.shape[0], gi, dtype=np.int32))
+            edges_a = cam[tris[:, 1]] - cam[tris[:, 0]]
+            edges_b = cam[tris[:, 2]] - cam[tris[:, 0]]
+            normals = np.cross(edges_a, edges_b)
+            normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-9)
+            diffuse = np.maximum(normals @ light_dir, 0.0)
+            lights.append(0.32 + 0.78 * diffuse)
 
         depth = np.full((camera.height, camera.width), np.inf, dtype=np.float32)
         label = np.full((camera.height, camera.width), -1, dtype=np.int32)
+        light = np.zeros((camera.height, camera.width), dtype=np.float32)
         if not polys:
-            return depth, label
+            return depth, label, light
 
         poly = np.concatenate(polys)
-        tri_depth = np.concatenate(depths)
+        tri_vertices = np.concatenate(camera_tris)
         tri_label = np.concatenate(labels)
-        # 画家算法：由远及近覆盖，省掉逐像素 z 比较。
-        for i in np.argsort(-tri_depth):
-            cv2.fillConvexPoly(depth, poly[i], float(tri_depth[i]),
-                               lineType=cv2.LINE_8, shift=4)
-            cv2.fillConvexPoly(label, poly[i], int(tri_label[i]),
-                               lineType=cv2.LINE_8, shift=4)
-        return depth, label
+        tri_light = np.concatenate(lights)
+        for i in range(poly.shape[0]):
+            points = poly[i]
+            x0 = max(0, int(np.floor(points[:, 0].min())))
+            y0 = max(0, int(np.floor(points[:, 1].min())))
+            x1 = min(camera.width - 1, int(np.ceil(points[:, 0].max())))
+            y1 = min(camera.height - 1, int(np.ceil(points[:, 1].max())))
+            if x0 > x1 or y0 > y1:
+                continue
+
+            local_poly = np.round((points - [x0, y0]) * 16.0).astype(np.int32)
+            mask = np.zeros((y1 - y0 + 1, x1 - x0 + 1), dtype=np.uint8)
+            cv2.fillConvexPoly(mask, local_poly, 1, lineType=cv2.LINE_8, shift=4)
+            local_y, local_x = np.nonzero(mask)
+            if local_x.size == 0:
+                continue
+
+            sample_x = local_x + x0
+            sample_y = local_y + y0
+            px, py = points[:, 0], points[:, 1]
+            denominator = ((py[1] - py[2]) * (px[0] - px[2])
+                           + (px[2] - px[1]) * (py[0] - py[2]))
+            if abs(denominator) < 1e-9:
+                continue
+            weight0 = ((py[1] - py[2]) * (sample_x - px[2])
+                       + (px[2] - px[1]) * (sample_y - py[2])) / denominator
+            weight1 = ((py[2] - py[0]) * (sample_x - px[2])
+                       + (px[0] - px[2]) * (sample_y - py[2])) / denominator
+            weight2 = 1.0 - weight0 - weight1
+            inside_triangle = ((weight0 >= -1e-6) & (weight1 >= -1e-6)
+                               & (weight2 >= -1e-6))
+            inverse_depth = (weight0 / tri_vertices[i, 0, 2]
+                             + weight1 / tri_vertices[i, 1, 2]
+                             + weight2 / tri_vertices[i, 2, 2])
+            inside_triangle &= inverse_depth > 0.0
+            pixel_depth = 1.0 / inverse_depth
+            image_x = local_x + x0
+            image_y = local_y + y0
+            nearer = inside_triangle & (pixel_depth < depth[image_y, image_x])
+            image_x = image_x[nearer]
+            image_y = image_y[nearer]
+            depth[image_y, image_x] = pixel_depth[nearer]
+            label[image_y, image_x] = tri_label[i]
+            light[image_y, image_x] = tri_light[i]
+        return depth, label, light
 
 
 def _tri(triangle):
@@ -240,6 +293,43 @@ def colorize_labels(label: np.ndarray, names: List[str]) -> np.ndarray:
             continue
         rng = np.random.default_rng(abs(hash(names[gi])) % (2 ** 32))
         out[label == gi] = rng.integers(60, 256, size=3)
+    return out
+
+
+def fit_background(image: np.ndarray, width: int, height: int) -> np.ndarray:
+    """等比缩放并居中裁切背景图，使它铺满目标画面。"""
+    source_height, source_width = image.shape[:2]
+    scale = max(width / source_width, height / source_height)
+    resized_width = max(width, int(np.ceil(source_width * scale)))
+    resized_height = max(height, int(np.ceil(source_height * scale)))
+    resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+    x0 = (resized_width - width) // 2
+    y0 = (resized_height - height) // 2
+    return resized[y0:y0 + height, x0:x0 + width].copy()
+
+
+def colorize_materials(label: np.ndarray, colors: List[np.ndarray],
+                       light: np.ndarray,
+                       background: Optional[np.ndarray] = None) -> np.ndarray:
+    """按 URDF visual 材质色和表面光照生成 BGR 图。"""
+    if background is None:
+        out = np.zeros(label.shape + (3,), dtype=np.uint8)
+    else:
+        out = fit_background(background, label.shape[1], label.shape[0])
+    for gi in np.unique(label):
+        if gi < 0:
+            continue
+        mask = label == gi
+        linear_rgb = np.power(np.clip(colors[gi][:3], 0.0, 1.0), 2.2)
+        reflected = light[mask, None] * linear_rgb
+        diffuse = np.clip((light[mask, None] - 0.32) / 0.78, 0.0, 1.0)
+        if np.allclose(colors[gi][:3], 0.7, atol=1e-3):
+            reflected *= 0.7 + 0.3 * diffuse
+            reflected += np.array([0.55, 0.59, 0.65]) * np.power(diffuse, 20.0)
+        elif colors[gi][:3].max() < 0.15:
+            reflected += 0.008 * np.power(diffuse, 2.0)
+        lit_rgb = np.power(np.clip(reflected, 0.0, 1.0), 1.0 / 2.2)
+        out[mask] = np.round(lit_rgb[:, ::-1] * 255.0).astype(np.uint8)
     return out
 
 
@@ -292,21 +382,30 @@ def shoot(joint_positions: Optional[Dict[str, float]] = None, *,
           frame: str = 'd435_link',
           optical: bool = True,
           extrinsic: Optional[np.ndarray] = None,
+          background: Optional[str] = None,
           out: Optional[str] = None) -> Shot:
     """URDF 拍照：给一组关节角，渲染该姿态下相机看到的画面。
 
     `joint_positions` 传 `None` 就用 URDF 中立位；只给部分关节时，其余保持中立位。
     `mesh_dir` 默认取 URDF 所在目录；URDF 里写 `package://pkg/...` 时要传包所在的父目录。
     `extrinsic` 见 `UrdfSceneRenderer.camera_pose`。
-    给了 `out` 就同时写出 `{out}_depth16.png`、`{out}_depth.png`、`{out}_parts.png`。
+    给了 `out` 就同时写出 `{out}_color.png`、`{out}_depth16.png`、
+    `{out}_depth.png`、`{out}_parts.png`。
     """
     renderer = UrdfSceneRenderer(urdf, mesh_dir)
     camera = camera or DEFAULT_CAMERA
     q = (renderer.q_from_joint_map(joint_positions) if joint_positions
          else renderer.neutral_q())
     rot, pos = renderer.camera_pose(q, frame, optical=optical, extrinsic=extrinsic)
-    depth, label = renderer.render(q, camera, rot, pos)
+    depth, label, light = renderer.render(q, camera, rot, pos)
     if out:
+        background_image = None
+        if background:
+            background_image = cv2.imread(background)
+            if background_image is None:
+                raise ValueError('无法读取背景图片 %r' % background)
+        cv2.imwrite(out + '_color.png', colorize_materials(
+            label, renderer.colors, light, background_image))
         cv2.imwrite(out + '_depth16.png', depth_to_png16(depth))
         cv2.imwrite(out + '_depth.png', colorize_depth(depth))
         cv2.imwrite(out + '_parts.png', colorize_labels(label, renderer.names))

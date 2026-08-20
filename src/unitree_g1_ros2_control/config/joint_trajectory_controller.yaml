@@ -20,6 +20,12 @@
     offset_ramp_s: 2.0
     compensation_scale: 1.0
 
+    # 误差自适应刚度，含义与 forward_position_controller.yaml 里的完全一致，
+    # 那份文件写了完整说明。形状参数与它对齐，scale 单独当开关：0.0 = 关闭。
+    adaptive_stiffness_scale: 0.0
+    adaptive_stiffness_b: 0.08
+    adaptive_stiffness_power: 3.0
+
     constraints:
       goal_time: 2.0
       stopped_velocity_tolerance: 0.05

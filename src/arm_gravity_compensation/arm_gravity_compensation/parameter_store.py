@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 from numpy.typing import ArrayLike
 
+from .calibration import fit_friction_model
 from .constants import (ALL_ARM_JOINTS, ARM_JOINTS, SIDES, mirror_arm_values,
                         opposite_side)
 
@@ -72,6 +73,60 @@ def _inertial_parameters(link: ET.Element) -> Optional[Dict[str, object]]:
             for name in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz")
         },
     }
+
+
+def _digest_attributes(element, keys) -> str:
+    if element is None:
+        return ""
+    values = []
+    for key in keys:
+        text = element.get(key)
+        if text is None:
+            values.append("")
+            continue
+        try:
+            # 数值归一：0.10 和 0.1 是同一个模型，不该算成两个。
+            values.append(" ".join(
+                "%.12g" % float(part) for part in text.split()))
+        except ValueError:
+            values.append(text.strip())
+    return ",".join(values)
+
+
+def urdf_model_digest(urdf_xml: str) -> str:
+    """Digest of what changes the model, ignoring how it is drawn.
+
+    Hashing the whole file treats a new render colour as a new robot. Only the
+    kinematics and the inertias can invalidate a calibration, so only those are
+    read: joint connectivity, origin, axis and limits, plus link inertials.
+    ``visual``, ``collision``, ``material`` and anything else are ignored.
+    """
+    root = ET.fromstring(urdf_xml)
+    parts = []
+    for joint in sorted(root.findall("joint"), key=lambda e: e.get("name") or ""):
+        parent, child = joint.find("parent"), joint.find("child")
+        parts.append("joint|%s|%s|%s|%s|%s|%s|%s" % (
+            joint.get("name") or "",
+            joint.get("type") or "",
+            "" if parent is None else parent.get("link") or "",
+            "" if child is None else child.get("link") or "",
+            _digest_attributes(joint.find("origin"), ("xyz", "rpy")),
+            _digest_attributes(joint.find("axis"), ("xyz",)),
+            _digest_attributes(joint.find("limit"),
+                               ("lower", "upper", "effort", "velocity")),
+        ))
+    for link in sorted(root.findall("link"), key=lambda e: e.get("name") or ""):
+        inertial = link.find("inertial")
+        if inertial is None:
+            continue
+        parts.append("link|%s|%s|%s|%s" % (
+            link.get("name") or "",
+            _digest_attributes(inertial.find("origin"), ("xyz", "rpy")),
+            _digest_attributes(inertial.find("mass"), ("value",)),
+            _digest_attributes(inertial.find("inertia"),
+                               ("ixx", "ixy", "ixz", "iyy", "iyz", "izz")),
+        ))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
 def create_parameter_document(urdf_xml: str, source_path: str) -> dict:
@@ -156,7 +211,8 @@ def create_parameter_document(urdf_xml: str, source_path: str) -> dict:
         "updated_at": utc_now(),
         "source_urdf": {
             "path": str(Path(source_path).expanduser().resolve()),
-            "sha256": hashlib.sha256(urdf_xml.encode("utf-8")).hexdigest(),
+            "digest_kind": "model",
+            "sha256": urdf_model_digest(urdf_xml),
             "robot_name": root.get("name", ""),
         },
         "model_scope": {
@@ -242,17 +298,40 @@ class ParameterStore:
     def exists(self) -> bool:
         return Path(self.path).is_file()
 
-    def initialize(self, urdf_path: str, *, force: bool = False) -> dict:
+    def initialize(self, urdf_path: str, *, force: bool = False,
+                   rebind: bool = False) -> dict:
         if self.exists and not force:
             document = self.load()
             source = Path(urdf_path).expanduser().resolve()
             with open(source, "r", encoding="utf-8") as stream:
-                digest = hashlib.sha256(stream.read().encode("utf-8")).hexdigest()
+                text = stream.read()
+            digest = urdf_model_digest(text)
             stored_source = document["source_urdf"]
+            if stored_source.get("digest_kind") != "model":
+                # 早期文件存的是整份文件的摘要，改个渲染颜色就会不认。内容真没变
+                # 就地升级成模型摘要；变了则落到下面的检查，报同样的错。
+                legacy = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                if stored_source["sha256"] == legacy:
+                    stored_source["digest_kind"] = "model"
+                    stored_source["sha256"] = digest
+                    self.save(document)
+                    document = self.load()
+                    stored_source = document["source_urdf"]
             if stored_source["sha256"] != digest:
-                raise ValueError(
-                    "existing parameter file belongs to a different URDF; "
-                    "back it up and reinitialize explicitly")
+                if not rebind:
+                    raise ValueError(
+                        "existing parameter file belongs to a different URDF; "
+                        "rerun with rebind_urdf:=true to keep the captured "
+                        "poses and adopt this URDF, or back it up and "
+                        "reinitialize explicitly")
+                # 重绑只换身份，不动采样点和分组配置——质量参数本来就要重标，
+                # 但手工配好的 model_scope 没有理由跟着一起丢。
+                stored_source["digest_kind"] = "model"
+                stored_source["sha256"] = digest
+                stored_source["path"] = str(source)
+                self.save(document)
+                document = self.load()
+                stored_source = document["source_urdf"]
             # 同一份模型换个路径看到（工作区搬家、或容器里透过 bind mount 看同一棵树）
             # 不是换了模型：内容摘要才是身份，路径只是出处记录。
             if Path(stored_source["path"]).resolve() != source:
@@ -415,6 +494,60 @@ class ParameterStore:
         biases = [document["calibration"]["joint_torque_bias"][joint_name]
                   for joint_name in ARM_JOINTS[side]]
         return np.asarray(scales, dtype=float), np.asarray(biases, dtype=float)
+
+    def friction_estimate(self, side: str):
+        """Per-joint friction coefficients from the newest two-sided batch.
+
+        Returns ``(load_ratio, offset)`` or ``None`` when no iteration carries
+        friction - which is every batch recorded before two-sided sampling, and
+        any batch whose ``approach_offset_rad`` was zero. The caller has to
+        treat that as "no friction compensation", not as zero friction.
+        """
+        if side not in SIDES:
+            raise ValueError("side must be 'left' or 'right'")
+        document = self.load()
+        for record in reversed(document["calibration"]["iterations"]):
+            if record.get("side") != side:
+                continue
+            samples = record.get("samples")
+            if not samples or "friction" not in samples[0]:
+                continue
+            friction = np.asarray(
+                [sample["friction"] for sample in samples], dtype=float)
+            # One-sided batches store zeros rather than omitting the field.
+            if not np.any(friction):
+                continue
+            load = np.asarray(
+                [sample["estimated_torque"] for sample in samples], dtype=float)
+            return fit_friction_model(friction, load)
+        return None
+
+    def friction_table(self) -> dict:
+        """The friction fit as a loadable table, one block per side.
+
+        Kept out of the gravity table on purpose. That file describes the
+        rigid-body chain and is read by the force sensor compensator and the
+        payload estimator too, neither of which has any use for friction;
+        friction is a property of the drives, not of the links. The joint names
+        travel with the coefficients so a controller can refuse a table whose
+        order does not match the arm it is compensating - which is the
+        consistency the single-file version got for free.
+
+        Sides with no two-sided samples are omitted rather than zero-filled, so
+        the consumer can tell "not measured" from "measured as zero".
+        """
+        table = {}
+        for side in SIDES:
+            estimate = self.friction_estimate(side)
+            if estimate is None:
+                continue
+            ratio, offset = estimate
+            table[side] = {
+                "joints": list(ARM_JOINTS[side]),
+                "load_ratio": [float(value) for value in ratio],
+                "offset": [float(value) for value in offset],
+            }
+        return table
 
     def mirror_link_estimate(self, source_side: str) -> dict:
         """Seed the opposite arm with the mirror of ``source_side``.

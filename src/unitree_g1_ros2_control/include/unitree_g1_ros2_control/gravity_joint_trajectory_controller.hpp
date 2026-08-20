@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "joint_trajectory_controller/joint_trajectory_controller.hpp"
+#include "unitree_g1_ros2_control/adaptive_stiffness.hpp"
 #include "unitree_g1_ros2_control/gravity_feedforward.hpp"
 
 namespace unitree_g1_ros2_control {
@@ -25,6 +26,7 @@ public:
     controller_interface::CallbackReturn on_init() override;
 
     controller_interface::InterfaceConfiguration state_interface_configuration() const override;
+    controller_interface::InterfaceConfiguration command_interface_configuration() const override;
 
     controller_interface::CallbackReturn on_configure(
         const rclcpp_lifecycle::State& previous_state) override;
@@ -38,8 +40,10 @@ public:
 
 private:
     GravityFeedforward gravity_;
+    AdaptiveStiffness stiffness_;
     // Scratch buffers, sized once at configure so the loop never allocates.
     std::vector<double> target_;
+    std::vector<double> measured_;
     std::vector<double> command_;
     bool target_valid_{false};
 };

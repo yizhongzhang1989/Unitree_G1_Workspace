@@ -60,6 +60,11 @@ private:
     static constexpr std::size_t kForceTorqueSensorCount = 2;
     static constexpr std::size_t kWrenchAxisCount = 6;
     static constexpr std::size_t kImuAxisCount = 10;
+    // Sanity bound on the commanded gains, as a multiple of the table value.
+    // Not a tuning limit: a controller that crashes leaves its last write in
+    // place and the firmware has no watchdog, so anything outside this falls
+    // back to the table.
+    static constexpr double kMaximumGainScale = 10.0;
 
     struct PendingState {
         std::array<double, kControlledJointCount> position{};
@@ -99,6 +104,10 @@ private:
     bool release_motion_mode(std::string& error);
     bool restore_motion_mode(std::string& error);
     bool wait_for_lowcmd_quiet();
+    /// Whatever the controller asked for, bounded against the table value.
+    double commanded_stiffness(std::size_t index) const;
+    double commanded_damping(std::size_t index) const;
+    void reset_commanded_gains();
     std::optional<std::size_t> control_interface_index(const std::string& name) const;
     std::uint32_t next_claim_mask(
         const std::vector<std::string>& start_interfaces,
@@ -120,6 +129,12 @@ private:
     // controllers never have to duplicate the gain file.
     std::array<double, kControlledJointCount> gain_stiffness_{};
     std::array<double, kControlledJointCount> gain_damping_{};
+    // The gains the arm controllers command, mirroring command_position_. Kept
+    // apart from the table above because that one is also the backing store of
+    // the `kp`/`kd` state interfaces: sharing it would feed a controller its
+    // own output back as the nominal gain, and every cycle would compound.
+    std::array<double, kControlledJointCount> command_stiffness_{};
+    std::array<double, kControlledJointCount> command_damping_{};
     double arm_stiffness_scale_{1.0};   // 双臂 15–28 号关节的 `kp` 的缩放
     std::array<std::array<double, kWrenchAxisCount>, kForceTorqueSensorCount>
         wrench_state_{};

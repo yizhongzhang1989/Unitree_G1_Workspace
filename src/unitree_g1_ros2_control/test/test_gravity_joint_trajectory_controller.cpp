@@ -24,6 +24,7 @@ namespace {
 constexpr double kMass = 0.2;
 constexpr double kLever = 0.5;
 constexpr double kStiffness = 10.0;
+constexpr double kDamping = 2.0;
 constexpr double kGravity = 9.81;
 
 const std::vector<std::string> kJoints = {
@@ -79,9 +80,11 @@ public:
                  // Torso upright: the fused attitude is identity, so gravity
                  // points at -Z.
                  imu_{0.0, 0.0, 0.0, 1.0},
-                 gains_(2 * GravityFeedforward::kArmJointCount, kStiffness) {
-        command_handles_.reserve(kJoints.size());
-        state_handles_.reserve(3 * kJoints.size() + imu_.size() + gains_.size());
+                 gains_(2 * GravityFeedforward::kArmJointCount, kStiffness),
+                 damping_(2 * GravityFeedforward::kArmJointCount, kDamping),
+                 commanded_gains_(2 * gains_.size(), std::nan("")) {
+        command_handles_.reserve(kJoints.size() + commanded_gains_.size());
+        state_handles_.reserve(3 * kJoints.size() + imu_.size() + 2 * gains_.size());
         for (std::size_t index = 0; index < kJoints.size(); ++index) {
             command_handles_.emplace_back(
                 kJoints[index], hardware_interface::HW_IF_POSITION, &commands_[index]);
@@ -98,6 +101,17 @@ public:
         }
         for (std::size_t index = 0; index < gains_.size(); ++index) {
             state_handles_.emplace_back(kJoints[index], "kp", &gains_[index]);
+        }
+        for (std::size_t index = 0; index < gains_.size(); ++index) {
+            state_handles_.emplace_back(kJoints[index], "kd", &damping_[index]);
+        }
+        for (std::size_t index = 0; index < gains_.size(); ++index) {
+            command_handles_.emplace_back(
+                kJoints[index], "kp", &commanded_gains_[index]);
+        }
+        for (std::size_t index = 0; index < gains_.size(); ++index) {
+            command_handles_.emplace_back(
+                kJoints[index], "kd", &commanded_gains_[gains_.size() + index]);
         }
     }
 
@@ -118,6 +132,8 @@ public:
     std::vector<double> commands_;
     std::vector<double> imu_;
     std::vector<double> gains_;
+    std::vector<double> damping_;
+    std::vector<double> commanded_gains_;
 
 private:
     std::vector<hardware_interface::CommandInterface> command_handles_;
