@@ -91,6 +91,7 @@ function updateFiles(snapshot) {
   ui.sourcePath.textContent = snapshot.files.source_urdf;
   ui.outputPath.textContent = snapshot.files.calibrated_urdf;
   ui.tablePath.textContent = snapshot.files.gravity_table;
+  ui.frictionPath.textContent = snapshot.files.friction_table;
   ui.ftPath.textContent = snapshot.files.ft_calibration;
   ui.sourceHash.textContent = snapshot.files.source_sha256;
   ui.schemaValue.textContent = `schema v${snapshot.files.schema_version}`;
@@ -354,6 +355,8 @@ function bind() {
     try {
       const result = await api("/api/export");
       const written = ["calibrated.urdf", "gravity_table.yaml"];
+      // 只有跑过双向采样才有摩擦数据，没有就不写这个文件。
+      if (result.friction_table) written.push("friction_table.yaml");
       if (result.ft_calibration) written.push("ft_calibration.yaml");
       toast(`已写入 ${written.join(" · ")}`);
       await refresh();

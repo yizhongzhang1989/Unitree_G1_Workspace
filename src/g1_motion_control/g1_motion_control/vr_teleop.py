@@ -252,7 +252,7 @@ class VRTeleop(Node):
             p('arm_position_frame', 'world').get_parameter_value().string_value,
             'arm_position_frame')
         self._rot_frame = _frame_mode(
-            p('arm_rotation_frame', 'local').get_parameter_value().string_value,
+            p('arm_rotation_frame', 'world').get_parameter_value().string_value,
             'arm_rotation_frame')
         self._timeout = float(p('frame_timeout_s', 0.3).get_parameter_value().double_value)
         self._grip_open = float(p('gripper_open', 2.76377472169236).get_parameter_value().double_value)

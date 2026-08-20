@@ -58,10 +58,38 @@ def test_default_controller_claims_g1_body_and_both_grippers():
         "gravity_filter_cutoff_hz",
         "offset_ramp_s",
         "compensation_scale",
+        "friction_scale",
+        "friction_table",
+        "friction_error_epsilon",
+        "friction_velocity_epsilon",
+        "target_velocity_cutoff_hz",
+        "adaptive_stiffness_scale",
+        "adaptive_stiffness_b",
+        "adaptive_stiffness_power",
     }
     assert forward_parameters["gravity_table"] == \
         "package://arm_gravity_compensation/config/gravity_table.yaml"
     assert forward_parameters["compensation_scale"] == 1.0
+    # 摩擦补偿的总开关，兼作保守度旋钮。
+    assert forward_parameters["friction_scale"] >= 0.0
+    # 系数从标定导出的独立文件读，正常留空 = 用那一份。分成两个文件是因为重力表
+    # 还被力传感器补偿和负载估计读，它们用不到摩擦。
+    assert forward_parameters["friction_table"] == \
+        "package://arm_gravity_compensation/config/friction_table.yaml"
+    # 空的 YAML 列表没有类型，rclcpp 声明时会 abort 整个 ros2_control_node，
+    # 所以这两个覆盖项只能从命令行给，不能写进文件。
+    assert "friction_load_ratio" not in forward_parameters
+    assert "friction_offset_nm" not in forward_parameters
+    # 误差项是主导：只靠目标速度恰恰在精细动作时补不够。两个 eps 都允许为 0
+    # （= 关掉该项），但不能同时为 0，否则整个补偿恒为 0。
+    assert forward_parameters["friction_error_epsilon"] > 0.0
+    assert (forward_parameters["friction_error_epsilon"] > 0.0
+            or forward_parameters["friction_velocity_epsilon"] > 0.0)
+    assert forward_parameters["target_velocity_cutoff_hz"] > 0.0
+    # b 是除数、power 是指数，两者不得为 0；scale 是总开关兼保守度旋钮。
+    assert forward_parameters["adaptive_stiffness_scale"] >= 0.0
+    assert forward_parameters["adaptive_stiffness_b"] > 0.0
+    assert forward_parameters["adaptive_stiffness_power"] > 0.0
     assert trajectory_parameters["command_interfaces"] == ["position"]
     assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
     # Humble 的 JTC 没有“不发布状态”这个概念（校验下限 0.1 Hz），也没有理由

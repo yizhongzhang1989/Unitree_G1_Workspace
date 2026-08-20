@@ -96,7 +96,7 @@ ros2 launch arm_gravity_compensation gravity_calibration.launch.py \
 1. 让手臂能自己停住（现有重力补偿浮动，或用手扶前臂），把末端摆到一个朝向。
 2. 点"记录当前朝向"。节点在一个 IMU 平均窗口里同时统计两台传感器的均值和抖动；抖动超阈值（默认 1 N / 0.1 N·m）直接拒绝——那说明还有人碰着工具。
 3. 换朝向重复。**至少 4 个**，并且要让传感器的三根轴都朝下过一次；页面上的 `spread` 是重力单位向量矩阵的最小/最大奇异值之比，越接近 1 越好，实践上做 8~12 个。
-4. 点"求解"，核对"建议取矩点"的量级后点"采用建议取矩点重解"（见下），再点第 01 段的"导出全部结果"。那一个按钮同时写 `calibrated.urdf`、`gravity_table.yaml` 和 `ft_calibration.yaml`。
+4. 点"求解"，核对"建议取矩点"的量级后点"采用建议取矩点重解"（见下），再点第 01 段的"导出全部结果"。那一个按钮同时写 `calibrated.urdf`、`gravity_table.yaml`、`friction_table.yaml` 和 `ft_calibration.yaml`。
 
 自动扭矩标定跑到每个姿态停稳时也会顺带记一条力样本（`source = automatic_settle`），因为那一刻工具那端最干净。
 
@@ -213,8 +213,8 @@ $$\tau_\uparrow = -G(q) + f,\qquad \tau_\downarrow = -G(q) - f$$
 `StaticSample.friction`，随每轮迭代写进 `parameters.json`，并在每侧标定结束时打印
 （跨位姿中位数与 p90）。它**不进回归**，是白拿的副产物。
 
-实测摩擦**正比于关节载荷**：$\tau_f \approx \mu|\tau_g| + \tau_0$，$\mu$ 在 0.13~0.22，
-各关节与两侧高度一致。这是摩擦补偿能否安全实施的前提——同一关节的摩擦跨位姿能差 11 倍，
+实测摩擦**正比于关节载荷**：$\tau_f \approx \mu|\tau_g| + \tau_0$，逐关节拟合的 $\mu$ 落在
+0.064~0.223。这是摩擦补偿能否安全实施的前提——同一关节的摩擦跨位姿能差 11 倍，
 按常数补偿会在轻载位姿过补成负阻尼。详见 [`CALIBRATION.md`](CALIBRATION.md) 第 10 节。
 
 平均量（重力）的组内相对离散度只有 **3.3%**，而差值（摩擦）是 30.3%。后者不是噪声，
@@ -224,11 +224,55 @@ $$\tau_\uparrow = -G(q) + f,\qquad \tau_\downarrow = -G(q) - f$$
 在此之前它被排除在重力表之外正是因为混了静摩擦，见
 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
 
+## 摩擦表
+
+`config/friction_table.yaml`，双向标定的第二个产物，随「导出全部结果」一起写出。
+
+### 怎么算
+
+每个位姿两次逼近的**半差**就是那一点的摩擦。实测它与该位姿的重力矩显著正相关
+（肩部 $r=0.90\sim0.96$）——减速器损耗随传递的力矩走——所以拟合一次函数而不是取均值：
+
+$$\tau_f^{(i)} = \tfrac12\bigl(\tau_\uparrow^{(i)} - \tau_\downarrow^{(i)}\bigr),
+\qquad
+\min_{\mu,\,\tau_0}\ \sum_i\Bigl(\mu\,\bigl|\tau_g^{(i)}\bigr| + \tau_0 - \bigl|\tau_f^{(i)}\bigr|\Bigr)^2$$
+
+每侧 7 组 $(\mu,\tau_0)$，都裁到非负——负截距会让轻载时补偿反向推。
+实测 $\mu\in[0.064,\,0.223]$；取均值当常数则会在轻载位姿过补，同一关节的摩擦跨位姿差 11 倍。
+
+```yaml
+left:
+  joints: [left_shoulder_pitch_joint, ... , left_wrist_yaw_joint]
+  load_ratio: [0.171, 0.132, 0.213, 0.148, 0.133, 0.173, 0.216]
+  offset:     [0.149, 0.230, 0.000, 0.142, 0.156, 0.138, 0.091]
+```
+
+### 怎么用
+
+```yaml
+# forward_position_controller
+friction_table: package://arm_gravity_compensation/config/friction_table.yaml
+friction_scale: 1.0     # 0 = 不补
+```
+
+运行时按 $\tau_f = \mu|\tau_g| + \tau_0$ 折成位置偏移，叠在重力偏移上：
+
+$$q_{cmd} = q_{target} + \frac{s\,\tau_g + s_f\,\tau_f\tanh\bigl(e/\varepsilon_e + \dot q_{target}/\varepsilon_v\bigr)}{k_p}$$
+
+- 路径是**配置期参数**，改完要重载 controller；`friction_scale` 与两个 $\varepsilon$ 可热调。
+- 非空但文件不存在 → `on_configure` 失败、FPC 起不来。不补的正规写法是**置空**。
+- 表里带 `joints`，加载时与重力表逐个比对，对不上拒绝启动。
+- 某侧没跑双向采样则该侧整块省略（「没测」≠「摩擦为零」）。
+
+调参顺序与翻车表现见
+[unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md) 的「摩擦前馈」。
+
 ## 文件
 标定结果放在包内 `config/`，**纳入版本管理**，四个文件都在点击"导出"时原子写入：
 - `config/parameters.json`：源 URDF 参数、当前逐 link 标定值、采点和每轮迭代记录，外加 `ft_sensor` 段（力传感器样本与每侧结果）。schema v3；v2 的文件在加载时自动补齐这一段。
 - `config/calibrated.urdf`：与源 `final.urdf` 保持相同 link/joint/mimic 结构，只替换标定后的 `mass` 和六个 inertia 分量。
 - `config/gravity_table.yaml`：给运行时用的**归并刚体链**，每侧 7 个体的 `axis / origin_xyz / origin_rotation / mass / com` 平铺数组，另带 `imu_to_torso`，以及力传感器测量系相对腕 yaw 关节系的常值位姿 `payload_origin_xyz / payload_origin_rotation`。后者既是末端负载的挂载点，也让运行时能把重力方向转进测量系。它按 ROS 2 参数文件格式书写，由 `forward_position_controller` 的 `gravity_table` 参数通过 `package://arm_gravity_compensation/config/gravity_table.yaml` 读取。标定出的力矩偏置不在其中（只留在 `parameters.json`），原因见 [unitree_g1_ros2_control/README.md](../unitree_g1_ros2_control/README.md)。
+- `config/friction_table.yaml`：每侧 7 个关节的 `joints / load_ratio / offset`，即 $\tau_f = \mu|\tau_g| + \tau_0$ 的逐关节拟合，由 `forward_position_controller` 的 `friction_table` 参数读取，用于摩擦补偿。**单独成文件**而不是并进重力表：重力表还被 `ft_wrench_compensator` 和 `payload_estimator` 读，它们用不到摩擦；摩擦是驱动器特性，不是连杆参数。代价是失去了「同一个文件必然同源」，所以表里带着关节名，运行时与重力表逐个比对，对不上直接拒绝启动。某侧没有双向采样数据时该侧整块省略（表示「没测」而不是「摩擦为零」）。
 - `config/ft_calibration.yaml`：每侧的 `force_bias / torque_bias / tool_mass / tool_com / measurement_origin / rotation / polarity / frame`，由 `ft_wrench_compensator` 读取。`tool_com` 对 **link 原点**取矩，`measurement_origin` 是传感器自己的力矩参考点在同一个系里的位置。
 
 节点拿到的是安装后的 share 路径，而 `--symlink-install` 使它经 `build/` 指回源码树，写入前的 `Path.resolve()` 会跟随这条链，所以导出直接落在 `src/arm_gravity_compensation/config/` 上，符号链接也不会被替换。三个路径均可用 `parameter_file` / `calibrated_urdf` / `gravity_table` 参数覆盖；重力表的顶层键名取自 `gravity_controller_name`（默认 `arm_gravity_compensation`）。

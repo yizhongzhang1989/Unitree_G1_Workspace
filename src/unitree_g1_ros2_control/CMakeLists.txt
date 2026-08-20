@@ -36,6 +36,7 @@ find_package(yaml_cpp_vendor REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
+  src/adaptive_stiffness.cpp
   src/forward_position_controller.cpp
   src/ft_compensation.cpp
   src/gravity_feedforward.cpp
@@ -115,6 +116,36 @@ if(BUILD_TESTING)
     test/test_periodic_deadline.cpp
   )
   target_include_directories(test_periodic_deadline PRIVATE include)
+  ament_add_gtest(
+    test_g1_topic_system
+    test/test_g1_topic_system.cpp
+  )
+  target_link_libraries(
+    test_g1_topic_system
+    ${PROJECT_NAME}
+    yaml-cpp
+  )
+  ament_target_dependencies(
+    test_g1_topic_system
+    hardware_interface
+    rclcpp
+  )
+  target_compile_definitions(test_g1_topic_system PRIVATE
+    CONFIG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/config")
+  ament_add_gtest(
+    test_adaptive_stiffness
+    test/test_adaptive_stiffness.cpp
+  )
+  target_link_libraries(
+    test_adaptive_stiffness
+    ${PROJECT_NAME}
+  )
+  ament_target_dependencies(
+    test_adaptive_stiffness
+    controller_interface
+    hardware_interface
+    rclcpp
+  )
   ament_add_gtest(
     test_forward_position_controller
     test/test_forward_position_controller.cpp

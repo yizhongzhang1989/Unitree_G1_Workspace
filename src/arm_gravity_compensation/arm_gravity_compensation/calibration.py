@@ -45,6 +45,45 @@ class CalibrationFit:
     em: EMResult
 
 
+def fit_friction_model(friction: np.ndarray, load: np.ndarray) -> tuple:
+    """Fit ``tau_f = mu * |tau_gravity| + tau_0`` per joint.
+
+    ``friction`` is the half difference the two-sided sampling throws away and
+    ``load`` the gravity torque at the same pose, both ``(poses, 7)`` and both
+    taken as magnitudes. Measured 2026-08-19 the two correlate at 0.71-0.96 on
+    the shoulders: friction here is gearbox loss, which scales with what the
+    gearbox is carrying.
+
+    Fitting the slope rather than taking a mean is what makes the result safe
+    to feed forward. One joint spans 11x between poses (0.106-1.205 N.m on the
+    left shoulder roll), so a constant from the median over-compensates a
+    lightly loaded pose tenfold - and over-compensated friction is negative
+    damping. Both coefficients are clipped at zero: a negative slope has no
+    reading, and a negative intercept is the fit extrapolated below the loads
+    that were sampled, which would push the joint backwards.
+    """
+    friction = np.abs(np.asarray(friction, dtype=float))
+    load = np.abs(np.asarray(load, dtype=float))
+    if friction.shape != load.shape or friction.ndim != 2:
+        raise ValueError("friction and load must be matching (poses, joints) arrays")
+
+    joints = friction.shape[1]
+    ratio = np.zeros(joints)
+    offset = np.zeros(joints)
+    for index in range(joints):
+        column = load[:, index]
+        # Two poses cannot separate a slope from an intercept, and neither can
+        # any number of poses that all sat at the same load.
+        if column.size < 3 or np.ptp(column) < 1e-9:
+            offset[index] = max(0.0, float(np.median(friction[:, index])))
+            continue
+        design = np.column_stack([column, np.ones(column.size)])
+        solution, *_ = np.linalg.lstsq(design, friction[:, index], rcond=None)
+        ratio[index] = max(0.0, float(solution[0]))
+        offset[index] = max(0.0, float(solution[1]))
+    return ratio, offset
+
+
 def _selected_indices(side: str, selected_joint_names: Iterable[str]) -> np.ndarray:
     names = ARM_JOINTS.get(side)
     if names is None:

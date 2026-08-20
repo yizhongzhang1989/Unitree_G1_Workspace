@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 from numpy.typing import ArrayLike
 
+from .calibration import fit_friction_model
 from .constants import (ALL_ARM_JOINTS, ARM_JOINTS, SIDES, mirror_arm_values,
                         opposite_side)
 
@@ -493,6 +494,60 @@ class ParameterStore:
         biases = [document["calibration"]["joint_torque_bias"][joint_name]
                   for joint_name in ARM_JOINTS[side]]
         return np.asarray(scales, dtype=float), np.asarray(biases, dtype=float)
+
+    def friction_estimate(self, side: str):
+        """Per-joint friction coefficients from the newest two-sided batch.
+
+        Returns ``(load_ratio, offset)`` or ``None`` when no iteration carries
+        friction - which is every batch recorded before two-sided sampling, and
+        any batch whose ``approach_offset_rad`` was zero. The caller has to
+        treat that as "no friction compensation", not as zero friction.
+        """
+        if side not in SIDES:
+            raise ValueError("side must be 'left' or 'right'")
+        document = self.load()
+        for record in reversed(document["calibration"]["iterations"]):
+            if record.get("side") != side:
+                continue
+            samples = record.get("samples")
+            if not samples or "friction" not in samples[0]:
+                continue
+            friction = np.asarray(
+                [sample["friction"] for sample in samples], dtype=float)
+            # One-sided batches store zeros rather than omitting the field.
+            if not np.any(friction):
+                continue
+            load = np.asarray(
+                [sample["estimated_torque"] for sample in samples], dtype=float)
+            return fit_friction_model(friction, load)
+        return None
+
+    def friction_table(self) -> dict:
+        """The friction fit as a loadable table, one block per side.
+
+        Kept out of the gravity table on purpose. That file describes the
+        rigid-body chain and is read by the force sensor compensator and the
+        payload estimator too, neither of which has any use for friction;
+        friction is a property of the drives, not of the links. The joint names
+        travel with the coefficients so a controller can refuse a table whose
+        order does not match the arm it is compensating - which is the
+        consistency the single-file version got for free.
+
+        Sides with no two-sided samples are omitted rather than zero-filled, so
+        the consumer can tell "not measured" from "measured as zero".
+        """
+        table = {}
+        for side in SIDES:
+            estimate = self.friction_estimate(side)
+            if estimate is None:
+                continue
+            ratio, offset = estimate
+            table[side] = {
+                "joints": list(ARM_JOINTS[side]),
+                "load_ratio": [float(value) for value in ratio],
+                "offset": [float(value) for value in offset],
+            }
+        return table
 
     def mirror_link_estimate(self, source_side: str) -> dict:
         """Seed the opposite arm with the mirror of ``source_side``.

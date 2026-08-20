@@ -113,6 +113,12 @@ class ArmGravityWorkflow(Node):
         self._controller_name = self.declare_parameter(
             "gravity_controller_name", "arm_gravity_compensation"
         ).get_parameter_value().string_value
+        # Friction is a property of the drives rather than of the links, and
+        # the gravity table has two other consumers that do not care about it,
+        # so it gets its own file.
+        self._friction_table_path = str(Path(self.declare_parameter(
+            "friction_table", str(default_data / "friction_table.yaml")
+        ).get_parameter_value().string_value).expanduser().resolve())
         self._lowstate_topic = self.declare_parameter(
             "lowstate_topic", "/lowstate").get_parameter_value().string_value
         # The torso IMU. G1 carries two: ``LowState.imu_state`` sits in the
@@ -700,6 +706,14 @@ class ArmGravityWorkflow(Node):
                     {self._controller_name: {
                         "ros__parameters": self._model.gravity_table(tool=tool)}},
                     default_flow_style=None, sort_keys=False).encode("utf-8"))
+            friction = ""
+            friction_table = self._store.friction_table()
+            if friction_table:
+                friction = atomic_write(
+                    self._friction_table_path,
+                    yaml.safe_dump(
+                        {self._controller_name: {"ros__parameters": friction_table}},
+                        default_flow_style=None, sort_keys=False).encode("utf-8"))
             sensors = ""
             if calibrated:
                 sensors = atomic_write(
@@ -711,6 +725,7 @@ class ArmGravityWorkflow(Node):
                         for side, record in calibrated.items()}}},
                         default_flow_style=None, sort_keys=False).encode("utf-8"))
         return {"ok": True, "path": output, "gravity_table": table,
+                "friction_table": friction,
                 "ft_calibration": sensors, "adopted_tool": bool(tool)}
 
     def _run_calibration(self) -> None:
@@ -1341,6 +1356,7 @@ class ArmGravityWorkflow(Node):
                 "source_urdf": self._urdf_path,
                 "calibrated_urdf": self._output_urdf,
                 "gravity_table": self._gravity_table_path,
+                "friction_table": self._friction_table_path,
                 "ft_calibration": self._ft_calibration_path,
                 "schema_version": document["schema_version"],
                 "source_sha256": document["source_urdf"]["sha256"],

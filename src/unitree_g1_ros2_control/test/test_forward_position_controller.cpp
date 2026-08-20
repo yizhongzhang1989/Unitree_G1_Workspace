@@ -28,6 +28,7 @@ using CallbackReturn =
 constexpr double kMass = 0.2;
 constexpr double kLever = 0.5;
 constexpr double kStiffness = 10.0;
+constexpr double kDamping = 2.0;
 constexpr double kGravity = 9.81;
 
 /// Fifteen joints so the whole table fits, with the waist last to prove the
@@ -172,11 +173,15 @@ TEST_F(ForwardPositionControllerTest, reapplies_gravity_offset_without_a_new_com
     // Torso upright: the fused attitude is identity, so gravity points at -Z.
     std::vector<double> imu = {0.0, 0.0, 0.0, 1.0};
     std::vector<double> gains(2 * GravityFeedforward::kArmJointCount, kStiffness);
+    std::vector<double> damping(gains.size(), kDamping);
+    // The adaptive stiffness claims a kp and a kd command per compensated
+    // joint, appended after the position commands.
+    std::vector<double> commanded_gains(2 * gains.size(), std::nan(""));
 
     std::vector<hardware_interface::CommandInterface> commands;
     std::vector<hardware_interface::StateInterface> states;
-    commands.reserve(kGravityJoints.size());
-    states.reserve(kGravityJoints.size() + imu.size() + gains.size());
+    commands.reserve(kGravityJoints.size() + commanded_gains.size());
+    states.reserve(kGravityJoints.size() + imu.size() + 2 * gains.size());
     for (std::size_t index = 0; index < kGravityJoints.size(); ++index) {
         commands.emplace_back(
             kGravityJoints[index], hardware_interface::HW_IF_POSITION,
@@ -184,6 +189,13 @@ TEST_F(ForwardPositionControllerTest, reapplies_gravity_offset_without_a_new_com
         states.emplace_back(
             kGravityJoints[index], hardware_interface::HW_IF_POSITION,
             &state_positions[index]);
+    }
+    for (std::size_t index = 0; index < gains.size(); ++index) {
+        commands.emplace_back(kGravityJoints[index], "kp", &commanded_gains[index]);
+    }
+    for (std::size_t index = 0; index < gains.size(); ++index) {
+        commands.emplace_back(
+            kGravityJoints[index], "kd", &commanded_gains[gains.size() + index]);
     }
     // Exactly the order state_interface_configuration() asks for them in.
     for (std::size_t index = 0; index < imu.size(); ++index) {
@@ -193,6 +205,9 @@ TEST_F(ForwardPositionControllerTest, reapplies_gravity_offset_without_a_new_com
     }
     for (std::size_t index = 0; index < gains.size(); ++index) {
         states.emplace_back(kGravityJoints[index], "kp", &gains[index]);
+    }
+    for (std::size_t index = 0; index < gains.size(); ++index) {
+        states.emplace_back(kGravityJoints[index], "kd", &damping[index]);
     }
 
     std::vector<hardware_interface::LoanedCommandInterface> loaned_commands;

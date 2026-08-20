@@ -1,0 +1,16 @@
+arm_gravity_compensation:
+  ros__parameters:
+    left:
+      joints: [left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint,
+        left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint]
+      load_ratio: [0.17108683043421033, 0.13180052746532095, 0.21333801001652866,
+        0.14778223301605026, 0.13268002519583846, 0.17328803601099296, 0.21585497876550763]
+      offset: [0.14892069912913294, 0.2300897874719929, 0.0, 0.14231253386879528,
+        0.1562939076319041, 0.13760003827847717, 0.09094690252677762]
+    right:
+      joints: [right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint,
+        right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint]
+      load_ratio: [0.14805217618584315, 0.1194416493300844, 0.1688931173139499, 0.09180463972371872,
+        0.06426176535407585, 0.15731086470262906, 0.2227256313123194]
+      offset: [0.12923492966255704, 0.15454530126622731, 0.0, 0.39452893893800134,
+        0.09841373731331973, 0.16945558626697257, 0.13544316134149006]

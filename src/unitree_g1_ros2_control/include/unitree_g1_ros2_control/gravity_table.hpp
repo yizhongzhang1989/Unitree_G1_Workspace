@@ -88,6 +88,41 @@ private:
     bool has_sensor_{false};
 };
 
+/// The `friction_table.yaml` exported by `arm_gravity_compensation`.
+///
+/// Separate from the gravity table because friction belongs to the drives
+/// rather than to the links, and because the gravity table is also read by the
+/// force sensor compensation and the payload estimator, neither of which has
+/// any use for it. The joint names travel with the coefficients so that a
+/// mismatched pair is rejected instead of silently compensating the wrong
+/// joint - the one guarantee the single-file version got for free.
+class FrictionTable {
+public:
+    static constexpr std::size_t kArmJointCount = GravityTable::kArmJointCount;
+    static constexpr std::size_t kSideCount = GravityTable::kSideCount;
+
+    /// Reads `path` and checks each side against `joints`, which is the order
+    /// the gravity table reported. A side the file omits stays at zero, which
+    /// means no compensation there. Throws `std::runtime_error` describing
+    /// what is wrong with the file.
+    void load(
+        const std::string& path,
+        const std::array<std::vector<std::string>, kSideCount>& joints);
+    bool loaded() const noexcept { return loaded_; }
+
+    double load_ratio(std::size_t side, std::size_t index) const {
+        return load_ratio_[side][index];
+    }
+    double offset(std::size_t side, std::size_t index) const {
+        return offset_[side][index];
+    }
+
+private:
+    std::array<std::array<double, kArmJointCount>, kSideCount> load_ratio_{};
+    std::array<std::array<double, kArmJointCount>, kSideCount> offset_{};
+    bool loaded_{false};
+};
+
 }  // namespace unitree_g1_ros2_control
 
 #endif  // UNITREE_G1_ROS2_CONTROL__GRAVITY_TABLE_HPP_

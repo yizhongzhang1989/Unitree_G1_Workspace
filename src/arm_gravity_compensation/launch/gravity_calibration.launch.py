@@ -44,6 +44,12 @@ def generate_launch_description() -> LaunchDescription:
                 FindPackageShare("arm_gravity_compensation"),
                 "config", "gravity_table.yaml",
             ])),
+        DeclareLaunchArgument(
+            "friction_table",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("arm_gravity_compensation"),
+                "config", "friction_table.yaml",
+            ])),
     ]
     node = Node(
         package="arm_gravity_compensation",
@@ -62,6 +68,7 @@ def generate_launch_description() -> LaunchDescription:
             "parameter_file": LaunchConfiguration("parameter_file"),
             "calibrated_urdf": LaunchConfiguration("calibrated_urdf"),
             "gravity_table": LaunchConfiguration("gravity_table"),
+            "friction_table": LaunchConfiguration("friction_table"),
         }],
     )
     return LaunchDescription([*arguments, node])
