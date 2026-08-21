@@ -283,8 +283,12 @@ class Recorder(Node):
                 rec.stop()
             if self.head is not None:
                 self.head.stop()
-            for rec in self.wrists.values():
-                rec.finalize()
+            for name, rec in self.wrists.items():
+                stamps = rec.finalize()
+                if rec.killed:
+                    self.session.warn('video_hard_killed', stream=name, timestamps=stamps)
+                elif not stamps:
+                    self.session.warn('video_no_timestamps', stream=name)
             if self.head is not None:
                 self.head.finalize()
                 if self.head.dropped:

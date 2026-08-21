@@ -63,6 +63,7 @@ class _FfmpegProcess:
         self.out_path = Path(out_path)
         self.health = StreamHealth(name=name)
         self.proc: subprocess.Popen | None = None
+        self.killed = False
         self._reader: threading.Thread | None = None
         self._stderr: list[bytes] = []
 
@@ -103,6 +104,8 @@ class _FfmpegProcess:
         try:
             self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            # 阻塞在 socket 读里的 ffmpeg 收不到 SIGINT，只能硬杀；调用方要据此告警
+            self.killed = True
             self.proc.kill()
             self.proc.wait(timeout=5)
         self.health.alive = False
@@ -124,6 +127,10 @@ class WristRecorder(_FfmpegProcess):
             # low_delay 管编解码器重排序缓冲，要留；nobuffer 会丢掉入场 IDR
             # 导致开头几秒全是灰帧，绝不能加（实测 32 帧纯灰）。
             '-flags', 'low_delay',
+            # 相机卡住时 ffmpeg 会一直阻塞在 socket 读里，连 SIGINT 都处理不了，
+            # 最后被 stop() 硬杀。**必须是 -stimeout**：-timeout 是「等待入站连接」
+            # 且隐含 listen 标志，会把客户端变成服务器。
+            '-stimeout', '5000000',
             # 这两个一起才能让时间戳文件里是绝对 unix 时间：前者把收包墙钟写进
             # 输入包，后者阻止 ffmpeg 把时间轴平移到 0。缺 -copyts 就只有相对值。
             '-use_wallclock_as_timestamps', '1', '-copyts',
@@ -131,7 +138,12 @@ class WristRecorder(_FfmpegProcess):
             '-c', 'copy', '-y', str(self.out_path),
             # 时间戳这一路**必须也写 -c copy**：不写就走默认编码器，ffmpeg 为此
             # 把 1080p 整个解码一遍，实测 1.0% -> 25.1% 单核，25 倍。
+            #
+            # flush_packets 让每帧的时间戳立刻落盘。不加的话进程被硬杀时整个文件
+            # 是空的 —— 实测 SIGKILL 后 0 行 vs 加了之后 348 行，一次 82 秒的采集
+            # 就是这样丢光了腕部时间戳。文本量约 420 B/s，代价可忽略。
             '-c', 'copy', '-f', 'mkvtimestamp_v2', '-vsync', 'passthrough',
+            '-flush_packets', '1',
             '-y', str(self.ts_path),
             '-progress', 'pipe:1', '-nostats',
         ]
