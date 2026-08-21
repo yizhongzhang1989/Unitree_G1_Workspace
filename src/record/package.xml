@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>record</name>
+  <version>0.1.0</version>
+  <description>上肢 VR 遥操作数据采集：三路视频 + 信号表 + 指令生成 + 采集面板</description>
+  <maintainer email="liruigang20131115@126.com">madderscientist</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- 腕相机走 -c copy 不解码，头部相机走 ROS 订阅再软编，两条都要它 -->
+  <exec_depend>ffmpeg</exec_depend>
+  <!-- 采集面板的预览帧要 JPEG 编码 -->
+  <exec_depend>python3-opencv</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

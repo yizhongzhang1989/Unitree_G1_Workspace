@@ -32,8 +32,21 @@ esac
 # 必须限定网卡：不指定时 Cyclone 会挑到 wlan0，表现为收不到 /lowstate。配置直接内联
 # 在 CYCLONEDDS_URI 里（Cyclone 接受 XML 文本，不只是 file://），省掉一个配置文件；
 # 换网卡时设 G1_DDS_INTERFACE 即可，不用编辑 XML。
+#
+# SocketReceiveBufferSize 是给大图像话题用的：1280x720 YUYV 一帧 1.84 MB，30 fps
+# 就是 55 MB/s。Cyclone 切成 UDP 分片发，收包缓冲一满就丢片，丢一片整帧作废。实测
+# 内核默认 rmem_max=208KB 时头部相机 30 fps 只收到 27.7（RcvbufErrors 10 秒涨 2427），
+# 加到 8MB 后满帧且 RcvbufErrors 归零。
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${G1_DDS_INTERFACE:-eth0}\" priority=\"default\" multicast=\"default\"/></Interfaces><AllowMulticast>spdp</AllowMulticast></General></Domain></CycloneDDS>}"
+export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"${G1_DDS_INTERFACE:-eth0}\" priority=\"default\" multicast=\"default\"/></Interfaces><AllowMulticast>spdp</AllowMulticast></General><Internal><SocketReceiveBufferSize min=\"8MB\"/></Internal></Domain></CycloneDDS>}"
+
+# 上面那 8MB 会被内核按 rmem_max 悄悄钳掉，钳掉后没有任何报错，只是默默丢帧。
+# 容器是 network_mode: host，这个值就是宿主机的全局值，得在**宿主机**上持久化：
+#   echo 'net.core.rmem_max=16777216' | sudo tee /etc/sysctl.d/60-ros2-dds.conf
+#   sudo sysctl --system
+if [ "$(cat /proc/sys/net/core/rmem_max 2>/dev/null || echo 0)" -lt 8388608 ]; then
+    echo "警告: net.core.rmem_max 过小，大图像话题会静默丢帧（见 scripts/env.sh）" >&2
+fi
 
 unset _EE_WS
 
