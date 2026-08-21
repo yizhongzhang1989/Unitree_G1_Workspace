@@ -324,6 +324,11 @@ class DashboardNode(Node):
 
     def _on_command(self, message: Float64MultiArray) -> None:
         """只观察统一命令总线里的臂块，解析复用 motion_control 的唯一协议。"""
+        with self._lock:
+            # 透传模式下同一个块是 14 个关节角，画成末端位姿就是编故事。
+            if self._status.get('arm_mode', 'ik') != 'ik':
+                self._command_pose.clear()
+                return
         try:
             chunks = split_command(message.data)
         except ValueError:

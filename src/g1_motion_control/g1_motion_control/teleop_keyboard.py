@@ -7,6 +7,10 @@
 
 指令发到 ``<policy_node>/command``（``[vx, vy, wz, h]``）。这里只做终端侧的粗
 限幅；真正对得上训练分布的限幅、限速在策略节点里。
+
+``F`` 的手臂浮动也全在这一侧：把 14 个手臂关节的实测值原样当目标发回去。FPC 于是
+写出 ``q_cmd = q_meas + G/kp``，电机只剩 ``tau = G - kd*dq``：位置项恰好抵消，手臂
+自撑自重、能徒手推，而下肢照旧跑策略。它要求策略层起在 ``arm_mode:=passthrough``。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import unicodedata
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
@@ -37,8 +42,12 @@ HELP = """\
   J / L     左转 / 右转      (wz)
   I / K     升高 / 蹲低      (h)
   X         速度指令清零（高度保持）
+  F         手臂浮动开/关：上肢失重可徒手摆，下肢策略不受影响（需 arm_mode:=passthrough）
   Q         退出（退出前自动急停）
 """
+
+# 浮动把实测关节角当目标发回去，太陈的一帧就是把手臂拽回旧位置。
+JOINT_TIMEOUT_S = 0.2
 
 
 class Teleop(Node):
@@ -77,6 +86,8 @@ class Teleop(Node):
         self._publisher = self.create_publisher(
             Float64MultiArray, f'{target}/command', stream)
         self.create_subscription(String, f'{target}/status', self._on_status, 10)
+        self.create_subscription(JointState, '/joint_states',
+                                 self._on_joint_states, stream)
         self._engage_client = self.create_client(Trigger, f'{target}/engage')
         self._start_client = self.create_client(Trigger, f'{target}/start')
         self._estop_client = self.create_client(Trigger, f'{target}/estop')
@@ -86,6 +97,13 @@ class Teleop(Node):
         self._status = '(等待策略节点状态)'
         self.notice = ''
         self._message = Float64MultiArray()
+        # 手臂浮动：14 轴的名字与顺序都由策略层的 status 报出，这边不猜也不抄。
+        self._float = False
+        self._arm_mode = ''
+        self._arm_names: list[str] = []
+        self._arm_q: list[float] | None = None
+        self._arm_stamp = 0.0
+        self._arm_message = Float64MultiArray()
 
     # -- 输入 ------------------------------------------------------------------
 
@@ -104,6 +122,7 @@ class Teleop(Node):
             self._height = max(self._height - self._h_step, self._h_range[0])
         elif name == ' ':
             self._vel = [0.0, 0.0, 0.0]
+            self._float = False
             self.request(self._estop_client, '急停')
         elif name == 'g':
             self.request(self._engage_client, '站立')
@@ -112,11 +131,21 @@ class Teleop(Node):
             self.request(self._start_client, '启动策略')
         elif name == 'x':
             self._vel = [0.0, 0.0, 0.0]
+        elif name == 'f':
+            self._toggle_float()
         elif name == 'q':
             return False
         else:
             self._idle = self._hold_timeout  # 无关按键不算"还按着"。
         return True
+
+    def _toggle_float(self) -> None:
+        """关掉只需停发臂块：上肢指令没有超时，手臂就停在你放开它的地方。"""
+        if not self._float and (self._arm_mode != 'passthrough' or self._arm_q is None):
+            self.notice = f'手臂浮动要 arm_mode:=passthrough 与关节反馈（当前 {self._arm_mode or "?"}）'
+            return
+        self._float = not self._float
+        self.notice = '手臂浮动：' + ('开（可徒手推）' if self._float else '关（停在当前位姿）')
 
     def request(self, client, label: str):
         """发一个 Trigger，返回 future；服务不在就返回 None，表示压根没发出去。"""
@@ -147,10 +176,25 @@ class Teleop(Node):
             self._status = message.data
             return
         state = status.get('state', '?')
+        self._arm_mode = status.get('arm_mode', '')
+        self._arm_names = list(status.get('arm_joints') or [])
+        if self._float and state not in ('stand', 'running'):
+            # 掉出 stand/running 就没人接上肢指令了，别让浮动状态留到下一次接管。
+            self._float = False
+            self.notice = f'手臂浮动已关：策略层变成 {state}'
         if state == 'stand':
             state += ' (可以 Enter)' if status.get('ready_to_start') else ' (插值中)'
+        if self._float:
+            state += ' +手臂浮动'
         detail = status.get('reason') or status.get('stale') or ''
         self._status = f'{state}{" ⚠ " + detail if detail else ""}'
+
+    def _on_joint_states(self, message: JointState) -> None:
+        """只取浮动要用的那 14 轴，顺序跟 status 报的走、不跟话题的排列走。"""
+        measured = dict(zip(message.name, message.position))
+        if self._arm_names and all(n in measured for n in self._arm_names):
+            self._arm_q = [float(measured[n]) for n in self._arm_names]
+            self._arm_stamp = time.monotonic()
 
     # -- 输出 ------------------------------------------------------------------
 
@@ -162,9 +206,18 @@ class Teleop(Node):
             self._vel = [0.0 if abs(v) < 1e-3 else v * keep for v in self._vel]
         self._message.data = [*self._vel, self._height]
         self._publisher.publish(self._message)
+        if not self._float:
+            return
+        # 浮动：14 轴实测值原样当目标发回去。单独一帧，不碰下肢那 4 值和夹爪。
+        if time.monotonic() - self._arm_stamp > JOINT_TIMEOUT_S:
+            self.notice = '手臂浮动暂停：/joint_states 不新鲜'
+            return
+        self._arm_message.data = self._arm_q
+        self._publisher.publish(self._arm_message)
 
     def stop(self) -> None:
         self._vel = [0.0, 0.0, 0.0]
+        self._float = False
 
     def estop(self, label: str):
         return self.request(self._estop_client, label)

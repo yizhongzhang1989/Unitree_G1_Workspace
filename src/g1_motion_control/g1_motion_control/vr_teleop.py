@@ -531,9 +531,16 @@ class VRTeleop(Node):
             self._update_command(frame)
             self._update_arms(frame, status.get('limited_pose') or {})
 
-        self._message.data = join_command(
-            base=(*self._twist, self._height),
-            left=self._pose['left'], right=self._pose['right'], grip=self._grip)
+        if status.get('arm_mode', 'ik') == 'ik':
+            self._message.data = join_command(
+                base=(*self._twist, self._height),
+                left=self._pose['left'], right=self._pose['right'], grip=self._grip)
+        else:
+            # 透传模式下那两个 7 值块是关节角。VR 只会算末端位姿，填进去就是拿
+            # 四元数当关节目标发，所以这时只发下肢。
+            self.get_logger().warning('策略层是逐关节透传模式，VR 只发下肢指令',
+                                      throttle_duration_sec=5.0)
+            self._message.data = join_command(base=(*self._twist, self._height))
         self._publisher.publish(self._message)
 
     def _check_button(self, frame) -> None:

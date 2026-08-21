@@ -5,10 +5,11 @@
 | 段 | 轴数 | 来源 |
 |---|---|---|
 | 下肢（12 腿 + 3 腰） | 15 | ONNX 策略，输入 `vx / vy / wz / h` |
-| 上肢双臂 | 14 | 双臂 IK，输入两个末端位姿（`*_gripper_base` 相对 `torso_link`） |
+| 上肢双臂 | 14 | `arm_mode:=ik` 时是双臂 IK（输入两个末端位姿）；`arm_mode:=passthrough` 时就是 14 个关节目标 |
 | 夹爪偏心轴 | 2 | 直接透传，只按 URDF 行程裁剪 |
 
-不分层、不加第二个定时器、不加第二个发布者。手臂**始终开启**，没有开关参数也没有服务。
+不分层、不加第二个定时器、不加第二个发布者。手臂**始终开启**，没有开关参数也没有服务；
+`arm_mode` 只换那两个 7 值块怎么读，分块长度、出口限速、接管时机全部不变。
 策略的职责是在上肢被遥操 / VLA 随意摆布时保持平衡并跟随速度与盆骨高度指令。
 
 ```mermaid
@@ -86,16 +87,26 @@ flowchart TD
 
 ```
 下标  0   1   2   3 | 4 ....... 10 | 11 ...... 17 | 18   19
-     vx  vy  wz  h  | 左臂位姿（7）  | 右臂位姿（7）  | 左夹爪 右夹爪
+     vx  vy  wz  h  | 左臂块（7）    | 右臂块（7）    | 左夹爪 右夹爪
 ```
 
 | 长度 | 内容 | 典型发布者 |
 |---|---|---|
 | 2 | `[左夹爪, 右夹爪]` | 抓取逻辑（手不动只开合） |
 | 4 | `[vx, vy, wz, h]` | `teleop_keyboard.py`、下肢 VLA |
-| 7 | 右臂位姿 `[x, y, z, qx, qy, qz, qw]` | 单臂遥操 |
-| 14 | 双臂位姿（先左后右） | 双臂遥操 |
+| 7 | 右臂块 | 单臂遥操 |
+| 14 | 双臂块（先左后右） | 双臂遥操、键盘的手臂浮动 |
 | 20 | 以上全部 | VR、全身 VLA |
+
+**臂块那 7 个数怎么读由 `arm_mode` 决定**，分块长度两种模式完全相同：
+
+| `arm_mode` | 臂块含义 | 校验 |
+|---|---|---|
+| `ik`（默认） | 末端位姿 `[x, y, z, qx, qy, qz, qw]`，`*_gripper_base` 相对 `torso_link` | 四元数模长必须在 `(0.5, 2.0)`，先归一化再用 |
+| `passthrough` | 该侧 7 个**关节目标**（rad） | 只查长度与有限性，**不裁剪** |
+
+透传模式下 14 轴的顺序由 `~/status` 的 **`arm_joints`** 报出（缩减模型自己定的那个顺序，
+和 IK 模式的输出同序）。**不要拄 `arm_joints` 参数的顺序去猜**——那两者不保证一致。
 
 **只覆写本次带来的字段，其余保持**，所以多个发布者可以同时存在且互不干扰。
 不在 `{2, 4, 7, 14, 20}` 里的长度、含非有限值、四元数模长不在 `(0.5, 2.0)` —— **整帧丢弃**，
@@ -127,15 +138,17 @@ flowchart TD
 
 | 内容 | 话题 / 服务 | 类型 | 频率 | 消费者 |
 |---|---|---|---|---|
-| 31 轴位置目标 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray[31]` | 50 Hz | FPC。下肢 15 槽来自策略，上肢 14 槽来自 IK，夹爪 2 槽透传 |
+| 31 轴位置目标 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray[31]` | 50 Hz | FPC。下肢 15 槽来自策略，上肢 14 槽来自 IK 或透传，夹爪 2 槽透传 |
 | 层状态 | `/motion_control/status` | `std_msgs/String`（JSON） | 50 Hz | 遥控台；要接 dashboard 也从这里取 |
 | 使能 / 启动 / 急停 | `/motion_control/engage`、`/start`、`/estop` | `std_srvs/Trigger` | 按需 | 遥控台或人工 `ros2 service call` |
 | 控制器开关 | `/controller_manager/switch_controller` | `controller_manager_msgs/SwitchController` | 按需 | 本节点**调用**它，用来激活 / 反激活 FPC |
 
 `~/status`（JSON）字段：`state / ready_to_start / command / reason / stale`，
 加上 `ik_ready`、`ik_pos_err`（IK 解本身的最大位置残差）、`ik_ms`、
-`grip` 与 `limited_pose`。`limited_pose` 是 **IK 解经过 `arm_rate_limit` 后真正下发的
-关节目标之正解**；它是可达、无编码器静差的末端指令，**不是实测末端**。真正的实测末端
+`arm_mode`、`arm_joints`、`grip` 与 `limited_pose`。
+**`arm_mode` 与 `arm_joints` 是上层的唯一依据**：前者决定臂块该填位姿还是关节角，
+后者给出透传时那 14 个数的顺序。`limited_pose` 是 **上肢目标经 `arm_rate_limit` 后真正下发的
+关节目标之正解**（两种模式都发）；它是可达、无编码器静差的末端指令，**不是实测末端**。真正的实测末端
 只能从 `/joint_states` 做 FK，dashboard 在浏览器已有的关节树上直接完成，不让控制层重复算。
 它跟着控制环发（而不是更慢的固定速率），因为 VR 离合接合拿它当锚点，那一下要求位移恒为 0。
 
@@ -153,26 +166,70 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 # 2.策略层
 ros2 launch g1_motion_control motion_control.launch.py
 # 换策略试跑：policy_path:=/abs/path/to/policy.onnx
+# 上肢改成逐关节透传（键盘手臂浮动需要它）：arm_mode:=passthrough
 
 # 3.遥控台（需要真终端，不要用 launch 包）
 ros2 run g1_motion_control teleop_keyboard
 ```
 
+### 上肢两种模式
+
+下肢策略与状态机完全不受影响，变的只是 `~/command` 里那两个 7 值块怎么读：
+
+| | `arm_mode:=ik`（默认） | `arm_mode:=passthrough` |
+|---|---|---|
+| 臂块 | 末端位姿，节点解双臂 IK | 14 个关节目标，不解 IK |
+| 适用 | VR、末端轨迹、笛卡尔 VLA | 键盘手臂浮动、关节空间策略、回放录制的关节轨迹 |
+| 仍然生效 | — | `arm_rate_limit` 出口限速、接管时机、`limited_pose` |
+| 不生效 | — | 四元数校验、`ik_limit_upper`、逆解逃生、零空间偏好 |
+
+透传**不裁剪**目标：底层是 PD，关节靠到行程边上还想要力就得把目标顶到行程之外，
+这一层裁一刀就直接改了期望的恢复力矩（同 `G1TopicSystem` 的取舍）。不合法的只有长度
+不对和非有限值，那两种整帧丢弃。
+
+> **透传模式下 VR 只发下肢**（`vr_teleop` 看 `status.arm_mode` 自己退出臂块，并打节流告警），
+> 双臂监控页也不再画绿色“上层末端命令”。拿四元数当关节角发下去是一次事故，不是一个显示 bug。
+
 ### 遥控台按键
 
-遥控台**只发长度 4**，只管下半身；上肢保持在接管时的姿态不动。完整键位启动时会打印，
-关键的三个：
+遥控台平时**只发长度 4**，只管下半身；上肢保持在接管时的姿态不动。完整键位启动时会打印，
+关键的几个：
 
 | 键 | 作用 |
 |---|---|
 | `G` | **站立**：激活 FPC，`stand_s`（2.5 s）内从当前实测位姿插值到策略默认位姿。**插完手臂就能用了** |
 | `Enter` | **启动下肢策略**：站立插值走完后按。只调手臂就别按它 |
 | `空格` | **急停**：反激活 FPC → kp 斜坡降到 0（阻尼）→ 最后一帧 kd 归零（零力矩） |
+| `F` | **手臂浮动**开/关：上肢失重、可徒手摆，下肢策略照旧跑 |
 
 其余：`W`/`S`/`A`/`D` 走、`J`/`L` 转、`I`/`K` 升降、`X` 清零速度、`Q` 退出（自动急停）。
 
 速度是"按住才走"：终端读不到抬键事件，所以超过 `hold_timeout_s`(0.4 s) 没按键就在
 `decay_s`(0.5 s) 内衰减到零。高度不衰减——它是绝对量，调到哪停哪。
+
+#### `F`：手臂浮动
+
+需要策略层用 `arm_mode:=passthrough` 启动；IK 模式下按 `F` 只在状态行提示，不发任何指令。
+
+```bash
+ros2 launch g1_motion_control motion_control.launch.py arm_mode:=passthrough
+ros2 run g1_motion_control teleop_keyboard      # G 站立 → Enter 起策略 → F 浮起手臂
+```
+
+**实现完全在遥控台这一侧**，策略节点既不知道也不关心：浮动时遥控台每拍额外发一帧长度 14，
+内容就是那 14 个手臂关节的**实测值**。FPC 于是写出 `q_cmd = q_meas + G/kp`，电机施加
+`tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq` —— 位置项恰好抵消，只剩重力项和
+阻尼：手臂在任意姿态都自撑自重，你只需克服阻尼就能推动它，而下肢 15 轴还在策略手里
+（`robot_bringup` 的 `gravity_float_demo` 是同一个原理，只是那里全身其余关节都锁死）。
+
+* **关掉就是停发臂块**，不回传任何“锁定”指令。上肢指令不设超时，手臂停在你放开它的地方。
+* **只浮 14 个手臂关节。** FPC 的重力前馈只覆盖 `gravity_table.yaml` 那 14 轴；夹爪和腿
+  没有重力项，跟随实测只剩 `tau = -kd*dq`，会发软。所以只发长度 14。
+* **`/joint_states` 超过 0.2 s 不新鲜就自动暂停发臂块**；急停、退出、策略层掉出
+  `stand`/`running` 时浮动自动关掉。
+* **进出都不会跳**：重力补偿准确时稳态下 `q_target == q_meas`，切换那一帧的台阶只有补偿
+  残差那么大，而且 `arm_rate_limit` 还在出口摊着。
+* **别让手臂长时间停在水平位附近**，肩 pitch 没有减速自锁，实测悬停数分钟绕组到 97 °C。
 
 ### VR 头显遥操（可选，代替键盘）
 
@@ -604,7 +661,8 @@ wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `arm_joints` | 14 个手臂关节 | 先后顺序不重要：真正的 q 顺序由缩减模型自己定 |
+| `arm_mode` | `ik` | 上肢怎么接指令。`ik`：臂块是末端位姿；`passthrough`：臂块就是 14 个关节目标（键盘手臂浮动靠它）。launch 参数同名。两种模式的分块长度、出口限速、接管时机完全一样 |
+| `arm_joints` | 14 个手臂关节 | 先后顺序不重要：真正的 q 顺序由缩减模型自己定，并随 `~/status` 的 `arm_joints` 报出 |
 | `gripper_joints` | `[left_eccentric_joint, right_eccentric_joint]` | 不进 IK 模型，直接透传 |
 | `gripper_limits` | `[0.0, 2.76377]` | 取自 URDF 的 `<limit>`；透传前只做这一道裁剪 |
 | `base_frame` | `torso_link` | 末端位姿的参考系。选它而不是 `pelvis`，IK 链里就没有腰 |
@@ -618,7 +676,7 @@ wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
 | `ik_null_gain` | 第二轴 0.05，三根自转轴 0.20，其余 0 | 零空间软偏好增益（长度同 `arm_joints`）。每轮形成 `-gain·(q-q_ref)` 再投影；全填 0 = 关闭。见第 5 节 |
 | `ik_null_target` | 左右第二轴 `+0.34/-0.34 rad`（约 ±20°），其余 0 | 零空间参考角（长度同 `arm_joints`）。非零参考轴是无门限软偏好；只取可用投影，不要求最终到达参考角。见第 5 节 |
 | `ik_null_gate` | `[0.6, 1.2]` rad | 只作用于未显式设置参考值的原三根自转轴：某轴 `\|q\|` 低于开始角不介入，高于全开角施加完整增益。非零 `ik_null_target` 轴不经过此门控。见第 5 节 |
-| `arm_rate_limit` | 10.0 rad/s | 手臂关节目标的变化率上限（在 IK **出口**限）。**防"手腕突然翻 180 度"的那一道**。嫌快调 5，别超过 20。见第 5 节 |
+| `arm_rate_limit` | 10.0 rad/s | 手臂关节目标的变化率上限（在 IK **出口**限，透传模式同样走这一道）。**防"手腕突然翻 180 度"的那一道**。嫌快调 5，别超过 20。见第 5 节 |
 | `robot_description_topic` | `/robot_description` | latched（TRANSIENT_LOCAL），正常只进来一次 |
 
 `joints`（FPC 的 31 轴顺序）由 launch 从
@@ -751,7 +809,7 @@ g1_motion_control/
 │   ├── policy_runtime.py        # 下肢：观测装配 + 推理 + 契约校验，不依赖 ROS
 │   ├── arm_ik.py                # 上肢：缩减模型 + DLS 求解，不依赖 ROS
 │   ├── policy_node.py           # ROS 节点 + 状态机 + 看门狗 + 指令分块
-│   ├── teleop_keyboard.py       # 键盘遥控台（只发长度 4，只管下半身）
+│   ├── teleop_keyboard.py       # 键盘遥控台（长度 4 管下半身；F 键发长度 14 做手臂浮动）
 │   ├── vr_teleop.py             # VR 桥接（内嵌 WebXR 服务，发长度 20，上下肢全管）
 │   ├── dashboard_node.py        # 双臂监控页后端（只读，不在控制链路上）
 │   └── make_vr_cert.py          # 签局域网自签证书，兼作证书路径/端口的唯一定义
@@ -781,6 +839,9 @@ g1_motion_control/
 ```bash
 # 假状态源 + 假 controller_manager，把状态机从头走一遍
 python3 src/g1_motion_control/test/smoke_no_robot.py
+
+# 同一个台架，上肢换成逐关节透传（键盘手臂浮动走的那条路）
+python3 src/g1_motion_control/test/smoke_no_robot.py --passthrough
 
 # 监控页联调（假 URDF / joint_states / status，逐个打 HTTP 口）
 python3 src/g1_motion_control/test/smoke_dashboard.py

@@ -6,15 +6,23 @@
                                                                           |
                                                               G1TopicSystem --> /lowcmd
 
-一个定时器算齐 31 轴：下肢 15 轴（12 腿 + 3 腰）由 ONNX 策略给出，上肢 14 轴由双臂
-IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终开启，没有开关。
+一个定时器算齐 31 轴：下肢 15 轴（12 腿 + 3 腰）由 ONNX 策略给出，上肢 14 轴由 ``arm_mode``
+决定怎么算，2 个夹爪偏心轴直接透传。手臂始终开启，没有开关。
+
+    arm_mode=ik           （默认）臂块是末端位姿，双臂 IK 解成 14 轴
+    arm_mode=passthrough  臂块就是 14 个关节目标，不解 IK
+
+两种模式的分块长度、出口限速、接管时机完全一致，只差那两个 7 值块怎么读；
+透传模式下 14 轴的顺序由 ``~/status`` 的 ``arm_joints`` 报出，不要在外面猜。
+徒手推手臂（“浮动”）就是透传模式的一个用法：发布方把实测关节角原样发回来，
+FPC 的手臂重力前馈于是成为唯一的力矩来源。本节点不实现它，也不知道它。
 
 ``~/command`` 一个话题按长度分块，各发布者只更新自己那部分，互不干扰：
 
     长度  2   [左夹爪, 右夹爪]
     长度  4   [vx, vy, wz, h]                      —— teleop_keyboard.py 发的就是它
-    长度  7   右臂位姿 [x, y, z, qx, qy, qz, qw]
-    长度 14   双臂位姿（先左后右）
+    长度  7   右臂：ik 模式下是 [x, y, z, qx, qy, qz, qw]，透传模式下是 7 个关节角
+    长度 14   双臂（先左后右）
     长度 20   全量，布局是 下肢 4 + 左臂 7 + 右臂 7 + 夹爪 2
 
 末端位姿指 ``*_gripper_base`` 相对 ``torso_link``。参考系选 torso_link 而不是 pelvis，
@@ -140,8 +148,12 @@ class MotionControlNode(Node):
             raise ValueError(f'passive_targets 长度必须是 {len(passive_slots)}')
 
         # -- 上肢 --------------------------------------------------------------
-        # 手臂 14 轴走 IK，夹爪偏心轴不进 IK 模型、直接透传。手臂的槽位要等
-        # /robot_description 到了、缩减模型建好才能定（顺序以模型为准）。
+        # 手臂 14 轴走 IK 或逐关节透传，夹爪偏心轴不进 IK 模型、直接透传。手臂的
+        # 槽位要等 /robot_description 到了、缩减模型建好才能定（顺序以模型为准）。
+        arm_mode = p('arm_mode', 'ik').get_parameter_value().string_value
+        if arm_mode not in ('ik', 'passthrough'):
+            raise ValueError(f"arm_mode 只能是 'ik' 或 'passthrough'，收到 {arm_mode!r}")
+        self._arm_mode = arm_mode
         self._arm_names = list(
             p('arm_joints', ['']).get_parameter_value().string_array_value)
         grippers = list(
@@ -310,10 +322,12 @@ class MotionControlNode(Node):
         self._stand_start = 0.0
         self._reason = ''
         self._spinning = True
-        # 上肢：_pose 是末端位姿指令的缓存（唯一真值），_arm_target 是 IK 解出、
-        # 实际发给 FPC 的关节目标，同时充当下一帧的热启动种子。
+        # 上肢：_pose 是臂指令的缓存（唯一真值，ik 模式是末端位姿、透传模式是关节角），
+        # _arm_target 是最终发给 FPC 的关节目标，同时充当 IK 下一帧的热启动种子。
         self._ik: ArmIK | None = None
         self._arm_slots: list[int] = []
+        # 透传模式把臂块散回 14 轴向量时用；下标是 14 轴内部的，不是 31 轴的。
+        self._side_slots: dict[str, list[int]] = {}
         self._arm_target = np.zeros(len(self._arm_names))
         self._reached: dict[str, np.ndarray] = {}
         self._pose: dict[str, np.ndarray] = {}
@@ -414,7 +428,7 @@ class MotionControlNode(Node):
     def _on_command(self, message: Float64MultiArray) -> None:
         """按长度分块，只覆写本次带来的字段，其余保持——上下肢发布者因此互不干扰。"""
         try:
-            chunk = split_command(message.data)
+            chunk = split_command(message.data, arm_poses=self._arm_mode == 'ik')
         except ValueError as error:
             self.get_logger().warning(f'丢弃非法指令：{error}')
             return
@@ -460,17 +474,21 @@ class MotionControlNode(Node):
         try:
             ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs)  # type: ignore[arg-type]
             slots = [self._joints.index(name) for name in ik.joint_names]
+            # 透传模式把 7 值臂块散回 14 轴向量时按这两组下标。顺序一律以缩减模型
+            # 为准（同 IK 模式的输出），并随 status 的 arm_joints 报给上层。
+            sides = {side: [i for i, name in enumerate(ik.joint_names)
+                            if name.startswith(side)] for side in ('left', 'right')}
         except Exception as error:  # 建模失败不能拖垮节点，但 ~/start 会拒绝。
             self.get_logger().error(f'手臂 IK 建模失败，上肢不可用: {error}')
             return
         with self._lock:
-            self._ik, self._arm_slots = ik, slots
+            self._ik, self._arm_slots, self._side_slots = ik, slots, sides
         tightened = [f'{name}≤{ik.upper[i]:.3f}' for i, name in enumerate(ik.joint_names)
                      if ik.upper[i] < ik.model.upperPositionLimit[i] - 1e-9]
         self.get_logger().info(
-            f'手臂 IK 就绪（{ik.model.nq} 轴，限位取自 URDF'
+            f'手臂模型就绪（{ik.model.nq} 轴，限位取自 URDF'
             + (f'，已收紧：{", ".join(tightened)}）' if tightened else '）')
-            + f'，关节限速 {self._arm_rate / 0.02:.1f} rad/s')
+            + f'，关节限速 {self._arm_rate / 0.02:.1f} rad/s，模式：{self._arm_mode}')
 
     # -- 服务 ------------------------------------------------------------------
 
@@ -647,8 +665,11 @@ class MotionControlNode(Node):
                 if self._arm_seed:
                     # 没人发上肢指令时就停在接管那一刻的姿态；setdefault 让
                     # 交接与首帧之间已经收到的指令优先。
-                    for side, pose in self._reached.items():
-                        self._pose.setdefault(side, pose.copy())
+                    seed = self._reached if self._arm_mode == 'ik' else {
+                        side: self._arm_target[index]
+                        for side, index in self._side_slots.items()}
+                    for side, values in seed.items():
+                        self._pose.setdefault(side, np.array(values))
                     self._arm_seed = False
                 poses, grip = dict(self._pose), self._grip.copy()
 
@@ -675,19 +696,26 @@ class MotionControlNode(Node):
             # 上肢出什么事都只保持上一帧手臂目标，绝不能把正在平衡的下肢一起急停。
             try:
                 clock = time.monotonic()
-                # 热启动：种子就是上一帧已发布的目标，解天然连续。跨解支时仍可能跳，
-                # 所以出口按 arm_rate_limit 限速——这才是防"手腕突然翻 180 度"的那一道。
-                solved, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
-                # 逃生：热启动会把解一路推进回不来的解支（实测手臂翻到肩后、
-                # shoulder_roll 顶死限位，之后连原位都够不着）。残差大到不像"只是够不着"
-                # 时，拿站立位形当种子再解一次——那个种子从不落进陷阱。只有明显更好才采纳，
-                # 所以正常跟随根本不会触发（实测 ±3cm 轨迹 0.00%），代价也只有那一次求解。
-                if pos_err > self._rescue_err:
-                    alt, alt_pos, alt_ori, alt_iters = self._ik.solve(
-                        self._stand_pose[self._arm_slots], poses)
-                    if alt_pos < pos_err - self._rescue_err:
-                        solved, pos_err, ori_err = alt, alt_pos, alt_ori
-                        iters += alt_iters
+                if self._arm_mode != 'ik':
+                    # 透传：指令本身就是关节目标，不解 IK。出口那道 arm_rate_limit
+                    # 照样走——它拦的是发布者的阶跃，和 IK 的跨解支跳变一样致命。
+                    solved, pos_err, ori_err, iters = self._arm_target.copy(), 0.0, 0.0, 0
+                    for side, values in poses.items():
+                        solved[self._side_slots[side]] = values
+                else:
+                    # 热启动：种子就是上一帧已发布的目标，解天然连续。跨解支时仍可能跳，
+                    # 所以出口按 arm_rate_limit 限速——这才是防"手腕突然翻 180 度"的那一道。
+                    solved, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
+                    # 逃生：热启动会把解一路推进回不来的解支（实测手臂翻到肩后、
+                    # shoulder_roll 顶死限位，之后连原位都够不着）。残差大到不像"只是够不着"
+                    # 时，拿站立位形当种子再解一次——那个种子从不落进陷阱。只有明显更好才采纳，
+                    # 所以正常跟随根本不会触发（实测 ±3cm 轨迹 0.00%），代价也只有那一次求解。
+                    if pos_err > self._rescue_err:
+                        alt, alt_pos, alt_ori, alt_iters = self._ik.solve(
+                            self._stand_pose[self._arm_slots], poses)
+                        if alt_pos < pos_err - self._rescue_err:
+                            solved, pos_err, ori_err = alt, alt_pos, alt_ori
+                            iters += alt_iters
                 self._arm_target = self._arm_target + np.clip(
                     solved - self._arm_target, -self._arm_rate, self._arm_rate)
                 self._reached = self._ik.fk(self._arm_target)
@@ -725,6 +753,9 @@ class MotionControlNode(Node):
                 'stale': self._stale(),
                 'ik_ready': self._ik is not None,
                 'arms_live': self._arms_live,
+                # 上层靠它决定臂块怎么填，以及透传时 14 轴排哪个顺序。
+                'arm_mode': self._arm_mode,
+                'arm_joints': list(self._ik.joint_names) if self._ik else [],
                 'ik_pos_err': round(pos_err, 4),
                 'ik_ms': round(solve_ms, 2),
                 'ik_rotation_weight': round(
