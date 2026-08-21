@@ -152,6 +152,7 @@ def test_end_effectors_dashboard_expands_to_one_web_node():
         "left_camera_url": "http://127.0.0.1:8010",
         "right_camera_url": "http://127.0.0.1:8011",
         "camera_timeout_s": "1.0",
+        "camera_stream_timeout_s": "10.0",
         "camera_poll_period_s": "2.0",
     })
     actions = module._dashboard_node(context)
