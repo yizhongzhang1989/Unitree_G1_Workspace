@@ -28,6 +28,10 @@
 * **夹爪**：``trigger`` 直接映射，**0 = 完全打开、1 = 夹紧**。注意 ``eccentric_joint``
   是 **0 rad 闭合、2.76377 rad 打开**（见 unitree_g1_description/model/Gloria-M/README.md），
   所以这里是**反向**映射；写反了就是该松手的时候夹紧。
+* **归位**：单手按 **A/X**（右手 A / 左手 X）把**那一只**手送回预备姿势。轨迹不在
+  这儿算：调策略层的 ``~/home_left`` / ``~/home_right``，和 B/Y 调 engage 完全同构。
+  归位期间本节点**只跟随不驱动**（目标钉在 ``limited_pose`` 上），否则 50 Hz 的
+  陈旧目标会和插值对着干、走完还把手臂拽回去。握 squeeze 或再按一次 A/X 即取消。
 
 坐标系：平移和转角**各自**可选「世界」或「局部」，随便搭配出四种手感。参数是
 ``arm_position_frame`` / ``arm_rotation_frame``，取值 ``world`` / ``local``；默认
@@ -102,6 +106,8 @@ _TOOL_AXIS_MAP = '-x +y -z'
 # 平移 local-floor (+X 右, +Y 上, -Z 前) -> 躯干 (+X 前, +Y 左, +Z 上)。
 _BASE_AXIS_MAP = '-y +z -x'
 _MAX_HAND_STEP_M = 0.1
+# 归位服务是阻塞的。这是本地兜底：策略层掉了不能让那只手永远卡在“跟随”里。
+_HOME_TIMEOUT_S = 10.0
 # 平移与转角各自的参考系。含义见模块 docstring 的「坐标系」。
 _FRAME_MODES = ('world', 'local')
 # 参数名 -> 存在节点上的属性名。默认值只写在 declare_parameter 那里。
@@ -278,6 +284,10 @@ class VRTeleop(Node):
         # 初始当作"按着"：连上之后必须真的松手再按才算一次，避免启动瞬间误触。
         self._button_held = True
         self._button_stamp = 0.0
+        # A/X 归位：每侧一个超时时刻（None = 没在归位）加一个按键沿。
+        # 这两个会被服务回调那个线程碰，但只是整个替换字典项，不需要加锁。
+        self._homing: dict[str, float | None] = {side: None for side in SIDES}
+        self._home_held = {side: True for side in SIDES}
 
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -298,7 +308,8 @@ class VRTeleop(Node):
             .get_parameter_value().string_value.rstrip('/')
         self._trigger = {
             name: self.create_client(Trigger, f'{policy}/{name}', callback_group=slow)
-            for name in ('engage', 'start', 'estop')
+            for name in ('engage', 'start', 'estop',
+                         'home_left', 'home_right', 'home_cancel')
         }
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -308,7 +319,8 @@ class VRTeleop(Node):
         self.get_logger().info(
             '头显里打开采集页并 Enter VR。'
             '双手同时按 B/Y 推进：站立 -> 启动策略 -> 急停；'
-            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）。'
+            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）；'
+            '单手按 A/X 把那只手送回预备姿势。'
             f'上肢参考系：平移 {self._pos_frame} / 转角 {self._rot_frame}。')
 
     def _on_set_parameters(self, parameters):
@@ -517,6 +529,8 @@ class VRTeleop(Node):
             self._grip = np.asarray(status.get('grip') or (0.0, 0.0),
                                     dtype=np.float64)
             self._clutch = {side: None for side in SIDES}
+            self._homing = {side: None for side in SIDES}
+            self._home_held = {side: True for side in SIDES}
             self._twist = np.zeros(3)
             self._height = self._height0
             self._seeded = True
@@ -525,6 +539,8 @@ class VRTeleop(Node):
         if frame is None:
             # 掉帧/退出 VR：立刻停车，手臂、夹爪和高度都冻结在最后一帧。
             self._twist = np.zeros(3)
+            self._cancel_home('VR 帧不新鲜')
+            self._home_held = {side: True for side in SIDES}
             self.get_logger().warning('VR 帧不新鲜，已停车并冻结上肢',
                                       throttle_duration_sec=2.0)
         else:
@@ -585,6 +601,47 @@ class VRTeleop(Node):
         else:
             # 最常见的是"站立插值还没走完"——等满 stand_s 再按一次即可。
             self.get_logger().warning(f'{label}被拒绝：{result.message}')
+
+    # -- A/X 归位 ---------------------------------------------------------------
+
+    def _check_home(self, side: str, pressed: bool, clutching: bool) -> None:
+        """A/X 上升沿：把这一只手交给策略层的归位服务。再按一次或握 squeeze 都取消。"""
+        deadline = self._homing[side]
+        if deadline is not None and self._now() > deadline:
+            self._homing[side] = deadline = None
+            self.get_logger().warning(f'{side} 归位服务超时没返回，已恢复手动')
+        if deadline is not None:
+            if clutching or (pressed and not self._home_held[side]):
+                self._cancel_home('squeeze 接管' if clutching else '再按一次 A/X')
+        elif pressed and not self._home_held[side] and not clutching:
+            self._start_home(side)
+        self._home_held[side] = pressed
+
+    def _start_home(self, side: str) -> None:
+        client = self._trigger[f'home_{side}']
+        if not client.service_is_ready():
+            self.get_logger().warning(f'{side} 归位：服务还没就绪')
+            return
+        self._homing[side] = self._now() + _HOME_TIMEOUT_S
+        self._clutch[side] = None
+        self.get_logger().info(f'A/X -> {side} 归位')
+        client.call_async(Trigger.Request()).add_done_callback(
+            lambda future: self._home_returned(side, future))
+
+    def _home_returned(self, side: str, future) -> None:
+        self._homing[side] = None
+        self._report(f'{side} 归位', future)
+
+    def _cancel_home(self, reason: str) -> None:
+        """取消两侧归位。标志留给服务返回时清：取消也是走同一条返回路径。"""
+        if not any(deadline is not None for deadline in self._homing.values()):
+            return
+        client = self._trigger['home_cancel']
+        if not client.service_is_ready():
+            self.get_logger().warning('取消归位：服务还没就绪')
+            return
+        client.call_async(Trigger.Request())
+        self.get_logger().info(f'取消归位（{reason}）')
 
     def _stick(self, frame: dict, side: str) -> np.ndarray:
         """取一个摇杆的 ``[x, y]``，已去死区。"""
@@ -647,7 +704,13 @@ class VRTeleop(Node):
             squeeze = float(buttons.get('squeeze', 0.0) or 0.0)
             clutch = self._clutch[side]
             active = squeeze >= (self._squeeze_off if clutch is not None else self._squeeze_on)
-            if position is None:
+            self._check_home(side, bool(buttons.get('a_x')), active)
+            if self._homing[side] is not None:
+                # 归位由策略层驱动，这里只把目标钉在它已经限速的指令上：
+                # 自己再发一份就是两个目标对着干，走完还会把手臂拽回去。
+                if side in limited:
+                    self._pose[side] = np.asarray(limited[side], dtype=np.float64)
+            elif position is None:
                 # 只冻结，不动 clutch。**千万别在这里作废 ``previous``**：那样恢复帧会
                 # 无条件重锚，把跨这一帧的位移整段丢掉。emulated 标志逐帧抖时会按比例
                 # 丢运动（实测 1/2 抖动 -> 手走 900 mm 目标走 0 mm，完全冻住）。

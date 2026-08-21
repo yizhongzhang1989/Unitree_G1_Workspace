@@ -133,6 +133,9 @@ class Harness(Node):
         self.engage = self.create_client(Trigger, '/motion_control/engage')
         self.start = self.create_client(Trigger, '/motion_control/start')
         self.estop = self.create_client(Trigger, '/motion_control/estop')
+        self.home_left = self.create_client(Trigger, '/motion_control/home_left')
+        self.home_right = self.create_client(Trigger, '/motion_control/home_right')
+        self.home_cancel = self.create_client(Trigger, '/motion_control/home_cancel')
         self.targets, self.stamps, self.switches = [], [], []
         self.status, self.status_log = {}, []
 
@@ -160,6 +163,16 @@ class Harness(Node):
         print(f'  {label}: success={future.result().success} '
               f'"{future.result().message}"', flush=True)
         return future.result()
+
+    def call_async(self, client, label):
+        assert client.wait_for_service(timeout_sec=15.0), f'{label} 服务没出现'
+        return client.call_async(Trigger.Request())
+
+
+def home_pose(joints, passive_slots, passive_targets, slots) -> np.ndarray:
+    """这些槽位的预备姿势，直接从 passive_targets 重建，不从被测节点取。"""
+    stand = dict(zip((joints[i] for i in passive_slots), passive_targets))
+    return np.array([stand[joints[i]] for i in slots])
 
 
 def scenario(node, config):
@@ -353,6 +366,62 @@ def scenario(node, config):
     check(f'长度 20 全量：双臂末端回到原位（残差 {worst * 1e3:.2f} mm）、夹爪归零',
           worst < 3e-3 and np.abs(last[grip_slots]).max() < 1e-9)
 
+    print('\n-- 归位：~/home_right --', flush=True)
+    # 此刻双臂停在“全零关节”的末端位姿上，离预备姿势（shoulder_roll ±0.6）很远。
+    ready = home_pose(joints, passive_slots, config['passive_targets'], arm_slots)
+    ready_tip = ik.fk(ready)
+    goal = home_pose(joints, passive_slots, config['passive_targets'], right_slots)
+    roll = next(i for i, slot in enumerate(right_slots)
+                if 'shoulder_roll' in joints[slot])
+    before = last
+    node.targets.clear()
+    result = node.call(node.home_right, 'home_right')
+    stream = np.asarray(node.targets)
+    check('归位服务走完才返回', result.success and len(stream) > 50)
+    check(f'右臂逐位到达预备姿势（最大差 {np.abs(stream[-1][right_slots] - goal).max():.2e}）',
+          np.abs(stream[-1][right_slots] - goal).max() < 1e-9)
+    # 左臂比的是末端不是关节值：零空间软偏好一直在推关节，理由同文件头 TIP_TOL。
+    # 下肢不能拿来对比：这一段策略正在跑，腿本来就在动。
+    shift = tip_shift(ik, arm_slots, before, stream[-1], sides=('left',))
+    check(f'归位不碰左臂（末端动了 {shift * 1e3:.2f} mm）、不碰夹爪',
+          shift < TIP_TOL and np.ptp(stream[:, grip_slots], axis=0).max() < 1e-9)
+    # 第一段只把 shoulder_roll 往外张：关节空间直线不避障，贴着身体摆回来会扫大腿。
+    clear = int(config['stand_clear_s'] / (1.0 / config['control_rate_hz']))
+    opened = stream[:clear, right_slots[roll]]
+    check(f'第一段先把 shoulder_roll 往外张（{opened[0]:+.3f} -> {opened[-1]:+.3f}）',
+          opened[-1] < opened[0] - 0.1)          # 右臂向外是负号
+    step = config['arm_rate_limit'] / config['control_rate_hz']
+    check(f'归位仍走出口限速（逐帧 ≤ {step:.3f} rad）',
+          np.abs(np.diff(stream[:, arm_slots], axis=0)).max() <= step + 1e-9)
+    # 走完必须重播种 _pose，否则上层手里那份陈旧目标下一帧就把手臂拽回去（这里是 30 cm）。
+    node.targets.clear()
+    time.sleep(0.6)
+    idle = np.asarray(node.targets)
+    drift = tip_shift(ik, arm_slots, idle[0], idle[-1], sides=('right',))
+    gap = float(np.linalg.norm(
+        ik.fk(idle[-1][arm_slots])['right'][:3] - ready_tip['right'][:3]))
+    check(f'走完没人发指令时不回弹（漂 {drift * 1e3:.2f} mm，离预备姿势 {gap * 1e3:.2f} mm）',
+          drift < TIP_TOL and gap < 3e-3)
+
+    print('\n-- 归位可以中途取消 --', flush=True)
+    publish(np.concatenate([home['left'], home['right']]), repeat=30)
+    future = node.call_async(node.home_left, 'home_left')
+    time.sleep(config['home_s'] / 2.0)
+    node.call(node.home_cancel, 'home_cancel')
+    deadline = time.monotonic() + 5.0
+    while not future.done() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    check('取消后阻塞的服务立刻返回失败', future.done() and not future.result().success)
+    # 取消同样要重播种：否则手臂立刻奔回取消前那个上层目标，"停下"就成了空话。
+    node.targets.clear()
+    time.sleep(0.4)
+    stopped = np.asarray(node.targets)
+    drift = tip_shift(ik, arm_slots, stopped[0], stopped[-1], sides=('left',))
+    gap = float(np.linalg.norm(
+        ik.fk(stopped[-1][arm_slots])['left'][:3] - ready_tip['left'][:3]))
+    check(f'取消后左臂停在半路（漂 {drift * 1e3:.2f} mm，离预备姿势还有 {gap * 1e3:.0f} mm）',
+          drift < TIP_TOL and gap > 0.02)
+
     print('\n-- estop --', flush=True)
     node.call(node.estop, 'estop')
     check('请求反激活 FPC', node.switches[-1][1] == ['forward_position_controller'])
@@ -429,6 +498,22 @@ def scenario_passthrough(node, config):
     # 遥控台关掉浮动就只是不再发臂块，靠的正是“上肢指令不设超时”。
     check('停发后手臂目标不动',
           np.ptp(np.asarray(node.targets)[:, arm_slots], axis=0).max() < 1e-9)
+
+    print('\n-- 归位与 arm_mode 正交 --', flush=True)
+    passive_slots = [i for i in range(len(joints)) if i not in set(policy_slots)]
+    right_slots = [joints.index(n) for n in arm_names if n.startswith('right')]
+    ready = home_pose(joints, passive_slots, config['passive_targets'], right_slots)
+    node.targets.clear()
+    check('透传模式下归位服务照样走完',
+          node.call(node.home_right, 'home_right').success)
+    landed = np.asarray(node.targets)[-1]
+    check(f'右臂逐位到达预备姿势（最大差 {np.abs(landed[right_slots] - ready).max():.2e}）',
+          np.abs(landed[right_slots] - ready).max() < 1e-9)
+    # 重播种的是关节角而不是末端位姿；没重播种的话会弹回刚才那份 goal。
+    node.targets.clear()
+    time.sleep(0.6)
+    check('走完没人发指令时不回弹',
+          np.abs(np.asarray(node.targets)[:, right_slots] - ready).max() < 1e-9)
 
     node.call(node.estop, 'estop')
     check('请求反激活 FPC', node.switches[-1][1] == ['forward_position_controller'])

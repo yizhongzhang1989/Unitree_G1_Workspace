@@ -39,6 +39,38 @@ class _Silent:
         pass
 
 
+class _FakeClient:
+    """只记下被调了几次，不拉 ROS 图。``call_async`` 返回一个可以手动完成的 future。"""
+
+    def __init__(self, ready=True):
+        self.ready, self.calls, self.callbacks = ready, 0, []
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, _request):
+        self.calls += 1
+        self.callbacks.append([])
+        handle = self
+        index = len(self.callbacks) - 1
+
+        class _Future:
+            def add_done_callback(self, callback):
+                handle.callbacks[index].append(callback)
+
+        return _Future()
+
+    def finish(self, index=-1):
+        """把第 ``index`` 次调用当成已返回。"""
+        for callback in self.callbacks[index]:
+            callback(_Result())
+
+
+class _Result:
+    def result(self):
+        return type('R', (), {'success': True, 'message': 'ok'})()
+
+
 def _frame(squeeze, trigger, position, orientation=UNIT):
     return {side: {'grip': {'position': list(position),
                             'orientation': list(orientation)},
@@ -76,6 +108,12 @@ def node():
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
                     'right': np.array([0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])}
     teleop._grip = np.zeros(2)
+    # A/X 归位：按键沿同真实初值（连上就按着不算一次），服务客户端换成假的。
+    teleop._homing = {'left': None, 'right': None}
+    teleop._home_held = {'left': True, 'right': True}
+    teleop._trigger = {name: _FakeClient() for name in
+                       ('home_left', 'home_right', 'home_cancel')}
+    teleop._now = lambda: 100.0
     teleop.get_logger = lambda: _Silent()
     return teleop
 
@@ -596,3 +634,86 @@ def test_advance_table_covers_the_whole_cycle():
     assert _ADVANCE['stand'][0] == 'start'
     assert _ADVANCE['running'][0] == 'estop'
     assert _ADVANCE['estop'][0] == 'engage'
+
+
+# --------------------------------------------------------------------- A/X 归位
+
+LIMITED = {'left': [0.31, 0.26, 0.09, 0.0, 0.0, 0.0, 1.0],
+           'right': [0.31, -0.26, 0.09, 0.0, 0.0, 0.0, 1.0]}
+
+
+def _ax(pressed, squeeze=0.0, position=(0.0, 0.0, 0.0)):
+    return {side: {'grip': {'position': list(position), 'orientation': list(UNIT)},
+                   'buttons': {'squeeze': squeeze, 'a_x': side in pressed}}
+            for side in ('left', 'right')}
+
+
+def test_a_x_calls_the_service_for_that_hand_only(node):
+    node._update_arms(_ax(()), LIMITED)               # 先松手，解除初始的"按着"
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_right'].calls == 1
+    assert node._trigger['home_left'].calls == 0
+    assert node._homing['right'] is not None and node._homing['left'] is None
+
+
+def test_holding_a_x_does_not_call_again(node):
+    node._update_arms(_ax(()), LIMITED)
+    for _ in range(20):
+        node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_right'].calls == 1
+
+
+def test_homing_follows_limited_pose_instead_of_driving(node):
+    """归位期间本节点只跟随策略层的指令：自己再发一份就是两个目标对着干。"""
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert np.allclose(node._pose['right'], LIMITED['right'])
+    assert node._clutch['right'] is None
+
+
+def test_squeeze_cancels_homing_and_takes_over_without_a_jump(node):
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    assert node._trigger['home_cancel'].calls == 1
+    # 标志由服务返回时清——取消也走同一条返回路径，不能在这里抢先清掉。
+    assert node._homing['right'] is not None
+    node._trigger['home_right'].finish()
+    assert node._homing['right'] is None
+    here = node._pose['right'][:3].copy()
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    assert np.array_equal(node._pose['right'][:3], here)      # 接合瞬间零位移
+
+
+def test_pressing_a_x_again_cancels(node):
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_cancel'].calls == 1
+    assert node._trigger['home_right'].calls == 1             # 没有重复下单
+
+
+def test_homing_does_not_start_while_the_clutch_is_held(node):
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    node._update_arms(_ax(('right',), squeeze=1.0), LIMITED)
+    assert node._trigger['home_right'].calls == 0
+
+
+def test_service_not_ready_does_not_pretend_to_home(node):
+    node._trigger['home_right'].ready = False
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._homing['right'] is None
+
+
+def test_a_lost_service_reply_eventually_hands_control_back(node):
+    """服务阻塞在策略层，策略层没了的话不能让那只手永远卡在跟随里。"""
+    from g1_motion_control.vr_teleop import _HOME_TIMEOUT_S
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._homing['right'] is not None
+    node._now = lambda: 100.0 + _HOME_TIMEOUT_S + 1.0
+    node._update_arms(_ax(()), LIMITED)
+    assert node._homing['right'] is None

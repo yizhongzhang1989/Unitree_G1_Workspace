@@ -141,11 +141,12 @@ flowchart TD
 | 31 轴位置目标 | `/forward_position_controller/commands` | `std_msgs/Float64MultiArray[31]` | 50 Hz | FPC。下肢 15 槽来自策略，上肢 14 槽来自 IK 或透传，夹爪 2 槽透传 |
 | 层状态 | `/motion_control/status` | `std_msgs/String`（JSON） | 50 Hz | 遥控台；要接 dashboard 也从这里取 |
 | 使能 / 启动 / 急停 | `/motion_control/engage`、`/start`、`/estop` | `std_srvs/Trigger` | 按需 | 遥控台或人工 `ros2 service call` |
+| 单臂归位 | `/motion_control/home_left`、`/home_right`、`/home_cancel` | `std_srvs/Trigger` | 按需 | VR 的 A/X；**阻塞到插值走完才返回** |
 | 控制器开关 | `/controller_manager/switch_controller` | `controller_manager_msgs/SwitchController` | 按需 | 本节点**调用**它，用来激活 / 反激活 FPC |
 
 `~/status`（JSON）字段：`state / ready_to_start / command / reason / stale`，
 加上 `ik_ready`、`ik_pos_err`（IK 解本身的最大位置残差）、`ik_ms`、
-`arm_mode`、`arm_joints`、`grip` 与 `limited_pose`。
+`arm_mode`、`arm_joints`、`homing`（正在归位的那几侧）、`grip` 与 `limited_pose`。
 **`arm_mode` 与 `arm_joints` 是上层的唯一依据**：前者决定臂块该填位姿还是关节角，
 后者给出透传时那 14 个数的顺序。`limited_pose` 是 **上肢目标经 `arm_rate_limit` 后真正下发的
 关节目标之正解**（两种模式都发）；它是可达、无编码器静差的末端指令，**不是实测末端**。真正的实测末端
@@ -251,6 +252,7 @@ PICO 4；手柄读的是 `xr-standard` 标准映射。
 | **右摇杆** | 转向 `wz`（左右）与盆骨高度 `h`（前后，绝对量，松手不回弹） |
 | **squeeze** 按住 | 该侧手臂跟随手柄的位移**与转角**；松开即冻结在最后一帧。位移与转角各自可选世界系 / 局部系，见下 |
 | **trigger** | 夹爪：0 = 完全打开，1 = 夹紧 |
+| **单手 A/X** | 把**那一只**手送回预备姿势（右手 A / 左手 X）。握 squeeze 或再按一次即取消 |
 | **双手同时 B/Y** | 推进状态机：站立 → 启动策略 → 急停（戴着头显摸不到终端） |
 
 几个必须知道的点：
@@ -271,6 +273,9 @@ PICO 4；手柄读的是 `xr-standard` 标准映射。
   手臂停在接合点**后方 383 mm**。细节见 `vr_teleop.py` 的 `_update_arms` docstring。
 * **帧超时（`frame_timeout_s` 0.3 s）或退出 VR 会话**：速度归零、双臂冻结、夹爪保持。
   不卸力——要卸力用策略层的 `~/estop`。
+* **A/X 归位不在本节点算轨迹**，只是调策略层的 `~/home_left` / `~/home_right`，
+  和 B/Y 调 engage 完全同构。归位期间 `vr_teleop` **只跟随不驱动**（目标钉在
+  `limited_pose` 上），否则 50 Hz 的陈旧目标会和插值对着干、走完还把手臂拽回去。
 * **站立插值走完那一刻夹爪会弹到全开**（trigger 松开 = 0 = 完全打开）。手里有东西就先扣
   住 trigger 再 `~/engage`。
 * **平移和转角各自选参考系，四种搭配**（`arm_position_frame` / `arm_rotation_frame`，
@@ -653,7 +658,8 @@ wrist_roll     [-1.972, 1.972]   wrist_pitch/yaw [-1.614, 1.614]
 | `initial_height` | 0.74 | 进入 `RUNNING` 时的高度指令 |
 | `stand_s` | 2.5 | 总时长。官方 `FixStand` 是 2 s，多出来的半秒是因为还要把手臂收到 `passive_targets` |
 | `stand_clear_roll` | 0.7 (40°) | STAND 第一段把 `shoulder_roll` 往外张到这个角度（**只张不收**）。防的是关节空间直线扫过大腿，见第 8 节实测。设 0 退回单段直插 |
-| `stand_clear_s` | 0.4 | 第一段的时长，**包含在 `stand_s` 里**（必须小于它，否则拒绝启动） |
+| `stand_clear_s` | 0.4 | 第一段的时长，**包含在 `stand_s` 里**（必须小于它，否则拒绝启动）。单臂归位的第一段也用它 |
+| `home_s` | 2.0 | 单臂归位（`~/home_left` / `~/home_right`）的总时长。走的是和 STAND 完全一样的两段式关节空间插值，只动被点名那一侧的 7 轴，与 `arm_mode` 正交。见第 7 节 |
 | `control_rate_hz` | 50.0 | **不要改**，会改变步态相位速度。上肢 IK 共用这一个定时器 |
 | `tilt_limit_rad` | 1.0 | 同官方 `bad_orientation` |
 
@@ -731,6 +737,35 @@ STAND 是**关节空间直线插值**，而直线不避障。用 `final.urdf` �
 > 此时这个方案是最快的脱离路径：实测从 +60° 起步 0.25 s 内脱开、0.5 s 到 42 mm、
 > 1 s 到 113 mm。真遇到先手动把手臂拨开再按 `G`。
 
+### 单臂归位复用同一套两段式，不走笛卡尔
+
+`~/home_left` / `~/home_right` 把一只手送回预备姿势，走的就是上面这套「先张肩再走」的
+**关节空间**插值，只是把范围收到被点名那一侧的 7 轴。两点理由：
+
+* **预备姿势本来就是关节量**（`passive_targets` 那一侧的 7 个数）。笛卡尔归位要绕
+  「关节 → FK → 位姿目标 → 再 IK 解回关节」，而同一末端位姿多解支最大差 2.67 rad
+  （见第 5 节）——**夹爪到位不等于位形是预备姿势**。关节空间是逐位精确的。
+* 归位和 STAND 是同一个问题：从任意位形回到站立臂位姿。没道理两套解法、两张实测表。
+
+同一套碰撞体、同一段插值公式，只动单臂（腿取最弯的最坏姿态），肘及以远 vs
+躯干/髋/膝/头的**全程最小间距**：
+
+| 起始位形（单臂） | 起点自身 | 单段直插 | 两段式 |
+|---|---|---|---|
+| 背后 +75° | 126 mm | 110 mm | 120 mm |
+| 背后 +75° 且 `shoulder_roll` 内收到 0.2 | 28 mm | **7 mm** | 28 mm |
+| 背后 +75° 且内收到 0.4 | 2 mm | **−22 mm（穿模）** | 2 mm |
+| 碰撞带 +60° 且内收 0.3 + 屈肘 | 146 mm | **−2 mm（穿模）** | 150 mm |
+| 贴身屈肘（pitch 0.9 / 内收 0.1 / elbow 1.3） | 150 mm | 46 mm | 152 mm |
+| 手臂在前 −60° / 自然下垂 0° | 164 / 154 mm | 154 / 154 mm | 154 / 154 mm（不变） |
+
+**每一个"路上撞"的用例都被两段式消掉了**，代价是手臂已经张开时路径略绕（个别姿态从
+153 mm 降到 133 mm，无关紧要）。两段式的最小间距在这些用例里恰好等于**起点自身**的
+间距——第一段张肩之后，全程再没比起点更近过。
+
+> ⚠️ 同一条警告在这里同样成立：**起点自己就已经穿模的话归位也救不了**（实测
+> 「碰撞带 +60° + 内收 0.3」起点就是 −32 mm，单段 −34、两段 −33）。先手动把手臂拨开。
+
 ### 手臂停在 `passive_targets`：分布外开局，不是碰撞
 
 `passive_targets` 现在只把 `shoulder_roll` 张到 ±0.6，其余 14 项是 0。上面已确认这个
@@ -792,6 +827,8 @@ CPU 闭环重跑里手臂写 0 并**没有**让下肢站不住，所以这一项
 | `~/engage` 返回 `/joint_states 超时` | 控制栈没起，或 `scope:=whole_body` 忘了写 |
 | `~/engage` 返回 `switch_controller 拒绝激活` | FPC 被别的控制节点占着（IKT Pose Commander / JTC），先把它们停掉；只读 dashboard 不占控制器 |
 | `~/start` 返回 `站立插值还没走完` | 等满 `stand_s` 再按 `Enter` |
+| `~/home_left` / `~/home_right` 返回 `手臂还没接管` | 归位要求 `arms_live`：先 `~/engage` 并等满 `stand_s` |
+| 归位走完手臂马上又跑回去了 | 上层在 50 Hz 发归位前那个旧目标。策略层走完会重播种自己的缓存，但**拦不住别人接着发**。归位期间发布方要么停发、要么跟随 `limited_pose`（`vr_teleop` 走的是后者） |
 | 跑着跑着莫名急停、原因是 `/joint_states` 或 IMU 超时 | 默认 `state_timeout_s` 已取 0.2 s，用于容忍 Jetson 上的短时广播/回调调度抖动；它仍小于硬件自己的 `state_timeout_s`(0.25 s) |
 | 急停后机器人还硬着 | 看日志有没有 `卸力失败`。有的话立刻用手柄断电——这条路径失效说明 controller_manager 没响应 |
 | 站立位姿正常但一放策略就抖 | 先确认 `/joint_states` 的 `velocity` 字段非空（观测第 6 项全 0 会让策略瞎跑）：`ros2 topic echo /joint_states --field velocity --once` |
@@ -823,7 +860,7 @@ g1_motion_control/
 └── test/
     ├── test_policy_runtime.py   # 观测拼接 / 隐状态回喂与清零 / 契约校验，pytest
     ├── test_arm_ik.py           # 正逆往返 / 不可达不抖 / 单侧求解 / 零空间偏置与门控 / 整条管线不卡死不跳变
-    ├── test_vr_teleop.py        # 离合 / tracking 防跳 / 领先量夹紧 / 畸形帧 / 轴映射 / 偏航基准 / 夹爪
+    ├── test_vr_teleop.py        # 离合 / tracking 防跳 / 领先量夹紧 / 畸形帧 / 轴映射 / 偏航基准 / 夹爪 / A、X 归位
     ├── test_dashboard.py        # URDF 裁剪 / mimic 单遍解算 / 路径容纳
     ├── smoke_no_robot.py        # 无真机联调，直接 python3 跑
     └── smoke_dashboard.py       # 监控页联调，直接 python3 跑
