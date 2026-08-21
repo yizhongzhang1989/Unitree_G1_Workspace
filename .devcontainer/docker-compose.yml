@@ -59,6 +59,8 @@ services:
       # 重力标定结果 ~/.ros/arm_gravity_compensation/ 要持久化。
       # 容器侧用户名跟宿主走（dev.sh build 传 $(id -un)），两边都用同一个变量。
       - ${HOME:-/home/unitree}/.ros:/home/${G1_USER_NAME:-unitree}/.ros
+      # .vscode-server 默认落在容器可写层，重建即丢扩展
+      - ${HOME:-/home/unitree}/.g1-vscode-server:/home/${G1_USER_NAME:-unitree}/.vscode-server
     working_dir: /workspace
 
     # devcontainer 需要容器常驻；dev.sh 用 `compose run` 会覆盖掉这一条
