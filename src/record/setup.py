@@ -37,6 +37,7 @@ setup(
     entry_points={
         'console_scripts': [
             'recorder = record.recorder_node:main',
+            'data_manager = record.data_node:main',
         ],
     },
 )

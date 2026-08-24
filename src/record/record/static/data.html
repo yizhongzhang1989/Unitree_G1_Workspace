@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 采集数据管理</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="with-transport">
+<header>
+  <h1>采集数据管理</h1>
+  <a id="peer" class="peer" hidden>← 采集面板</a>
+  <div id="banner" class="banner">连接中…</div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>已录制 <span class="hint" id="count"></span></h2>
+    <div class="split wide">
+      <div id="sessions" class="episodes"></div>
+      <div id="detail"><p class="hint">左边选一次采集</p></div>
+    </div>
+  </section>
+
+  <details class="panel note">
+    <summary>回放安全须知</summary>
+    <p class="hint">
+      <b>「接管上肢」会让机器人真的动</b>：激活 FPC 并在 2.5 s 内插值到默认站立位姿，
+      插完上肢就归 IK 管了。<b>只调手臂时机器人必须被吊起或另行支撑</b> —— 下肢只是被
+      位置环钉在站立位姿，没人在平衡。
+    </p>
+    <p class="hint">
+      回放只发上肢：双臂末端位姿 + 夹爪，<b>不发行走指令</b>。开播前会从当前位姿
+      缓入到录制起点（进度条走琥珀色那一段）。「停止」只是不再发目标，手臂停在原地；
+      要卸力按同一个位置上的<b>急停卸力</b>。
+    </p>
+    <p class="hint">
+      进度条不能拖动。中途跳到别处等于给手臂一个阶跃目标，会被出口限速摊成一段全速
+      运动 —— 要从别的地方开始就选别的 episode。
+    </p>
+  </details>
+</main>
+
+<footer class="transport">
+  <div class="bar" id="seek"><div id="prog"></div></div>
+  <div class="tbody">
+    <div class="tnow">
+      <div class="tlabel" id="now-label">未在回放</div>
+      <div class="hint" id="ready">检查中…</div>
+    </div>
+    <div class="tclock" id="clock">0:00 / 0:00</div>
+    <label class="hint">速度
+      <select id="speed">
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+      </select>
+    </label>
+    <button id="btn-stop" class="icon" title="停止回放" aria-label="停止回放" disabled>■</button>
+    <button id="btn-arm" class="ok">接管上肢</button>
+  </div>
+</footer>
+
+<script src="/common.js"></script>
+<script src="/data.js"></script>
+</body>
+</html>
