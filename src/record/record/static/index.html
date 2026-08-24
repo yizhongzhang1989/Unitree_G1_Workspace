@@ -9,49 +9,63 @@
 <body>
 <header>
   <h1>G1 上肢遥操作采集</h1>
+  <a id="peer" class="peer" hidden>数据管理 →</a>
   <div id="banner" class="banner">连接中…</div>
 </header>
 
 <main>
-  <section class="panel" id="control">
-    <h2>会话</h2>
-    <div class="row">
-      <input id="note" placeholder="备注（操作者、场地、任务批次…）">
-      <button id="btn-start" class="primary">开始 session</button>
-      <button id="btn-stop" class="danger" disabled>结束 session</button>
-    </div>
-    <p class="hint" id="lock-hint">
-      勾选在开录瞬间冻结写进 <code>manifest.json</code>；开录后不可更改，
-      否则 <code>schema.json</code> 会与实际落盘内容静默错位。
-    </p>
-  </section>
+  <div class="cols">
+    <section class="panel">
+      <h2>摆桌与指令</h2>
+      <div class="row">
+        <button id="btn-preview">生成任务 / 重 roll</button>
+        <button id="btn-round" disabled>开始本轮（固化）</button>
+        <button id="btn-round-end" disabled>结束本轮</button>
+        <span class="hint" id="round-hint"></span>
+      </div>
+      <div class="split">
+        <div id="episodes" class="episodes"></div>
+        <div id="scene" class="scene"><p class="hint">还没有摆放样例</p></div>
+      </div>
+    </section>
 
-  <section class="panel">
-    <h2>数据一览 <span class="hint" id="stream-summary"></span></h2>
-    <table id="streams">
-      <thead><tr>
-        <th style="width:3rem">录</th><th>数据流</th><th>话题 / 源</th>
-        <th>类型</th><th class="num">列</th><th class="num">收到</th>
-        <th class="num">已写</th><th>状态</th><th>说明</th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
+    <section class="panel" id="control">
+      <h2>会话</h2>
+      <div class="row">
+        <input id="note" placeholder="备注（操作者、场地、任务批次…）">
+        <button id="btn-start" class="primary">开始 session</button>
+        <button id="btn-stop" class="danger" disabled>结束 session</button>
+      </div>
+      <p class="hint" id="lock-hint">
+        勾选在开录瞬间冻结写进 <code>manifest.json</code>；开录后不可更改，
+        否则 <code>schema.json</code> 会与实际落盘内容静默错位。
+      </p>
+    </section>
+  </div>
 
-  <section class="panel">
-    <h2>摆桌与指令</h2>
-    <div class="row">
-      <button id="btn-round" disabled>生成新一轮摆放</button>
-      <button id="btn-round-end" disabled>结束本轮</button>
-      <span class="hint">照着右边的样例把真实桌面摆好，再逐条执行。</span>
-    </div>
-    <div class="split">
-      <div id="episodes" class="episodes"></div>
-      <div id="scene" class="scene"><p class="hint">还没有摆放样例</p></div>
+  <section class="panel" id="streams-card">
+    <h2>数据一览 <span class="hint" id="stream-summary"></span>
+      <button id="btn-fold" class="fold" title="折叠">▾</button>
+    </h2>
+    <div id="streams-body">
+      <div class="row">
+        <button id="btn-shot">抓一帧看看</button>
+        <span class="hint" id="shot-hint">帧计数只能发现流哑了，发现不了相机对着墙。录制中不可用。</span>
+      </div>
+      <div id="shots" class="shots"></div>
+      <table id="streams">
+        <thead><tr>
+          <th style="width:3rem">录</th><th>数据流</th><th>话题 / 源</th>
+          <th>类型</th><th class="num">列</th><th class="num">收到</th>
+          <th class="num">已写</th><th>状态</th><th>说明</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
   </section>
 </main>
 
+<script src="/common.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -41,7 +41,7 @@ def render_scene(placements, geometry, *, title: str = '') -> str:
 
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{u0 * MM:.1f} '
            f'{v0 * MM:.1f} {w:.1f} {h:.1f}" width="{w:.0f}" height="{h + 46:.0f}">',
-           '<rect x="-9999" y="-9999" width="19998" height="19998" fill="#0f172a"/>']
+           '<rect x="-9999" y="-9999" width="19998" height="19998" fill="#f1f5f9"/>']
 
     # 可达格：铺一层底，操作者能看出哪些位置根本放不了东西
     cell = geometry.cell * MM
@@ -50,13 +50,13 @@ def render_scene(placements, geometry, *, title: str = '') -> str:
             left, right = bool(geometry.left[i, j]), bool(geometry.right[i, j])
             if not (left or right):
                 continue
-            fill = '#1e3a5f' if left and right else ('#14342a' if left else '#3a1e2e')
+            fill = '#dbeafe' if left and right else ('#dcfce7' if left else '#fce7f3')
             out.append(f'<rect x="{-y * MM - cell / 2:.1f}" y="{-x * MM - cell / 2:.1f}" '
                        f'width="{cell:.1f}" height="{cell:.1f}" fill="{fill}"/>')
 
     out.append(f'<line x1="0" y1="{v0 * MM:.1f}" x2="0" y2="{v1 * MM:.1f}" '
-               'stroke="#64748b" stroke-dasharray="12 8" stroke-width="2"/>')
-    out.append(f'<text x="{u0 * MM + 12:.1f}" y="{v1 * MM - 10:.1f}" fill="#94a3b8" '
+               'stroke="#94a3b8" stroke-dasharray="12 8" stroke-width="2"/>')
+    out.append(f'<text x="{u0 * MM + 12:.1f}" y="{v1 * MM - 10:.1f}" fill="#64748b" '
                'font-size="26" font-family="sans-serif">机器人在这一侧</text>')
 
     for p in placements:
@@ -71,12 +71,12 @@ def render_scene(placements, geometry, *, title: str = '') -> str:
             f'translate({-used_w / 2:.1f},{-used_d / 2:.1f}) '
             f'translate({(used_w - vw * s) / 2:.1f},{(used_d - vh * s) / 2:.1f}) '
             f'scale({s:.4f})">{body}</g>')
-        out.append(f'<text x="{cu:.1f}" y="{cv + used_d / 2 + 22:.1f}" fill="#e2e8f0" '
+        out.append(f'<text x="{cu:.1f}" y="{cv + used_d / 2 + 22:.1f}" fill="#1f2937" '
                    f'font-size="22" text-anchor="middle" '
                    f'font-family="sans-serif">{_escape(p.item.name_zh)}</text>')
 
     if title:
-        out.append(f'<text x="{u0 * MM + 12:.1f}" y="{v0 * MM + 30:.1f}" fill="#f8fafc" '
+        out.append(f'<text x="{u0 * MM + 12:.1f}" y="{v0 * MM + 30:.1f}" fill="#0f172a" '
                    f'font-size="28" font-family="sans-serif">{_escape(title)}</text>')
     out.append('</svg>')
     return ''.join(out)

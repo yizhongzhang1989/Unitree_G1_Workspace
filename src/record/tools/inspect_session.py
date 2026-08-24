@@ -55,10 +55,14 @@ def main() -> int:
         if t.size:
             t_lo.append(float(t[0]))
             t_hi.append(float(t[-1]))
-        head_ok = np.isfinite(s.table(key)[0]).all()
+        cov = s.header_coverage(key)
+        src = ('—' if data.shape[0] == 0 else
+               'header' if cov > 0.999 else
+               'recv（作用时刻）' if cov < 0.001 else
+               f'{(1 - cov) * 100:.0f}% 回退 recv')
         span = float(t[-1] - t[0]) if t.size > 1 else 0.0
         print(f'{key:<26}{data.shape[0]:>9}{data.shape[1]:>5}{_hz(t):>8.1f}'
-              f'{span:>9.1f}  {"header" if head_ok else "含回退 recv"}')
+              f'{span:>9.1f}  {src}')
 
     print('\n--- 视频 ---')
     print(f'{"路":<16}{"帧":>8}{"fps":>8}{"标称":>7}{"跨度s":>9}'
@@ -121,7 +125,11 @@ def main() -> int:
             o = r['overall']
             print(f'  {name} ({r["source"]}): 整段 {o["delay_ms"]:+.1f} ms  '
                   f'置信 {o["score"]:.2f}/峰差 {o["margin"]:.2f}  '
-                  f'{"可用" if o["trustworthy"] else "不可用（运动太少或不相关）"}')
+                  f'{"可用" if r["side_specific"] else "不可用"}')
+            c = r['cross']
+            print(f'    同侧 {o["score"]:.2f} vs 异侧 {c["score"]:.2f}'
+                  + ('' if r['side_specific'] else
+                     '  ← 分不开，测到的是另一条臂的串扰；重采时只动这一条臂'))
             if r['trustworthy_windows'] > 1:
                 print(f'    分窗 {r["trustworthy_windows"]} 个可用，'
                       f'偏移极差 {r["spread_ms"]:.1f} ms'

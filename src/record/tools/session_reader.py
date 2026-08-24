@@ -20,6 +20,15 @@ from pathlib import Path
 
 import numpy as np
 
+#: 已标定的相机管线延迟（秒）：从曝光到帧抵达主机。`video_pts` 默认把它减掉。
+#:
+#: 两路都是 110 ms ± 15（2026-08-24，两台相机编码参数统一之后）。测法与证据链见
+#: `align_video` 与 README「时间对齐」。**改过相机编码参数就要重标** —— 实测把 .98
+#: 从 25 fps 改成 30 fps，延迟从 195 ms 变成 115 ms。
+#:
+#: 头部为 0：D435i 给的就是硬件曝光时刻，不需要再减。
+CAMERA_DELAY_S = {'wrist_left': 0.110, 'wrist_right': 0.110, 'head': 0.0}
+
 
 class Session:
     def __init__(self, root: str | Path) -> None:
@@ -61,7 +70,12 @@ class Session:
     # -------------------------------------------------------------------- 信号
 
     def table(self, key: str) -> tuple[np.ndarray, np.ndarray]:
-        """返回 (时间列, 数据列)。时间用 ``t_header``，无效处回退 ``t_recv``。"""
+        """返回 (时间列, 数据列)。**每一行都有可用时间戳。**
+
+        优先用 `t_header`（源端打戳）；没有 header 字段的消息类型用 `t_recv`。
+        对 `motion_control_command` 这类指令话题，**接收时刻就是正确语义** ——
+        指令是收到那一刻才生效的，没有更早的「采集时刻」可言。
+        """
         entry = self.schema[key]
         path = self.root / 'signals' / entry['file']
         flat = np.fromfile(path, dtype=np.float64)
@@ -74,16 +88,42 @@ class Session:
     def columns(self, key: str) -> list[str]:
         return list(self.schema[key]['columns'][2:])
 
+    def header_coverage(self, key: str) -> float:
+        """有多少比例的行用的是源端打的 header 戳（其余用接收时刻）。
+
+        `Float64MultiArray` / `String` / `unitree_hg/IMUState` 没有 header 字段，落盘写 NaN。
+        这**不是缺陷**，指令类话题本来就该按接收（= 生效）时刻计；区分它们只是因为
+        源端戳不含传输抖动，对齐精度更高（实测 recv-header p50 4.6~50.1 ms）。
+
+        判断时间来源必须看原始 header 列：`table()` 已经回退过，它的返回值永远是 finite。
+        """
+        entry = self.schema[key]
+        flat = np.fromfile(self.root / 'signals' / entry['file'], dtype=np.float64)
+        ncol = entry['ncol']
+        if flat.size < ncol:
+            return 0.0
+        data = flat[:flat.size // ncol * ncol].reshape(-1, ncol)
+        return float(np.isfinite(data[:, 1]).mean())
+
     def tables(self) -> list[str]:
         return [k for k, v in self.schema.items()
                 if (self.root / 'signals' / v['file']).is_file()]
 
     # -------------------------------------------------------------------- 视频
 
-    def video_pts(self, name: str, fit: bool = True) -> np.ndarray:
+    def video_pts(self, name: str, fit: bool = True, corrected: bool = True) -> np.ndarray:
+        """帧的采集时刻。**默认已扣掉相机管线延迟**，直接与信号表对齐。
+
+        `pts.bin` 里存的是帧**到达**主机的墙钟，而相机从曝光到出帧要走一段
+        固定管线，所以真实采集时刻 = 到达时刻 − 延迟。修正只在读的时候做，
+        **落盘文件永远是原始值** —— 标定值改过两回了，烧进文件就没得救。
+
+        传 ``corrected=False`` 拿未修正的值（重新标定时用）。
+        """
         path = self.root / 'video' / f'{name}.pts.bin'
         raw = np.fromfile(path, dtype=np.float64)
-        return fitted_pts(raw) if fit and name.startswith('wrist') else raw
+        pts = fitted_pts(raw) if fit and name.startswith('wrist') else raw
+        return pts - CAMERA_DELAY_S.get(name, 0.0) if corrected else pts
 
     def video_path(self, name: str) -> Path:
         return self.root / 'video' / f'{name}.mkv'

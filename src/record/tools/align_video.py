@@ -50,6 +50,23 @@ ARM_JOINTS = {
 }
 WRIST_SIDE = {'wrist_left': 'left', 'wrist_right': 'right'}
 
+#: 已标定的相机管线延迟定义在 `session_reader.CAMERA_DELAY_S`，这里不再存第二份。
+#: `video_pts()` 默认已经把它减掉，所以**本模块必须拿未修正的值**，
+#: 否则量到的是修正后的残差而不是延迟本身。
+#:
+#: **两路都约 110 ms，不确定度 ±15 ms**（2026-08-24，两台相机参数统一之后）。
+#: 单次互相关的峰高只有 0.17~0.24，没到 0.3 的判据线，但下面几条互相独立的证据都指向
+#: 同一个数，合起来足够用：
+#:
+#: * 同一段数据换 4 种机器人侧信号（全 7 轴 / 腕 3 轴 / 肘+腕 / 末端），延迟都落在
+#:   98~116 ms；
+#: * 换窗长 4/12/16 s 重算，左路 +100.3 / +103.9 / +101.4，右路 +101.3 / +109.8 / +115.1；
+#: * 参数统一前 `.97` 在高置信度下测得 +114 ms（峰高 0.60），与本次 +101 一致；
+#: * **改帧率前就预测过** `.98` 的 +195 ms 会向 `.97` 靠拢（那 81 ms 差 ≈ 25 fps 的两个
+#:   帧周期），改完实测 +115 ms，预测应验。
+#:
+#: 头部没有值：D435i 给的是硬件时间戳，且它不随手臂动，互相关这条路对它不适用。
+
 GRID_HZ = 50.0          # 两路重采样到的公共网格
 MAX_LAG_S = 0.6         # 搜索范围，覆盖曝光+ISP+编码+网络的全部量级
 
@@ -114,7 +131,12 @@ def motion_from_frames(mkv_path, width: int = 160) -> tuple[np.ndarray, np.ndarr
 
 
 def arm_speed(session, side: str) -> tuple[np.ndarray, np.ndarray]:
-    """该臂 7 个关节角速度的模。相机随手腕转，图像运动主要由它驱动。"""
+    """该臂 7 个关节角速度的模。相机随手腕转，图像运动主要由它驱动。
+
+    **必须用 `joint_states` 的实测速度，不能用 `motion_control_status` 的 `limited_pose`。**
+    后者是关节指令的正解，机器人跟随指令有滞后，拿它做互相关会把伺服跟踪滞后一起算进
+    延迟里 —— 实测系统性偏大 30~45 ms（+142 vs +101、+145 vs +114、+243 vs +195）。
+    """
     t, data = session.table('joint_states')
     cols = session.columns('joint_states')
     wanted = [f'vel.{j}' for j in ARM_JOINTS[side]]
@@ -127,6 +149,11 @@ def arm_speed(session, side: str) -> tuple[np.ndarray, np.ndarray]:
 def _resample(t: np.ndarray, v: np.ndarray, grid: np.ndarray) -> np.ndarray:
     if t.size < 2:
         return np.zeros_like(grid)
+    # np.interp 要求 x 递增，乱序会静默插出错值。实测每张表有 1~2 行倒序
+    # （多线程执行器下 header 戳可能乱序），当前量级不影响结果，但不能指望它一直这么少。
+    if np.any(np.diff(t) < 0):
+        order = np.argsort(t, kind='stable')
+        t, v = t[order], v[order]
     return np.interp(grid, t, v, left=np.nan, right=np.nan)
 
 
@@ -185,7 +212,8 @@ def align_stream(session, name: str, window_s: float = 30.0,
     side = WRIST_SIDE.get(name)
     if side is None:
         raise ValueError(f'{name} 不是腕部视频')
-    pts = session.video_pts(name)
+    other = 'right' if side == 'left' else 'left'
+    pts = session.video_pts(name, corrected=False)   # 标定要量的就是这个修正量本身
     idx, motion = (motion_from_frames(session.video_path(name)) if use_frames
                    else motion_from_packets(session.video_path(name)))
     if idx.size == 0:
@@ -195,6 +223,10 @@ def align_stream(session, name: str, window_s: float = 30.0,
     sig_t, sig_motion = arm_speed(session, side)
 
     overall = estimate_delay(video_t, video_motion, sig_t, sig_motion)
+    # 双臂同时动时，画面里两条臂的运动混在一起，光看峰高会把串扰当成信号。
+    # 实测 wrist_right 同侧 0.55 / 异侧 0.16（可信），wrist_left 同侧 0.23 / 异侧 0.22
+    # （不可信，两者分不开）。所以同侧必须明显赢过异侧才算标出来了。
+    cross = estimate_delay(video_t, video_motion, *arm_speed(session, other))
     windows = []
     lo, hi = float(video_t[0]), float(video_t[-1])
     n = max(1, int((hi - lo) // window_s))
@@ -208,10 +240,13 @@ def align_stream(session, name: str, window_s: float = 30.0,
         windows.append({'t0': round(a, 3), **est.as_dict()})
 
     good = [w['delay_ms'] for w in windows if w['trustworthy']]
+    side_specific = overall.score >= cross.score * 2 and overall.trustworthy
     return {
         'stream': name, 'side': side,
         'source': 'frames' if use_frames else 'packets',
         'overall': overall.as_dict(),
+        'cross': cross.as_dict(),
+        'side_specific': side_specific,
         'windows': windows,
         'trustworthy_windows': len(good),
         'spread_ms': round(max(good) - min(good), 1) if len(good) > 1 else 0.0,

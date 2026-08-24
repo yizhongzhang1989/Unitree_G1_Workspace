@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import signal
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -37,6 +38,20 @@ def _import_msg(type_name: str):
     return getattr(__import__(f'{pkg}.msg', fromlist=[cls]), cls)
 
 
+def _udp_rcvbuf_errors() -> int:
+    """UDP 收包缓冲溢出计数。大图像丢帧时它涨得快就是丢在 DDS 传输层。"""
+    try:
+        head = val = ''
+        with open('/proc/net/snmp', encoding='ascii') as fh:
+            for line in fh:
+                if line.startswith('Udp:'):
+                    head, val = (head or line), line
+        cols, vals = head.split(), val.split()
+        return int(vals[cols.index('RcvbufErrors')])
+    except (OSError, ValueError):
+        return -1
+
+
 def _qos(best_effort: bool, depth: int = 50) -> QoSProfile:
     return QoSProfile(
         depth=depth, history=HistoryPolicy.KEEP_LAST,
@@ -55,6 +70,10 @@ class Recorder(Node):
         self.head_info_topic = p('head_camera_info_topic',
                                  '/head/camera/color/camera_info').value
         self.head_fps = int(p('head_fps', 30).value)
+        # KEEP_LAST 深度就是能容忍的卡顿长度。头部 pts 取自 header.stamp，晚到不影响时间
+        # 精度，丢了却会在时间轴上留空洞，所以加深只赚不亏。实测 4/30/120 在可复现
+        # 的负载下没差别（那种负载压根不丢帧），30 是给复现不了的真实工况留的保险。
+        self.head_qos_depth = int(p('head_qos_depth', 30).value)
         self.wrist_urls = {
             'wrist_left': p('wrist_left_url',
                             'rtsp://admin:123456@192.168.123.97/stream0').value,
@@ -63,6 +82,8 @@ class Recorder(Node):
         }
         self.n_items = int(p('round_items', 4).value)
         self.n_moves = int(p('round_moves', 6).value)
+        self.peer_port = int(p('peer_port', 8221).value)
+        self._peer = (0.0, False)
 
         self._lock = threading.RLock()
         self._group = ReentrantCallbackGroup()
@@ -79,6 +100,10 @@ class Recorder(Node):
                            'last': 0.0}
         self._head_info: dict | None = None
         self._preview: dict[str, bytes] = {}
+        self.pending_round: dict | None = None      # 已生成、还没固化进 session 的那一轮
+        self._pending_obj = None
+        # 开录前抓快照要用。只留最近一帧，不是缓冲区
+        self._head_last: tuple[bytes, int, int, str] | None = None
 
         self.library, self.geometry, self.library_error = self._load_library()
         self.current_round: dict | None = None
@@ -87,7 +112,7 @@ class Recorder(Node):
         # 常驻订阅：不录也要在面板上显示各路的实时频率，操作者才能在开录前发现问题
         self._attach_monitors()
         self.create_subscription(Image, self.head_topic, self._on_head,
-                                 _qos(False, 4), callback_group=self._group)
+                                 _qos(False, self.head_qos_depth), callback_group=self._group)
         self.create_subscription(CameraInfo, self.head_info_topic, self._on_head_info,
                                  _qos(False, 4), callback_group=self._group)
         self.get_logger().info(
@@ -149,6 +174,8 @@ class Recorder(Node):
         seen['count'] += 1
         head = self.head
         if head is None:
+            # 没在录时才留快照用的那一帧：录制中留它等于每帧多一次 1.8 MB 拷贝
+            self._head_last = (bytes(msg.data), msg.width, msg.height, msg.encoding)
             return
         if not head.health.alive and head.proc is None:
             try:
@@ -198,6 +225,9 @@ class Recorder(Node):
             if streams.get('head'):
                 self.head = HeadRecorder('head', paths.video)
             self.session = session
+            self._udp_err0 = _udp_rcvbuf_errors()
+            self._head_seen0 = self._head_seen['count']
+            self._head_t0 = time.time()
             probing = {n: u for n, u in self.wrist_urls.items() if streams.get(n)}
             if probing:
                 # 探一路最长 20 s，串行探完会把开录拖慢半分钟，所以扔后台；录制不依赖它
@@ -221,17 +251,40 @@ class Recorder(Node):
         except OSError as exc:
             self.get_logger().warning(f'标称帧率写入失败: {exc}')
 
-    def start_round(self, seed: int | None = None) -> dict:
+    def preview_round(self, seed: int | None = None) -> dict:
+        """生成一轮摆放但**不写进 session**，可以反复重 roll。
+
+        摆真桌子要几十秒，以前只能开录之后才看得到任务，那段时间全录进了视频里。
+        现在 IDLE 下就能预览，摆完再开录。
+        """
         with self._lock:
-            self._require(State.SESSION)
+            if self.session is not None and self.session.state in (State.ROUND, State.EPISODE):
+                raise RuntimeError('本轮还没结束，不能重 roll')
             if self.library is None:
                 raise RuntimeError(f'物品库不可用: {self.library_error}')
             from record.instruction.builder import build_round
-            rnd = build_round(self.library, self.geometry,
-                              index=self.session.round_index + 1, seed=seed,
+            index = self.session.round_index + 1 if self.session else 0
+            rnd = build_round(self.library, self.geometry, index=index, seed=seed,
                               n_items=self.n_items, n_moves=self.n_moves)
+            self._pending_obj = rnd
+            self.pending_round = rnd.as_dict()
+            return self.status()
+
+    def start_round(self, seed: int | None = None) -> dict:
+        """把预览的那一轮固化进 session。没预览过就现生一个。"""
+        with self._lock:
+            self._require(State.SESSION)
+            rnd = self._pending_obj
+            if rnd is None or seed is not None:
+                if self.library is None:
+                    raise RuntimeError(f'物品库不可用: {self.library_error}')
+                from record.instruction.builder import build_round
+                rnd = build_round(self.library, self.geometry,
+                                  index=self.session.round_index + 1, seed=seed,
+                                  n_items=self.n_items, n_moves=self.n_moves)
             self._round_obj = rnd
             self.current_round = rnd.as_dict()
+            self.pending_round, self._pending_obj = None, None
             self.session.start_round(self.current_round, svg=rnd.svg)
             for hit in self.current_round.get('lint_warnings', []):
                 self.session.warn('lint', **hit)
@@ -294,6 +347,7 @@ class Recorder(Node):
                 if self.head.dropped:
                     # 队列满才会计数，说明编码器或写线程跟不上；为 0 则丢在订阅上游
                     self.session.warn('head_queue_drop', frames=self.head.dropped)
+                self._warn_head_gap()
             schema = {}
             for key, w in self.writers.items():
                 w.close()
@@ -386,7 +440,16 @@ class Recorder(Node):
             'disk_free_gb': round(disk / 1e9, 1),
             'library_error': self.library_error,
             'round_detail': self.current_round,
+            'pending_round': self.pending_round,
+            'peer_port': self.peer_port if self._peer_alive('data_manager') else 0,
         }
+
+    def _peer_alive(self, name: str, ttl: float = 5.0) -> bool:
+        """对方面板在不在。问 ROS 图而不是去探那个端口 —— 跨端口探测会往控制台灌报错。"""
+        now = time.monotonic()
+        if now - self._peer[0] > ttl:
+            self._peer = (now, name in self.get_node_names())
+        return self._peer[1]
 
     def _disk(self) -> int:
         import shutil as _sh
@@ -396,8 +459,66 @@ class Recorder(Node):
         except OSError:
             return 0
 
-    def preview(self, key: str) -> bytes:
-        return self._preview.get(key, b'')
+    def _warn_head_gap(self) -> None:
+        """头部没收齐帧就把同期的 UDP 溢出计数一并记下。
+
+        实机出过 24.9/30，但在能复现的负载（真控制栈 + 三路录制 + 合成信号）下一次都
+        没重现，差的是头显真连着推流那份负载。下次再发生时这条告警能直接分开
+        「丢在 UDP 分片」和「丢在别处」，不用再猬。
+        """
+        got = self._head_seen['count'] - self._head_seen0
+        want = self.head_fps * (time.time() - self._head_t0)
+        if want <= 0 or got >= want * 0.97:
+            return
+        err = _udp_rcvbuf_errors() - self._udp_err0
+        self.session.warn('head_frames_short', got=got, want=int(want),
+                          lost=int(want - got), rcvbuf_errors=err,
+                          queue_drop=self.head.dropped if self.head else 0)
+
+    def pending_svg(self) -> str:
+        return self._pending_obj.svg if self._pending_obj is not None else ''
+
+    def snapshot(self, key: str) -> bytes:
+        """开录前抓一帧确认画面。**只在未录制时可用，且只抓一帧。**
+
+        帧计数和在线点能发现「流哑了」，但发现不了「相机对着墙」或者被挡住了，
+        那得看一眼画面。连续预览不行：实测解码是 65% 单核每路，三路就是两个核，
+        录制期间绝不能加这个负载。单帧是一次性的，腕部约 1.3 s（RTSP 握手 + 等 IDR）。
+        """
+        with self._lock:
+            if self.session is not None:
+                raise RuntimeError('正在录制，不抓快照 —— 解码会跟录制抢 CPU')
+        if key == 'head':
+            return self._head_snapshot()
+        url = self.wrist_urls.get(key)
+        if url is None:
+            raise ValueError(f'未知的视频流 {key}')
+        out = subprocess.run(
+            ['ffmpeg', '-nostdin', '-v', 'error', '-rtsp_transport', 'tcp',
+             '-stimeout', '5000000', '-i', url, '-frames:v', '1',
+             '-vf', 'scale=640:-2', '-f', 'mjpeg', 'pipe:1'],
+            capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        if out.returncode != 0 or len(out.stdout) < 512:
+            raise RuntimeError(f'抓不到画面: {out.stderr.decode("utf-8", "replace")[:200]}')
+        return out.stdout
+
+    def _head_snapshot(self) -> bytes:
+        """头部走 ROS，最近一帧已经在内存里，编码成 JPEG 即可。"""
+        frame = self._head_last
+        if frame is None:
+            raise RuntimeError('还没收到头部图像')
+        payload, width, height, encoding = frame
+        pix = HeadRecorder.PIX.get(encoding)
+        if pix is None:
+            raise RuntimeError(f'头部相机编码 {encoding} 不支持')
+        out = subprocess.run(
+            ['ffmpeg', '-nostdin', '-v', 'error', '-f', 'rawvideo',
+             '-pix_fmt', pix, '-s', f'{width}x{height}', '-i', 'pipe:0',
+             '-frames:v', '1', '-vf', 'scale=640:-2', '-f', 'mjpeg', 'pipe:1'],
+            input=payload, capture_output=True, timeout=30)
+        if out.returncode != 0 or len(out.stdout) < 512:
+            raise RuntimeError(f'头部编码失败: {out.stderr.decode("utf-8", "replace")[:200]}')
+        return out.stdout
 
 
 def _on_sigterm(signum, frame):   # noqa: ARG001
@@ -407,8 +528,8 @@ def _on_sigterm(signum, frame):   # noqa: ARG001
 def main() -> None:
     rclpy.init()
     node = Recorder()
-    from record.dashboard import Dashboard
-    dash = Dashboard(node, port=int(node.declare_parameter('dashboard_port', 8220).value))
+    from record.dashboard import panel
+    dash = panel(node, port=int(node.declare_parameter('dashboard_port', 8220).value))
     dash.start()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
