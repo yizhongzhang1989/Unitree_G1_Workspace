@@ -22,7 +22,7 @@
 | `ros2 launch robot_bringup ikt_pose_commander.launch.py controlled_frame:=left_gripper_base` | 同上，改控左手 |
 | `ros2 launch robot_bringup ikt_pose_commander.launch.py enable_dashboard:=false` | 只启 Commander，不开网页 |
 | `ros2 launch robot_bringup gravity_float_demo.launch.py` | 激活 FPC 并让双臂进入可徒手推动的失重状态；连接已有 manager |
-| `ros2 control switch_controllers --stop forward_position_controller` | 停掉 demo 遗留的 active FPC |
+| `ros2 control switch_controllers --deactivate forward_position_controller` | 停掉 demo 遗留的 active FPC |
 | `ros2 param set /forward_position_controller compensation_scale 0.0` | 临时关掉手臂重力补偿 |
 | `ros2 run robot_bringup enter_debug_mode` | 释放运控模式、交出 `/lowcmd`；走 ros2_control 时不需要 |
 | `ros2 run robot_bringup exit_debug_mode` | 卸力斜坡 + 交还 `ai` 模式；控制栈被强杀后的兜底 |
@@ -309,10 +309,13 @@ tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq
 
 电机失去命令后不再接受位置指令，`tau_est` 掉到约 0，只剩绕组阻尼——**手感是“紧”而不是“软”**，很容易误判成软件把命令锁死了。字段含义见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
 
-停止：`Ctrl-C` 结束 demo 后，controller 仍是 active，需要显式停回去。
-```bash
-ros2 control switch_controllers --stop forward_position_controller
-```
+停止：`Ctrl-C` 后 launch 自己收尾——先把 `forward_position_controller` 切回 inactive，再跑一遍 `exit_debug_mode`（2 s 卸力斜坡 + 交还 `ai`），手臂缓降到自然下垂位。两步都必须做：controller 还 active 时它的 1 kHz 流会把斜坡想降掉的增益一帧帧顶回去。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `release_on_exit` | `true` | 退出时停 controller + 卸力 + 交还 `ai` |
+
+交还 `ai` 之后总线不再独占，**再跑一次 demo 需要先重新进调试模式**（重启控制栈，或 `enter_debug_mode`）。要连着玩几轮就加 `release_on_exit:=false`，但那样手臂会保持最后一帧持续吃电流，必须自己盯着卸力。
 
 ### 进入调试模式
 用 ros2_control 时不需要这一步：`G1TopicSystem` 在 Engage 时自己走 MotionSwitcher `CheckMode`(1001) → `ReleaseMode`(1003)。**只有绕开 controller、自己发 `/lowcmd` 时才需要显式切换**。
