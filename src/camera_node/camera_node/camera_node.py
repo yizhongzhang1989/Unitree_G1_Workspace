@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import rclpy
@@ -12,11 +13,13 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CameraInfo, Image
 
 _DEFAULTS = {
     'rtsp_url': '',
     'image_topic': '~/image_raw',
+    'camera_info_topic': '~/camera_info',
+    'calib_file': '',
     'frame_id': '',
     'image_width': 0,
     'image_height': 0,
@@ -27,7 +30,7 @@ _DEFAULTS = {
     'stale_timeout_s': 5.0,
 }
 _SIZE_PARAMS = ('fps', 'image_width', 'image_height')
-# 顺序要和 _open_reader 的解包一致
+# 顺序要和 _open_reader 的解包一致。calib_file 不在这里：换标定文件不该重开流
 _STREAM_PARAMS = ('rtsp_url',) + _SIZE_PARAMS
 
 
@@ -85,6 +88,54 @@ def fit_size(native, width, height):
 
 def _even(value):
     return max(2, round(value / 2) * 2)
+
+
+def load_camera_info(path, camera, width, height):
+    """从 camera_calibration 写的 yaml 里挑出这个档位的内参，没有就返回 None。
+
+    自己解析而不是 import camera_calibration：那会让相机包反过来依赖标定包，
+    而标定包本来就要靠相机包出图。宁可多这二十行。
+    """
+    import yaml
+    data = yaml.safe_load(Path(path).expanduser().read_text(encoding='utf-8')) or {}
+    for entry in data.get('intrinsics', {}).get(camera, []):
+        if (entry.get('width'), entry.get('height')) == (width, height):
+            return entry
+    for relation in data.get('profile_relations', {}).get(camera, []):
+        # 只认实测判定为「缩放」的关系。裁剪档位的 fx 不随分辨率变，
+        # 按比例缩放出来的 K 是错的，而且错得看不出来
+        if relation.get('kind') != 'scale' or tuple(relation.get('to', ())) != (width, height):
+            continue
+        source = tuple(relation.get('from', ()))
+        for entry in data.get('intrinsics', {}).get(camera, []):
+            if (entry.get('width'), entry.get('height')) != source:
+                continue
+            matrix = list(entry['camera_matrix'])
+            ratio_x, ratio_y = width / source[0], height / source[1]
+            for index in range(3):
+                matrix[index] *= ratio_x
+                matrix[3 + index] *= ratio_y
+            scaled = dict(entry)
+            # 畸变系数定义在归一化坐标上，缩放不改它们
+            scaled.update({'width': width, 'height': height, 'camera_matrix': matrix,
+                           'scaled_from': list(source)})
+            return scaled
+    return None
+
+
+def camera_info_message(entry, frame_id):
+    message = CameraInfo()
+    message.header.frame_id = frame_id
+    message.width = int(entry['width'])
+    message.height = int(entry['height'])
+    message.distortion_model = entry.get('distortion_model', 'plumb_bob')
+    message.d = [float(v) for v in entry['distortion_coefficients']]
+    matrix = [float(v) for v in entry['camera_matrix']]
+    message.k = matrix
+    message.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    # 没做立体校正，P 就是 K 右边补一列零
+    message.p = matrix[0:3] + [0.0] + matrix[3:6] + [0.0] + matrix[6:9] + [0.0]
+    return message
 
 
 class RtspReader:
@@ -147,6 +198,13 @@ class CameraNode(Node):
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.VOLATILE,
                 history=HistoryPolicy.KEEP_LAST, depth=1))
+        self._info_publisher = self.create_publisher(
+            CameraInfo, self._setting('camera_info_topic'), QoSProfile(
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST, depth=1))
+        self._camera_info = None
+        self._calib_source = None
 
         self._frames = threading.Condition()
         self._frame = None
@@ -225,6 +283,9 @@ class CameraNode(Node):
             # 必须给 array.array：赋 bytes 会走 rclpy 的逐元素断言，一帧上百毫秒
             message.data = array.array('B', raw)
             self._publisher.publish(message)
+            if self._camera_info is not None:
+                self._camera_info.header = message.header
+                self._info_publisher.publish(self._camera_info)
         if self._preview is not None:
             with self._frames:
                 self._seq += 1
@@ -261,6 +322,8 @@ class CameraNode(Node):
         elif self._stream_settings() != self._applied:
             self._close_reader('参数改了，重开流')
             self._open_reader()
+        elif self._setting('calib_file') != self._calib_source:
+            self._load_camera_info((reader.width, reader.height))
 
     def _setting(self, name) -> Any:
         return self.get_parameter(name).value
@@ -307,7 +370,36 @@ class CameraNode(Node):
             self._fail(f'启动 ffmpeg 失败：{error}')
             return
         self._applied = settings
+        self._load_camera_info(size)
         self.get_logger().info(f'开始拉流 {size[0]}x{size[1]}')
+
+    def _load_camera_info(self, size):
+        """内参和分辨率绑死，每次重开流都要重新挑一次"""
+        self._camera_info = None
+        path = self._setting('calib_file')
+        self._calib_source = path
+        if not path:
+            return
+        try:
+            entry = load_camera_info(path, self.get_name(), size[0], size[1])
+        except (OSError, ValueError, KeyError) as error:
+            self._warn_once(f'读不了标定文件 {path}：{error}')
+            return
+        if entry is None:
+            # 宁可不发，也不能发一个全零的假内参 —— 下游拿到了也看不出是假的
+            self._warn_once(
+                f'{path} 里没有 {self.get_name()} 在 {size[0]}x{size[1]} 下的内参，'
+                f'不发 camera_info')
+            return
+        self._camera_info = camera_info_message(entry, self._frame_id)
+        note = f"（由 {entry['scaled_from']} 缩放）" if entry.get('scaled_from') else ''
+        self.get_logger().info(
+            f'加载内参 {size[0]}x{size[1]}{note} → {self._info_publisher.topic_name}')
+
+    def _warn_once(self, message):
+        if message != getattr(self, '_last_warning', None):
+            self._last_warning = message
+            self.get_logger().warn(message)
 
     def _close_reader(self, reason):
         reader = self._reader

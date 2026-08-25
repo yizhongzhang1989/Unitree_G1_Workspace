@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 相机标定</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header>
+  <h1>G1 相机标定</h1>
+  <nav class="tabs">
+    <button class="tab active" data-tab="intrinsic">① 内参</button>
+    <button class="tab" data-tab="extrinsic">② 外参</button>
+  </nav>
+  <span id="board-info" class="muted"></span>
+</header>
+
+<div id="banner" class="banner"></div>
+
+<main>
+
+<section id="tab-intrinsic" class="tab-body">
+  <p class="hint">
+    每个相机每个分辨率档位单独标。板子在画面里换角度、换远近、务必也放到四个角上 ——
+    畸变系数全靠边缘的点约束。每档位至少 15 张。
+  </p>
+
+  <div class="toolbar">
+    <button id="btn-capture" class="primary" data-done="已拍摄">拍摄（勾选的相机）</button>
+    <button id="btn-probe">探测板参数</button>
+    <label><input type="checkbox" id="chk-overlay" checked> 叠加检测结果</label>
+    <span class="grow"></span>
+    <span id="calib-path" class="muted"></span>
+  </div>
+
+  <div id="cameras" class="grid"></div>
+
+  <div id="probe-panel" class="card" hidden>
+    <h3>板参数探测</h3>
+    <p class="hint">
+      朝向猜错时角点数一模一样，只有<b>共面残差</b>能区分。残差在几个像素以内的才是对的；
+      几十像素说明字典或格数不对。定下来后填回 <code>config/board.yaml</code>。
+    </p>
+    <div id="probe-table"></div>
+  </div>
+</section>
+
+<section id="tab-extrinsic" class="tab-body" hidden>
+  <p class="hint">
+    把板固定在三个相机都看得见的地方，<b>整个过程别动板子</b>。
+    换若干个手臂姿态，每次停稳后采一组。姿态之间手腕的转轴要拉开，否则 AX=XB 无解。
+    下面三路是实时画面加检测叠加 —— 板子摆得对不对、有没有被夹爪挡住，看图比看角点数直观。
+  </p>
+
+  <div id="ext-cameras" class="grid"></div>
+
+  <div id="preflight" class="card"></div>
+
+  <div class="toolbar">
+    <button id="btn-capture-pose" class="primary" data-done="已采集">采集一组</button>
+    <button id="btn-solve-extrinsic" data-done="已求解">求解</button>
+    <button id="btn-clear-poses" class="danger">清空姿态</button>
+  </div>
+
+  <div id="pose-list" class="card"></div>
+  <div id="extrinsic-result"></div>
+</section>
+
+</main>
+
+<script src="/common.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

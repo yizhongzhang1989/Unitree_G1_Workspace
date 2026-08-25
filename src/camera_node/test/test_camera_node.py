@@ -1,8 +1,10 @@
 """不依赖 ROS 运行时和相机的部分：ffmpeg 命令拼装、按需拉流判据、读帧线程。"""
 
 import array
+import os
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -12,14 +14,17 @@ from unittest.mock import MagicMock, patch
 from builtin_interfaces.msg import Time
 from rclpy.parameter import Parameter
 
-from camera_node.camera_node import (CameraNode, RtspReader, ffmpeg_command,
-                                     fit_size, probe_size)
+from camera_node.camera_node import (CameraNode, RtspReader, camera_info_message,
+                                     ffmpeg_command, fit_size, load_camera_info,
+                                     probe_size)
 from camera_node.preview import connected
 
 _BOUND = ('_step', '_open_reader', '_close_reader', '_fail', '_on_frame',
-          '_setting', '_stream_settings', '_native_size', '_check_parameters')
+          '_setting', '_stream_settings', '_native_size', '_check_parameters',
+          '_load_camera_info', '_warn_once')
 _DEFAULTS = {'rtsp_url': 'rtsp://camera/stream1', 'fps': 15,
-             'image_width': 0, 'image_height': 0, 'jpeg_quality': 60}
+             'image_width': 0, 'image_height': 0, 'jpeg_quality': 60,
+             'calib_file': ''}
 
 
 def _node(subscribers=0, viewers=0, reader=None, **overrides):
@@ -45,9 +50,14 @@ def _node(subscribers=0, viewers=0, reader=None, **overrides):
         _frame=None,
         _stale_timeout=5.0,
         _frame_id='camera_left',
+        _camera_info=None,
+        _calib_source='',
+        _info_publisher=SimpleNamespace(
+            publish=MagicMock(), topic_name='/camera_left/camera_info'),
         get_clock=clock,
         get_logger=MagicMock(return_value=MagicMock()),
     )
+    node.get_name = lambda: 'camera_left'
     for name in _BOUND:
         setattr(node, name, MethodType(getattr(CameraNode, name), node))
     return node
@@ -328,6 +338,85 @@ class ViewerDisconnectTest(unittest.TestCase):
 
         self.assertTrue(connected(self.here))
         self.assertEqual(self.here.recv(1), b'x')
+
+
+_CALIB = """
+version: 1
+intrinsics:
+  camera_left:
+    - width: 1920
+      height: 1080
+      camera_matrix: [1500.0, 0.0, 960.0, 0.0, 1502.0, 540.0, 0.0, 0.0, 1.0]
+      distortion_model: plumb_bob
+      distortion_coefficients: [-0.31, 0.09, 0.001, -0.002, 0.0]
+profile_relations:
+  camera_left:
+    - {from: [1920, 1080], to: [640, 360], kind: scale}
+    - {from: [1920, 1080], to: [1440, 1080], kind: crop}
+"""
+
+
+class CameraInfoTest(unittest.TestCase):
+    """内参和分辨率是绑死的，挑错档位比不发还糟"""
+
+    def setUp(self) -> None:
+        self.path = tempfile.NamedTemporaryFile('w', suffix='.yaml', delete=False)
+        self.path.write(_CALIB)
+        self.path.close()
+        self.addCleanup(os.unlink, self.path.name)
+
+    def test_exact_profile_is_used(self) -> None:
+        entry = load_camera_info(self.path.name, 'camera_left', 1920, 1080)
+
+        self.assertEqual(entry['camera_matrix'][0], 1500.0)
+
+    def test_scale_relation_converts(self) -> None:
+        entry = load_camera_info(self.path.name, 'camera_left', 640, 360)
+
+        self.assertAlmostEqual(entry['camera_matrix'][0], 500.0)
+        self.assertAlmostEqual(entry['camera_matrix'][2], 320.0)
+        self.assertAlmostEqual(entry['camera_matrix'][8], 1.0)
+        # 畸变系数定义在归一化坐标上，缩放不改它们
+        self.assertEqual(entry['distortion_coefficients'][0], -0.31)
+
+    def test_crop_relation_is_refused(self) -> None:
+        # 裁剪档位的 fx 不随分辨率变，按比例缩放出来的 K 是错的且看不出来
+        self.assertIsNone(load_camera_info(self.path.name, 'camera_left', 1440, 1080))
+
+    def test_unknown_profile_returns_none(self) -> None:
+        self.assertIsNone(load_camera_info(self.path.name, 'camera_left', 800, 600))
+        self.assertIsNone(load_camera_info(self.path.name, 'camera_right', 1920, 1080))
+
+    def test_message_fills_k_r_p(self) -> None:
+        entry = load_camera_info(self.path.name, 'camera_left', 1920, 1080)
+
+        message = camera_info_message(entry, 'camera_left')
+
+        self.assertEqual(message.header.frame_id, 'camera_left')
+        self.assertEqual((message.width, message.height), (1920, 1080))
+        self.assertEqual(list(message.k)[:3], [1500.0, 0.0, 960.0])
+        self.assertEqual(list(message.r), [1, 0, 0, 0, 1, 0, 0, 0, 1])
+        self.assertEqual(list(message.p)[:4], [1500.0, 0.0, 960.0, 0.0])
+        self.assertEqual(len(message.p), 12)
+
+    def test_missing_entry_publishes_nothing(self) -> None:
+        node = _node(**{'calib_file': self.path.name})
+        node._load_camera_info((800, 600))
+        node._on_frame(b'\x00' * (2 * 2 * 3), 2, 2)
+
+        self.assertIsNone(node._camera_info)
+        node._info_publisher.publish.assert_not_called()
+
+    def test_info_rides_along_with_the_image(self) -> None:
+        node = _node(subscribers=1, **{'calib_file': self.path.name})
+        node._publish_frames = True
+        node._load_camera_info((1920, 1080))
+        node._on_frame(b'\x00' * (2 * 2 * 3), 2, 2)
+
+        node._info_publisher.publish.assert_called_once()
+        published = node._info_publisher.publish.call_args[0][0]
+        image = node._publisher.publish.call_args[0][0]
+        self.assertEqual(published.header, image.header)
 
 
 if __name__ == '__main__':
