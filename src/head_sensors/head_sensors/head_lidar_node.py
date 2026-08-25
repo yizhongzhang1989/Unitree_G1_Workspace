@@ -14,18 +14,34 @@
    但 `is_dense=true`，下游按稠密点云用会被这堆原点污染。
 3. Livox IMU 的线加速度单位是 **g** 而不是 m/s²（实测静止时模长 ≈ 0.99），
    且 `orientation` 全零却没有按 REP-145 标记为无效。
+
+点云出两路，同样的距离过滤、只差打包布局：
+
+* `/head/lidar/points` — 16 字节步长的 xyzi，给只要坐标的下游用。
+* `/head/lidar/points_full` — 原样保留 `ring` 与 `time`。激光惯性里程计靠逐点
+  `time` 做运动去畸变，瘦身布局喂不了它。
+
+两路都只在有订阅者时才打包，没人订就只走统计。
 """
 
 import math
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, PointCloud2
 from tf2_ros import StaticTransformBroadcaster
 
-from head_sensors.pointcloud import cloud_to_xyzi, filter_range, make_xyzi_cloud
+from head_sensors.pointcloud import (
+    cloud_to_structured,
+    make_xyzi_cloud,
+    range_mask,
+    repack_like,
+    xyzi_of,
+)
 
 STANDARD_GRAVITY = 9.80665
 
@@ -39,7 +55,9 @@ class HeadLidarNode(Node):
         self._in_cloud = p('input_cloud_topic', '/utlidar/cloud_livox_mid360').value
         self._in_imu = p('input_imu_topic', '/utlidar/imu_livox_mid360').value
         out_cloud = p('output_cloud_topic', '/head/lidar/points').value
+        out_full = p('output_full_cloud_topic', '/head/lidar/points_full').value
         out_imu = p('output_imu_topic', '/head/lidar/imu').value
+        publish_full = bool(p('publish_full_cloud', True).value)
 
         self._lidar_frame = p('lidar_frame', 'livox_frame').value
         self._mount_frame = p('mount_frame', 'mid360_link').value
@@ -56,9 +74,16 @@ class HeadLidarNode(Node):
                          history=HistoryPolicy.KEEP_LAST)
 
         self._cloud_pub = self.create_publisher(PointCloud2, out_cloud, qos)
+        self._full_pub = (self.create_publisher(PointCloud2, out_full, qos)
+                          if publish_full else None)
         self._imu_pub = self.create_publisher(Imu, out_imu, qos)
-        self.create_subscription(PointCloud2, self._in_cloud, self._on_cloud, qos)
-        self.create_subscription(Imu, self._in_imu, self._on_imu, qos)
+        # 点云与 IMU 必须分到不同的回调组，再配 MultiThreadedExecutor：一帧 2 万点的
+        # 过滤加打包要几十毫秒，同组的话 200 Hz 的 IMU 会被整段饿死。实测挤在一起时
+        # IMU 从 200 Hz 掉到 164 Hz，而下游的激光惯性里程计正靠这路 IMU。
+        self.create_subscription(PointCloud2, self._in_cloud, self._on_cloud, qos,
+                                 callback_group=MutuallyExclusiveCallbackGroup())
+        self.create_subscription(Imu, self._in_imu, self._on_imu, qos,
+                                 callback_group=MutuallyExclusiveCallbackGroup())
 
         if publish_static_tf:
             self._static_tf = StaticTransformBroadcaster(self)
@@ -76,6 +101,8 @@ class HeadLidarNode(Node):
             '头部雷达接入：%s -> %s（%s，保留 %.2f~%.2f m）'
             % (self._in_cloud, out_cloud, self._lidar_frame,
                self._min_range, self._max_range))
+        if self._full_pub is not None:
+            self.get_logger().info('完整字段点云（含 ring/time，供激光惯性里程计用）：%s' % out_full)
 
     def _identity_tf(self) -> TransformStamped:
         tf = TransformStamped()
@@ -89,15 +116,23 @@ class HeadLidarNode(Node):
         self._last_cloud_wall = self.get_clock().now()
         self._timeout_warned = False
         try:
-            xyzi = cloud_to_xyzi(msg)
+            rec = cloud_to_structured(msg)
         except ValueError as exc:
             self.get_logger().error('点云布局无法解析：%s' % exc)
             return
-        kept, _ = filter_range(xyzi, self._min_range, self._max_range)
+        keep = range_mask(rec, self._min_range, self._max_range)
         self._clouds += 1
-        self._kept += kept.shape[0]
-        if self._cloud_pub.get_subscription_count() > 0:
-            self._cloud_pub.publish(make_xyzi_cloud(msg.header, kept))
+        self._kept += int(keep.sum())
+        want_xyzi = self._cloud_pub.get_subscription_count() > 0
+        want_full = (self._full_pub is not None
+                     and self._full_pub.get_subscription_count() > 0)
+        if not (want_xyzi or want_full):
+            return
+        kept = rec[keep]
+        if want_xyzi:
+            self._cloud_pub.publish(make_xyzi_cloud(msg.header, xyzi_of(kept)))
+        if want_full:
+            self._full_pub.publish(repack_like(msg, kept))
 
     def _on_imu(self, msg: Imu) -> None:
         self._imus += 1
@@ -152,8 +187,10 @@ class HeadLidarNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = HeadLidarNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

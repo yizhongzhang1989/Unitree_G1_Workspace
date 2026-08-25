@@ -36,10 +36,11 @@ RUN set -eux; \
       iproute2 iputils-ping net-tools usbutils can-utils \
       adb \
       ffmpeg \
+      rsync \
       libusb-1.0-0-dev libyaml-cpp-dev \
       python3-colcon-common-extensions python3-pip python3-socks \
       python3-flask python3-opencv python3-numpy python3-scipy \
-      python3-yaml python3-pytest \
+      python3-yaml python3-pytest python3-h5py \
       ros-humble-ros2-control \
       ros-humble-ros2-controllers \
       ros-humble-ros2controlcli \
@@ -64,6 +65,8 @@ RUN set -eux; \
       ros-humble-realsense2-camera \
       ros-humble-realsense2-camera-msgs \
       ros-humble-realsense2-description \
+      ros-humble-pcl-ros \
+      ros-humble-pcl-conversions \
       ros-humble-ament-cmake-gtest \
       ros-humble-ament-cmake-pytest \
       ros-humble-ament-cmake-python \
@@ -84,6 +87,12 @@ RUN set -eux; \
 # 直连本机 NX，不是 DDS 设备；容器已经是 privileged + /dev:/dev，不需要额外装 udev 规则。
 # 头部 Livox MID-360 反过来不需要任何本地驱动：机器人内部的 lidar_driver 服务直接发
 # /utlidar/* 的标准 sensor_msgs，所以这里没有 livox SDK。
+# pcl-ros + pcl-conversions 供 src/point_lio_ros2（雷达世界定位的激光惯性里程计）用。
+# 这一对很贵——实测带进来 212 个新包：Ubuntu 不拆 PCL 的 dev 子包，只有 libpcl-dev 一个
+# 元包，它会把 visualization 组件连同 VTK9 + Qt5 一起拉进来。Point-LIO 只用到
+# common/io/filters/kdtree，但 apt 层面绕不开（pcl-conversions 自己就依赖 libpcl-dev）。
+# 仍然不需要 livox SDK：我们喂给它的是 /head/lidar/points_full，标准 PointCloud2 带
+# per-point time，走 Point-LIO 的 Velodyne 输入分支，不用 livox_ros_driver2 的 CustomMsg。
 # adb + aiohttp + cryptography 供 src/g1_lower_body_policy/vr 的 WebXR 桥接用。WebXR 只在
 # 安全上下文里可用，所以头显接入有两条并存的路：
 #   - HTTPS 直连 https://<本机IP>:8443，证书由 `ros2 run g1_lower_body_policy make_vr_cert`

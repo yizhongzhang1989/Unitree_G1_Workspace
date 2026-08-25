@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>g1_localization</name>
+  <version>0.1.0</version>
+  <description>G1 头部雷达世界定位：Point-LIO 之上的躯干位姿接口</description>
+  <maintainer email="dev@example.com">Unitree G1 Workspace</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- 里程计本体。上游原样引入（submodule），G1 的配置与 launch 都在本包里。 -->
+  <exec_depend>point_lio</exec_depend>
+  <!-- 点云与 IMU 的来源；TF 树由 unitree_g1_description 的 robot_state_publisher 发。 -->
+  <exec_depend>head_sensors</exec_depend>
+  <exec_depend>unitree_g1_description</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

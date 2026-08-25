@@ -1,6 +1,6 @@
 # Unitree_G1_Workspace
 
-Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹爪、双六轴力传感器、双相机和 Web 调试。生产入口由 `robot_bringup` 统一启动；各设备包仍可单独用于调试。
+Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹爪、双六轴力传感器、双相机、雷达世界定位和 Web 调试。生产入口由 `robot_bringup` 统一启动；各设备包仍可单独用于调试。
 
 | 模块 | 负责 |
 |---|---|
@@ -9,6 +9,7 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 | `g1_motion_control` | FPC 之上的整机 31 轴运动控制层：下肢 15 轴走 ONNX 策略（输入 `vx/vy/w/h`），上肢 14 轴走双臂 IK，夹爪 2 轴透传；内附 VR / 键盘遥操 |
 | `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
 | `head_sensors` | 头部传感器：Livox MID-360 雷达接入（TF、空点过滤、IMU 单位修正）+ RealSense D435i（官方 realsense2_camera） |
+| `g1_localization` | 头部雷达世界定位：Point-LIO 之上只暴露 `~/set_origin` 与 `~/torso_pose` 两个接口，另可广播 `world -> pelvis` |
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
 | `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
@@ -89,12 +90,37 @@ python3 scripts/set_wrist_camera_fps.py --osd-blank osd_title --apply
 
 头顶两个传感器由 [`head_sensors`](src/head_sensors/README.md) 接入，两者的驱动来源完全不同：
 
-- **Livox MID-360 雷达**（`192.168.123.120`）：由机器人内部的 `lidar_driver` 服务驱动，直接以 DDS 发 `/utlidar/cloud_livox_mid360`（10 Hz）和 `/utlidar/imu_livox_mid360`（200 Hz），**本机不装 Livox SDK**。`head_lidar_node` 只补 `mid360_link → livox_frame` 静态 TF、过滤约 55% 的无回波空点、并把 Livox 以 g 为单位的 IMU 加速度换算成 m/s²。
+- **Livox MID-360 雷达**（`192.168.123.120`）：由机器人内部的 `lidar_driver` 服务驱动，直接以 DDS 发 `/utlidar/cloud_livox_mid360`（10 Hz）和 `/utlidar/imu_livox_mid360`（200 Hz），**本机不装 Livox SDK**。`head_lidar_node` 只补 `mid360_link → livox_frame` 静态 TF、过滤约 55% 的无回波空点、并把 Livox 以 g 为单位的 IMU 加速度换算成 m/s²。点云出**两路**：`/head/lidar/points`（瘦身 16 字节，只有 xyzi）与 `/head/lidar/points_full`（保留 `ring` + 逐点 `time`，激光惯性里程计靠它去畸变），两路都只在有订阅者时才打包。
 - **RealSense D435i 深度相机**：USB 直连本机 NX，用官方 `realsense2_camera` 驱动，话题收在 `/head/camera/*`，默认 424x240x30。依赖 `ros-humble-librealsense2`、`ros-humble-realsense2-camera{,-msgs}`、`ros-humble-realsense2-description`，已写进 `.devcontainer/Dockerfile`。`head_camera.launch.py` 额外补一条 `d435_link → camera_link` 挂载 TF —— 官方驱动只发相机自己那棵子树，不知道相机装在机器人哪里。
+
+雷达的实测视野与标称不同，用它做感知前先看这三条（2026-08-25 实机）：
+
+- **水平只有 285° 有回波**，正前方 `az ∈ [-45°, +45°]` 是盲区（推测头部外壳遮挡）。桌面作业时机器人面朝的方向恰好看不见。
+- 垂直向上 6.2° ~ 向下 53.8°，与 MID-360 标称的 -7°~52° 倒装后吻合。
+- 近处 0~0.3 m 恒有 6.14% 的点（平均距离 0.154 m），那是**雷达自己所在的头部外壳**；手臂抬起时另在 0.3~0.5 m 多出十倍的点。两者都得剔掉，否则会把里程计锚死。
+
+`ring` 只有 0~3 且四者俯仰分布完全相同 —— 它是四个发射器，**不是 Velodyne 那种扫描线分层**。
 
 头是可转的，撞歪了用 `verify_head_view` 校：它拍一张实拍图、读当前关节角、用 URDF 渲染同一视角，把轮廓叠到实拍图上，对不齐就转头再拍。注意投影时必须从 TF 取 `d435_link → camera_color_optical_frame` 的实测外参（彩色镜头偏离挂载原点 15.3 mm），当成纯旋转会让渲染整体横移十几个像素。
 
 `head_sensors` 里的 URDF 渲染部分（`urdf_view.py` + `render_head_view.py`）**不依赖 ROS**，可以单独拷走交付，只要 pinocchio / numpy / opencv。
+
+## 世界定位
+
+[`g1_localization`](src/g1_localization/README.md) 用头部雷达做定位，内部跑 Point-LIO（激光惯性里程计，上游 `dfloreaa/point_lio_ros2` 以 submodule 引入 `src/point_lio_ros2`），**对外只给两个东西**：
+
+| 接口 | 类型 | 说明 |
+|---|---|---|
+| `~/set_origin` | `std_srvs/Trigger` | 把此刻的躯干位姿钉成世界原点，响应带原点时间戳 |
+| `~/torso_pose` | `nav_msgs/Odometry` | `world` → `torso_link` 的位姿与速度，10 Hz |
+
+外加一条可关的 TF `world -> pelvis`。**只能挂 pelvis**：URDF 的根是 pelvis，整棵树里只有它没有父；`torso_link` 的父已被 `waist_pitch_joint` 占着，再发一份就是两个 publisher 抢同一个 child，而 **tf2 不保证取哪一个、且完全静默**。挂 pelvis 不损失精度：下游查 `world -> torso_link` 时 tf2 会用同一份腰角走回来，两者精确抵消（实测 48% 的帧逐位相等，p50 1.14 mm）。
+
+接口做这么窄是为了**将来能整体换掉 Point-LIO** —— 只改本包的输入端，采集侧和下游一行不用改。
+
+精度（吊绳吊着 + 双脚落地，静止 20 s）：**最大漂移 8 mm、姿态 0.109°**（折到 0.5 m 力臂上约 0.9 mm）。作为对照，真实遥操作中躯干晃动 p95 是 **7.31°（折到末端 63.8 mm）**，噪声比信号小一个量级。其中大部分是腰关节贡献的（骨盆只晃 1.59°），**那部分编码器就能反解**；雷达真正不可替代的是骨盆的 yaw 漂移和平移。
+
+它是**纯里程计，没有回环检测**，长时间会漂；每次开录重设一次原点即可，不要跨 session 复用世界系。
 
 ## 宇树 G1
 
@@ -126,6 +152,8 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── canalystii_native_bridge/ 生产用 C++ CANalyst-II/KWR57 bridge
     ├── camera_node/              左右 IP 相机 RTSP、ROS 图像与 Web 预览
     ├── head_sensors/             头部 Livox MID-360 雷达接入与 RealSense D435i 集成
+    ├── g1_localization/          头部雷达世界定位（Point-LIO 之上的躯干位姿接口）
+    ├── point_lio_ros2/           [git submodule] 激光惯性里程计本体（上游原样引入）
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）【已经被 canalystii_native_bridge 取代】
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
     ├── inverse_kinematics_toolkit/ [git submodule] Pinocchio IK、Pose Commander 与 Dashboard
@@ -374,6 +402,8 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 | `unitree_g1_description/description.launch.py` | 仅模型、RSP 和 TF | 已有 `/joint_states` 时查看模型 |
 | `head_sensors/head_sensors.launch.py` | 头部雷达节点 + RealSense，可用 `lidar` / `camera` 单开 | 头部传感器，不在 `all_data` 里 |
 | `head_sensors/head_camera.launch.py` | 仅 RealSense + `d435_link → camera_link` 挂载 TF | 只要头部相机 |
+| `g1_localization/localization.launch.py` | Point-LIO + 世界定位接口层，`with_lidar:=true` 顺带起雷达节点 | 要世界坐标时 |
+| `g1_localization/point_lio.launch.py` | 仅里程计本体 | 调参、看原始输出 |
 
 单设备调试入口仍由 `kwr57_ros`、`gloria_ros`、`can_bridge_ros` 和 `camera_node` 各包提供；相机相关 launch 未改变。
 
@@ -388,5 +418,9 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 - G1 的 29 组 `kp/kd` 位于 `unitree_g1_ros2_control/config/default_29dof_param.yaml`。Gloria-M 默认 `kp=10`、`kd=5`，其中 `kd=5` 是协议编码上限。
 - `enable_grippers_on_start:=true` 只配置并使能设备；controller 激活仍会重新执行完整安全事务。需要上电保持失能时传入 `false`。
 - BEST_EFFORT 高频话题可使用 `ros2 topic echo --qos-reliability best_effort`；KWR57 的 1 kHz 订阅建议使用 `rclcpp`、BEST_EFFORT 和 `KEEP_LAST(64)`。
+- 世界定位要 `robot_state_publisher` 在跑：`torso_link → livox_frame` 的外参是从 TF 读的（`mid360_joint` 是 fixed）。查不到就只打告警、不发位姿。
+- `g1_localization/config/point_lio_g1.yaml` 里有三个改了就坏的地方，动之前先看那里的注释：`lidar_type` 必须是 2（上游把 AVIA 分支连同 livox 依赖一起注释了，填 1 一个点都收不到，而它自带的 `mid360.yaml` 正是填的 1）；`satu_acc: 29.42` 是按 m/s² 换算过的（饱和判定用的是归一化**前**的读数，照抄上游的 3.0 会开机即误判 IMU 饱和）；`blind: 1.0` 用来剔雷达自己所在的头部外壳和抬起的手臂。
+- `~/torso_pose` 的**协方差恒为 0**（Point-LIO 默认路径不填），只有 `pose.covariance[0] = -1` 有意义，表示世界原点还没设。判有效性要**按帧判**：调完 `set_origin` 之后队列里的残留帧仍带 -1。
+- 装 `ros-humble-pcl-ros` 会连带拉进一大片依赖（Ubuntu 不拆 PCL 的 dev 子包，`libpcl-dev` 把 visualization 组件连同 VTK9+Qt5 一起拉进来），**实测解压后占 951 MB**。已写进 Dockerfile，重建镜像时注意这段耗时与体积。
 
 各包细节见 [robot_bringup/README.md](src/robot_bringup/README.md)、[unitree_g1_ros2_control/README.md](src/unitree_g1_ros2_control/README.md)、[unitree_g1_description/README.md](src/unitree_g1_description/README.md)、[kwr57_ros/README.md](src/kwr57_ros/README.md) 和 [camera_node/README.zh.md](src/camera_node/README.zh.md)。

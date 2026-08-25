@@ -9,6 +9,8 @@ Livox MID-360 经宇树 `lidar_driver` 发出的 `/utlidar/cloud_livox_mid360` �
 
 from typing import Tuple
 
+import array
+
 import numpy as np
 from sensor_msgs.msg import PointCloud2, PointField
 
@@ -53,12 +55,11 @@ def cloud_to_structured(msg: PointCloud2) -> np.ndarray:
     return buf.view(dtype_from_fields(msg)).reshape(-1)
 
 
-def cloud_to_xyzi(msg: PointCloud2) -> np.ndarray:
-    """返回 float32 的 `(N, 4)` 数组：x, y, z, intensity。
+def xyzi_of(rec: np.ndarray) -> np.ndarray:
+    """结构化数组 -> float32 的 `(N, 4)`：x, y, z, intensity。
 
     没有 intensity 字段时该列填 0。
     """
-    rec = cloud_to_structured(msg)
     out = np.empty((rec.shape[0], 4), dtype=np.float32)
     out[:, 0] = rec['x']
     out[:, 1] = rec['y']
@@ -67,17 +68,36 @@ def cloud_to_xyzi(msg: PointCloud2) -> np.ndarray:
     return out
 
 
+def cloud_to_xyzi(msg: PointCloud2) -> np.ndarray:
+    """返回 float32 的 `(N, 4)` 数组：x, y, z, intensity。
+
+    没有 intensity 字段时该列填 0。
+    """
+    return xyzi_of(cloud_to_structured(msg))
+
+
+def _range_keep(xyz: np.ndarray, min_range: float,
+                max_range: float) -> Tuple[np.ndarray, np.ndarray]:
+    finite = np.isfinite(xyz).all(axis=1)
+    dist = np.full(xyz.shape[0], np.inf, dtype=np.float32)
+    dist[finite] = np.linalg.norm(xyz[finite], axis=1)
+    return finite & (dist >= min_range) & (dist <= max_range), dist
+
+
 def filter_range(xyzi: np.ndarray, min_range: float,
                  max_range: float) -> Tuple[np.ndarray, np.ndarray]:
     """按到雷达原点的欧氏距离过滤，同时剔除非有限值。
 
     返回 `(过滤后的点, 距离)`。
     """
-    finite = np.isfinite(xyzi[:, :3]).all(axis=1)
-    dist = np.full(xyzi.shape[0], np.inf, dtype=np.float32)
-    dist[finite] = np.linalg.norm(xyzi[finite, :3], axis=1)
-    keep = finite & (dist >= min_range) & (dist <= max_range)
+    keep, dist = _range_keep(xyzi[:, :3], min_range, max_range)
     return xyzi[keep], dist[keep]
+
+
+def range_mask(rec: np.ndarray, min_range: float, max_range: float) -> np.ndarray:
+    """同 `filter_range` 的判据，但直接吃结构化数组、只返回布尔掩码。"""
+    xyz = np.stack([rec['x'], rec['y'], rec['z']], axis=1).astype(np.float32, copy=False)
+    return _range_keep(xyz, min_range, max_range)[0]
 
 
 _XYZI_FIELDS = [
@@ -86,6 +106,17 @@ _XYZI_FIELDS = [
     PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
     PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
 ]
+
+
+def _as_payload(buf: bytes) -> array.array:
+    """`uint8[]` 字段只能这么赋值。
+
+    rclpy 对 `uint8[]` **只对 `array.array('B', ...)` 短路**；赋 `bytes` 会走
+    `__debug__` 分支里的 `all(isinstance(v, int) for v in value)` 逐元素断言。
+    实测一帧 9500 点（209 KB）：**29.9 ms vs 0.044 ms，678 倍**。10 Hz 下那就是
+    30% 单核，还会把同节点里 200 Hz 的 IMU 回调饿死。
+    """
+    return array.array('B', buf)
 
 
 def make_xyzi_cloud(header, xyzi: np.ndarray) -> PointCloud2:
@@ -100,5 +131,24 @@ def make_xyzi_cloud(header, xyzi: np.ndarray) -> PointCloud2:
     msg.point_step = 16
     msg.row_step = 16 * pts.shape[0]
     msg.is_dense = True
-    msg.data = pts.tobytes()
+    msg.data = _as_payload(pts.tobytes())
+    return msg
+
+
+def repack_like(src: PointCloud2, rec: np.ndarray) -> PointCloud2:
+    """按 `src` 的字段布局原样打包结构化数组，保住 `ring` / `time` 等额外字段。
+
+    激光惯性里程计（Point-LIO 等）靠逐点 `time` 做运动去畸变，`make_xyzi_cloud`
+    的 16 字节瘦身布局会把它丢掉，所以喂给里程计的那一路必须走这里。
+    """
+    msg = PointCloud2()
+    msg.header = src.header
+    msg.height = 1
+    msg.width = rec.shape[0]
+    msg.fields = src.fields
+    msg.is_bigendian = src.is_bigendian
+    msg.point_step = src.point_step
+    msg.row_step = src.point_step * rec.shape[0]
+    msg.is_dense = True
+    msg.data = _as_payload(np.ascontiguousarray(rec).tobytes())
     return msg

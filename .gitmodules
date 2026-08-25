@@ -13,3 +13,6 @@
 [submodule "src/inverse_kinematics_toolkit"]
 	path = src/inverse_kinematics_toolkit
 	url = https://github.com/yizhongzhang1989/inverse_kinematics_toolkit.git
+[submodule "src/point_lio_ros2"]
+	path = src/point_lio_ros2
+	url = https://github.com/dfloreaa/point_lio_ros2.git

@@ -68,6 +68,23 @@ ros2 run head_sensors verify_head_view --out /tmp/verify
 
 MID-360 在 URDF 里是**倒装**的（`mid360_link` 相对 `torso_link` 的 `rpy` roll = π，pitch = 0.0511），IMU 静止读到 `az ≈ -0.97 g` 与之吻合。
 
+点云出**两路**，同样的距离过滤、只差打包布局：
+
+| 话题 | `point_step` | 字段 | 给谁用 |
+|---|---|---|---|
+| `/head/lidar/points` | 16 | `x,y,z,intensity` | 只要坐标的下游 |
+| `/head/lidar/points_full` | 22 | 再加 `ring` + `time` | 激光惯性里程计（`g1_localization`） |
+
+里程计靠逐点 `time` 做运动去畸变，瘦身布局喂不了它。两路都只在**有订阅者时**才打包，
+没人订就只走统计，所以默认两路全开也不额外花钱。
+
+> **`PointCloud2.data` 只能用 `array.array('B', ...)` 赋值。**
+> rclpy 对 `uint8[]` 只对 `array.array` 短路，赋 `bytes` 会走逐元素 `isinstance` 断言 ——
+> 实测一帧 9500 点（209 KB）**29.9 ms vs 0.044 ms，678 倍**，10 Hz 下就是 30% 单核，
+> 还会把同节点里 200 Hz 的 IMU 回调饿死（实测掉到 164 Hz）。`pointcloud.py` 的
+> `_as_payload()` 统一处理，别绕过它。点云与 IMU 另外分在不同的回调组 +
+> `MultiThreadedExecutor`，两件事都做了 IMU 才回到 200 Hz。
+
 在自己的节点里用：
 ```python
 from head_sensors.pointcloud import cloud_to_xyzi, filter_range
@@ -76,7 +93,14 @@ xyzi = cloud_to_xyzi(msg)            # (N, 4) float32，零拷贝解析
 pts, dist = filter_range(xyzi, 0.1, 70.0)
 ```
 
+要保留 `ring`/`time` 就走 `cloud_to_structured` + `range_mask` + `repack_like`。
+
 `cloud_to_xyzi` 按 `msg.fields` 现场构造 numpy dtype，不写死 22 字节布局，换固件也不用改。
+
+实测的雷达视野（2026-08-25，见 `g1_localization` 的 README）：
+**水平只有 285° 有回波**，正前方 `az ∈ [-45°, +45°]` 是盲区（推测头部外壳遮挡）；
+垂直向上 6.2° ~ 向下 53.8°，与 MID-360 标称的 -7°~52° 倒装后吻合。
+近处 0~0.3 m 有 6.14% 的点是雷达自己所在的头部外壳（平均距离 0.154 m）。
 
 ## 相机
 `head_camera.launch.py` 只做两件事：转发参数给官方 `rs_launch.py`，再补一条挂载 TF。
