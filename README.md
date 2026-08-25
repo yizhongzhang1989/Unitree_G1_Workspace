@@ -68,6 +68,22 @@ ROS 环境由容器自动装配，**不需要手动 `source`**。只有当 `inst
 
 消息契约使用上游 ROS 2 [`can_msgs`](https://index.ros.org/p/can_msgs/) 包提供的 `can_msgs/Frame`（与 [ros2_socketcan](https://index.ros.org/p/ros2_socketcan/) 一致）。它是 ROS 消息定义，不属于 `python-can` 或本项目的 `can_sdk`；对应系统包为 `ros-humble-can-msgs`，已装在开发镜像里。
 
+### 腕部 IP 相机的一次性配置
+
+两台相机（ONVIF_ICAMERA H800_AF）**出厂参数不一致**，必须先统一，否则两路数据没法用同一套参数处理。全部用 [`scripts/set_wrist_camera_fps.py`](scripts/set_wrist_camera_fps.py) 改：
+
+```bash
+python3 scripts/set_wrist_camera_fps.py --diff              # 逐项对比，不一致则退出码非零
+python3 scripts/set_wrist_camera_fps.py --time              # 相机时钟差多少
+python3 scripts/set_wrist_camera_fps.py --time-sync --apply # 改走 NTP
+python3 scripts/set_wrist_camera_fps.py --osd-blank osd_title --apply
+```
+
+- **码流**：已统一为 1080p / 30 fps / 3000 kbps / GOP 90 / H264 High / Quality 50。出厂是 .97 为 30 fps+GOP 120、.98 为 25 fps+GOP 75。**改了帧率或 GOP，管线延迟标定就作废**——实测 .98 从 25 改到 30 fps，延迟从 195 ms 变成 115 ms。
+- **对时**：出厂配 `time.windows.com` 且模式是 Manual，内网到不了，等于从没对过（两台分别停在 2018-01-01，彼此还差三小时）。已改为 NTP 指向 **`192.168.123.161`**（G1 机载计算单元自带的 NTP，与开发机差 0.011 ms，见 [`G1.md`](G1.md) 的「机载网络与时间源」）。
+- **OSD**：相机把日期时间**烧进像素**，关不掉（`DeleteOSD` 是空壳、`SetOSD` 不让改类型、格式置空不收、`/IPC` 是 gSOAP 只吃 SOAP、Web UI 没有 OSD 页）。所以不去盖它，靠对时让它显示正确时间——对好之后那行字反而是个免费的带内时间参考。左上角常量文字 `Camera` 能关，已关。
+- **对焦**：`AutoFocusMode` 只有 `MANUAL` 一个选项，焦点固定，所以内参是常数、标了就一直有效。
+
 
 ## 头部传感器
 
