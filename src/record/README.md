@@ -45,7 +45,7 @@ flowchart TB
   VID & SIG & INS --> SES --> DISK
   DASH -.->|"只读状态 + 发命令"| SES
   BROW <-->|"HTTP 1 Hz 轮询"| DASH
-  DISK -->|"rsync / WinSCP"| TOOLS --> CLOUD
+  DISK -->|"rsync over ssh"| TOOLS --> CLOUD
 ```
 
 **架构铁律：录制逻辑全在 ROS 节点里，面板只是观察者 + 命令入口。** 没人开页面、HTTP
@@ -71,18 +71,53 @@ session   一次连续录制。视频与信号表全程连续写
 ## 快速开始
 
 ```bash
+ros2 launch record all.launch.py
+```
+
+**一条命令起齐六段，Ctrl-C 一起退出。** 它靠 `IncludeLaunchDescription` 把全部子
+launch 内联进同一个 launch 进程，这不是图省事：`G1TopicSystem::stop()` 的卸力斜坡和
+`recorder` 的 session 封口**都只挂在 SIGINT 上**，各开一个终端就得记着挨个 Ctrl-C，
+漏一个要么关节持续吃电流（实测肩部绕组 97 °C），要么 session 没有 `DONE`。
+
+⚠️ **停它只能对 launch 进程按 Ctrl-C。** `pkill` 发的是 SIGTERM，rclpy 根本不处理。
+
+每段都能单独关掉，控制栈已经在跑时就只补缺的那几段：
+
+```bash
+ros2 launch record all.launch.py hardware:=false motion:=false   # 只补传感器和采集
+ros2 launch record all.launch.py teleop:=false                   # 不要 VR，用键盘
+ros2 launch record all.launch.py data:=false                     # 不起数据管理面板
+```
+
+子 launch 自己的参数直接往上传（`output_root:=/data/sessions`、`round_items:=5`……）。
+
+<details><summary>六段分别是什么，以及手动逐条起的写法</summary>
+
+```bash
 # 1. 硬件栈与控制栈
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ros2 launch g1_motion_control motion_control.launch.py
 ros2 launch g1_motion_control vr_teleop.launch.py
 
-# 2. 头部相机。YUYV 直出省掉一次色彩转换，720p 编码从 98% 降到 60% 单核
-ros2 launch head_sensors head_camera.launch.py \
-    color_profile:=1280x720x30 color_format:=YUYV
+# 2. 头部传感器。一条起两个，**两个都要**：
+#    雷达 -> head_lidar_node 发的 mid360_link->livox_frame 静态 TF 是 torso_pose 的外参，
+#            也是 Point-LIO 的唯一输入源。不起它 torso_pose 整路 0 字节
+#    相机 -> head 那一路视频。**必须显式给这两个参数**：默认档是 424x240 RGB8，
+#            YUYV 直出省掉一次色彩转换，720p 实测 150% -> 114% 单核且不再丢帧
+ros2 launch head_sensors head_sensors.launch.py color_profile:=1280x720x30 color_format:=YUYV
 
-# 3. 采集节点 + 面板 + 数据管理
+# 3. 世界定位。开录时采集节点会自动钉一次原点，不用手动调
+ros2 launch g1_localization localization.launch.py
+
+# 4. 采集节点 + 面板 + 数据管理
 ros2 launch record record.launch.py
 ```
+
+各段之间**没有硬性先后**（ROS 2 的发现是动态的，各节点也都自带重试），
+`all.launch.py` 里的 0/6/8/10/12 s 错开只为两件事：Orin NX 上同时冷启 realsense 枚举 +
+point_lio + 四个 spawner 会把 CPU 打满，以及让「等不到数据」的告警不在启动阶段刷屏。
+
+</details>
 
 采集面板 `http://<机器人 IP>:8220`，数据管理 `:8221`。只想要采集就 `data:=false`。
 
@@ -150,31 +185,59 @@ instruction_en / instruction_zh / lint_warnings[] / outcome
 切分、改名、查错。方向不可逆：结构化 → 字符串是纯函数，反过来有损。
 
 ---
-
 ## 导出机侧
 
-把 `tools/` 整个拷过去，只要 Python + numpy（视频对齐额外需要 ffprobe）：
+数据搬到 B、在 B 上读 session、转成目标格式 —— **全部写在 [tools/README.md](tools/README.md)**，
+连同 Windows 11 的环境配置。那份是给 B 上的人看的，自洽，不用先读本文。
+
+要点只留三条：
+
+- **`tools/` 整个拷过去**，别只拷几个文件；里面刻意不依赖 ROS，有测试用正则守着。
+  面板右上角的「⤓ 导出工具」就是打这一包。
+- **`final.urdf` 和 `calibration.yaml` 要单独拷**，它们不在 session 里（「导出工具」那一包
+  已经帮你带上了）。末端位姿和
+  腕相机外参都得靠 FK 现算，而机器人当时用的 URDF 是「`final.urdf` 叠上
+  `calibration.yaml` 的 `urdf_overrides`」—— `unitree_g1_ros2_control/launch/control.launch.py`
+  就是这么拼的，两边必须一致。FK 是 `urdf_fk.py`，纯 numpy 手写（B 上没有 pinocchio），
+  已和 pinocchio 逐姿态对拍到双精度舍入。
+- **导出格式叫 YB**，规范在 [tools/format/YB/README.md](tools/format/YB/README.md) ——
+  **把数据交给别人时给那一份**。
+
+机器人上也可以直接在数据管理面板里点「开始转换」，转完就下载（见 §数据管理与回放）。
+
+### 一路相机只解码一遍
+
+episode 在时间上有序且不重叠，接成一条递增的取帧清单走一趟就够了。逐 episode 各解一次的话，
+一小时的 session 配一百条 episode 就是一百小时的解码。源视频是多少帧率不重要 ——
+`frame_index[k]` 已经算好该取源里的哪一帧，该重复的重复、该跳的跳。
+
+### 有效率那一行必须看
+
+某路整段没数据时，导出的形状照样完全正常、内容全是 NaN，不看那一行发现不了。
+`fpc_commands` 就这么丢过 —— 订阅端 QoS 写成 RELIABLE，发布端是 BEST_EFFORT，
+两个 session 全录成 0 行。
+
+### 腕相机画面里的那行时间
+
+相机端关不掉（`DeleteOSD` 是空壳、`SetOSD` 不让改类型、格式置空不收、`/IPC` 是 gSOAP
+只吃 SOAP、Web UI 没有 OSD 页）。**所以不盖它，改成让它显示正确的时间**：
 
 ```bash
-python inspect_session.py <session 目录>            # 概览
-python inspect_session.py <session 目录> --verify   # 逐文件核对 sha256
-python inspect_session.py <session 目录> --align    # 估视频时间偏移
+python3 scripts/set_wrist_camera_fps.py --time              # 看差多少
+python3 scripts/set_wrist_camera_fps.py --time-sync --apply # 改走 NTP
 ```
 
-```python
-from session_reader import Session
-s = Session(r'D:\data\20260821_101500')
+出厂配的是 `time.windows.com` 且模式是 Manual，内网到不了，等于从没对过（两台分别
+停在 2018-01-01，彼此还差三小时）。现在指向 **`192.168.123.161`** —— G1 的机载计算
+单元自己就跑着 NTP（stratum 10），实测它与开发机的时钟差 **0.011 ms**，所以指向它
+就等于和本机同步，不用另装服务端。
 
-t, q = s.table('joint_states')                # 时间列 + 数据列
-for ep in s.episodes():                       # 默认不含 discard
-    print(ep['instruction_en'], ep['outcome'])
-    t, q = s.slice_table('joint_states', ep['t0'], ep['t1'])
-    frames = s.slice_frames('head', ep['t0'], ep['t1'])
-```
+对好时之后那行字**从污染变成了一个免费的带内时间参考**：画面上的秒进位是一个发生在
+精确整秒的尖锐事件，把它和 `pts.bin` 的到达时刻一减就是管线延迟，不必再靠运动互相关
+估。注意画面上是本地时间（TZ `CST-8` = UTC+8，无夏令时），换算 epoch 要减 8 小时。
 
-`tools/` 里**禁止 import rclpy**，有测试用正则守着这条。
+左上角那条 `Camera` 标题能关，已经关了：`--osd-blank osd_title --apply`。
 
----
 
 ## 时间对齐
 
@@ -185,7 +248,7 @@ session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
 
 | 时间列 | 哪些表 | 语义 |
 |---|---|---|
-| `header`（源端打戳） | `joint_states`、`pelvis_imu`、四路 `wrench` | 数据产生的时刻，不含传输抖动 |
+| `header`（源端打戳） | `joint_states`、`pelvis_imu`、四路 `wrench`、`torso_pose`、`dog_odom` | 数据产生的时刻，不含传输抖动 |
 | `recv`（接收时刻） | `motion_control_command/status`、`secondary_imu` | 消息类型没有 header 字段。**对指令话题这本来就是正确语义** —— 指令是收到那一刻才生效的，不存在更早的「采集时刻」 |
 
 区分这两者只是为了知道对齐精度：源端戳不含传输抖动，接收戳含。实测有 header 的表
@@ -221,14 +284,44 @@ session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
 
 ## 数据管理与回放
 
-`:8221` 那个面板。左边列出历次采集（大小、episode 数、告警数、是否封口），点开看到
-每段的**预览帧**与指令，可以回放，也可以删除。
+`:8221` 那个面板，分两块：上面是**数据操作**（左边文件树、右边详情），底下钉着
+**播放进度条**。
+
+左边是 VSCode 那样的文件树：最外层一行是一次采集，展开是它的目录和文件。
+每行右侧悬停会浮出下载按钮 —— **文件单独下，目录整个打包下**。
+点最外层那一行才会在右边出详情（预览帧、回放、删除、转换）。
 
 - **预览** — 每条 episode 取中点那一帧（开头往往手还没进画面）。**按需取单帧，不做
   连续解码**：从已录文件取一帧含 seek 只要 0.21~0.33 s，而连续解码是 65% 单核每路
 - **删除** — 要把 session id 原样打一遍确认。**没有 `DONE` 的删不掉**，那可能正在录
   或异常中断
-- **回放** — 见下
+- **下载** — 见下
+- **回放** — 见再下
+
+### 下载和转换
+
+| 想要什么 | 怎么拿 |
+|---|---|
+| **导出机要的工具** | 右上角「⤓ 导出工具」—— `tools/` + `final.urdf` + `calibration.yaml` 一包带走 |
+| 某一个文件 | 树里那一行的 ⤓ |
+| 某个目录 / 整次采集 | 目录那一行的 ⤓，服务端现打 zip 流式发 |
+| 转成 YB 训练格式 | 右边详情里选格式 → 「开始转换」→ 转完点「下载」 |
+| 几十 GB 整批搬走 | **别用浏览器，用 rsync**（见 [tools/README.md](tools/README.md)） |
+
+**单文件下载支持 `Range`**，浏览器断了会自己续传。**打包下载不支持** ——
+zip 是边算边发的，断了只能重来。所以一小时的采集（5.4 GB）建议逐个文件或走 rsync。
+
+**转换是「现转现下」**：转换结果不留在盘上。点「开始转换」后服务端在临时目录里
+转（有进度条，实测 0.13x 实时，一小时素材约 8 分钟），转完出现「下载」链接，
+**下载完成即删除**，链接一次性。中断没下的临时产物有 30 分钟 TTL，节点重启也会清。
+
+之所以不做成「点一下等着下」：转换太慢，一个 HTTP 请求从头等到尾必然超时。
+之所以不留着：产物极少复用，而一次转换就是十几到几百 MB。
+
+**转换在服务器上跑，关掉页面不影响它**，回来还能看到进度。
+**转换要抢 3.8 个核**，采集面板在线时不给转（会挤掉录制）；一次只能跑一个。
+
+### 回放
 
 
 
@@ -304,9 +397,6 @@ session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
 
 ## 桌面几何
 
-桌面尺寸**不能照抄对面 A2D**：G1 肩→夹爪 0.508 m vs A2D 0.914（1.80 倍），
-肩间距 0.200 vs 0.426（2.13 倍），两个比值不同，不存在单一缩放系数。
-
 用 pinocchio 逐格 IK + 邻格热启动洪水填充实测（腰锁死、工具轴垂直向下 30° 内、
 含自碰撞过滤）：
 
@@ -334,6 +424,9 @@ session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
 | `-crf 26` | ultrafast 默认码率虚高 14.99 Mbps，加 crf 后 6.18 且 CPU 还少 15 个点 |
 | 不录 `/tf` | 665 列/条、96 KB/s，且能从 `joint_states` + URDF 离线重算 |
 | 不录 `/lowstate` | 1046 Hz、6.8 GB/h，而 `joint_states` 是它的重打包 |
+| 录 `torso_pose`（默认勾选） | 训练把机器人当成不动的，可实测躯干姿态 p95 7.31°（0.5 m 力臂 = 63.8 mm）。导出靠它把晃动补掉，**事后补不回来**；代价只有 10 Hz × 16 列 = 1.3 KB/s |
+| 录 `dog_odom`（默认勾选） | 固件腿部里程计，短时相对量比雷达准一个量级（静止 20 s 漂移 0.05 mm vs 3.8 mm），补上雷达 10 Hz 之间的动态。抽到 100 Hz 后 12 KB/s。**没有绝对参考**，长距离漂移无界，所以两路都录 |
+| `dog_odom` 订阅用 `depth=1` | 深度就是积压上限。实测 500 Hz 的它在 depth=50 下 `t_recv` 恒定滞后 **47.95 ms**，depth=1 只有 0.92 ms。滞后是常量、不丢帧、不报错，只会把整条时间轴推后 |
 | 关节按 `msg.name` 重排 | `joint_state_broadcaster` 的 `joints` 是空数组，顺序每次启动都可能变 |
 
 容量约 **6.5 GB/h**，1.8 T 可录 250 小时以上。
@@ -348,9 +441,8 @@ session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
 - **两台腕相机经常轮流掉线**。参数已统一（1080p / 30 fps / 3000 kbps / GOP 90 /
   H264 High），用 `scripts/set_wrist_camera_fps.py --diff` 自检
 - **回放没有视频同步画面**。只重演动作，预览帧是静态的；要逐帧看得自己开播放器
-- **没有导出/打包功能**。数据管理只能浏览、预览、删除、回放，搬运还是 rsync
-- **A→B 自动同步没接**。`DONE` 已经写了，rsync/WinSCP 还要人工触发
-- **导出脚本没写**，等对面给格式口径。中间格式设计成零依赖可读，届时只加导出脚本
+- **A→B 自动同步没接**。`DONE` 已经写了，rsync 还要人工敲一次
+- **图像还没进 h5**，等对面给口径。已导出的 `frame_index` 把对齐钉死了，届时只补取像素
 - 头部深度图默认不录：16UC1 压不了，424x240@30 就是 21 GB/h，比三路彩色加起来还大
 
 ---

@@ -38,7 +38,7 @@ import rclpy
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
@@ -46,11 +46,11 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 
 from g1_localization.transforms import (
+    body_twist,
     invert,
     level_frame,
     make_tf,
     mat_to_quat,
-    rigid_point_velocity,
 )
 
 #: `pose.covariance[0]` 借来当标志位：世界原点还没设。协方差本身一律置零，理由见
@@ -111,11 +111,11 @@ class LocalizationNode(Node):
                             callback_group=ReentrantCallbackGroup())
         self.create_timer(self._warn_period, self._on_watchdog)
 
+        tf_note = ('，并广播 %s -> %s' % (self._world, self._root)
+                   if self._publish_tf else '（不发 TF）')
         self.get_logger().info(
             '世界定位就绪：%s -> ~/torso_pose（%s -> %s）；~/set_origin 钉原点%s'
-            % (odom_topic, self._world, self._base,
-               '，并广播 %s -> %s' % (self._world, self._root)
-               if self._publish_tf else '（不发 TF）'))
+            % (odom_topic, self._world, self._base, tf_note))
 
     # -- 常量外参 --------------------------------------------------------------
 
@@ -162,6 +162,15 @@ class LocalizationNode(Node):
             return
         t_odom_base = t_odom_imu @ t_imu_base
 
+        # 上游的 twist 是混着的：linear 在世界系、angular 在 IMU 体系（Point-LIO 的状态
+        # 就是这么定义的）。Odometry 的约定是两者都在 child_frame_id 系，这里补上换算，
+        # 顺带把 IMU 原点的速度搬到躯干原点——两者差 0.4 m 以上，转头的杠杆速度不可忽略。
+        twist = msg.twist.twist
+        twist_base = body_twist(
+            [twist.linear.x, twist.linear.y, twist.linear.z],
+            [twist.angular.x, twist.angular.y, twist.angular.z],
+            t_odom_imu, t_imu_base)
+
         with self._lock:
             self._last = (msg, t_odom_base)
             self._odom_count += 1
@@ -169,33 +178,20 @@ class LocalizationNode(Node):
 
         valid = t_world_odom is not None
         t_world_base = (t_world_odom @ t_odom_base) if valid else np.eye(4)
-        self._publish_pose(msg, t_world_base, t_odom_imu, t_imu_base, valid)
+        self._publish_pose(msg, t_world_base, twist_base, valid)
         if self._publish_tf and valid:
             self._publish_root_tf(msg, t_world_base)
 
     def _publish_pose(self, msg: Odometry, t_world_base: np.ndarray,
-                      t_odom_imu: np.ndarray, t_imu_base: np.ndarray,
-                      valid: bool) -> None:
+                      twist_base: tuple[np.ndarray, np.ndarray], valid: bool) -> None:
         out = Odometry()
         out.header.stamp = msg.header.stamp
         out.header.frame_id = self._world
         out.child_frame_id = self._base
         _fill(t_world_base, out.pose.pose.position, out.pose.pose.orientation)
-
-        # 上游的 twist 是混着的：linear 在世界系、angular 在 IMU 体系（Point-LIO 的状态
-        # 就是这么定义的）。Odometry 的约定是两者都在 child_frame_id 系，这里补上换算，
-        # 顺带把 IMU 原点的速度搬到躯干原点——两者差 0.4 m 以上，转头的杠杆速度不可忽略。
-        r_odom_imu, r_imu_base = t_odom_imu[:3, :3], t_imu_base[:3, :3]
-        twist = msg.twist.twist
-        omega_imu = np.array([twist.angular.x, twist.angular.y, twist.angular.z])
-        v_odom_base = rigid_point_velocity(
-            [twist.linear.x, twist.linear.y, twist.linear.z],
-            r_odom_imu @ omega_imu,
-            t_odom_imu[:3, 3], (t_odom_imu @ t_imu_base)[:3, 3])
-        linear, angular = out.twist.twist.linear, out.twist.twist.angular
-        linear.x, linear.y, linear.z = (
-            float(v) for v in r_imu_base.T @ (r_odom_imu.T @ v_odom_base))
-        angular.x, angular.y, angular.z = (float(v) for v in r_imu_base.T @ omega_imu)
+        for vec, values in ((out.twist.twist.linear, twist_base[0]),
+                            (out.twist.twist.angular, twist_base[1])):
+            vec.x, vec.y, vec.z = (float(v) for v in values)
 
         # 协方差一律置零。Point-LIO 默认路径根本不填它（实测整个 36 项全是 0），
         # 换算一个全零矩阵只会制造「有不确定度估计」的假象。唯一保留的是第 0 项，
@@ -281,7 +277,8 @@ def main(args=None) -> None:
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    # launch 发 SIGINT 时 rclpy 先关掉 context，spin 抛的是 ExternalShutdownException
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

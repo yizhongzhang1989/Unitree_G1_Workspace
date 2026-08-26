@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -26,7 +27,12 @@ DEFAULT_CHUNK_ROWS = 1024
 class TableWriter:
     """一张表 = 一个 ``.bin`` 文件 + 一份列定义。
 
-    线程安全由调用方保证：每张表只由它自己的 ROS 回调写，不跨线程共享。
+    **自带锁。** ``recorder_node`` 跑在 ``MultiThreadedExecutor`` 上，只要订阅落在
+    ``ReentrantCallbackGroup`` 里，同一个回调就会在多个线程上同时跑，“每张表只由
+    它自己的回调写”保证不了串行。不加锁时实测出过两种静默损坏：两个线程
+    同时进 ``_write_chunk`` 会把同一段写两遍（实测一次 session 重复 99~515 行）；
+    ``self._fh.write`` 与 ``self.rows_written += self._n`` 之间插进一行，那行会被
+    ``self._n = 0`` 抹掉但仍计入 ``rows``。两者都不报错。
     """
 
     def __init__(self, path: str | os.PathLike, columns: Sequence[str],
@@ -55,6 +61,8 @@ class TableWriter:
 
         self._chunk = np.empty((chunk_rows, self.ncol), dtype=np.float64)
         self._n = 0
+        self._lock = threading.Lock()
+        self._closed = False
         self._flush_interval = float(flush_interval_s)
         self._last_flush = time.monotonic()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,22 +70,26 @@ class TableWriter:
 
     def append(self, values: Iterable[float]) -> None:
         """写一行。长度不符直接抛，因为列错位是静默的、事后无法发现。"""
-        row = self._chunk[self._n]
-        try:
-            row[:] = values
-        except (ValueError, TypeError) as exc:
-            raise ValueError(
-                f'{self.path.name}: 期望 {self.ncol} 列，收到的值装不进去') from exc
-        self._n += 1
-        if self._n == len(self._chunk):
-            self._write_chunk()
-        elif time.monotonic() - self._last_flush >= self._flush_interval:
-            self._write_chunk()
-
-    def append_row(self, *values: float) -> None:
-        self.append(values)
+        with self._lock:
+            # 封口后还会有几条回调在路上。收下来只会进缓冲区、永远落不了盘，
+            # 却会被 schema() 计进 rows，正是“声明比文件多 1 行”的来源。
+            if self._closed:
+                self.rows_dropped += 1
+                return
+            row = self._chunk[self._n]
+            try:
+                row[:] = values
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f'{self.path.name}: 期望 {self.ncol} 列，收到的值装不进去') from exc
+            self._n += 1
+            if self._n == len(self._chunk):
+                self._write_chunk()
+            elif time.monotonic() - self._last_flush >= self._flush_interval:
+                self._write_chunk()
 
     def _write_chunk(self) -> None:
+        """调用方必须已持有 ``self._lock``。"""
         if self._n:
             self._fh.write(self._chunk[:self._n].tobytes())
             self.rows_written += self._n
@@ -86,25 +98,23 @@ class TableWriter:
         self._last_flush = time.monotonic()
 
     def flush(self) -> None:
-        self._write_chunk()
-
-    def sync(self) -> None:
-        """把页缓存也刷进磁盘。只在 session 封口时调用，逐帧调会拖垮写入。"""
-        self._write_chunk()
-        os.fsync(self._fh.fileno())
+        with self._lock:
+            self._write_chunk()
 
     @property
     def bytes_written(self) -> int:
-        return (self.rows_written + self._n) * self.ncol * 8
+        with self._lock:
+            return (self.rows_written + self._n) * self.ncol * 8
 
     def schema(self) -> dict:
-        entry = {
-            'file': self.path.name,
-            'dtype': 'float64',
-            'ncol': self.ncol,
-            'columns': list(self.columns),
-            'rows': self.rows_written + self._n,
-        }
+        with self._lock:
+            entry = {
+                'file': self.path.name,
+                'dtype': 'float64',
+                'ncol': self.ncol,
+                'columns': list(self.columns),
+                'rows': self.rows_written + self._n,
+            }
         if self.units is not None:
             entry['units'] = list(self.units)
         if self.description:
@@ -112,11 +122,13 @@ class TableWriter:
         return entry
 
     def close(self) -> None:
-        if self._fh.closed:
-            return
-        self._write_chunk()
-        os.fsync(self._fh.fileno())
-        self._fh.close()
+        with self._lock:
+            self._closed = True
+            if self._fh.closed:
+                return
+            self._write_chunk()
+            os.fsync(self._fh.fileno())
+            self._fh.close()
 
     def __enter__(self) -> 'TableWriter':
         return self

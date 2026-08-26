@@ -149,8 +149,8 @@ class ItemLibrary:
         for item in self.items.values():
             for pose in item.poses or ('single',):
                 w, d = item.footprint(pose)
-                if len(geometry.candidate_centres(w, d, 0.0, **kwargs)) or \
-                        len(geometry.candidate_centres(d, w, 0.0, **kwargs)):
+                # 横竖各试一次：可达域是条「香蕉形」的带，转 90° 常常就塞得下
+                if geometry.can_fit(w, d, **kwargs) or geometry.can_fit(d, w, **kwargs):
                     out.append(item)
                     break
         return out

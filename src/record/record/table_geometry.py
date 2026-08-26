@@ -37,13 +37,14 @@ class TableGeometry:
     cell: float
     meta: dict
 
-    @property
-    def reachable(self) -> np.ndarray:
-        return self.left | self.right
-
-    @property
-    def both(self) -> np.ndarray:
-        return self.left & self.right
+    def __post_init__(self) -> None:
+        # 两样东西各算一次：``reachable`` 每次现算等于新建一整张 (nx, ny) 数组，而
+        # ``footprint_fits`` 是逐个落点调的；积分图让 ``fit_mask`` 一次算完所有窗口。
+        reach = self.left | self.right
+        object.__setattr__(self, 'reachable', reach)
+        object.__setattr__(self, '_cum', np.pad(
+            np.cumsum(np.cumsum(reach, axis=0, dtype=np.int32), axis=1),
+            ((1, 0), (1, 0))))
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -57,24 +58,6 @@ class TableGeometry:
     def hand_of(self, y: float) -> str:
         """哪只手负责这个位置。中线两侧硬分，没有模糊带。"""
         return 'left' if y >= 0.0 else 'right'
-
-    def _cell_index(self, x: float, y: float) -> tuple[int, int] | None:
-        i = int(round((x - self.xs[0]) / self.cell))
-        j = int(round((y - self.ys[0]) / self.cell))
-        if 0 <= i < len(self.xs) and 0 <= j < len(self.ys):
-            return i, j
-        return None
-
-    def is_reachable(self, x: float, y: float, hand: str | None = None) -> bool:
-        idx = self._cell_index(x, y)
-        if idx is None:
-            return False
-        i, j = idx
-        if hand == 'left':
-            return bool(self.left[i, j])
-        if hand == 'right':
-            return bool(self.right[i, j])
-        return bool(self.reachable[i, j])
 
     def footprint_fits(self, cx: float, cy: float, w: float, d: float,
                        rotation: float = 0.0,
@@ -94,13 +77,39 @@ class TableGeometry:
             return False
         return bool(self.reachable[i0:i1 + 1, j0:j1 + 1].all())
 
+    def fit_mask(self, w: float, d: float, rotation: float = 0.0,
+                 clearance: float = DEFAULT_CLEARANCE_M) -> np.ndarray:
+        """逐格版的 ``footprint_fits``，形状 (nx, ny)。
+
+        语义与标量版逐格一致，只是靠积分图一次算完所有窗口：布局采样每换一个旋转角
+        就要扫一遍全表，Python 双重循环是整个 round 生成里唯一的热点。
+        """
+        bw, bd = rotated_extent(w, d, rotation)
+        half_w, half_d = bw / 2 + clearance, bd / 2 + clearance
+        nx, ny = len(self.xs), len(self.ys)
+        i0 = np.floor((self.xs - half_d - self.xs[0]) / self.cell + 0.5).astype(np.intp)
+        i1 = np.ceil((self.xs + half_d - self.xs[0]) / self.cell - 0.5).astype(np.intp)
+        j0 = np.floor((self.ys - half_w - self.ys[0]) / self.cell + 0.5).astype(np.intp)
+        j1 = np.ceil((self.ys + half_w - self.ys[0]) / self.cell - 0.5).astype(np.intp)
+        ok = ((i0 >= 0) & (i1 < nx))[:, None] & ((j0 >= 0) & (j1 < ny))[None, :]
+        # 越界的行列先夹住免得 fancy index 报错，反正它们已经被 ok 判掉了
+        a, b = np.clip(i0, 0, nx), np.clip(i1 + 1, 0, nx)
+        c, e = np.clip(j0, 0, ny), np.clip(j1 + 1, 0, ny)
+        cum = self._cum
+        inside = (cum[np.ix_(b, e)] - cum[np.ix_(a, e)]
+                  - cum[np.ix_(b, c)] + cum[np.ix_(a, c)])
+        return ok & (inside == (b - a)[:, None] * (e - c)[None, :])
+
+    def can_fit(self, w: float, d: float, rotation: float = 0.0,
+                clearance: float = DEFAULT_CLEARANCE_M) -> bool:
+        """有没有至少一个格心放得下。挑物品时只问有无，不必把格心全列出来。"""
+        return bool(self.fit_mask(w, d, rotation, clearance).any())
+
     def candidate_centres(self, w: float, d: float, rotation: float = 0.0,
                           clearance: float = DEFAULT_CLEARANCE_M) -> np.ndarray:
         """所有能放下这个尺寸的格心，形状 (n, 2)。布局采样从这里挑，不用盲试。"""
-        out = [(float(x), float(y))
-               for x in self.xs for y in self.ys
-               if self.footprint_fits(x, y, w, d, rotation, clearance)]
-        return np.array(out, dtype=float).reshape(-1, 2)
+        i, j = np.nonzero(self.fit_mask(w, d, rotation, clearance))
+        return np.stack((self.xs[i], self.ys[j]), axis=1).astype(float).reshape(-1, 2)
 
 
 def rotated_extent(w: float, d: float, rotation: float) -> tuple[float, float]:

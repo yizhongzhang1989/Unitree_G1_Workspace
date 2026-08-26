@@ -17,9 +17,30 @@ from urllib.parse import urlparse
 
 _STATIC = Path(__file__).with_name('static')
 _MAX_BODY = 1 << 20
+_CHUNK = 1 << 18
 _CTYPE = {'.html': 'text/html; charset=utf-8',
           '.js': 'application/javascript; charset=utf-8',
           '.css': 'text/css; charset=utf-8'}
+
+
+class _Chunked:
+    """把写操作包成 HTTP chunked。zipfile 只要求 write/flush，不 seek。"""
+
+    def __init__(self, raw) -> None:
+        self._raw = raw
+
+    def write(self, data) -> int:
+        if data:
+            self._raw.write(f'{len(data):X}\r\n'.encode())
+            self._raw.write(data)
+            self._raw.write(b'\r\n')
+        return len(data)
+
+    def flush(self) -> None:
+        self._raw.flush()
+
+    def close(self) -> None:
+        self._raw.write(b'0\r\n\r\n')
 
 
 class _Server(ThreadingHTTPServer):
@@ -27,6 +48,16 @@ class _Server(ThreadingHTTPServer):
     # 默认 accept 队列只有 5，而一个页面就开 6 条 keep-alive 连接：
     # 多开几个页面 SYN 就被丢，表现是请求挂住或偶发连接被拒
     request_queue_size = 128
+
+
+def tree_entries(root: Path, prefix: str = '') -> list:
+    """把一个目录摊成 ``send_zip`` 要的 ``(zip 内路径, 磁盘路径)`` 清单。
+
+    跳过 ``__pycache__``：它不是内容，而且一份版本对不上的 .pyc 落到 B 上会盖掉源码。
+    """
+    return [(prefix + p.relative_to(root).as_posix(), p)
+            for p in sorted(root.rglob('*'))
+            if p.is_file() and '__pycache__' not in p.parts]
 
 
 def make_handler(node, actions: dict, route):
@@ -59,6 +90,77 @@ def make_handler(node, actions: dict, route):
                 return self.send_json({'error': 'not found'}, 404)
             self.send_bytes(200, path.read_bytes(),
                             _CTYPE.get(path.suffix, 'application/octet-stream'))
+
+        def send_file(self, path: Path, name: str = '') -> None:
+            """分块下发一个文件，支持 Range 断点续传。
+
+            不能走 ``send_bytes``：那要先把整份读进内存，导出的视频动辄几百 MB，
+            Orin 上几个并发就把内存吃光了。Range 是为了 WiFi 断了能接着下。
+            """
+            size = path.stat().st_size
+            start, end = 0, size - 1
+            code = 200
+            unit = self.headers.get('Range', '')
+            if unit.startswith('bytes=') and size:
+                first, _, last = unit[6:].partition('-')
+                try:
+                    start = int(first) if first else max(size - int(last), 0)
+                    end = int(last) if first and last else size - 1
+                except ValueError:
+                    start, end = 0, size - 1
+                if start >= size or start > end:
+                    self.send_response(416)
+                    self.send_header('Content-Range', f'bytes */{size}')
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                end = min(end, size - 1)
+                code = 206
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(end - start + 1))
+            self.send_header('Accept-Ranges', 'bytes')
+            if code == 206:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            if name:
+                self.send_header('Content-Disposition',
+                                 f'attachment; filename="{name}"')
+            self.end_headers()
+            remaining = end - start + 1
+            try:
+                with open(path, 'rb') as fh:
+                    fh.seek(start)
+                    while remaining > 0:
+                        chunk = fh.read(min(_CHUNK, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def send_zip(self, name: str, entries) -> None:
+            """边打包边发。``entries`` 是 ``(zip 内路径, 磁盘路径)`` 的序列。
+
+            **不压缩**（ZIP_STORED）。之前否掉过打包，那是冲着「压缩省带宽」去的 ——
+            mkv 压缩率 100%，白花 CPU。这里的目的只是「一次点击拿走一整套」，
+            STORED 几乎零开销，是另一回事。
+            代价是长度未知（chunked）、断了要重来；单个文件仍可分别下载并续传。
+            """
+            import zipfile
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.send_header('Content-Disposition', f'attachment; filename="{name}"')
+            self.end_headers()
+            stream = _Chunked(self.wfile)
+            try:
+                with zipfile.ZipFile(stream, 'w', zipfile.ZIP_STORED) as zf:
+                    for arcname, path in entries:
+                        zf.write(path, arcname)
+                stream.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def body(self) -> dict:
             n = int(self.headers.get('Content-Length') or 0)

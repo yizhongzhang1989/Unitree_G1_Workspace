@@ -26,7 +26,7 @@
 | `ros2 param set /forward_position_controller compensation_scale 0.0` | 临时关掉手臂重力补偿 |
 | `ros2 run robot_bringup enter_debug_mode` | 释放运控模式、交出 `/lowcmd`；走 ros2_control 时不需要 |
 | `ros2 run robot_bringup exit_debug_mode` | 卸力斜坡 + 交还 `ai` 模式；控制栈被强杀后的兜底 |
-| `kill -INT "$(pgrep -f 'ros2 launch robot_bringup all_data' \| head -1)"` | 正确停控制栈；**绝不要 `pkill`**，原因见下文 |
+| `kill -INT -- -"$(ps -o pgid= -p "$(pgrep -f 'ros2 launch robot_bringup all_data' \| head -1)" \| tr -d ' ')"` | 正确停控制栈（**发给进程组**）；**绝不要 `pkill`**，原因见下文 |
 
 网页端口：`8770` 末端联调、`8200` 整机 controller、`8210` 底层只读、`8180` IK Commander、`8010`/`8011` 相机自带页。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，`localhost` 常先解析到 IPv6 `::1`，表现为页面能开、数据不来。远程转发 `ssh -L 8770:127.0.0.1:8770 user@robot`，其余端口同理。
 
@@ -351,13 +351,17 @@ ros2 run robot_bringup enter_debug_mode
 > | `gloria_ros` 的 `disable_on_shutdown` | 两只 Gloria-M 一直留在使能态 |
 > | `native_bridge_node` 的 USB 传输取消 | CANalyst-II 固件卡死，之后每次启动都报 `LIBUSB_ERROR_TIMEOUT`，**只能物理拔插复位** |
 >
-> 必须用信号时也要发 SIGINT，且**只发给 launch 进程**，由它按依赖顺序转发：
+> 必须用信号时也要发 SIGINT，且发给**整个进程组**：
 >
 > ```bash
-> kill -INT "$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)"
+> LP=$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)
+> kill -INT -- -"$(ps -o pgid= -p "$LP" | tr -d ' ')"
 > ```
 >
-> 发给整个进程组（`kill -INT -- -PID`）会让子进程被直接杀死，launch 来不及编排关闭，效果和 `pkill` 一样。
+> ❗ 2026-08-26 更正：之前写的「只发给 launch 进程，由它转发」是错的。**`ros2 launch`
+> 在关闭路径上从不主动发 SIGINT**（见 `launch/actions/execute_local.py` 的
+> `__get_shutdown_timer_actions`，它只挂 SIGTERM / SIGKILL 两级升级定时器）。Ctrl-C 能用
+> 是因为内核把 SIGINT 送给前台进程组的每一个成员。只发给 launch 进程等于绕开了这套清理。
 
 控制栈被强杀、崩溃或从未启动时该路径不会执行，关节会保持最后一帧命令持续吃电流。用这个工具兜底：
 ```bash

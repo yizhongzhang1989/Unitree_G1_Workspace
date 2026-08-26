@@ -276,11 +276,13 @@ $$T_{\text{parent}\leftarrow\text{mount}}^{\text{new}} = T_{\text{parent}\leftar
 页面和 rviz 里**找不到 `camera_left` / `camera_right`，`d435_joint` 还是名义值**。
 
 ```bash
-kill -INT "$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)"
+LP=$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)
+kill -INT -- -"$(ps -o pgid= -p "$LP" | tr -d ' ')"
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ```
 
-停控制栈**绝不能 `pkill`**，原因见 [`robot_bringup/README.md`](../robot_bringup/README.md)。
+停控制栈**绝不能 `pkill`**，也不能只把 SIGINT 发给 launch 进程（它不转发），
+原因见 [`robot_bringup/README.md`](../robot_bringup/README.md)。
 
 一眼确认现在跑的是哪一版：
 

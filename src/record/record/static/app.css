@@ -3,6 +3,8 @@
   --fg: #1f2937; --muted: #64748b;
   --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --accent: #0369a1;
   --sunken: #f1f5f9;
+  /* header 高度 + 底部播放条给 body 留的 padding，数据操作区拿它算撑满高度 */
+  --chrome: 7rem;
 }
 * { box-sizing: border-box; }
 /* 作者样式里的 display 会盖掉 UA 的 [hidden]{display:none}，.confirm 就是这样藏不住的 */
@@ -115,26 +117,132 @@ select { border: 1px solid var(--line); border-radius: 6px; padding: .25rem .4re
 .tclock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .85rem; }
 .tbody button { white-space: nowrap; }
 #btn-arm { min-width: 7rem; }
-.note summary { cursor: pointer; color: var(--accent); font-size: .88rem; font-weight: 600;
-                border-bottom: 1px solid var(--line); padding-bottom: .2rem; }
-.note p { margin: .4rem 0 0; }
-.ep.playing { border-left-color: var(--ok); background: #dcfce7; }
 @media (max-width: 700px) { .tnow .hint { display: none; } .tbody { gap: .5rem; } }
-
-/* 宽屏上把 episode 卡片铺成多列，否则右边一大片白放着。
-   auto-fit 而不是 auto-fill：条目少时把空轨道折掉，让卡片和预览图撑满宽度 */
-.eplist { display: grid; gap: .5rem 1rem; align-content: start;
-          grid-template-columns: repeat(auto-fit, minmax(21rem, 1fr)); }
-/* 卡片里三路预览均分宽度，跟着列宽伸缩而不是固定 11rem */
-.eplist .shots .shot { flex: 1 1 0; width: auto; min-width: 0; }
 
 .peer { color: var(--accent); text-decoration: none; font-size: .85rem;
         border: 1px solid var(--line); border-radius: 999px; padding: .2rem .7rem; }
 .peer:hover { border-color: var(--accent); background: #e0f2fe; }
-.banner.bad, .banner.live { cursor: pointer; }
+.peer.down { color: var(--muted); }
 button.icon { font-size: .8rem; line-height: 1; padding: .45rem .7rem; }
+.banner.bad, .banner.live { cursor: pointer; }
 
 .fold { float: right; padding: .1rem .5rem; font-size: .8rem; line-height: 1.2; }
 .folded #streams-body { display: none; }
 /* 让宽表在卡片内部横滚，否则它把整页撑宽，折叠按钮会被挤到屏幕外 */
 #streams-body { overflow-x: auto; }
+
+/* 导出区：按钮 + 进度条 + 日志 */
+.export { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+          margin: .4rem 0 .8rem; }
+.export .log { flex: 1 1 100%; margin: 0; padding: .4rem .6rem; font-size: .75rem;
+               line-height: 1.4; max-height: 7rem; overflow: auto;
+               background: #f1f5f9; border-radius: 4px; white-space: pre-wrap; }
+a.btn { font-size: .85rem; text-decoration: none; color: #fff; background: var(--accent);
+        border-radius: 4px; padding: .45rem .8rem; }
+a.btn:hover { background: #075985; }
+.export .bar { flex: 1 1 100%; margin: 0; }
+.export .pct { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .8rem; }
+
+/* 数据操作区撑满视口：上面左树右详情，下面固定的播放条。
+   两侧各自滚动，滚左边的文件树不会把右边的预览带跑。 */
+.workarea {
+  padding: .5rem .9rem; gap: .9rem; align-content: stretch;
+  grid-template-columns: minmax(0, 22rem) minmax(0, 1fr);
+  height: calc(100vh - var(--chrome)); min-height: 22rem;
+}
+.workarea > .panel { display: flex; flex-direction: column; min-height: 0; }
+.tree-pane { border-right: 1px solid var(--line); padding-right: .9rem; }
+.tree-pane h2 { flex: none; }
+.tree, .detail-pane > #detail { flex: 1 1 auto; min-height: 0; overflow: auto; }
+@media (max-width: 950px) {
+  .workarea { grid-template-columns: 1fr; height: auto; }
+  .tree-pane { border-right: 0; padding-right: 0; }
+  .tree { max-height: 45vh; }
+}
+
+/* VSCode 那样的文件树：一行一个条目，靠缩进和展开箭头表达层级 */
+.tree .node { display: flex; align-items: center; gap: .35rem;
+              height: 1.45rem; padding: 0 .3rem; border-radius: 3px;
+              cursor: pointer; font-size: .82rem; white-space: nowrap; }
+.tree .node:hover { background: var(--sunken); }
+.tree .node.active { background: #e0f2fe; }
+.tree .node.root { font-family: ui-monospace, monospace; }
+.tree .node.root.playing { background: #dcfce7; }
+/* VSCode 的 chevron：两条边框转 45°，不是实心三角。占位固定，文件行也要对齐 */
+.tree .twist { width: .8rem; height: .8rem; flex: none; position: relative; }
+.tree .node.dir > .twist::before, .tree .node.root > .twist::before {
+  content: ''; position: absolute; top: 50%; left: 45%;
+  width: .3rem; height: .3rem; border: 1.4px solid var(--muted);
+  border-left: 0; border-bottom: 0;
+  transform: translate(-50%, -50%) rotate(45deg);
+  transition: transform .12s ease;
+}
+.tree .node.open > .twist::before {
+  transform: translate(-50%, -50%) rotate(135deg);
+}
+.tree .name { overflow: hidden; text-overflow: ellipsis; }
+/* 二进制文件点了也打不开，先把“不可点”写在脸上 */
+.tree .node.mute { cursor: default; color: var(--muted); }
+.tree .node.mute:hover { background: none; }
+.tree .node.mute .dl { cursor: pointer; }
+.tree .meta { color: var(--muted); font-size: .74rem; margin-left: auto;
+              padding-left: .5rem; flex: none; font-variant-numeric: tabular-nums; }
+/* 下载按钮平时不占视觉，悬停或选中才浮出来 */
+.tree .dl { flex: none; opacity: 0; border: 0; background: none; padding: 0 .2rem;
+            font-size: .8rem; line-height: 1; color: var(--accent); cursor: pointer; }
+.tree .node:hover .dl, .tree .node.active .dl { opacity: 1; }
+.tree .dl:hover { color: #075985; }
+.tree .kids { display: none; }
+.tree .kids.open { display: block; }
+
+/* 详情头：标题在左，破坏性操作靠右，中间留空 —— 手滑点不到删除 */
+.dhead { display: flex; align-items: center; gap: .5rem;
+         padding-bottom: .5rem; border-bottom: 1px solid var(--line); }
+.dhead .title { font-size: .95rem; font-family: ui-monospace, monospace; }
+.dhead .spacer { margin-left: auto; }
+
+/* episode 卡片：一行元信息 + 指令 + 三张预览铺满卡片宽度。
+   状态用左侧色条表示，不用一堆灰色小标签堆在一起 */
+.eplist { display: grid; gap: .6rem; align-content: start; margin-top: .7rem;
+          grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+.card { border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+        border-left: 3px solid var(--line); background: #fff;
+        display: flex; flex-direction: column; }
+.card:hover { border-color: #94a3b8; border-left-color: var(--accent); }
+.card.ok { border-left-color: var(--ok); }
+.card.bad { border-left-color: var(--bad); }
+.card.off { border-left-color: #cbd5e1; opacity: .6; }
+.card.playing { border-left-color: var(--ok); background: #f0fdf4; }
+.card .top { display: flex; align-items: center; gap: .45rem; padding: .45rem .6rem; }
+.card .who { font-weight: 600; font-size: .84rem; }
+.card .dur { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+.card .top button { margin-left: auto; padding: .18rem .7rem; font-size: .78rem; }
+.card .say { padding: 0 .6rem .45rem; font-size: .8rem; color: var(--fg);
+             display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+             overflow: hidden; min-height: 1.2rem; }
+.card .say:empty::before { content: '未标注指令'; color: var(--muted); }
+/* 预览图钉在卡片底部：同一排里指令长短不一，不推下去图就不齐 */
+.card .shots { display: flex; gap: 1px; margin: auto 0 0; background: var(--line); }
+.card .shots .shot { flex: 1 1 0; width: auto; min-width: 0; border: 0;
+                     border-radius: 0; display: block; }
+.card .shots .hint { padding: .5rem .6rem; background: #fff; }
+
+/* 文本预览：等宽、可滚，别把整页撑宽 */
+.preview { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.preview pre { flex: 1 1 auto; min-height: 0; overflow: auto; margin: .5rem 0 0;
+               padding: .6rem .8rem; background: var(--sunken); border-radius: 4px;
+               font-size: .78rem; line-height: 1.45; white-space: pre; }
+
+/* 底栏的问号：hover 弹出安全须知，不再占正文位置 */
+.safety { position: relative; display: flex; }
+.safety .help { border-radius: 50%; width: 1.6rem; height: 1.6rem; padding: 0;
+                font-weight: 700; color: var(--muted); }
+.safety .tip { position: absolute; bottom: 2.2rem; right: 0; width: 30rem;
+               max-width: 92vw; padding: .7rem .9rem; border: 1px solid var(--line);
+               border-radius: 6px; background: var(--panel); color: var(--fg);
+               box-shadow: 0 6px 24px rgba(15, 23, 42, .18);
+               font-size: .8rem; line-height: 1.55; display: none; z-index: 30; }
+.safety .tip p { margin: 0 0 .5rem; }
+.safety .tip p:last-child { margin-bottom: 0; }
+.safety:hover .tip, .safety:focus-within .tip { display: block; }
+

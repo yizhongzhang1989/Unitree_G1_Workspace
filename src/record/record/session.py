@@ -34,39 +34,18 @@ class SessionError(RuntimeError):
 
 @dataclass(frozen=True)
 class SessionPaths:
+    """一次采集的目录布局。全部由 ``root`` 派生，别的地方不要再拼路径。"""
+
     root: Path
 
-    @property
-    def video(self) -> Path:
-        return self.root / 'video'
-
-    @property
-    def signals(self) -> Path:
-        return self.root / 'signals'
-
-    @property
-    def rounds(self) -> Path:
-        return self.root / 'rounds'
-
-    @property
-    def events(self) -> Path:
-        return self.root / 'events.jsonl'
-
-    @property
-    def manifest(self) -> Path:
-        return self.root / 'manifest.json'
-
-    @property
-    def schema(self) -> Path:
-        return self.root / 'schema.json'
-
-    @property
-    def meta(self) -> Path:
-        return self.root / 'meta.json'
-
-    @property
-    def done(self) -> Path:
-        return self.root / 'DONE'
+    video = property(lambda s: s.root / 'video')
+    signals = property(lambda s: s.root / 'signals')
+    rounds = property(lambda s: s.root / 'rounds')
+    events = property(lambda s: s.root / 'events.jsonl')
+    manifest = property(lambda s: s.root / 'manifest.json')
+    schema = property(lambda s: s.root / 'schema.json')
+    meta = property(lambda s: s.root / 'meta.json')
+    done = property(lambda s: s.root / 'DONE')
 
     def make(self) -> None:
         for d in (self.root, self.video, self.signals, self.rounds):

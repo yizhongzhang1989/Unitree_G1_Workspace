@@ -32,6 +32,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('max_range', default_value='70.0'),
         DeclareLaunchArgument('align_depth', default_value='false'),
         DeclareLaunchArgument('pointcloud', default_value='false'),
+        # 默认值与 head_camera.launch.py 一致，转发只是让这一条命令也能改档 ——
+        # 缺了它，想要 720p YUYV 就只能绕开本文件单独起相机，雷达那半边容易漏掉。
+        DeclareLaunchArgument('color_profile', default_value='424x240x30'),
+        DeclareLaunchArgument('color_format', default_value='RGB8'),
         Node(
             package='head_sensors',
             executable='head_lidar_node',
@@ -49,6 +53,8 @@ def generate_launch_description() -> LaunchDescription:
             launch_arguments={
                 'align_depth': LaunchConfiguration('align_depth'),
                 'pointcloud': LaunchConfiguration('pointcloud'),
+                'color_profile': LaunchConfiguration('color_profile'),
+                'color_format': LaunchConfiguration('color_format'),
             }.items(),
         ),
     ])

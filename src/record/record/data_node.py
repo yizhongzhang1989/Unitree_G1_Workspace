@@ -13,15 +13,18 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 import numpy as np
 import rclpy
+from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -30,8 +33,16 @@ from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 from record.replay import Playback, load_commands, pose_from_status, ramp
+from record.webui import tree_entries
+
+# 转换器注册表在 tools/ 里 —— 那个目录整个拷到导出机就能用。面板不另写一份，
+# 否则下拉框里列的和 B 上真跑的会分叉。
+TOOLS_DIR = Path(get_package_share_directory('record')) / 'tools'
+sys.path.insert(0, str(TOOLS_DIR))
+import converters                                          # noqa: E402
 
 DEFAULT_ROOT = str(Path.home() / '.ros' / 'record' / 'sessions')
+DEFAULT_BUNDLES = str(Path.home() / '.ros' / 'record' / 'bundles')
 _QOS = QoSProfile(depth=4, history=HistoryPolicy.KEEP_LAST,
                   reliability=ReliabilityPolicy.RELIABLE)
 _STREAMS = ('wrist_left', 'wrist_right', 'head')
@@ -41,11 +52,48 @@ def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
 
 
+def _child(parent: Path, name: str, what: str) -> Path:
+    """把外来的名字收敛成 ``parent`` 下的**直接**子项，挡掉路径穿越。
+
+    session 目录和临时产物目录共用这一套 —— 后者的调用方是个 rmtree，两边的判据
+    一旦分叉，漏掉的那一边删的就是采集数据。
+    """
+    if not name or '/' in name or '\\' in name or '..' in name:
+        raise ValueError(f'{what} 非法: {name!r}')
+    path = (parent / name).resolve()
+    if path.parent != parent.resolve():
+        raise ValueError(f'{what} 非法: {name!r}')
+    return path
+
+
+def _share(package: str, *parts: str) -> str:
+    """包里的文件路径，没装就空串。
+
+    URDF 和标定都不在 session 里（看 README 里 FK 那节），但 A 上它们就跟包装着，
+    自己找得到就不该让人在面板上填路径。B 上没 ROS，那边走 ``convert.py`` 手动传。
+    """
+    try:
+        path = Path(get_package_share_directory(package)).joinpath(*parts)
+    except PackageNotFoundError:
+        return ''
+    return str(path) if path.is_file() else ''
+
+
 class DataManager(Node):
     def __init__(self) -> None:
         super().__init__('data_manager')
         p = self.declare_parameter
         self.root = Path(p('sessions_root', DEFAULT_ROOT).value)
+        # 临时产物目录。**必须在 session 目录之外**：不然下一次 DONE 校验会把它
+        # 当成多余，而且删 session 会连它一起删。下完就删，不长期占盘。
+        self._bundles = Path(p('bundles_root', DEFAULT_BUNDLES).value)
+        self._bundles.mkdir(parents=True, exist_ok=True)
+        self.bundle_ttl_s = float(p('bundle_ttl_s', 1800.0).value)
+        self.urdf = str(p('urdf', '').value) or _share(
+            'unitree_g1_description', 'model', 'final.urdf')
+        self.calibration = str(p('calibration', '').value) or _share(
+            'camera_calibration', 'config', 'calibration.yaml')
+        self.video_height = int(p('convert_video_height', 360).value)
         self.rate_hz = float(p('rate_hz', 50.0).value)
         self.ramp_s = float(p('ramp_s', 3.0).value)
         self.cmd_topic = p('command_topic', '/motion_control/command').value
@@ -73,16 +121,21 @@ class DataManager(Node):
         self.state = {'playing': False, 'session': '', 'label': '',
                       'phase': 'idle', 'progress': 0.0, 'elapsed': 0.0,
                       'duration': 0.0, 'error': ''}
+        self._convert = {'running': False, 'session': '', 'format': '', 'token': '',
+                         'log': [], 'error': '', 'done': False, 'bytes': 0,
+                         'progress': 0.0}
+        #: 已封口 session 的概要。面板 1 Hz 轮询 sessions()，而一次概要要递归 stat 整个
+        #: 目录、逐行解 events.jsonl（能到几 MB）；封口后这些数字不会再变，算一次就够。
+        self._summary: dict[str, dict] = {}
+        # 上一轮没取走的临时产物在盘上，而 token 随进程没了，再也取不走
+        self._sweep_bundles(ttl=0.0)
         self.get_logger().info(f'数据管理节点就绪，session 根目录 {self.root}')
 
     # ------------------------------------------------------------------ 浏览
 
     def _dir(self, session_id: str) -> Path:
-        """把外来的 id 收敛成根目录下的直接子目录，挡掉路径穿越。"""
-        if not session_id or '/' in session_id or '\\' in session_id or '..' in session_id:
-            raise ValueError(f'session id 非法: {session_id!r}')
-        d = (self.root / session_id).resolve()
-        if d.parent != self.root.resolve() or not d.is_dir():
+        d = _child(self.root, session_id, 'session id')
+        if not d.is_dir():
             raise ValueError(f'找不到 session {session_id}')
         return d
 
@@ -92,27 +145,34 @@ class DataManager(Node):
         for d in sorted(self.root.glob('*/'), reverse=True):
             if not (d / 'manifest.json').is_file():
                 continue
-            item = {'id': d.name, 'sealed': (d / 'DONE').is_file(),
-                    'bytes': _dir_size(d), 'episodes': 0, 'success': 0,
-                    'warnings': 0, 'commands': 0}
-            try:
-                schema = json.loads((d / 'schema.json').read_text(encoding='utf-8'))
-                item['commands'] = schema.get('tables', {}).get(
-                    'motion_control_command', {}).get('rows', 0)
-            except (OSError, ValueError):
-                pass
-            try:
-                for line in (d / 'events.jsonl').read_text(encoding='utf-8').splitlines():
-                    e = json.loads(line)
-                    if e['type'] == 'episode_end':
-                        item['episodes'] += 1
-                        item['success'] += e.get('outcome') == 'success'
-                    elif e['type'] == 'warning':
-                        item['warnings'] += 1
-            except (OSError, ValueError):
-                pass
+            item = self._summary.get(d.name) or self._scan(d)
+            if item['sealed']:
+                self._summary[d.name] = item
             out.append(item)
         return out
+
+    @staticmethod
+    def _scan(d: Path) -> dict:
+        item = {'id': d.name, 'sealed': (d / 'DONE').is_file(),
+                'bytes': _dir_size(d), 'episodes': 0, 'success': 0,
+                'warnings': 0, 'commands': 0}
+        try:
+            schema = json.loads((d / 'schema.json').read_text(encoding='utf-8'))
+            item['commands'] = schema.get('tables', {}).get(
+                'motion_control_command', {}).get('rows', 0)
+        except (OSError, ValueError):
+            pass
+        try:
+            for line in (d / 'events.jsonl').read_text(encoding='utf-8').splitlines():
+                e = json.loads(line)
+                if e['type'] == 'episode_end':
+                    item['episodes'] += 1
+                    item['success'] += e.get('outcome') == 'success'
+                elif e['type'] == 'warning':
+                    item['warnings'] += 1
+        except (OSError, ValueError):
+            pass
+        return item
 
     def detail(self, session_id: str) -> dict:
         from record.replay_source import describe
@@ -149,10 +209,190 @@ class DataManager(Node):
         with self._lock:
             if self.state['playing'] and self.state['session'] == session_id:
                 raise RuntimeError('这次采集正在回放，先停止')
+            if self._convert['running'] and self._convert['session'] == session_id:
+                raise RuntimeError('这次采集正在转换，先等它跑完')
         size = _dir_size(d)
         shutil.rmtree(d)
+        self._summary.pop(session_id, None)
         self.get_logger().warning(f'已删除 {session_id}（{size / 1e6:.1f} MB）')
         return {'id': session_id, 'bytes': size}
+
+    # ------------------------------------------------------------------ 转换
+
+    def formats(self) -> list[dict]:
+        """面板下拉框的选项。缺依赖的那项带着 missing 一起报出去，好置灰。"""
+        return converters.describe()
+
+    def tools_bundle(self) -> list:
+        """B 上要的全套：`tools/` 整个 + 两个不在 session 里的配置文件。
+
+        URDF 和标定必须一起给：末端位姿和腕相机外参都要靠 FK 现算，而它俩
+        既不在 session 里也不在 tools/ 里。分开拿就会漏 —— 漏了还能跑，只是外参
+        退化成名义值，不报错，发现不了。
+        """
+        entries = tree_entries(TOOLS_DIR, 'tools/')
+        for path in (self.urdf, self.calibration):
+            if path and Path(path).is_file():
+                entries.append((Path(path).name, Path(path)))
+        return entries
+
+    def raw_files(self, session_id: str) -> dict:
+        """原始数据的文件清单。**逐个下**，不打包 —— 一小时的采集 5.4 GB，
+        流式 zip 断了要重来，而单文件带 Range 能续传。"""
+        d = self._dir(session_id)
+        files = [{'path': f.relative_to(d).as_posix(), 'bytes': f.stat().st_size}
+                 for f in sorted(d.rglob('*')) if f.is_file()]
+        return {'id': session_id, 'files': files,
+                'bytes': sum(f['bytes'] for f in files)}
+
+    def raw_path(self, session_id: str, relative: str) -> Path:
+        d = self._dir(session_id)
+        path = (d / relative).resolve()
+        if d.resolve() not in path.parents or not path.is_file():
+            raise ValueError(f'{session_id} 里没有 {relative}')
+        return path
+
+    def raw_dir(self, session_id: str, relative: str) -> Path:
+        """整个目录打包下载的根。``relative`` 为空就是整次采集。
+
+        打包只是为了「一次点完」，不是为了省流量 —— 里头 mkv 已经压过，ZIP_STORED
+        再压也压不动。代价是断了要重来，所以大件还是走 rsync。
+        """
+        d = self._dir(session_id)
+        if not relative:
+            return d
+        path = (d / relative).resolve()
+        if d.resolve() not in path.parents or not path.is_dir():
+            raise ValueError(f'{session_id} 里没有目录 {relative}')
+        return path
+
+    #: 面板里能直接看的后缀。没后缀的（如 ``DONE``）靠嗅探，不写死名字。
+    TEXT_SUFFIX = ('.json', '.jsonl', '.txt', '.yaml', '.yml', '.md', '.csv', '.svg')
+    #: 预览截断长度。events.jsonl 能长到几 MB，整份塞给浏览器没意义。
+    PREVIEW_LIMIT = 256 << 10
+
+    def preview(self, session_id: str, relative: str) -> dict:
+        """文本文件的前若干 KB，给右边的预览用。"""
+        path = self.raw_path(session_id, relative)
+        size = path.stat().st_size
+        blob = path.read_bytes()[:self.PREVIEW_LIMIT]
+        text = ''
+        if path.suffix.lower() in self.TEXT_SUFFIX or not path.suffix:
+            try:
+                # 严格解一遍：截断处可能切在多字节中间，掉最后几字节再试
+                text = blob.decode('utf-8')
+            except UnicodeDecodeError as exc:
+                text = blob[:exc.start].decode('utf-8') if exc.start else ''
+        binary = not text and bool(blob)
+        return {'id': session_id, 'path': relative, 'bytes': size,
+                'text': text, 'truncated': size > len(blob), 'binary': binary}
+
+    def start_convert(self, session_id: str, fmt: str) -> dict:
+        """现转现下：转到临时目录，下完就删，盘上不留产物。
+
+        为什么不做成「一个请求从头等到尾」：转换是 0.13x 实时，一小时素材要 8 分钟，
+        浏览器等首字节必然超时。所以拆成「触发 + 轮询进度 + 取件」三步。
+
+        走子进程而不是 import：转换脚本在 ``tools/`` 里，那边禁止 import rclpy
+        （导出机没有 ROS），而且它崩了不该把节点一起带走。
+        """
+        session = self._dir(session_id)
+        converter = converters.get(fmt)
+        if not (session / 'DONE').is_file():
+            raise RuntimeError(f'{session_id} 没有 DONE，还在录或异常中断，不能转换')
+        missing = converter.missing()
+        if missing:
+            raise RuntimeError(f'跑不了 {fmt}：缺 {"、".join(missing)}')
+        with self._lock:
+            if self._convert['running']:
+                raise RuntimeError(f'{self._convert["session"]} 正在转换，一次只能跑一个')
+            if self.state['playing']:
+                raise RuntimeError('正在回放，先停止')
+            if self._peer_alive('recorder'):
+                raise RuntimeError('采集面板在线，可能正在录制；转换会抢 3.8 个核，先停采集')
+            token = f'{session_id}.{fmt}.{int(time.time())}'
+            self._convert = {'running': True, 'session': session_id, 'format': fmt,
+                             'token': token, 'log': [], 'error': '',
+                             'done': False, 'bytes': 0, 'progress': 0.0}
+        self._sweep_bundles()
+        thread = threading.Thread(target=self._run_convert,
+                                  args=(session, converter, token), daemon=True)
+        thread.start()
+        return {'session': session_id, 'format': fmt, 'token': token}
+
+    def convert_state(self) -> dict:
+        with self._lock:
+            return dict(self._convert, log=list(self._convert['log'])[-40:])
+
+    def _run_convert(self, session: Path, converter, token: str) -> None:
+        out = self._bundles / token
+        values = {'urdf': self.urdf, 'calibration': self.calibration,
+                  'video_height': self.video_height}
+        error = ''
+        try:
+            command = converter.command(sys.executable, session, out, values,
+                                        progress=True)
+            self.get_logger().info(f'转换 {token}: {" ".join(command)}')
+            # PYTHONUNBUFFERED：子进程的 stdout 接的是管道，默认块缓冲，
+            # 不加这个就要等它整个跑完才吐字，面板上的进度条等于没有
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    stdin=subprocess.DEVNULL,
+                                    env={**os.environ, 'PYTHONUNBUFFERED': '1'})
+            for line in proc.stdout:
+                line = line.rstrip()
+                # 进度行不进日志：一秒好几条，会把真正要看的报告冲没
+                if line.startswith('@progress '):
+                    with self._lock:
+                        self._convert['progress'] = float(line.split()[1])
+                    continue
+                with self._lock:
+                    self._convert['log'].append(line)
+                self.get_logger().info(f'  {line}')
+            if proc.wait() != 0:
+                error = f'转换进程退出码 {proc.returncode}'
+        except Exception as exc:                       # noqa: BLE001
+            error = f'{type(exc).__name__}: {exc}'
+        with self._lock:
+            self._convert.update(running=False, done=not error, error=error,
+                                 progress=0.0 if error else 1.0,
+                                 bytes=_dir_size(out) if out.is_dir() else 0)
+        if error:
+            shutil.rmtree(out, ignore_errors=True)
+            self.get_logger().error(f'转换 {token} 失败: {error}')
+        else:
+            self.get_logger().info(f'转换 {token} 完成，{_dir_size(out) / 1e6:.1f} MB')
+
+    def bundle(self, token: str) -> Path:
+        """取件目录。token 只允许是 bundles 下的直接子目录。"""
+        return self._bundle_path(token, must_exist=True)
+
+    def _bundle_path(self, token: str, must_exist: bool) -> Path:
+        path = _child(self._bundles, token, 'token')
+        if must_exist and not path.is_dir():
+            raise ValueError(f'{token} 已经取过或已过期')
+        return path
+
+    def drop_bundle(self, token: str) -> None:
+        """自己也校验一遍。这是个 rmtree，不能靠「调用方总会先调 bundle()」保平安。"""
+        try:
+            path = self._bundle_path(token, must_exist=False)
+        except ValueError:
+            self.get_logger().error(f'拒绝删除非法 token {token!r}')
+            return
+        shutil.rmtree(path, ignore_errors=True)
+        # 取件链接是一次性的。不撤掉的话面板会一直挂着它，再点就是「已经取过」。
+        with self._lock:
+            if self._convert.get('token') == token:
+                self._convert.update(done=False, token='')
+
+    def _sweep_bundles(self, ttl: float | None = None) -> None:
+        """清掉过期的临时产物。下载中断没触发删除时，靠这一条兜底。"""
+        cutoff = time.time() - (self.bundle_ttl_s if ttl is None else ttl)
+        for path in self._bundles.glob('*'):
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+                self.get_logger().info(f'清掉过期的临时产物 {path.name}')
 
     # ------------------------------------------------------------------ 控制层
 
@@ -287,7 +527,8 @@ class DataManager(Node):
             st['disk_free_gb'] = round(shutil.disk_usage(self.root).free / 1e9, 1)
         except OSError:
             st['disk_free_gb'] = -1.0
-        st['peer_port'] = self.peer_port if self._peer_alive('recorder') else 0
+        st['peer_port'] = self.peer_port
+        st['peer_alive'] = self._peer_alive('recorder')
         return st
 
     def _peer_alive(self, name: str, ttl: float = 5.0) -> bool:

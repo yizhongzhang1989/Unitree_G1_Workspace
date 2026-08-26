@@ -14,12 +14,11 @@
 
 from __future__ import annotations
 
-import re
-import shutil
 import signal
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,8 +31,6 @@ ENCODE = ('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
 
 #: ffmpeg 在脚本里必须加 -nostdin，否则它吞掉 stdin 直接卡死（表现为超时无输出）。
 BASE = ('ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'warning')
-
-_PROGRESS_FRAME = re.compile(rb'frame=(\d+)')
 
 
 @dataclass
@@ -49,11 +46,6 @@ class StreamHealth:
         dt = time.time() - self.started
         return self.frames / dt if dt > 1.0 else 0.0
 
-    def as_dict(self) -> dict:
-        return {'name': self.name, 'frames': self.frames,
-                'fps': round(self.fps, 2), 'alive': self.alive,
-                'error': self.error}
-
 
 class _FfmpegProcess:
     """ffmpeg 子进程 + 进度读取线程。子类决定命令行与喂数据的方式。"""
@@ -65,7 +57,6 @@ class _FfmpegProcess:
         self.proc: subprocess.Popen | None = None
         self.killed = False
         self._reader: threading.Thread | None = None
-        self._stderr: list[bytes] = []
 
     def _spawn(self, args, stdin=None) -> None:
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,20 +68,20 @@ class _FfmpegProcess:
         self._reader.start()
 
     def _pump(self) -> None:
+        """读 ``-progress`` 的输出抽帧计数。stderr 得同时排空，否则管道满了 ffmpeg 会阻住。"""
         assert self.proc is not None
-        err = threading.Thread(target=self._pump_stderr, daemon=True)
-        err.start()
+        threading.Thread(target=self._pump_stderr, daemon=True).start()
         for line in self.proc.stdout:
-            m = _PROGRESS_FRAME.search(line)
-            if m:
-                self.health.frames = int(m.group(1))
+            if line.startswith(b'frame='):
+                try:
+                    self.health.frames = int(line[6:])
+                except ValueError:
+                    pass
         self.health.alive = False
 
     def _pump_stderr(self) -> None:
         assert self.proc is not None
         for line in self.proc.stderr:
-            self._stderr.append(line)
-            del self._stderr[:-40]
             low = line.lower()
             if b'error' in low or b'failed' in low:
                 self.health.error = line.decode('utf-8', 'replace').strip()[:200]
@@ -180,7 +171,7 @@ class HeadRecorder(_FfmpegProcess):
     def __init__(self, name: str, out_dir: Path, queue_size: int = 90) -> None:
         super().__init__(name, Path(out_dir) / f'{name}.mkv')
         self.pts_path = Path(out_dir) / f'{name}.pts.bin'
-        self._queue: list = []
+        self._queue: deque = deque()
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._writer: threading.Thread | None = None
@@ -214,6 +205,7 @@ class HeadRecorder(_FfmpegProcess):
 
     def _drain(self) -> None:
         assert self.proc is not None and self.proc.stdin is not None
+        stdin = self.proc.stdin
         while True:
             self._event.wait(0.2)
             self._event.clear()
@@ -221,11 +213,11 @@ class HeadRecorder(_FfmpegProcess):
                 with self._lock:
                     if not self._queue:
                         break
-                    buf = self._queue.pop(0)
-                if buf is None:
+                    buf = self._queue.popleft()
+                if buf is None:                    # stop() 放进来的哨兵
                     return
                 try:
-                    self.proc.stdin.write(buf)
+                    stdin.write(buf)
                 except (BrokenPipeError, ValueError):
                     return
 
@@ -250,10 +242,6 @@ class HeadRecorder(_FfmpegProcess):
     def finalize(self) -> int:
         np.asarray(self._stamps, dtype=np.float64).tofile(self.pts_path)
         return len(self._stamps)
-
-
-def ffmpeg_available() -> bool:
-    return shutil.which('ffmpeg') is not None
 
 
 def probe_stream(url: str, timeout: float = 20.0) -> dict:

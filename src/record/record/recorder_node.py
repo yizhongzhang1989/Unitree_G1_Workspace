@@ -3,26 +3,32 @@
 **架构铁律：录制逻辑全在这里，dashboard 只是观察者 + 命令入口。** 没人开页面、HTTP
 线程崩了，录制照常。所以本文件不 import 任何 HTTP 相关的东西。
 
-线程模型：ROS 回调写各自的表（每张表只由它自己的回调写，不跨线程共享）；HTTP 线程
-只调 ``start_session`` / ``start_round`` 这类状态迁移，它们全在 ``_lock`` 里。
+线程模型：**每路订阅各占一个 ``MutuallyExclusiveCallbackGroup``**，各路之间并行、同一路
+内部串行。不能图省事共用一个 ``ReentrantCallbackGroup``：那样同一个回调会在 4 个线程上
+同时跑，``TableWriter`` 会把同一段写两遍、``_last_write`` 节流失效、``_on_head`` 还可能
+把 ffmpeg 启两遍。HTTP 线程只调 ``start_session`` / ``start_round`` 这类状态迁移，
+它们全在 ``_lock`` 里。
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import signal
 import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import cast
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
+from std_srvs.srv import Trigger
 
 from record import signals as sig
 from record.session import Session, State
@@ -33,22 +39,19 @@ DEFAULT_ROOT = str(Path.home() / '.ros' / 'record' / 'sessions')
 
 
 def _import_msg(type_name: str):
-    pkg, _, cls = type_name.replace('/msg/', '/').partition('/')
-    cls = cls.split('/')[-1]
-    return getattr(__import__(f'{pkg}.msg', fromlist=[cls]), cls)
+    """``'sensor_msgs/msg/JointState'`` -> 消息类。"""
+    parts = type_name.split('/')
+    return getattr(__import__(f'{parts[0]}.msg', fromlist=[parts[-1]]), parts[-1])
 
 
 def _udp_rcvbuf_errors() -> int:
     """UDP 收包缓冲溢出计数。大图像丢帧时它涨得快就是丢在 DDS 传输层。"""
     try:
-        head = val = ''
         with open('/proc/net/snmp', encoding='ascii') as fh:
-            for line in fh:
-                if line.startswith('Udp:'):
-                    head, val = (head or line), line
+            head, val = [ln for ln in fh if ln.startswith('Udp:')][:2]
         cols, vals = head.split(), val.split()
         return int(vals[cols.index('RcvbufErrors')])
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         return -1
 
 
@@ -59,38 +62,51 @@ def _qos(best_effort: bool, depth: int = 50) -> QoSProfile:
                      else ReliabilityPolicy.RELIABLE))
 
 
+def _liveness(last: float, now: float) -> dict:
+    """距上一条消息多久，以及据此判的在线与否。面板上那颗绿灯就是它。"""
+    age = now - last if last else float('inf')
+    return {'online': age < 3.0, 'age': round(min(age, 999.0), 1)}
+
+
 class Recorder(Node):
     """采集主体。对外只暴露几个状态迁移方法，dashboard 调它们。"""
 
     def __init__(self) -> None:
         super().__init__('recorder')
         p = self.declare_parameter
-        self.root = Path(p('output_root', DEFAULT_ROOT).value)
-        self.head_topic = p('head_image_topic', '/head/camera/color/image_raw').value
-        self.head_info_topic = p('head_camera_info_topic',
-                                 '/head/camera/color/camera_info').value
-        self.head_fps = int(p('head_fps', 30).value)
+        self.root = Path(cast(str, p('output_root', DEFAULT_ROOT).value))
+        self.head_topic = cast(
+            str, p('head_image_topic', '/head/camera/color/image_raw').value)
+        self.head_info_topic = cast(
+            str, p('head_camera_info_topic',
+                   '/head/camera/color/camera_info').value)
+        self.head_fps = cast(int, p('head_fps', 30).value)
         # KEEP_LAST 深度就是能容忍的卡顿长度。头部 pts 取自 header.stamp，晚到不影响时间
         # 精度，丢了却会在时间轴上留空洞，所以加深只赚不亏。实测 4/30/120 在可复现
         # 的负载下没差别（那种负载压根不丢帧），30 是给复现不了的真实工况留的保险。
-        self.head_qos_depth = int(p('head_qos_depth', 30).value)
+        self.head_qos_depth = cast(int, p('head_qos_depth', 30).value)
         self.wrist_urls = {
-            'wrist_left': p('wrist_left_url',
-                            'rtsp://admin:123456@192.168.123.97/stream0').value,
-            'wrist_right': p('wrist_right_url',
-                             'rtsp://admin:123456@192.168.123.98/stream0').value,
+            'wrist_left': cast(
+                str, p('wrist_left_url',
+                       'rtsp://admin:123456@192.168.123.97/stream0').value),
+            'wrist_right': cast(
+                str, p('wrist_right_url',
+                       'rtsp://admin:123456@192.168.123.98/stream0').value),
         }
-        self.n_items = int(p('round_items', 4).value)
-        self.n_moves = int(p('round_moves', 6).value)
-        self.peer_port = int(p('peer_port', 8221).value)
+        self.n_items = cast(int, p('round_items', 4).value)
+        self.n_moves = cast(int, p('round_moves', 6).value)
+        self.peer_port = cast(int, p('peer_port', 8221).value)
+        # 置空则不代钉世界原点。只有想让多个 session 共用同一个世界系时才需要关。
+        self._origin_service = cast(
+            str, p('origin_service', '/g1_localization/set_origin').value)
         self._peer = (0.0, False)
 
         self._lock = threading.RLock()
-        self._group = ReentrantCallbackGroup()
         self.session: Session | None = None
         self.specs = {s.key: s for s in sig.default_specs()}
         self.writers: dict[str, TableWriter] = {}
-        self.stats: dict[str, dict] = {k: {'received': 0, 'written': 0, 'last': 0.0}
+        self.stats: dict[str, dict] = {k: {'received': 0, 'written': 0, 'last': 0.0,
+                                           'health': ''}
                                        for k in self.specs}
         self._subs: list = []
         self._last_write: dict[str, float] = {}
@@ -99,9 +115,10 @@ class Recorder(Node):
         self._head_seen = {'width': 0, 'height': 0, 'encoding': '', 'count': 0,
                            'last': 0.0}
         self._head_info: dict | None = None
-        self._preview: dict[str, bytes] = {}
         self.pending_round: dict | None = None      # 已生成、还没固化进 session 的那一轮
         self._pending_obj = None
+        # 开录时刷新，停录时拿来判头部收没收齐帧（见 _warn_head_gap）
+        self._udp_err0, self._head_seen0, self._head_t0 = 0, 0, 0.0
         # 开录前抓快照要用。只留最近一帧，不是缓冲区
         self._head_last: tuple[bytes, int, int, str] | None = None
 
@@ -112,9 +129,16 @@ class Recorder(Node):
         # 常驻订阅：不录也要在面板上显示各路的实时频率，操作者才能在开录前发现问题
         self._attach_monitors()
         self.create_subscription(Image, self.head_topic, self._on_head,
-                                 _qos(False, self.head_qos_depth), callback_group=self._group)
+                                 _qos(False, self.head_qos_depth),
+                                 callback_group=MutuallyExclusiveCallbackGroup())
         self.create_subscription(CameraInfo, self.head_info_topic, self._on_head_info,
-                                 _qos(False, 4), callback_group=self._group)
+                                 _qos(False, 4),
+                                 callback_group=MutuallyExclusiveCallbackGroup())
+        # 自己一组：开录时要同步等它回包，不能排在信号回调后面
+        self._origin_cli = self.create_client(
+            Trigger, self._origin_service,
+            callback_group=MutuallyExclusiveCallbackGroup()) \
+            if self._origin_service else None
         self.get_logger().info(
             f'采集节点就绪，落盘根目录 {self.root}；'
             f'物品库 {"OK" if self.library else self.library_error}')
@@ -144,17 +168,21 @@ class Recorder(Node):
             self._subs.append(self.create_subscription(
                 msg_type, spec.topic,
                 (lambda m, k=spec.key: self._on_signal(k, m)),
-                _qos(spec.best_effort), callback_group=self._group))
+                _qos(spec.best_effort, spec.depth),
+                callback_group=MutuallyExclusiveCallbackGroup()))
 
     def _on_signal(self, key: str, msg) -> None:
         st = self.stats[key]
         now = time.time()
         st['received'] += 1
         st['last'] = now
+        spec = self.specs[key]
+        # 体检在落盘之前做：没开录时最需要看见它，开录之后就晚了
+        if spec.health is not None:
+            st['health'] = spec.health(msg)
         writer = self.writers.get(key)
         if writer is None:
             return
-        spec = self.specs[key]
         if spec.max_hz > 0.0:
             prev = self._last_write.get(key, 0.0)
             if now - prev < 1.0 / spec.max_hz:
@@ -197,12 +225,43 @@ class Recorder(Node):
 
     # -------------------------------------------------------------- 状态迁移
 
+    def _pin_world_origin(self) -> dict:
+        """把世界原点钉在开录那一刻的躯干位姿。
+
+        忘了钉的后果是静默的：``torso_pose`` 整段是单位阵、``origin_set`` 恒 0，
+        面板上只看频率一切正常，事后才发现这一路是废的。每个 session 各钉一次，
+        于是「世界原点 = 开录瞬间的躯干位姿（调平）」，数据自含。
+
+        失败只记进 meta，绝不挡录制——其余十几路不该因为雷达没起就录不成。
+        """
+        if self._origin_cli is None:
+            return {'ok': False, 'reason': '未配置 origin_service'}
+        if not self._origin_cli.wait_for_service(timeout_sec=1.0):
+            return {'ok': False, 'reason': f'{self._origin_service} 不在线'}
+        future = self._origin_cli.call_async(Trigger.Request())
+        # 回包由执行器线程填，这里是 HTTP 线程，所以只能轮询不能自己 spin
+        deadline = time.monotonic() + 5.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        res = future.result()
+        if res is None:
+            return {'ok': False, 'reason': '服务超时'}
+        return {'ok': bool(res.success), 'message': res.message}
+
     def start_session(self, streams: dict, note: str = '') -> dict:
         with self._lock:
             if self.session is not None:
                 raise RuntimeError('已经在录了')
+            origin = self._pin_world_origin() if streams.get('torso_pose') else None
+            if origin is not None:
+                self.get_logger().info(
+                    f'世界原点：{origin.get("message") or origin.get("reason")}'
+                    if origin['ok'] else
+                    f'世界原点没钉上（{origin.get("reason") or origin.get("message")}），'
+                    f'torso_pose 这一路录下来也是废的')
             meta = {
                 'note': note,
+                'world_origin': origin,
                 'head_camera_info': self._head_info,
                 'head_stream': dict(self._head_seen),
                 'table_geometry': self.geometry.meta if self.geometry else None,
@@ -215,7 +274,7 @@ class Recorder(Node):
                     continue
                 self.writers[key] = TableWriter(
                     paths.signals / f'{key}.bin',
-                    ['t_recv', 't_header', *spec.columns],
+                    ['t_recv', 't_header', *cast(list, spec.columns)],
                     description=spec.note)
             for name, url in self.wrist_urls.items():
                 if streams.get(name):
@@ -251,6 +310,13 @@ class Recorder(Node):
         except OSError as exc:
             self.get_logger().warning(f'标称帧率写入失败: {exc}')
 
+    def _build_round(self, index: int, seed: int | None):
+        if self.library is None:
+            raise RuntimeError(f'物品库不可用: {self.library_error}')
+        from record.instruction.builder import build_round
+        return build_round(self.library, self.geometry, index=index, seed=seed,
+                           n_items=self.n_items, n_moves=self.n_moves)
+
     def preview_round(self, seed: int | None = None) -> dict:
         """生成一轮摆放但**不写进 session**，可以反复重 roll。
 
@@ -260,71 +326,65 @@ class Recorder(Node):
         with self._lock:
             if self.session is not None and self.session.state in (State.ROUND, State.EPISODE):
                 raise RuntimeError('本轮还没结束，不能重 roll')
-            if self.library is None:
-                raise RuntimeError(f'物品库不可用: {self.library_error}')
-            from record.instruction.builder import build_round
             index = self.session.round_index + 1 if self.session else 0
-            rnd = build_round(self.library, self.geometry, index=index, seed=seed,
-                              n_items=self.n_items, n_moves=self.n_moves)
-            self._pending_obj = rnd
-            self.pending_round = rnd.as_dict()
+            self._pending_obj = self._build_round(index, seed)
+            self.pending_round = self._pending_obj.as_dict()
             return self.status()
 
     def start_round(self, seed: int | None = None) -> dict:
         """把预览的那一轮固化进 session。没预览过就现生一个。"""
         with self._lock:
-            self._require(State.SESSION)
+            session = self._require(State.SESSION)
             rnd = self._pending_obj
             if rnd is None or seed is not None:
-                if self.library is None:
-                    raise RuntimeError(f'物品库不可用: {self.library_error}')
-                from record.instruction.builder import build_round
-                rnd = build_round(self.library, self.geometry,
-                                  index=self.session.round_index + 1, seed=seed,
-                                  n_items=self.n_items, n_moves=self.n_moves)
+                rnd = self._build_round(session.round_index + 1, seed)
             self._round_obj = rnd
             self.current_round = rnd.as_dict()
             self.pending_round, self._pending_obj = None, None
-            self.session.start_round(self.current_round, svg=rnd.svg)
+            session.start_round(self.current_round, svg=rnd.svg)
             for hit in self.current_round.get('lint_warnings', []):
-                self.session.warn('lint', **hit)
+                session.warn('lint', **hit)
             return self.status()
 
     def end_round(self) -> dict:
         with self._lock:
-            self._require(State.ROUND)
-            self.session.end_round()
+            session = self._require(State.ROUND)
+            session.end_round()
             self.current_round = None
             self._round_obj = None
             return self.status()
 
     def start_episode(self, index: int) -> dict:
         with self._lock:
-            self._require(State.ROUND)
+            session = self._require(State.ROUND)
             eps = (self.current_round or {}).get('episodes', [])
             if not 0 <= index < len(eps):
                 raise RuntimeError(f'episode 序号 {index} 越界')
-            self.session.start_episode(eps[index])
+            session.start_episode(eps[index])
             return self.status()
 
     def end_episode(self, outcome: str, note: str = '') -> dict:
         with self._lock:
-            self._require(State.EPISODE)
-            self.session.end_episode(outcome, note)
+            session = self._require(State.EPISODE)
+            session.end_episode(outcome, note)
             if outcome == 'success' and self.library and self._round_obj:
                 self._bump_usage()
             return self.status()
 
     def _bump_usage(self) -> None:
-        idx = self.session.episode_index
+        session = self.session
+        library = self.library
+        if session is None or library is None:
+            return
+        idx = session.episode_index
         eps = (self.current_round or {}).get('episodes', [])
         if not 0 <= idx < len(eps):
             return
         ep = eps[idx]
         if ep.get('obj', {}).get('id'):
-            self.library.bump_usage(ep['obj']['id'], 'as_x')
+            library.bump_usage(ep['obj']['id'], 'as_x')
         if ep.get('target', {}).get('id'):
-            self.library.bump_usage(ep['target']['id'], 'as_y')
+            library.bump_usage(ep['target']['id'], 'as_y')
 
     def stop_session(self) -> dict:
         with self._lock:
@@ -349,9 +409,19 @@ class Recorder(Node):
                     self.session.warn('head_queue_drop', frames=self.head.dropped)
                 self._warn_head_gap()
             schema = {}
-            for key, w in self.writers.items():
+            # 先摘掉再关：回调拿不到 writer 就直接返回，不会往已关的表里塞行
+            writers, self.writers = self.writers, {}
+            for key, w in writers.items():
                 w.close()
-                schema[key] = w.schema()
+                entry = w.schema()
+                # 文件字节数才是真相，rows 只是个计数器。下游拿 rows 决定读多少行，
+                # 对不上就静默截断尾部，而 DONE 里的 sha256 只校字节，两者不交叉。
+                real = w.path.stat().st_size // (entry['ncol'] * 8)
+                if real != entry['rows']:
+                    self.session.warn('table_rows_mismatch', table=key,
+                                      declared=entry['rows'], actual=real)
+                    entry['rows'] = real
+                schema[key] = entry
             for name, rec in self.wrists.items():
                 schema[f'{name}.pts'] = {
                     'file': rec.pts_path.name, 'dtype': 'float64', 'ncol': 1,
@@ -372,12 +442,14 @@ class Recorder(Node):
             return {'session': root.name, 'files': digest['file_count'],
                     'bytes': digest['total_bytes'], 'path': str(root)}
 
-    def _require(self, state: State) -> None:
-        if self.session is None:
+    def _require(self, state: State) -> Session:
+        session = self.session
+        if session is None:
             raise RuntimeError('还没开始 session')
-        if self.session.state is not state:
-            raise RuntimeError(f'当前是 {self.session.state.value}，'
+        if session.state is not state:
+            raise RuntimeError(f'当前是 {session.state.value}，'
                                f'这一步要求 {state.value}')
+        return session
 
     # ------------------------------------------------------------------ 观测
 
@@ -387,34 +459,33 @@ class Recorder(Node):
         out = []
         for key, spec in self.specs.items():
             st = self.stats[key]
-            age = now - st['last'] if st['last'] else float('inf')
             out.append({
                 'key': key, 'kind': 'signal', 'topic': spec.topic,
-                'type': spec.type_name, 'columns': len(spec.columns),
+                'type': spec.type_name, 'columns': len(cast(list, spec.columns)),
                 'received': st['received'], 'written': st['written'],
-                'online': age < 3.0, 'age': round(min(age, 999.0), 1),
-                'max_hz': spec.max_hz, 'note': spec.note,
+                **_liveness(st['last'], now),
+                'max_hz': spec.max_hz,
+                'note': f'！{st["health"]}' if st['health'] else spec.note,
                 'default_on': spec.default_on,
                 'recording': key in self.writers,
             })
         for name, url in self.wrist_urls.items():
             rec = self.wrists.get(name)
+            frames = rec.health.frames if rec else 0
             out.append({
                 'key': name, 'kind': 'video', 'topic': url, 'type': 'RTSP (-c copy)',
-                'columns': 0, 'received': rec.health.frames if rec else 0,
-                'written': rec.health.frames if rec else 0,
+                'columns': 0, 'received': frames, 'written': frames,
                 'online': bool(rec and rec.health.alive), 'age': 0.0,
                 'max_hz': 0.0, 'default_on': True, 'recording': name in self.wrists,
                 'note': rec.health.error if rec else '未开录',
             })
         seen = self._head_seen
-        age = now - seen['last'] if seen['last'] else float('inf')
         out.append({
             'key': 'head', 'kind': 'video', 'topic': self.head_topic,
             'type': f'{seen["encoding"] or "?"} {seen["width"]}x{seen["height"]}',
             'columns': 0, 'received': seen['count'],
             'written': self.head.health.frames if self.head else 0,
-            'online': age < 3.0, 'age': round(min(age, 999.0), 1),
+            **_liveness(seen['last'], now),
             'max_hz': 0.0, 'default_on': True, 'recording': self.head is not None,
             'note': f'队列丢帧 {self.head.dropped}' if self.head else '',
         })
@@ -441,7 +512,8 @@ class Recorder(Node):
             'library_error': self.library_error,
             'round_detail': self.current_round,
             'pending_round': self.pending_round,
-            'peer_port': self.peer_port if self._peer_alive('data_manager') else 0,
+            'peer_port': self.peer_port,
+            'peer_alive': self._peer_alive('data_manager'),
         }
 
     def _peer_alive(self, name: str, ttl: float = 5.0) -> bool:
@@ -452,10 +524,9 @@ class Recorder(Node):
         return self._peer[1]
 
     def _disk(self) -> int:
-        import shutil as _sh
         try:
-            return _sh.disk_usage(self.root if self.root.exists()
-                                  else self.root.parent).free
+            return shutil.disk_usage(self.root if self.root.exists()
+                                     else self.root.parent).free
         except OSError:
             return 0
 
@@ -471,9 +542,10 @@ class Recorder(Node):
         if want <= 0 or got >= want * 0.97:
             return
         err = _udp_rcvbuf_errors() - self._udp_err0
-        self.session.warn('head_frames_short', got=got, want=int(want),
-                          lost=int(want - got), rcvbuf_errors=err,
-                          queue_drop=self.head.dropped if self.head else 0)
+        if self.session is not None:
+            self.session.warn('head_frames_short', got=got, want=int(want),
+                              lost=int(want - got), rcvbuf_errors=err,
+                              queue_drop=self.head.dropped if self.head else 0)
 
     def pending_svg(self) -> str:
         return self._pending_obj.svg if self._pending_obj is not None else ''
@@ -529,14 +601,15 @@ def main() -> None:
     rclpy.init()
     node = Recorder()
     from record.dashboard import panel
-    dash = panel(node, port=int(node.declare_parameter('dashboard_port', 8220).value))
+    dash = panel(node, port=cast(
+        int, node.declare_parameter('dashboard_port', 8220).value))
     dash.start()
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
 
     # Python 对 SIGTERM 没有处理器，默认动作直接终止进程，下面的 finally 不会跑，
-    # ffmpeg 子进程就成了孤儿，继续空烧 CPU 和写盘。docker stop / systemd / ros2 launch
-    # 关闭走的都是 SIGTERM。
+    # ffmpeg 子进程就成了孤儿，继续空烧 CPU 和写盘。docker stop / systemd 关闭走的
+    # 都是 SIGTERM。SIGINT 交给 rclpy 自带的处理器，实测 1 s 内退出并把 session 封口。
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     try:

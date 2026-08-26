@@ -178,7 +178,7 @@ async function refresh() {
   renderStreams(data.streams, locked);
   renderControls(data.status);
   renderEpisodes(data.status);
-  peerLink(data.status.peer_port);
+  peerLink(data.status.peer_port, data.status.peer_alive);
   const key = sceneKey(data.status);
   if (key !== SCENE_KEY) {
     SCENE_KEY = key;

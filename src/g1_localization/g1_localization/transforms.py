@@ -101,3 +101,19 @@ def rigid_point_velocity(v_ref_a, omega_ref, p_ref_a, p_ref_b) -> np.ndarray:
     omega_ref = np.asarray(omega_ref, dtype=np.float64)
     lever = np.asarray(p_ref_b, dtype=np.float64) - np.asarray(p_ref_a, dtype=np.float64)
     return v_ref_a + np.cross(omega_ref, lever)
+
+
+def body_twist(v_ref_a, omega_a, t_ref_a, t_a_b):
+    """换算刚体上另一点的 twist，并把它表达到那一点自己的系里。
+
+    输入是 Point-LIO 那种**混着的** twist：``v_ref_a`` 是 a 点原点的线速度、在参考系下
+    表达；``omega_a`` 是角速度、在 a 自己的体系下表达。输出 `(v_b, omega_b)` 两者都在
+    b 系，也就是 ``nav_msgs/Odometry`` 对 ``child_frame_id`` 的约定。
+
+    ``t_a_b`` 是常量外参，所以只有杠杆臂那一项，没有相对运动项。
+    """
+    r_ref_a, r_a_b = t_ref_a[:3, :3], t_a_b[:3, :3]
+    omega_a = np.asarray(omega_a, dtype=np.float64)
+    v_ref_b = rigid_point_velocity(v_ref_a, r_ref_a @ omega_a,
+                                   t_ref_a[:3, 3], (t_ref_a @ t_a_b)[:3, 3])
+    return r_a_b.T @ (r_ref_a.T @ v_ref_b), r_a_b.T @ omega_a

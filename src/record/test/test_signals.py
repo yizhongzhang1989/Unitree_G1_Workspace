@@ -6,6 +6,7 @@
 
 import json
 import math
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
@@ -142,17 +143,48 @@ def test_specs_are_unique_and_column_widths_match():
             assert len(s.columns) == len(set(s.columns)), s.key
 
 
-def test_command_topic_is_best_effort():
-    """发布方是 BEST_EFFORT depth=1，用 RELIABLE 订阅会一条都收不到。"""
-    spec = next(s for s in sig.default_specs() if s.key == 'motion_control_command')
-    assert spec.best_effort and len(spec.columns) == 20
+def test_command_topics_are_best_effort():
+    """两条指令话题的发布方都是 BEST_EFFORT，用 RELIABLE 订阅会一条都收不到。
+
+    `fpc_commands` 就是这么丢的：20260821 和 20260824 两个 session 都录成 0 行，
+    直到导出时 action/joint_space 全 NaN 才发现。发布方在
+    `g1_motion_control/policy_node.py` 里是 depth=1 BEST_EFFORT。
+    """
+    by = {s.key: s for s in sig.default_specs()}
+    assert by['motion_control_command'].best_effort
+    assert len(by['motion_control_command'].columns) == 20
+    assert by['fpc_commands'].best_effort
 
 
 def test_high_rate_topics_are_throttled():
     by = {s.key: s for s in sig.default_specs()}
     assert by['arm0_wrench_raw'].max_hz == 200.0     # 实测 743 Hz
     assert by['secondary_imu'].max_hz == 100.0       # 实测 755 Hz
+    assert by['dog_odom'].max_hz == 100.0            # 实测 500 Hz
     assert by['joint_states'].max_hz == 0.0          # 100 Hz，不抽
+
+
+def test_dog_odom_subscribes_with_depth_one():
+    """深度就是积压上限，对 500 Hz 的话题不能用默认的 50。
+
+    实测同一条 `/dog_odom`：depth=50 时 `t_recv - t_header` 恒定 47.95 ms，
+    depth=1 时 0.92 ms。滞后是常量，看不出丢帧、也不报错，只会把时间轴整体推后。
+    """
+    by = {s.key: s for s in sig.default_specs()}
+    assert by['dog_odom'].depth == 1
+    # 其余都是低频或已抽稀，默认深度是给卡顿留的余量
+    assert all(s.depth == 50 for s in sig.default_specs() if s.key != 'dog_odom')
+
+
+def test_dog_odom_has_no_origin_flag():
+    """它和 torso_pose 都是 Odometry，但 covariance[0] 在这里不是标志位。
+
+    固件那份实测 36 项全零，照 torso_pose 的读法会把每一帧都判成「原点已设」。
+    """
+    by = {s.key: s for s in sig.default_specs()}
+    assert 'origin_set' not in by['dog_odom'].columns
+    assert 'origin_set' in by['torso_pose'].columns
+    assert len(by['dog_odom'].columns) == 13
 
 
 def test_tf_is_off_by_default():
@@ -166,3 +198,67 @@ def test_joint_states_spec_uses_canonical_order():
     assert spec.columns[0] == f'pos.{sig.CANONICAL_JOINTS[0]}'
     row = spec.row(_js(list(reversed(sig.CANONICAL_JOINTS))))
     assert len(row) == 93
+
+
+# ------------------------------------------------------- 躯干世界位姿
+
+def _odom(cov0=0.0, xyz=(1.0, 2.0, 3.0), quat=(0.0, 0.0, 0.0, 1.0)):
+    cov = [0.0] * 36
+    cov[0] = cov0
+    return NS(pose=NS(pose=NS(position=NS(x=xyz[0], y=xyz[1], z=xyz[2]),
+                              orientation=NS(x=quat[0], y=quat[1],
+                                             z=quat[2], w=quat[3])),
+                      covariance=cov),
+              twist=NS(twist=NS(linear=NS(x=0.1, y=0.2, z=0.3),
+                                angular=NS(x=0.4, y=0.5, z=0.6))))
+
+
+def test_odometry_row_layout():
+    spec = next(s for s in sig.default_specs() if s.key == 'torso_pose')
+    row = spec.row(_odom())
+    assert len(row) == len(spec.columns)
+    cols = spec.columns
+    assert [row[cols.index(k)] for k in ('x', 'y', 'z')] == [1.0, 2.0, 3.0]
+    assert [row[cols.index(k)] for k in ('qx', 'qy', 'qz', 'qw')] == [0.0, 0.0, 0.0, 1.0]
+    assert row[cols.index('wz')] == 0.6
+
+
+def test_origin_unset_is_flagged_per_frame():
+    """调过 set_origin 之后队列里的残留帧仍带 -1，只能逐帧判。"""
+    cols = next(s for s in sig.default_specs() if s.key == 'torso_pose').columns
+    flag = cols.index('origin_set')
+    assert sig.odometry_row(_odom(cov0=sig.ORIGIN_UNSET_COV))[flag] == 0.0
+    assert sig.odometry_row(_odom(cov0=0.0))[flag] == 1.0
+
+
+def test_origin_unset_constant_still_matches_the_publisher():
+    """这个值是 g1_localization 的对外契约，两边分叉了会静默把无效帧当成有效帧。"""
+    source = (Path(__file__).resolve().parents[3] / 'src' / 'g1_localization'
+              / 'g1_localization' / 'localization_node.py')
+    if not source.is_file():
+        pytest.skip('工作区里没有 g1_localization')
+    line = next(ln for ln in source.read_text(encoding='utf-8').splitlines()
+                if ln.startswith('ORIGIN_UNSET_COV'))
+    assert float(line.split('=')[1]) == sig.ORIGIN_UNSET_COV
+
+
+def test_torso_pose_is_on_by_default_and_not_throttled():
+    """默认勾选：世界定位事后补不回来。10 Hz 本来就慢，不抽稀。"""
+    spec = next(s for s in sig.default_specs() if s.key == 'torso_pose')
+    assert spec.default_on
+    assert spec.max_hz == 0.0
+    assert spec.best_effort                    # 发布方是 BEST_EFFORT，RELIABLE 收不到
+
+
+def test_origin_unset_shows_up_on_the_panel():
+    """频率、行数、绿灯全都正常，只有内容是废的 —— 这种只能靠体检暴露。"""
+    spec = next(s for s in sig.default_specs() if s.key == 'torso_pose')
+    assert spec.health is not None
+    warning = spec.health(_odom(cov0=sig.ORIGIN_UNSET_COV))
+    assert 'set_origin' in warning
+    assert spec.health(_odom(cov0=0.0)) == ''
+
+
+def test_only_torso_pose_pays_for_the_health_check():
+    """体检在落盘前逐帧跑，别的路挂上去就是白白多一次调用。"""
+    assert [s.key for s in sig.default_specs() if s.health is not None] == ['torso_pose']

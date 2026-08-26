@@ -19,9 +19,16 @@ setup(
         (os.path.join('share', package_name, 'items'), ['items/README.md']),
         (os.path.join('share', package_name, 'items', 'item-library', 'db'),
             ['items/item-library/db/item_library.db']),
-        # 导出机（Windows，无 ROS）把这个目录整个拷走就能读 session
+        # 导出机（Windows，无 ROS）把这个目录整个拷走就能读 session。
+        # 只捞 *.py 会漏掉 README.md 和 sync_and_convert.ps1，本地看不出来，
+        # B 点下载到的是残缺的一份 —— 而 ps1 正是 README 让他敲的第一条命令。
         (os.path.join('share', package_name, 'tools'),
-            glob(os.path.join('tools', '*.py'))),
+            glob(os.path.join('tools', '*.py')) + glob(os.path.join('tools', '*.md'))
+            + glob(os.path.join('tools', '*.ps1'))),
+    ] + [
+        (os.path.join('share', package_name, os.path.dirname(path)), [path])
+        for path in glob(os.path.join('tools', 'format', '*', '*'))
+        if os.path.isfile(path)
     ],
     package_data={
         package_name: ['static/*.html', 'static/*.css', 'static/*.js',
