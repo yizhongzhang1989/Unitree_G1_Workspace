@@ -103,6 +103,21 @@ def test_warning_never_blocks(session):
     assert 'warning' in kinds and 'episode_end' in kinds
 
 
+def test_episode_index_counts_takes_not_slots(session):
+    """`episode_index` 是「本轮第几次录」，**不是指令表的下标**。
+
+    两者只在「一条一次、按顺序走」时碰巧相等，重录一次就永久分家。拿它当
+    「面板该高亮哪一行」用过一次：重录之后没有一行匹配得上，于是成功/失败/丢弃
+    和开始/重录**两组按钮同时消失**，点了像没反应。现在面板改看 `episode_slot`。
+    """
+    session.start_round({'seed': 1, 'items': [], 'episodes': [{}, {}]})
+    for _ in range(2):
+        session.start_episode({})
+        session.end_episode('success')
+    session.start_episode({})                 # 重录第 0 条
+    assert session.episode_index == 2         # 指令表只有 2 条，下标不可能是 2
+
+
 def test_finish_closes_dangling_episode(session):
     session.start_round({'seed': 1, 'items': [], 'episodes': [{}]})
     session.start_episode({})

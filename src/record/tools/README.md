@@ -237,7 +237,14 @@ python3 convert.py <session 目录> --to yb -o <输出目录> \
         --urdf final.urdf --calibration calibration.yaml
 ```
 
-可选参数：`--video-height`（默认 360，给 0 保持源分辨率）、`--hz`（默认 30）。
+可选参数：`--video-height`（默认 360，给 0 保持源分辨率）、`--hz`（默认 30）、
+`--keep-idle`（默认 1.0）、`--no-trim`。
+
+**默认会把每条 episode 首尾的无动作空转裁掉**，首尾各留 `--keep-idle` 秒。
+操作者要走去点「开始/成功」，实测这种空转能占到总时长的四成。判据是遥操作**目标**
+在不在变（末端目标位姿的速率 + 夹爪开度的幅度），所以「全程夹着东西递给另一只手」
+不会被误判成一直有动作，VR 扬机抖一下也不会。
+裁了多少记在 `episode/*.json` 的 `source.trim` 里，原始采集不动，`--no-trim` 可关。
 
 **`--urdf` 是必填的。** 这两个文件不在 session 里，但已经随「导出工具」包一起给你了
 （就在 `tools/` 旁边）。它们在 A 上的出处：

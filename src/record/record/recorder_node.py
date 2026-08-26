@@ -33,7 +33,7 @@ from std_srvs.srv import Trigger
 from record import signals as sig
 from record.session import Session, State
 from record.table_writer import TableWriter
-from record.video import HeadRecorder, WristRecorder, probe_stream
+from record.video import HeadRecorder, PreviewPump, WristRecorder, preview_url, probe_stream
 
 DEFAULT_ROOT = str(Path.home() / '.ros' / 'record' / 'sessions')
 
@@ -121,10 +121,17 @@ class Recorder(Node):
         self._udp_err0, self._head_seen0, self._head_t0 = 0, 0, 0.0
         # 开录前抓快照要用。只留最近一帧，不是缓冲区
         self._head_last: tuple[bytes, int, int, str] | None = None
+        # 面板上的低帧率预览。按需起、没人看就收（见 _reap_previews）
+        self._preview_lock = threading.Lock()
+        self._previews: dict[str, PreviewPump] = {}
+        self._head_jpeg: tuple[bytes, float] = (b'', 0.0)
 
         self.library, self.geometry, self.library_error = self._load_library()
         self.current_round: dict | None = None
         self._round_obj = None
+        # 正在录的是指令表里的第几条。和 session.episode_index（本轮第几次录）
+        # 只在「一条一次、按顺序走」时碰巧相等，重录一次就永久分家
+        self._episode_slot = -1
 
         # 常驻订阅：不录也要在面板上显示各路的实时频率，操作者才能在开录前发现问题
         self._attach_monitors()
@@ -139,6 +146,10 @@ class Recorder(Node):
             Trigger, self._origin_service,
             callback_group=MutuallyExclusiveCallbackGroup()) \
             if self._origin_service else None
+        # 没人看预览时把解码进程收掉。只能靠定时器：页面一关就再也不来请求了，
+        # 挂在请求路径上的回收永远触发不到
+        self.create_timer(2.0, self._reap_previews,
+                          callback_group=MutuallyExclusiveCallbackGroup())
         self.get_logger().info(
             f'采集节点就绪，落盘根目录 {self.root}；'
             f'物品库 {"OK" if self.library else self.library_error}')
@@ -361,6 +372,7 @@ class Recorder(Node):
             if not 0 <= index < len(eps):
                 raise RuntimeError(f'episode 序号 {index} 越界')
             session.start_episode(eps[index])
+            self._episode_slot = index
             return self.status()
 
     def end_episode(self, outcome: str, note: str = '') -> dict:
@@ -376,7 +388,7 @@ class Recorder(Node):
         library = self.library
         if session is None or library is None:
             return
-        idx = session.episode_index
+        idx = self._episode_slot
         eps = (self.current_round or {}).get('episodes', [])
         if not 0 <= idx < len(eps):
             return
@@ -506,6 +518,9 @@ class Recorder(Node):
             'session': s.session_id if s else '',
             'round': s.round_index if s else -1,
             'episode': s.episode_index if s else -1,
+            # 面板要高亮的是指令表里的那一行，不是上面那个次数
+            'episode_slot': (self._episode_slot
+                             if s is not None and s.state is State.EPISODE else -1),
             'counts': dict(s.counts) if s else {},
             'bytes': sum(w.bytes_written for w in self.writers.values()),
             'disk_free_gb': round(disk / 1e9, 1),
@@ -592,6 +607,50 @@ class Recorder(Node):
             raise RuntimeError(f'头部编码失败: {out.stderr.decode("utf-8", "replace")[:200]}')
         return out.stdout
 
+    # ------------------------------------------------------------- 低帧率预览
+
+    #: 预览帧的最短间隔，和 ``PreviewPump.FPS`` 对齐
+    PREVIEW_PERIOD = 0.45
+
+    def preview(self, key: str) -> bytes:
+        """连续预览的最近一帧 JPEG。**录制中照样可用**，代价和快照差一个量级。
+
+        腕部走 640x360 子码流常驻解码（实测 7% 单核/路），既不碰 ``-c copy`` 搬字节
+        的主码流那一路，也不用每次重新握手；头部的帧本来就在内存里，只是编码，
+        按 ``PREVIEW_PERIOD`` 节流后约 8% 单核。三路加起来不到四分之一个核。
+        """
+        if key == 'head':
+            return self._head_preview()
+        url = self.wrist_urls.get(key)
+        if url is None:
+            raise ValueError(f'未知的视频流 {key}')
+        with self._preview_lock:
+            pump = self._previews.get(key)
+            if pump is None:
+                pump = self._previews[key] = PreviewPump(key, preview_url(url))
+        return pump.frame()
+
+    def _head_preview(self) -> bytes:
+        cached, at = self._head_jpeg
+        if cached and time.monotonic() - at < self.PREVIEW_PERIOD:
+            return cached
+        jpeg = self._head_snapshot()
+        self._head_jpeg = (jpeg, time.monotonic())
+        return jpeg
+
+    def _reap_previews(self) -> None:
+        with self._preview_lock:
+            stale = [k for k, p in self._previews.items() if p.idle()]
+            pumps = [self._previews.pop(k) for k in stale]
+        for pump in pumps:
+            pump.stop()
+
+    def stop_previews(self) -> None:
+        with self._preview_lock:
+            pumps, self._previews = list(self._previews.values()), {}
+        for pump in pumps:
+            pump.stop()
+
 
 def _on_sigterm(signum, frame):   # noqa: ARG001
     raise KeyboardInterrupt
@@ -622,6 +681,7 @@ def main() -> None:
                 node.stop_session()
             except Exception as exc:                   # noqa: BLE001
                 node.get_logger().error(f'退出时收尾失败: {exc}')
+        node.stop_previews()
         dash.stop()
         node.destroy_node()
         rclpy.try_shutdown()

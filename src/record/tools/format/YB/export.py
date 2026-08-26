@@ -84,6 +84,21 @@ FORMAT_DOC = 'record/tools/format/YB/README.md'
 DEFAULT_HZ = 30.0
 #: 超过这么久没有新样本，该时刻就判为无效而不是继续保持上一个值
 DEFAULT_MAX_AGE_S = 0.1
+
+#: 动作前后各保留多少秒空隙。操作者要先回去按「开始」、做完再回去按「成功」，
+#: 两头都挂着一大段机器人不动的画面。实测一次 13 条 episode 的采集：
+#: 头部空隙中位 2.5 s、尾部 3.2 s，**183 s 里有 77 s 是空的（42%）**。
+DEFAULT_KEEP_IDLE_S = 1.0
+#: 判「目标在动」的阈值与观察窗。逐点差分会被 50 Hz 的量化噪声淹没，所以看 ±0.1 s。
+#: 位姿阈值不敏感：实测静止时目标位姿速度是**精确的 0**（p05 = 0.00 mm/s），
+#: 操作时 p95 在 110~230 mm/s，中间隔着四个数量级。
+IDLE_POS_M_S = 0.005
+IDLE_WINDOW_S = 0.2
+#: 夹爪则看**窗口内的幅度**而不是速率：VR 扬机是模拟量，手指碰一下就能
+#: 在 0.19 s 里跑出 0.054 rad（行程的 2%）= 0.29 rad/s，按速率判会当成真动作，
+#: 实测把一条 episode 的头部少裁了 2.3 s。真的开合一定走完全行程，
+#: 峰值窗口幅度 p50 = 1.18 rad，高出一个数量级。
+IDLE_GRIP_RAD = 0.28                # ≈ 行程的 10%
 #: FK 的根，也是末端位姿与相机外参的参考系
 ORIGIN = 'torso_link'
 WORLD_AXES = '+X forward, +Y left, +Z up (REP-103)'
@@ -323,6 +338,58 @@ def read_table(session: Session, key: str, ncol: int) -> tuple[np.ndarray, np.nd
         order = np.argsort(t, kind='stable')
         t, data = t[order], data[order]
     return t, data
+
+
+def active_span(session: Session, t0: float, t1: float, keep: float) -> tuple[float, float]:
+    """把 episode 收缩到「下发的目标真的在动」的那一段，前后各留 ``keep`` 秒。
+
+    夹爪和位姿一起看，因为「手臂停着只合爪」在物理上是真动作。实测一次 13 条
+    的采集里它一次也没改变过边界（夹爪动的时候手臂也在动），留着是保险。
+
+    判据取 ``motion_control_status``：它一张表里同时有 ``limited_pose`` 和 ``grip``。
+    换成 ``motion_control_command`` 的原始 VR 目标结果几乎一样（13 条 episode 上
+    总裁剪量 77.6 s vs 77.2 s），不值得为此多读一张表。
+
+    这一路缺失、或者整条 episode 里目标一动没动时，原样返回不裁。
+    """
+    columns = session.columns('motion_control_status')
+    t, data = read_table(session, 'motion_control_status', len(columns))
+    inside = (t >= t0) & (t <= t1)
+    if inside.sum() < 3:
+        return t0, t1
+    t, data = t[inside], data[inside]
+
+    pos = np.stack([data[:, [columns.index(f'limited.{side}.{k}') for k in 'xyz']]
+                    for side in ARMS], axis=1)                      # (N, 2, 3)
+    grip = data[:, [columns.index(f'grip.{side}') for side in ARMS]]
+
+    lo = np.searchsorted(t, t - IDLE_WINDOW_S / 2, 'left')
+    hi = np.clip(np.searchsorted(t, t + IDLE_WINDOW_S / 2, 'right') - 1, 0, t.size - 1)
+    span = np.maximum(t[hi] - t[lo], 1e-6)
+    speed = np.linalg.norm(pos[hi] - pos[lo], axis=-1).max(axis=1) / span
+    grip_travel = np.abs(grip[hi] - grip[lo]).max(axis=1)
+
+    moving = np.flatnonzero((speed > IDLE_POS_M_S) | (grip_travel > IDLE_GRIP_RAD))
+    if moving.size == 0:
+        return t0, t1
+    return (max(t0, float(t[moving[0]]) - keep),
+            min(t1, float(t[moving[-1]]) + keep))
+
+
+def trim_episode(session: Session, episode: dict, keep: float) -> dict:
+    """就地把 episode 的时间窗收紧，原始窗口留在 ``trim`` 里备查。"""
+    t0, t1 = active_span(session, episode['t0'], episode['t1'], keep)
+    if t1 - t0 < 1.0 / DEFAULT_HZ:       # 收得只剩一帧就别收了
+        return episode
+    episode['trim'] = {
+        'raw_t0': episode['t0'], 'raw_t1': episode['t1'],
+        'head_s': round(t0 - episode['t0'], 3),
+        'tail_s': round(episode['t1'] - t1, 3),
+        'keep_idle_s': keep,
+    }
+    episode['t0'], episode['t1'] = t0, t1
+    episode['duration'] = t1 - t0
+    return episode
 
 
 def end_space(model, joints: dict, session: Session, grid, max_age,
@@ -707,6 +774,10 @@ def main() -> int:
                     help='统一时间栅格，视频也按它重采样')
     ap.add_argument('--max-age', type=float, default=DEFAULT_MAX_AGE_S,
                     help='超过这么久没新样本就判无效（秒）')
+    ap.add_argument('--keep-idle', type=float, default=DEFAULT_KEEP_IDLE_S,
+                    help='把 episode 收紧到目标真在动的那一段，前后各留这么多秒空隙')
+    ap.add_argument('--no-trim', action='store_true',
+                    help='不裁，原样用 events.jsonl 里的起止时刻')
     ap.add_argument('--end-action', choices=('limited', 'target'), default='limited',
                     help='limited=实际下发的目标（IK 限位后），target=VR 原始目标')
     ap.add_argument('--extrinsic', choices=tuple(EXTRINSIC_FORMULA),
@@ -748,10 +819,15 @@ def main() -> int:
     session_id = session.manifest['session_id']
     plans, records = {c.name: [] for c in CAMERAS}, []
     for serial, episode in enumerate(episodes, 1):
+        if not args.no_trim:
+            trim_episode(session, episode, args.keep_idle)
         grid = build_grid(episode['t0'], episode['t1'], args.hz)
         spaces = build_spaces(session, model, grid, args, intrinsics, provenance)
         name = episode_name(serial, session_id, episode)
-        print(f'{name}  N={grid.size:<5d} {episode["duration"]:.1f}s  '
+        cut = episode.get('trim')
+        cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'
+                    if cut and cut['head_s'] + cut['tail_s'] > 0.05 else '')
+        print(f'{name}  N={grid.size:<5d} {episode["duration"]:.1f}s{cut_note}  '
               f'{episode["outcome"]:<8} {episode.get("instruction_en", "")}')
         for line in _report(spaces, verbose=args.dry_run):
             print(f'    {line}')
@@ -762,7 +838,8 @@ def main() -> int:
         import h5py
         notes = {'origin': ORIGIN, 'fk_root': ORIGIN, 'session': session_id,
                  'end_action_source': args.end_action,
-                 'grid_hz': args.hz, 'max_age_s': args.max_age}
+                 'grid_hz': args.hz, 'max_age_s': args.max_age,
+                 'keep_idle_s': -1.0 if args.no_trim else args.keep_idle}
         (out / 'data').mkdir(parents=True, exist_ok=True)
         with h5py.File(out / 'data' / f'{name}.h5', 'w') as handle:
             export_episode(handle, episode, spaces, grid, notes)

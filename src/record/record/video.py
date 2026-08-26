@@ -244,8 +244,124 @@ class HeadRecorder(_FfmpegProcess):
         return len(self._stamps)
 
 
+def preview_url(url: str) -> str:
+    """主码流 URL -> 子码流 URL。认不出就原样返回（还能用，只是贵）。
+
+    腕相机的 ``stream1`` 是 640x360 HEVC；同样「解码 + 2fps + 缩到 480」实测
+    7% 单核，主码流 1080p 那路是 18%。预览是常驻的，这个差价不能不要。
+    """
+    return url[:-1] + '1' if url.endswith('stream0') else url
+
+
+class PreviewPump:
+    """一路 RTSP 低帧率预览：ffmpeg 常驻解码，最新一帧 JPEG 留在内存里。
+
+    和 ``snapshot`` 那条路是两回事：快照抓的是 1080p 主码流、每次重新握手（腕部约
+    1.3 s），只适合点一下看一眼；预览要连续出帧，所以走子码流并把帧率压到 2。
+
+    **没人取帧就自己停**（``idle()`` + 调用方定期收）。页面一关就再没人来取，
+    不停就是白烧 CPU，而这个面板经常整天开着。
+    """
+
+    #: 出帧节流。低帧率是有意的：这是「看一眼画面对不对」，不是监视器。
+    FPS = 2.0
+    #: 多久没人取帧就停。要大于前端的轮询周期，不然一边收一边起。
+    IDLE_STOP = 6.0
+    #: 起不来时的重试间隔。不退避的话相机不在线会变成每次轮询都 fork 一个 ffmpeg。
+    RETRY = 5.0
+
+    def __init__(self, name: str, url: str, width: int = 480) -> None:
+        self.name, self.url, self.width = name, url, width
+        self._lock = threading.Lock()
+        self._frame = b''
+        self._err = ''
+        self._proc: subprocess.Popen | None = None
+        self._retry_at = 0.0
+        self._touched = time.monotonic()
+
+    def frame(self) -> bytes:
+        """最近一帧 JPEG。取帧这一下也是「有人在看」的唯一信号。"""
+        self._touched = time.monotonic()
+        self._ensure()
+        with self._lock:
+            if self._frame:
+                return self._frame
+            err = self._err
+        raise RuntimeError(err or f'{self.name} 预览还在起（腕部要等 RTSP 握手）')
+
+    def idle(self) -> bool:
+        return time.monotonic() - self._touched > self.IDLE_STOP
+
+    def _ensure(self) -> None:
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return
+            if time.monotonic() < self._retry_at:
+                return
+            self._retry_at = time.monotonic() + self.RETRY
+            self._err = ''
+            args = [*BASE, '-rtsp_transport', 'tcp', '-stimeout', '5000000',
+                    '-i', self.url, '-an',
+                    '-vf', f'fps={self.FPS},scale={self.width}:-2',
+                    '-q:v', '7', '-f', 'mjpeg', 'pipe:1']
+            self._proc = subprocess.Popen(
+                args, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc = self._proc
+        threading.Thread(target=self._read, args=(proc,), daemon=True).start()
+        threading.Thread(target=self._read_err, args=(proc,), daemon=True).start()
+
+    def _read(self, proc: subprocess.Popen) -> None:
+        """从 MJPEG 管道里切出整帧。
+
+        按 EOI(``ff d9``) 切是安全的：JPEG 的熵编码段里 ``ff`` 后面一定跟 ``00``，
+        而 ffmpeg 的 mjpeg 输出不带 EXIF 缩略图，图里不会再出现第二个 EOI。
+        """
+        buf = b''
+        assert proc.stdout is not None
+        while True:
+            chunk = proc.stdout.read1(1 << 16)     # read() 会等满 n 字节
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                i = buf.find(b'\xff\xd9')
+                if i < 0:
+                    break
+                frame, buf = buf[:i + 2], buf[i + 2:]
+                if frame.startswith(b'\xff\xd8'):
+                    with self._lock:
+                        self._frame = frame
+
+    def _read_err(self, proc: subprocess.Popen) -> None:
+        """排空 stderr（管道满了 ffmpeg 会阻住），顺便留下最后一句话当错误。"""
+        assert proc.stderr is not None
+        last = b''
+        for line in proc.stderr:
+            line = line.strip()
+            if line:
+                last = line
+        proc.wait()
+        with self._lock:
+            if proc is self._proc:
+                self._err = last.decode('utf-8', 'replace')[:200]
+                self._frame = b''
+
+    def stop(self) -> None:
+        with self._lock:
+            proc, self._proc, self._frame = self._proc, None, b''
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def probe_stream(url: str, timeout: float = 20.0) -> dict:
     """探一路 RTSP 的实参。ffprobe **没有** -nostdin 选项，加了会当输入文件报错。"""
+
     args = ['ffprobe', '-v', 'error', '-rtsp_transport', 'tcp',
             '-select_streams', 'v:0', '-show_entries',
             'stream=codec_name,width,height,avg_frame_rate',

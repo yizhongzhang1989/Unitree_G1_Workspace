@@ -129,6 +129,14 @@ def main() -> int:
             call('/api/episode/start', {'index': k})
             time.sleep(args.hold)
             call('/api/episode/end', {'outcome': 'success' if k else 'fail'})
+
+        # 重录第 0 条。走这一步 episode_index（第几次录）就和指令表下标分家了，
+        # 面板高亮哪一行只能看 episode_slot —— 曾经看错，重录后整排按钮全消失
+        st = call('/api/episode/start', {'index': 0})['result']
+        assert st['episode_slot'] == 0, st
+        assert st['episode'] != st['episode_slot'], f'重录后这两个还相等，测试没测到点上: {st}'
+        time.sleep(args.hold)
+        call('/api/episode/end', {'outcome': 'discard'})
         call('/api/round/end', {})
 
         print('封口…')

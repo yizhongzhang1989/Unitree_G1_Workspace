@@ -4,12 +4,14 @@ Spec §1.5 要求：发布前批量随机模拟，**模板类生成器的 lint �
 ``test_bulk_simulation_is_lint_clean`` 就是那道验收。
 """
 
+import collections
+import math
 import random
 
 import pytest
 
 from record.instruction.builder import build_round
-from record.instruction.generator import RELATIVE, simulate
+from record.instruction.generator import MIN_TRAVEL_M, RELATIVE, simulate
 from record.instruction.layout import layout_scene
 from record.instruction.library import LIBRARY_SUBDIR, ItemLibrary
 from record.instruction.templates import (NAMED_POSITIONS, Instruction, join_steps,
@@ -216,14 +218,43 @@ def test_move_freezes_pick_position(library, geometry):
         seen[key] = m.drop
 
 
-def test_put_down_keeps_position(library, geometry):
+def test_every_move_actually_relocates(library, geometry):
+    """老版本 put_down 的落点就是取件点，「拿起来又放回原处」能连出五六遍一样的指令。"""
     rng = random.Random(11)
     items = library.choose_group(geometry, size=4, rng=rng)
     placed = layout_scene(items, geometry, rng=rng)
     moves, _ = simulate(placed, geometry, n_moves=10, rng=rng)
-    for m in moves:
-        if m.action == 'put_down':
-            assert m.drop == m.pick_from and not m.passes
+    for k, m in enumerate(moves):
+        travel = math.hypot(m.drop[0] - m.pick_from[0], m.drop[1] - m.pick_from[1])
+        assert travel >= MIN_TRAVEL_M - 1e-9, \
+            f'第 {k} 步只挪了 {travel * 1000:.0f} mm，等于没动'
+
+
+def test_no_duplicate_instruction_in_a_round(library, geometry):
+    """一轮里同一条 Place 不能出现两次 —— 面板上就是一模一样的两行。"""
+    for seed in range(30):
+        rnd = build_round(library, geometry, index=seed, seed=seed,
+                          n_items=4, n_moves=6)
+        places = [i.render_en() for i in rnd.instructions if i.verb == 'Place']
+        dup = [t for t, n in collections.Counter(places).items() if n > 1]
+        assert not dup, f'seed={seed} 重复了 {dup}'
+
+
+def test_same_item_not_moved_twice_in_a_row(library, geometry):
+    """还有别的东西可搬时就别连着搬同一件，否则整轮都在拿同一个物品。"""
+    for seed in range(30):
+        rnd = build_round(library, geometry, index=seed, seed=seed,
+                          n_items=4, n_moves=6)
+        for a, b in zip(rnd.moves, rnd.moves[1:]):
+            assert a.obj.item.item_id != b.obj.item.item_id, f'seed={seed}'
+
+
+def test_round_is_not_starved(library, geometry):
+    """状态机走不动就收工，但收工不能变成空轮 —— 摆不开的场景要重摆。"""
+    short = [seed for seed in range(60)
+             if len(build_round(library, geometry, index=seed, seed=seed,
+                                n_items=4, n_moves=6).moves) < 4]
+    assert not short, f'这些 seed 生成的 round 不足 4 步: {short}'
 
 
 def test_buried_items_are_never_picked_again(library, geometry):
@@ -271,7 +302,7 @@ def test_every_drop_stays_reachable_and_clear(library, geometry):
     placed = layout_scene(items, geometry, rng=rng)
     moves, _ = simulate(placed, geometry, n_moves=10, rng=rng)
     for m in moves:
-        if m.action in RELATIVE:
+        if m.action in RELATIVE or m.action == 'put_down':
             w, d = m.obj.item.footprint(m.obj.pose)
             assert geometry.footprint_fits(m.drop[0], m.drop[1], w, d,
                                            m.obj.rotation), '落点跑出可达域'

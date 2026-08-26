@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from record.instruction.generator import expand, simulate
 from record.instruction.layout import layout_scene
@@ -51,16 +51,27 @@ class Round:
 
 
 def build_round(library, geometry, index: int = 0, seed: int | None = None,
-                n_items: int = 4, n_moves: int = 6) -> Round:
+                n_items: int = 4, n_moves: int = 6, attempts: int = 8) -> Round:
     """生成一个完整的 round。
 
-    渲染必须在 ``simulate`` **之前** —— 状态机会原地改 Placement 的坐标。
+    摆不开的场景就**重摆**：可达域只有 0.198 m²，四件物里卡进两件大的就再也腾挪
+    不开，状态机一步都走不出来（实测 200 轮里有 4 轮如此）。重摆用的是同一个 rng，
+    所以给定 seed 仍然逐位可复现。
     """
     seed = random.randrange(2 ** 31) if seed is None else int(seed)
     rng = random.Random(seed)
-    items = library.choose_group(geometry, size=n_items, rng=rng)
-    placements = layout_scene(items, geometry, rng=rng)
-    svg = render_scene(placements, geometry, title=f'Round {index}')
-    moves, _ = simulate(placements, geometry, n_moves=n_moves, rng=rng)
+    best = None
+    for _ in range(max(1, attempts)):
+        items = library.choose_group(geometry, size=n_items, rng=rng)
+        placements = layout_scene(items, geometry, rng=rng)
+        # 状态机原地改坐标，给它副本，``placements`` 才一直是待会儿要画的那个初始局面
+        moves, _ = simulate([replace(p) for p in placements], geometry,
+                            n_moves=n_moves, rng=rng)
+        if best is None or len(moves) > len(best[2]):
+            best = (items, placements, moves)
+        if len(moves) >= n_moves:
+            break
+    items, placements, moves = best
     return Round(index=index, seed=seed, items=items, placements=placements,
-                 svg=svg, instructions=expand(moves), moves=moves)
+                 svg=render_scene(placements, geometry, title=f'Round {index}'),
+                 instructions=expand(moves), moves=moves)

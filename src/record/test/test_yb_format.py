@@ -109,3 +109,16 @@ def test_known_limits_section_mentions_the_nan_action():
     """`action/joint_space` 全 NaN 是本批数据最大的坑，必须在文档里显式写着。"""
     assert 'action/joint_space' in TEXT
     assert 'NaN' in TEXT
+
+
+def test_trim_thresholds_match():
+    """裁空转改的是 episode 边界 —— 拿数据的人复算时长对不上会以为丢了数据。
+
+    所以四个阈值和 `source.trim` 的字段名都必须在文档里，且和代码一致。
+    """
+    for name in ('IDLE_POS_M_S', 'IDLE_GRIP_RAD', 'IDLE_WINDOW_S',
+                 'DEFAULT_KEEP_IDLE_S'):
+        assert name in TEXT, f'{name} 没写进文档'
+        assert f'{getattr(ex, name):g}' in TEXT, f'{name} 的值和文档对不上'
+    for field in ('raw_t0', 'raw_t1', 'head_s', 'tail_s', 'keep_idle_s'):
+        assert field in TEXT, f'source.trim.{field} 没写进文档'

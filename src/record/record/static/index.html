@@ -6,42 +6,45 @@
 <title>G1 上肢采集</title>
 <link rel="stylesheet" href="/app.css">
 </head>
-<body>
-<header>
-  <h1>G1 上肢遥操作采集</h1>
-  <a id="peer" class="peer" target="_blank" rel="noopener">数据管理 ↗</a>
-  <div id="banner" class="banner">连接中…</div>
-</header>
+<body class="fill">
+<div class="topbar">
+  <header>
+    <h1>G1 上肢遥操作采集</h1>
+    <a id="peer" class="peer" target="_blank" rel="noopener">数据管理 ↗</a>
+    <div id="banner" class="banner">连接中…</div>
+  </header>
+  <div class="sessionbar" id="control">
+    <input id="note" placeholder="备注（操作者、场地、任务批次…）">
+    <button id="btn-start" class="primary">开始 session</button>
+    <button id="btn-stop" class="danger" disabled>结束 session</button>
+    <span class="hint" id="lock-hint"
+          title="否则 schema.json 会与实际落盘内容静默错位">
+      勾选在开录瞬间冻结写进 <code>manifest.json</code>，开录后不可更改。
+    </span>
+  </div>
+</div>
 
 <main>
-  <div class="cols">
-    <section class="panel">
-      <h2>摆桌与指令</h2>
-      <div class="row">
-        <button id="btn-preview">生成任务 / 重 roll</button>
-        <button id="btn-round" disabled>开始本轮（固化）</button>
-        <button id="btn-round-end" disabled>结束本轮</button>
-        <span class="hint" id="round-hint"></span>
-      </div>
-      <div class="split">
-        <div id="episodes" class="episodes"></div>
+  <section class="panel">
+    <h2>摆桌与指令</h2>
+    <div class="row">
+      <button id="btn-preview">生成任务 / 重 roll</button>
+      <button id="btn-round" disabled>开始本轮（固化）</button>
+      <button id="btn-round-end" disabled>结束本轮</button>
+      <span class="hint" id="round-hint"></span>
+    </div>
+    <div class="split">
+      <div id="episodes" class="episodes"></div>
+      <div class="stage">
         <div id="scene" class="scene"><p class="hint">还没有摆放样例</p></div>
+        <div class="row">
+          <label class="hint"><input type="checkbox" id="cam-on" checked> 相机预览</label>
+          <span class="hint" id="cam-hint"></span>
+        </div>
+        <div id="cams" class="cams"></div>
       </div>
-    </section>
-
-    <section class="panel" id="control">
-      <h2>会话</h2>
-      <div class="row">
-        <input id="note" placeholder="备注（操作者、场地、任务批次…）">
-        <button id="btn-start" class="primary">开始 session</button>
-        <button id="btn-stop" class="danger" disabled>结束 session</button>
-      </div>
-      <p class="hint" id="lock-hint">
-        勾选在开录瞬间冻结写进 <code>manifest.json</code>；开录后不可更改，
-        否则 <code>schema.json</code> 会与实际落盘内容静默错位。
-      </p>
-    </section>
-  </div>
+    </div>
+  </section>
 
   <section class="panel" id="streams-card">
     <h2>数据一览 <span class="hint" id="stream-summary"></span>
@@ -55,7 +58,7 @@
       <div id="shots" class="shots"></div>
       <table id="streams">
         <thead><tr>
-          <th style="width:3rem">录</th><th>数据流</th><th>话题 / 源</th>
+          <th>录</th><th>数据流</th><th>话题 / 源</th>
           <th>类型</th><th class="num">列</th><th class="num">收到</th>
           <th class="num">已写</th><th>状态</th><th>说明</th>
         </tr></thead>

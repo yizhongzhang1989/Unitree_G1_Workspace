@@ -38,6 +38,9 @@ def panel(rec, port: int = 8220, host: str = '0.0.0.0') -> Panel:
         if u.path == '/api/snapshot':
             return h.send_bytes(
                 200, rec.snapshot((parse_qs(u.query).get('key') or [''])[0]), 'image/jpeg')
+        if u.path == '/api/preview':
+            return h.send_bytes(
+                200, rec.preview((parse_qs(u.query).get('key') or [''])[0]), 'image/jpeg')
         if u.path in actions:
             # 前端漏传 body 就会变成 GET，一律 404 的话错误条完全看不出来是方法错了
             return h.send_json({'error': f'{u.path} 只接受 POST'}, 405)

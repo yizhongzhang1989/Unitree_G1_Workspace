@@ -308,8 +308,6 @@ class DataManager(Node):
                 raise RuntimeError(f'{self._convert["session"]} 正在转换，一次只能跑一个')
             if self.state['playing']:
                 raise RuntimeError('正在回放，先停止')
-            if self._peer_alive('recorder'):
-                raise RuntimeError('采集面板在线，可能正在录制；转换会抢 3.8 个核，先停采集')
             token = f'{session_id}.{fmt}.{int(time.time())}'
             self._convert = {'running': True, 'session': session_id, 'format': fmt,
                              'token': token, 'log': [], 'error': '',

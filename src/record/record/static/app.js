@@ -72,7 +72,7 @@ function renderEpisodes(status) {
   box.innerHTML = '';
   detail.episodes.forEach((ep, i) => {
     const div = document.createElement('div');
-    const active = inEpisode && status.episode === i;
+    const active = inEpisode && status.episode_slot === i;
     div.className = 'ep' + (active ? ' active' : '') + (DONE.has(i) ? ' done' : '')
       + (preview ? ' preview' : '');
     const pass = ep.verb === 'Pass' ? '<span class="tag pass">交接</span>' : '';
@@ -92,9 +92,12 @@ function renderEpisodes(status) {
         const b = document.createElement('button');
         b.textContent = label;
         if (cls) b.className = cls;
+        // 不接住的话请求失败就是「点了没反应」，连错误条都不亮
         b.onclick = async () => {
-          await post('/api/episode/end', { outcome });
-          DONE.add(i);
+          try {
+            await post('/api/episode/end', { outcome });
+            DONE.add(i);
+          } catch (err) { banner('标注失败：' + err.message, 'bad'); }
           refresh();
         };
         acts.appendChild(b);
@@ -103,8 +106,10 @@ function renderEpisodes(status) {
       const b = document.createElement('button');
       b.textContent = DONE.has(i) ? '重录' : '开始';
       b.onclick = async () => {
-        await post('/api/episode/start', { index: i });
-        DONE.delete(i);
+        try {
+          await post('/api/episode/start', { index: i });
+          DONE.delete(i);
+        } catch (err) { banner('开始 episode 失败：' + err.message, 'bad'); }
         refresh();
       };
       acts.appendChild(b);
@@ -178,6 +183,10 @@ async function refresh() {
   renderStreams(data.streams, locked);
   renderControls(data.status);
   renderEpisodes(data.status);
+  renderCams(data.streams
+    .filter((s) => s.kind === 'video' && s.key !== 'head_depth')
+    .map((s) => s.key)
+    .sort((a, b) => camRank(a) - camRank(b)));
   peerLink(data.status.peer_port, data.status.peer_alive);
   const key = sceneKey(data.status);
   if (key !== SCENE_KEY) {
@@ -246,6 +255,68 @@ $('btn-shot').onclick = async () => {
   box.innerHTML = '';
   imgs.forEach((i) => box.appendChild(i));
 };
+
+// ---- 三路相机的低帧率预览 ----------------------------------------------
+// 摆放样例说的是「该摆成什么样」，预览说的是「现在什么样」，挨着放才好对照。
+// 后端按需起解码、没人取帧就收；这边只要「不看时别取」就行。
+const CAMS = new Map();      // key -> {img, note, busy}
+
+// 左腕 / 头 / 右腕，摆成真实的空间关系 —— 图的位置本身就是「哪路是哪路」的线索。
+// 认不出来的排到最后，而不是静悄悄插到最前面
+const CAM_ORDER = ['wrist_left', 'head', 'wrist_right'];
+const camRank = (k) => (CAM_ORDER.indexOf(k) + 1 || 99);
+
+function renderCams(keys) {
+  // 每秒无条件重建的话图会闪，而且刚拿到的帧会被扔掉
+  if (keys.join() === [...CAMS.keys()].join()) return;
+  const box = $('cams');
+  box.innerHTML = '';
+  CAMS.clear();
+  for (const k of keys) {
+    const cell = document.createElement('div');
+    cell.className = 'cam';
+    cell.innerHTML = `<img alt="${k}"><span class="tag">${k}</span>`
+      + '<span class="note">连接中…</span>';
+    box.appendChild(cell);
+    CAMS.set(k, { img: cell.querySelector('img'),
+                  note: cell.querySelector('.note'), busy: false });
+  }
+}
+
+async function pullCam(key) {
+  const cam = CAMS.get(key);
+  if (!cam || cam.busy) return;           // 慢的那一路别堆请求
+  cam.busy = true;
+  try {
+    const res = await fetch(`/api/preview?key=${key}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || res.statusText);
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const old = cam.img.src;
+    cam.img.src = url;
+    if (old.startsWith('blob:')) URL.revokeObjectURL(old);   // 不撤会一直吃内存
+    cam.note.hidden = true;
+  } catch (err) {
+    cam.note.textContent = err.message;
+    cam.note.hidden = false;              // 压在画面上，不清掉已有的帧
+  } finally {
+    cam.busy = false;
+  }
+}
+
+function camLoop() {
+  // 切到别的标签页就停：后台标签页的画面没人看，白烧 CPU
+  const on = $('cam-on').checked && document.visibilityState === 'visible';
+  $('cams').hidden = !on;
+  $('cam-hint').textContent = on
+    ? '腕部走 640x360 子码流 2 fps，不碰录制那条 -c copy 的主码流，录制中也能开。'
+    : '已关。页面切到后台也会自动停，节点那边跟着把解码进程收掉。';
+  if (!on) return;
+  for (const k of CAMS.keys()) pullCam(k);
+}
+setInterval(camLoop, 500);
 
 refresh();
 setInterval(refresh, 1000);
