@@ -32,8 +32,9 @@ WebXR 只在安全上下文里可用，所以只有这两种进法；证书与 a
 ``ros2 param set /vr_teleop arm_rotation_frame world``，松开 squeeze 再按一次即生效。
 
 手柄分工：**左摇杆**水平速度、**右摇杆**转向与高度（限幅同 ``teleop_keyboard.py``），
-**双手同时按 B/Y** 推进状态机：站立 -> 启动策略 -> 急停，不用回终端敲
-``ros2 service call``，也不需要另起 ``teleop_keyboard``。
+**双手同时按 B/Y** 推进状态机：站立 -> 启动策略 -> 急停（前两步松手时生效，
+**急停那一步按下即走**），**按住 1 s 不看当前状态直接急停**（``estop_hold_s:=1.0``）。
+不用回终端敲 ``ros2 service call``，也不需要另起 ``teleop_keyboard``。
 
 本节点不做 IK：接管原点直接取策略层 ``~/status`` 里发布的末端位姿，所以不需要
 从 ``motion_control.yaml`` 里继承关节名与末端帧。
@@ -56,7 +57,7 @@ _OVERRIDABLE = {
     # 平移 / 转角各自的参考系，'world' 或 'local'，四种搭配
     'arm_position_frame': str, 'arm_rotation_frame': str,
     'gripper_open': float, 'gripper_closed': float,
-    'frame_timeout_s': float, 'button_cooldown_s': float,
+    'frame_timeout_s': float, 'button_cooldown_s': float, 'estop_hold_s': float,
     # 和键盘 / VLA 共用 motion_control 的标准分块命令总线。VR 发全量 20 值。
     'policy_node': str, 'command_topic': str, 'status_topic': str,
 }
