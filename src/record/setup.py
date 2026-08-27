@@ -45,6 +45,7 @@ setup(
         'console_scripts': [
             'recorder = record.recorder_node:main',
             'data_manager = record.data_node:main',
+            'verify_alignment = record.verify_alignment:main',
         ],
     },
 )

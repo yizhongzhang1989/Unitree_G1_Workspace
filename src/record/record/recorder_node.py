@@ -33,7 +33,8 @@ from std_srvs.srv import Trigger
 from record import signals as sig
 from record.session import Session, State
 from record.table_writer import TableWriter
-from record.video import HeadRecorder, PreviewPump, WristRecorder, preview_url, probe_stream
+from record.video import (HeadPreview, HeadRecorder, PreviewPump, WristRecorder,
+                          preview_url, probe_stream)
 
 DEFAULT_ROOT = str(Path.home() / '.ros' / 'record' / 'sessions')
 
@@ -124,7 +125,9 @@ class Recorder(Node):
         # 面板上的低帧率预览。按需起、没人看就收（见 _reap_previews）
         self._preview_lock = threading.Lock()
         self._previews: dict[str, PreviewPump] = {}
-        self._head_jpeg: tuple[bytes, float] = (b'', 0.0)
+        self._head_pump = HeadPreview()
+        # 最近一次为头部留帧的时刻（monotonic），见 _head_due
+        self._head_kept = 0.0
 
         self.library, self.geometry, self.library_error = self._load_library()
         self.current_round: dict | None = None
@@ -132,6 +135,9 @@ class Recorder(Node):
         # 正在录的是指令表里的第几条。和 session.episode_index（本轮第几次录）
         # 只在「一条一次、按顺序走」时碰巧相等，重录一次就永久分家
         self._episode_slot = -1
+        # slot -> 已录各次的 outcome。同一条指令可以录很多遍，每遍都是独立的一条
+        # episode，旧的不会被覆盖；面板拿它显示「重录」和已录次数
+        self._slot_takes: dict[int, list[str]] = {}
 
         # 常驻订阅：不录也要在面板上显示各路的实时频率，操作者才能在开录前发现问题
         self._attach_monitors()
@@ -212,9 +218,15 @@ class Recorder(Node):
                     last=time.time())
         seen['count'] += 1
         head = self.head
+        # 每帧都拷 = 30 x 1.8 MB/s 的白拷贝，所以按预览周期节流；
+        # 在录、又没人看预览时一帧都不留
+        watching = not self._head_pump.idle()
+        if (head is None or watching) and self._head_due():
+            payload = bytes(msg.data)
+            self._head_last = (payload, msg.width, msg.height, msg.encoding)
+            if watching:
+                self._head_pump.push(payload, msg.width, msg.height, msg.encoding)
         if head is None:
-            # 没在录时才留快照用的那一帧：录制中留它等于每帧多一次 1.8 MB 拷贝
-            self._head_last = (bytes(msg.data), msg.width, msg.height, msg.encoding)
             return
         if not head.health.alive and head.proc is None:
             try:
@@ -263,6 +275,9 @@ class Recorder(Node):
         with self._lock:
             if self.session is not None:
                 raise RuntimeError('已经在录了')
+            # 没 roll 就开录，生任务和摆桌子的那几十秒全录进视频里
+            if self.pending_round is None:
+                raise RuntimeError('先生成一轮任务并摆好桌子再开录')
             origin = self._pin_world_origin() if streams.get('torso_pose') else None
             if origin is not None:
                 self.get_logger().info(
@@ -321,24 +336,40 @@ class Recorder(Node):
         except OSError as exc:
             self.get_logger().warning(f'标称帧率写入失败: {exc}')
 
-    def _build_round(self, index: int, seed: int | None):
+    def _build_round(self, index: int, seed: int | None, items: list | None = None):
         if self.library is None:
             raise RuntimeError(f'物品库不可用: {self.library_error}')
         from record.instruction.builder import build_round
         return build_round(self.library, self.geometry, index=index, seed=seed,
-                           n_items=self.n_items, n_moves=self.n_moves)
+                           n_items=self.n_items, n_moves=self.n_moves, items=items)
 
-    def preview_round(self, seed: int | None = None) -> dict:
+    def _retitle(self, rnd, index: int):
+        """复用上一轮时只改样例图里的轮次号，摆放和指令保持逐位一致。"""
+        from dataclasses import replace
+        from record.instruction.scene_svg import render_scene
+        return replace(rnd, index=index,
+                       svg=render_scene(rnd.placements, self.geometry,
+                                        title=f'Round {index}'))
+
+    def preview_round(self, seed: int | None = None, keep_items: bool = False) -> dict:
         """生成一轮摆放但**不写进 session**，可以反复重 roll。
 
         摆真桌子要几十秒，以前只能开录之后才看得到任务，那段时间全录进了视频里。
         现在 IDLE 下就能预览，摆完再开录。
+
+        ``keep_items`` 沿用当前这组物品，只换摆放和指令 —— 换物品要起身去桌上换东西，
+        只挪位置在手边就能做完，两件事的代价差一个数量级。
         """
         with self._lock:
             if self.session is not None and self.session.state in (State.ROUND, State.EPISODE):
                 raise RuntimeError('本轮还没结束，不能重 roll')
+            items = None
+            if keep_items:
+                if self._pending_obj is None:
+                    raise RuntimeError('还没有可沿用的物品，先生成一次任务')
+                items = self._pending_obj.items
             index = self.session.round_index + 1 if self.session else 0
-            self._pending_obj = self._build_round(index, seed)
+            self._pending_obj = self._build_round(index, seed, items=items)
             self.pending_round = self._pending_obj.as_dict()
             return self.status()
 
@@ -349,20 +380,27 @@ class Recorder(Node):
             rnd = self._pending_obj
             if rnd is None or seed is not None:
                 rnd = self._build_round(session.round_index + 1, seed)
+            elif rnd.index != session.round_index + 1:
+                rnd = self._retitle(rnd, session.round_index + 1)
             self._round_obj = rnd
             self.current_round = rnd.as_dict()
             self.pending_round, self._pending_obj = None, None
+            self._slot_takes = {}
             session.start_round(self.current_round, svg=rnd.svg)
             for hit in self.current_round.get('lint_warnings', []):
                 session.warn('lint', **hit)
             return self.status()
 
     def end_round(self) -> dict:
+        """结束本轮，但**把这一轮退回预览**：桌子已经照它摆好了，再点「开始本轮」
+        就是同样的物品、摆放和指令，不用重新摆一次桌子。要换任务再去重 roll。
+        """
         with self._lock:
             session = self._require(State.ROUND)
             session.end_round()
-            self.current_round = None
-            self._round_obj = None
+            self._pending_obj, self._round_obj = self._round_obj, None
+            self.pending_round, self.current_round = self.current_round, None
+            self._slot_takes = {}
             return self.status()
 
     def start_episode(self, index: int) -> dict:
@@ -379,6 +417,8 @@ class Recorder(Node):
         with self._lock:
             session = self._require(State.EPISODE)
             session.end_episode(outcome, note)
+            if self._episode_slot >= 0:
+                self._slot_takes.setdefault(self._episode_slot, []).append(outcome)
             if outcome == 'success' and self.library and self._round_obj:
                 self._bump_usage()
             return self.status()
@@ -450,6 +490,7 @@ class Recorder(Node):
             root = self.session.paths.root
             self.session, self.writers, self.wrists = None, {}, {}
             self.head, self.current_round, self._round_obj = None, None, None
+            self._slot_takes = {}
             self._last_write.clear()
             return {'session': root.name, 'files': digest['file_count'],
                     'bytes': digest['total_bytes'], 'path': str(root)}
@@ -527,6 +568,8 @@ class Recorder(Node):
             'library_error': self.library_error,
             'round_detail': self.current_round,
             'pending_round': self.pending_round,
+            # JSON 的键只能是字符串，前端按 takes[i] 取（JS 会自动转成 "i"）
+            'slot_takes': {str(k): v for k, v in self._slot_takes.items()},
             'peer_port': self.peer_port,
             'peer_alive': self._peer_alive('data_manager'),
         }
@@ -616,11 +659,11 @@ class Recorder(Node):
         """连续预览的最近一帧 JPEG。**录制中照样可用**，代价和快照差一个量级。
 
         腕部走 640x360 子码流常驻解码（实测 7% 单核/路），既不碰 ``-c copy`` 搬字节
-        的主码流那一路，也不用每次重新握手；头部的帧本来就在内存里，只是编码，
-        按 ``PREVIEW_PERIOD`` 节流后约 8% 单核。三路加起来不到四分之一个核。
+        的主码流那一路，也不用每次重新握手；头部的帧本来就在内存里，只需编码，
+        同样交给一个常驻的 ffmpeg。三路加起来不到四分之一个核。
         """
         if key == 'head':
-            return self._head_preview()
+            return self._head_pump.frame()
         url = self.wrist_urls.get(key)
         if url is None:
             raise ValueError(f'未知的视频流 {key}')
@@ -630,18 +673,24 @@ class Recorder(Node):
                 pump = self._previews[key] = PreviewPump(key, preview_url(url))
         return pump.frame()
 
-    def _head_preview(self) -> bytes:
-        cached, at = self._head_jpeg
-        if cached and time.monotonic() - at < self.PREVIEW_PERIOD:
-            return cached
-        jpeg = self._head_snapshot()
-        self._head_jpeg = (jpeg, time.monotonic())
-        return jpeg
+    def _head_due(self) -> bool:
+        """距上次给头部留帧够不够一个预览周期。
+
+        每帧都留 = 30 x 1.8 MB/s 的白拷贝；一帧不留则预览会冻在开录前那一帧，
+        画面看着像流断了（实际 ROS 流和落盘都正常）。
+        """
+        now = time.monotonic()
+        if now - self._head_kept < self.PREVIEW_PERIOD:
+            return False
+        self._head_kept = now
+        return True
 
     def _reap_previews(self) -> None:
         with self._preview_lock:
             stale = [k for k, p in self._previews.items() if p.idle()]
             pumps = [self._previews.pop(k) for k in stale]
+        if self._head_pump.idle():
+            pumps.append(self._head_pump)
         for pump in pumps:
             pump.stop()
 
@@ -650,6 +699,7 @@ class Recorder(Node):
             pumps, self._previews = list(self._previews.values()), {}
         for pump in pumps:
             pump.stop()
+        self._head_pump.stop()
 
 
 def _on_sigterm(signum, frame):   # noqa: ARG001

@@ -120,12 +120,11 @@ def test_never_widens_past_the_recorded_episode():
 
 
 def test_trim_episode_records_what_it_cut():
-    """裁掉多少必须留痕，否则事后无法判断 h5 里那段是不是被动过。"""
+    """裁掉多少必须打得出来，否则无从判断 h5 里那段是不是被动过。"""
     ses = _session(20.0, move_from=8.0, move_to=12.0, grip_level=2.0)
     episode = {'t0': 0.0, 't1': 20.0, 'duration': 20.0}
     ex.trim_episode(ses, episode, keep=1.0)
     cut = episode['trim']
-    assert cut['raw_t0'] == 0.0 and cut['raw_t1'] == 20.0
     assert cut['head_s'] > 5.0 and cut['tail_s'] > 5.0
     assert episode['duration'] == episode['t1'] - episode['t0']
 

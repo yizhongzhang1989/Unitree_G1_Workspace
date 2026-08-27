@@ -91,11 +91,13 @@ def make_handler(node, actions: dict, route):
             self.send_bytes(200, path.read_bytes(),
                             _CTYPE.get(path.suffix, 'application/octet-stream'))
 
-        def send_file(self, path: Path, name: str = '') -> None:
+        def send_file(self, path: Path, name: str = '',
+                      ctype: str = 'application/octet-stream') -> None:
             """分块下发一个文件，支持 Range 断点续传。
 
             不能走 ``send_bytes``：那要先把整份读进内存，导出的视频动辄几百 MB，
-            Orin 上几个并发就把内存吃光了。Range 是为了 WiFi 断了能接着下。
+            Orin 上几个并发就把内存吃光了。Range 是为了 WiFi 断了能接着下，
+            也是 `<video>` 能拖进度条的前提。不给 ``name`` 就是内联打开而不是另存。
             """
             size = path.stat().st_size
             start, end = 0, size - 1
@@ -117,7 +119,7 @@ def make_handler(node, actions: dict, route):
                 end = min(end, size - 1)
                 code = 206
             self.send_response(code)
-            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(end - start + 1))
             self.send_header('Accept-Ranges', 'bytes')
             if code == 206:

@@ -19,9 +19,9 @@
     data/<name>.h5
     episode/<name>.json          每条的帧区间与指令
     episodes_all.json
-    video_head/<name>.mp4
-    video_wrist_left/<name>.mp4
-    video_wrist_right/<name>.mp4
+    video_headcam/<name>.mp4
+    video_leftcam/<name>.mp4
+    video_rightcam/<name>.mp4
 
 **h5 的行数就是 mp4 的帧数**，第 k 帧就是第 k 行那一刻看到的画面。
 全部统一到 30 Hz，连带视频一起重采样（见 `tools/resample_video.py`）。
@@ -46,17 +46,14 @@
 
 别用「world2camera」这类叫法当凭据 —— CV 圈和机器人圈把它指向相反的两边，已经
 因此弄反过一回。`--extrinsic cam_T_base` 可以翻（那时
-`camera_xyz = extrinsic @ world_xyz`）；无论哪种，方向和公式都会写进
-`meta/camera_space/extrinsic_direction` 与 `extrinsic_formula`。
+`camera_xyz = extrinsic @ world_xyz`）；方向写进 h5 的
+`meta/camera_space/extrinsic_direction`，它对应的公式写进 `meta.json`。
 
 两者只差一个逆，弄反了不报错。自查的办法：腕相机是拧在夹爪上的，把它的平移
 列直接当相机位置去量到末端的距离，**必须是常数**；实测本机是 7.4 / 7.7 cm。
 
-## 还没定的口径
-
-- **图像不进 h5**，跟示例一样另存 mp4。h5 里留
-  `state/camera_space/frame_index`（源 mkv 里的帧号，−1 = 那一刻没帧），万一要
-  回溯到原始素材能对上。
+**图像不进 h5**，跟示例一样另存 mp4。h5 里留 `state/camera_space/frame_index`
+（源 mkv 里的帧号，−1 = 那一刻没帧），万一要回溯到原始素材能对上。
 """
 
 from __future__ import annotations
@@ -64,7 +61,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from session_reader import Session                        # noqa: E402
 import resample_video                                     # noqa: E402
 import urdf_fk                                            # noqa: E402
+from urdf_fk import HEAD_OPTICAL, HEAD_OPTICAL_FRAME      # noqa: E402
 
 VERSION = '0.1'
 #: 这个导出格式的名字。写进 meta.json，拿到数据的人才知道该查哪份文档。
@@ -107,7 +104,6 @@ WORLD_AXES = '+X forward, +Y left, +Z up (REP-103)'
 #: 的 `gripper_limits`。**0 是闭合、2.76 是张开**，和对面 meta.json 要的
 #: 「0=open、1=closed」正好相反，所以归一化时要取补。
 GRIPPER_TRAVEL_RAD = 2.76377472169236
-HEAD_OPTICAL_FRAME = 'camera_color_optical_frame'
 
 #: 末端统一约定：**+Z 接近方向（夹爪尾→头）、+X 朝腕相机那侧、+Y 开合**，
 #: 右手系所以 Y = Z × X。
@@ -121,8 +117,8 @@ HEAD_OPTICAL_FRAME = 'camera_color_optical_frame'
 EE_CONVENTION = 'approach_z_closing_y'
 EE_FIX_QUAT_XYZW = (0.0, 0.0, 0.7071067811865476, 0.7071067811865476)
 
-#: `extrinsic` 的两个方向及其定义式。存公式而不只存名字：「world2camera」这类叫法
-#: CV 圈和机器人圈指向相反，已经因此弄反过一回。
+#: `extrinsic` 的两个方向及其定义式。`meta.json` 里存的是公式而不只是名字：
+#: 「world2camera」这类叫法 CV 圈和机器人圈指向相反，已经因此弄反过一回。
 EXTRINSIC_FORMULA = {
     'base_T_cam': 'world_xyz = extrinsic @ camera_xyz',
     'cam_T_base': 'camera_xyz = extrinsic @ world_xyz',
@@ -133,29 +129,28 @@ EXTRINSIC_FORMULA = {
 #: 零位实测（在 torso_link 下）：+X → 机器人右侧（图像向右）、+Y → 向下、+Z → 向前。
 CAMERA_AXES = '+X image right, +Y image down, +Z forward into the scene (OpenCV)'
 
-#: 头部彩色镜头相对 `d435_link` 的位姿。URDF 里没有这一段 —— 它由 realsense-ros
-#: 从设备出厂标定里读出来发成 TF。2026-08-25 从跑着的栈上取的全精度值。
-#: **换一台 D435i 就要重取**；session 的 meta.json 里有 `head_optical` 时以它为准。
-HEAD_OPTICAL = {
-    'xyz': [-0.0008463825797662139, 0.015250945463776588, -2.4963012037915178e-05],
-    'quat': [-0.4998616034745607, 0.5031675567847118,
-             -0.49744304340790907, 0.4995109665825387],
-}
-
 
 @dataclass(frozen=True)
 class CameraSpec:
-    name: str          # 导出用的名字，也是 video_<name>/ 目录名
+    name: str          # 导出用的名字，也是 video_<name>/ 目录名。**用对面的词**
+    source: str        # session 里这一路的流名（video/<source>.mkv）
     frame: str         # URDF 里的叶子 link
     calib: str         # calibration.yaml 的 intrinsics 键；空 = 用 meta.json
     static: bool       # 外参在一条 episode 里是否恒定
 
 
+#: 名字照对面样例的 `meta/camera_space/names`（headcam/leftcam/rightcam/frontcam），
+#: 它们的 leftcam/rightcam 就是两只手腕上的相机。我们没有 frontcam。
 CAMERAS = (
-    CameraSpec('head', HEAD_OPTICAL_FRAME, '', True),
-    CameraSpec('wrist_left', 'camera_left', 'camera_left', False),
-    CameraSpec('wrist_right', 'camera_right', 'camera_right', False),
+    CameraSpec('headcam', 'head', HEAD_OPTICAL_FRAME, '', True),
+    CameraSpec('leftcam', 'wrist_left', 'camera_left', 'camera_left', False),
+    CameraSpec('rightcam', 'wrist_right', 'camera_right', 'camera_right', False),
 )
+
+#: h5 根 `meta` 上的 attrs，就这两个 —— 对面样例里有的那两个。夹爪归一化约定的版号，
+#: 以及「这份数据事后打过哪些补丁」（我们没打过，给空表而不是留空缺）。
+#: 导出参数不写进 h5，看 `meta.json` 与导出日志。
+H5_NOTES = {'gripper_unified': 'v1', 'patches': '[]'}
 
 #: 前 29 个是 G1 本体关节，最后两个 eccentric 是夹爪 —— 它们进 actuator_space。
 #: 规范把夹爪明确划在 actuator 而不是 joint（例 2/例 4 都是这么分的）。
@@ -182,23 +177,28 @@ def build_grid(t0: float, t1: float, hz: float) -> np.ndarray:
 
 
 def hold(t_src: np.ndarray, data: np.ndarray, grid: np.ndarray,
-         max_age: float) -> tuple[np.ndarray, np.ndarray]:
-    """零阶保持采样。返回 (值, 有效位)。
+         max_age: float, columns=None) -> tuple[np.ndarray, np.ndarray]:
+    """零阶保持采样。返回 (值, 有效位)，``columns`` 选定要哪几列。
 
     **不插值。** 关节角插值看着无害，但四元数、离散状态位、指令都不能线性插；
     与其一个字段一个规则，不如统一保持上一个真实样本，超过 `max_age` 就判无效。
     无效处填 NaN 而不是 0 —— 0 是一个合法的关节角，下游看不出是缺的。
+
+    挑列必须在采样**之后**：先 `data[:, keep]` 会把整张表复制一遗（实测一个
+    21802x93 的 joint_states 这么写要 139 ms，换成先采样只要 4.9 ms）。
     """
     grid = np.asarray(grid, float)
     data = np.atleast_2d(np.asarray(data, float))
-    out = np.full((grid.size, data.shape[1]), np.nan)
+    width = data.shape[1] if columns is None else len(columns)
+    out = np.full((grid.size, width), np.nan)
     if t_src.size == 0:
         return out, np.zeros(grid.size, bool)
     index = np.searchsorted(t_src, grid, side='right') - 1
     valid = index >= 0
     index = np.clip(index, 0, t_src.size - 1)
     valid &= (grid - t_src[index]) <= max_age
-    out[valid] = data[index[valid]]
+    rows = data[index[valid]]
+    out[valid] = rows if columns is None else rows[:, columns]
     return out, valid
 
 
@@ -275,20 +275,22 @@ def _quat_to_matrix(quat) -> np.ndarray:
 
 def joint_space(session: Session, grid, order, max_age, gripper_index) -> dict:
     """state 用 joint_states 实测，action 用 fpc_commands —— 关节级指令的唯一出口"""
-    keep = [i for i in range(len(order)) if i not in gripper_index]
     count = len(order)
+    keep = [i for i in range(count) if i not in gripper_index]
+    names = [order[i] for i in keep]
+
     t, data = read_table(session, 'joint_states', 3 * count)
     state = {}
-    for name, offset in (('position', 0), ('velocity', 1), ('effort', 2)):
-        block = data[:, offset * count:(offset + 1) * count]
+    for block, field in enumerate(('position', 'velocity', 'effort')):
         # 三者同表同时刻，有效位是同一个，取最后一次即可
-        state[name], state['valid_mask'] = hold(t, block[:, keep], grid, max_age)
+        state[field], state['valid_mask'] = hold(
+            t, data, grid, max_age, [block * count + i for i in keep])
 
     ta, cmd = read_table(session, 'fpc_commands', 31 + 14 + 14)
-    position, _ = hold(ta, cmd[:, keep], grid, max_age)
+    position, _ = hold(ta, cmd, grid, max_age, keep)
     return {
-        'names': [order[i] for i in keep],
-        'roles': _roles([order[i] for i in keep]),
+        'names': names,
+        'roles': _roles(names),
         'state': state,
         'action': {'position': position, 'valid_mask': arrived(ta, grid)},
     }
@@ -297,10 +299,10 @@ def joint_space(session: Session, grid, order, max_age, gripper_index) -> dict:
 def actuator_space(session: Session, grid, order, max_age, gripper_index) -> dict:
     """夹爪。state 走 joint_states 里的 eccentric 轴，和关节同一个时间基。"""
     t, data = read_table(session, 'joint_states', 3 * len(order))
-    value, valid = hold(t, data[:, list(gripper_index)], grid, max_age)
+    value, valid = hold(t, data, grid, max_age, list(gripper_index))
 
     tc, cmd = read_table(session, 'motion_control_command', 20)
-    command, _ = hold(tc, cmd[:, 18:20], grid, max_age)      # base4+left7+right7+grip2
+    command, _ = hold(tc, cmd, grid, max_age, [18, 19])   # base4+left7+right7+grip2
     return {
         'names': [f'{side}_gripper' for side in ARMS],
         'types': ['gripper'] * len(ARMS),
@@ -330,14 +332,22 @@ def read_table(session: Session, key: str, ncol: int) -> tuple[np.ndarray, np.nd
 
     `fpc_commands` 在 FPC inactive 时根本没有发布者，空表是正常情况，
     下游会走 hold 的「无效填 NaN」而不是整个导出崩掉。
+
+    **按 session 缓存，返回的是共享数组，别就地改。** 同一批表每条 episode 都要
+    重读一遍（joint_states 就有两个 space 要用），12 条 episode 实测读了 72 次。
     """
+    cache = vars(session).setdefault('_yb_tables', {})
+    if key in cache:
+        return cache[key]
     if key not in session.tables():
-        return np.empty(0), np.empty((0, ncol))
+        cache[key] = (np.empty(0), np.empty((0, ncol)))
+        return cache[key]
     t, data = session.table(key)
     if t.size and not np.all(np.diff(t) >= 0):
         order = np.argsort(t, kind='stable')
         t, data = t[order], data[order]
-    return t, data
+    cache[key] = (t, data)
+    return cache[key]
 
 
 def active_span(session: Session, t0: float, t1: float, keep: float) -> tuple[float, float]:
@@ -376,20 +386,15 @@ def active_span(session: Session, t0: float, t1: float, keep: float) -> tuple[fl
             min(t1, float(t[moving[-1]]) + keep))
 
 
-def trim_episode(session: Session, episode: dict, keep: float) -> dict:
-    """就地把 episode 的时间窗收紧，原始窗口留在 ``trim`` 里备查。"""
+def trim_episode(session: Session, episode: dict, keep: float) -> None:
+    """就地把 episode 的时间窗收紧，裁了多少留在 ``trim`` 里给日志打。"""
     t0, t1 = active_span(session, episode['t0'], episode['t1'], keep)
     if t1 - t0 < 1.0 / DEFAULT_HZ:       # 收得只剩一帧就别收了
-        return episode
-    episode['trim'] = {
-        'raw_t0': episode['t0'], 'raw_t1': episode['t1'],
-        'head_s': round(t0 - episode['t0'], 3),
-        'tail_s': round(episode['t1'] - t1, 3),
-        'keep_idle_s': keep,
-    }
+        return
+    episode['trim'] = {'head_s': round(t0 - episode['t0'], 3),
+                       'tail_s': round(episode['t1'] - t1, 3)}
     episode['t0'], episode['t1'] = t0, t1
     episode['duration'] = t1 - t0
-    return episode
 
 
 def end_space(model, joints: dict, session: Session, grid, max_age,
@@ -404,18 +409,16 @@ def end_space(model, joints: dict, session: Session, grid, max_age,
 
     if action_source == 'target':
         t, data = read_table(session, 'motion_control_command', 20)
-        blocks = [data[:, 4:11], data[:, 11:18]]             # base4 + left7 + right7
+        picks = [range(4, 11), range(11, 18)]                # base4 + left7 + right7
     else:
         columns = session.columns('motion_control_status')
         t, data = read_table(session, 'motion_control_status', len(columns))
-        blocks = [data[:, [columns.index(f'limited.{side}.{k}')
-                           for k in ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw')]]
-                  for side in ARMS]
-    held = [hold(t, block, grid, max_age)[0] for block in blocks]
-    action = np.stack(held, axis=1)
+        picks = [[columns.index(f'limited.{side}.{k}')
+                  for k in ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw')] for side in ARMS]
+    action = np.stack([hold(t, data, grid, max_age, list(pick))[0]
+                       for pick in picks], axis=1)
     return {
         'names': [f'{side}_arm_end' for side in ARMS],
-        'links': [END_LINKS[side] for side in ARMS],
         'state': {'pose': pose, 'pose_unified': unify_pose(pose),
                   'valid_mask': np.isfinite(pose).all(axis=(1, 2))},
         'action': {'pose': action, 'pose_unified': unify_pose(action),
@@ -434,8 +437,7 @@ def unify_pose(pose) -> np.ndarray:
 def camera_space(model, joints: dict, session: Session, grid, max_age,
                  intrinsics: dict, direction: str) -> dict:
     """内参逐档取标定值，外参靠 FK。图像另存 mp4，h5 里只留帧号。"""
-    matrices, extrinsic, frames, warnings = [], [], [], []
-    sizes = []
+    matrices, sizes, extrinsic, frames, warnings = [], [], [], [], []
     for camera in CAMERAS:
         entry = intrinsics.get(camera.name)
         if entry is None:
@@ -451,8 +453,8 @@ def camera_space(model, joints: dict, session: Session, grid, max_age,
         if direction == 'cam_T_base':
             pose = urdf_fk.invert(pose)
         extrinsic.append(pose[:, :3, :])
-        pts = (session.video_pts(camera.name)
-               if session.video_path(camera.name).is_file() else np.empty(0))
+        pts = (session.video_pts(camera.source)
+               if session.video_path(camera.source).is_file() else np.empty(0))
         back = int((np.diff(pts) < 0).sum()) if pts.size else 0
         if back:
             warnings.append(f'{camera.name}：pts 有 {back} 处回退，查表时已夹平')
@@ -465,9 +467,10 @@ def camera_space(model, joints: dict, session: Session, grid, max_age,
         'static_intrinsic': [1] * len(CAMERAS),
         'static_extrinsic': [int(c.static) for c in CAMERAS],
         'state': {
+            # float32：对面样例这两路就是 f32，f64 只是把体积翻倍（内参每帧还都一样）
             'intrinsic': np.broadcast_to(np.stack(matrices),
-                                         (grid.size, len(CAMERAS), 3, 3)),
-            'extrinsic': np.stack(extrinsic, axis=1),
+                                         (grid.size, len(CAMERAS), 3, 3)).astype(np.float32),
+            'extrinsic': np.stack(extrinsic, axis=1).astype(np.float32),
             'frame_index': np.stack(frames, axis=1),
         },
     }
@@ -494,13 +497,16 @@ def collect_intrinsics(session: Session, calibration: dict) -> dict:
     """
     out = {}
     head = session.meta.get('head_camera_info') or {}
-    if head.get('k'):
-        out['head'] = {'k': head['k'], 'd': head.get('d', [0.0] * 5),
-                       'width': head.get('width'), 'height': head.get('height'),
-                       'source': 'meta.json head_camera_info（D435i 出厂值）'}
     table = (calibration.get('intrinsics') or {})
     for camera in CAMERAS:
-        size = _video_size(session, camera.name)
+        if not camera.calib:                    # 头部没标定表，用 D435i 的出厂值
+            if head.get('k'):
+                out[camera.name] = {
+                    'k': head['k'], 'd': head.get('d', [0.0] * 5),
+                    'width': head.get('width'), 'height': head.get('height'),
+                    'source': 'meta.json head_camera_info（D435i 出厂值）'}
+            continue
+        size = _video_size(session, camera.source)
         for entry in table.get(camera.calib) or []:
             if size and (entry['width'], entry['height']) != size:
                 continue
@@ -526,8 +532,13 @@ def _video_size(session: Session, name: str) -> tuple | None:
 # ------------------------------------------------------------------------- 写盘
 
 
-def export_episode(handle, episode: dict, spaces: dict,
-                   grid: np.ndarray, notes: dict) -> None:
+def export_episode(handle, spaces: dict, grid: np.ndarray) -> None:
+    """写一条 episode 的 h5。
+
+    **只写规范里有的键。** 采集侧的标注（物品编号、lint 告警、步骤序号…）不进 h5，
+    也不进索引 —— 它们是我们自己的现场记录，对面的读取代码一个都不认。
+    坐标系/夹爪/末端约定这些说明性字段统一在 `meta.json` 里给，h5 里不再重复一遍。
+    """
     import h5py
     text = h5py.string_dtype('utf-8')
 
@@ -541,7 +552,7 @@ def export_episode(handle, episode: dict, spaces: dict,
 
     meta = handle.create_group('meta')
     meta.attrs['version'] = VERSION
-    for key, value in notes.items():
+    for key, value in H5_NOTES.items():
         meta.attrs[key] = value
     handle.create_dataset('timestamp', data=grid)
 
@@ -551,14 +562,10 @@ def export_episode(handle, episode: dict, spaces: dict,
     group.create_dataset('static_intrinsic', data=np.array(camera['static_intrinsic'], np.int64))
     group.create_dataset('static_extrinsic', data=np.array(camera['static_extrinsic'], np.int64))
     strings(group, 'state_fields', ['intrinsic', 'extrinsic'])
+    # K 是这个分辨率下的值，而 mp4 已经降过采样，不给尺寸就没法把 K 用到画面上
     group.create_dataset('intrinsic_size', data=np.array(camera['intrinsic_size'], np.int64))
-    scalar(group, 'intrinsic_size_note',
-           'K 对应的是这个分辨率，不是 video_*/ 里 mp4 的分辨率；'
-           '要用在 mp4 像素上先按 mp4_w/intrinsic_w 缩放 fx,cx（fy,cy 同理）')
     scalar(group, 'extrinsic_direction', camera['extrinsic_direction'])
-    scalar(group, 'extrinsic_formula', EXTRINSIC_FORMULA[camera['extrinsic_direction']])
     scalar(group, 'extrinsic_reference', 'robot')
-    scalar(group, 'optical_axes', CAMERA_AXES)
 
     joint = spaces['joint']
     group = meta.create_group('joint_space')
@@ -575,7 +582,6 @@ def export_episode(handle, episode: dict, spaces: dict,
     end = spaces['end']
     group = meta.create_group('end_space')
     strings(group, 'names', end['names'])
-    strings(group, 'links', end['links'])
     group.create_group('roles').create_dataset(
         'end', data=np.arange(len(end['names']), dtype=np.int64))
     strings(group, 'state_fields', ['pose'])
@@ -583,12 +589,6 @@ def export_episode(handle, episode: dict, spaces: dict,
     scalar(group, 'state_pose_reference', 'robot')
     scalar(group, 'action_pose_reference', 'robot')
     scalar(group, 'action_pose_type', 'absolute')
-    scalar(group, 'pose_frame', ORIGIN)
-    # pose 是 gripper_base 原生的摆法，pose_unified 是右乘 R_fix 之后的统一约定。
-    # 两份都留，和对面示例一样 —— 换算是纯函数，反过来推不回原生 frame 的语义。
-    scalar(group, 'unified_convention', EE_CONVENTION)
-    group.create_dataset('unified_fix_quat_xyzw',
-                         data=np.array(EE_FIX_QUAT_XYZW, float))
     scalar(group, 'fk_provenance', json.dumps(end['fk_provenance'],
                                               ensure_ascii=False, sort_keys=True))
 
@@ -598,7 +598,6 @@ def export_episode(handle, episode: dict, spaces: dict,
     strings(group, 'types', actuator['types'])
     strings(group, 'state_fields', ['value'])
     strings(group, 'action_fields', ['value'])
-    scalar(group, 'value_convention', '0=open, 1=closed')
 
     for section in ('state', 'action'):
         root = handle.create_group(section)
@@ -608,16 +607,11 @@ def export_episode(handle, episode: dict, spaces: dict,
                 continue
             group = root.create_group(f'{key}_space')
             for field, array in payload.items():
+                array = np.asarray(array)
                 group.create_dataset(
                     field,
-                    data=np.asarray(array).astype(np.uint8) if field == 'valid_mask'
-                    else np.asarray(array),
+                    data=array.astype(np.uint8) if field == 'valid_mask' else array,
                     compression='gzip', compression_opts=4)
-    # 结构化指令字段有嵌套（obj/target），逐个转字符串会丢结构，整条存 JSON
-    handle.attrs['episode_json'] = json.dumps(episode, ensure_ascii=False)
-    for key in ('round', 'episode', 'outcome', 'instruction_en', 'instruction_zh'):
-        if key in episode:
-            handle.attrs[key] = episode[key]
 
 
 def build_spaces(session: Session, model, grid, args, intrinsics,
@@ -648,19 +642,6 @@ def episode_id(name: str) -> str:
     我们一个文件只放一条 episode，恒为 0000。
     """
     return f'{name.split("-", 1)[0]}-0000'
-
-
-def episode_label(episode: dict, session_id: str) -> list:
-    """检索用的标签串，粒度照对面示例：任务、机器人、批次、轮次、条次、成败。"""
-    task = _slug(f'{episode.get("verb") or ""} {(episode.get("obj") or {}).get("en", "")}')
-    return [tag for tag in (task, 'g1', session_id,
-                            f'round{episode["round"]}',
-                            f'episode{episode["episode"]}',
-                            episode.get('outcome') or '') if tag]
-
-
-def _slug(text: str) -> str:
-    return re.sub(r'[^a-z0-9]+', '_', str(text).lower()).strip('_')
 
 
 def dataset_meta(session: Session, episodes: list, args, intrinsics: dict) -> dict:
@@ -733,6 +714,8 @@ def dataset_meta(session: Session, episodes: list, args, intrinsics: dict) -> di
             'arms': {f'{side}_arm_end': {'R_fix_quat_xyzw': list(EE_FIX_QUAT_XYZW),
                                          'source': 'urdf_measured'}
                      for side in ARMS},
+            '_arms_desc': "Keys are the dataset's own meta/end_space/names verbatim "
+                          '(left_arm_end/right_arm_end). source in {manual, urdf_measured}.',
         },
         'license': 'proprietary',
     }
@@ -784,10 +767,9 @@ def main() -> int:
                     default='base_T_cam',
                     help='base_T_cam（默认）: world_xyz = extrinsic @ camera_xyz；'
                          'cam_T_base: camera_xyz = extrinsic @ world_xyz')
-    ap.add_argument('--video-height', type=int, default=0,
+    ap.add_argument('--video-height', type=int, default=360,
                     help='导出视频的高度，0 = 保持源分辨率')
     ap.add_argument('--no-video', action='store_true')
-    ap.add_argument('--include-discarded', action='store_true')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--progress', action='store_true',
                     help='往 stdout 多吐 "@progress <0..1>" 行，给面板的进度条用')
@@ -810,12 +792,28 @@ def main() -> int:
     for camera in CAMERAS:
         entry = intrinsics.get(camera.name)
         print(f'内参 {camera.name:<12} {entry["source"] if entry else "缺 —— 该路写 NaN"}')
+        try:
+            model.chain(ORIGIN, camera.frame)
+        except (KeyError, ValueError):
+            # 腕相机那两个 link 是 calibration.yaml 用 create 现建的，裸 URDF 里没有
+            print(f'！{camera.frame} 不在模型里 —— 它由 calibration.yaml 的 '
+                  'urdf_overrides 创建，本机必须传 --calibration', file=sys.stderr)
+            return 2
 
-    episodes = session.episodes(include_discarded=args.include_discarded)
+    # 只导 success。fail/discard 是采集现场判的「这一条没做成」，导出了就是拿失败轨迹去模仿
+    graded = session.episodes(include_discarded=True)
+    episodes = [e for e in graded if e['outcome'] == 'success']
+    dropped = len(graded) - len(episodes)
+    print(f'episode   {len(episodes)} 条 success'
+          + (f'，丢掉 {dropped} 条 fail/discard' if dropped else ''))
     if not episodes:
         print('没有可导出的 episode', file=sys.stderr)
         return 1
     out = Path(args.out) if args.out else None
+    writing = out is not None and not args.dry_run
+    if writing:
+        import h5py
+        (out / 'data').mkdir(parents=True, exist_ok=True)
     session_id = session.manifest['session_id']
     plans, records = {c.name: [] for c in CAMERAS}, []
     for serial, episode in enumerate(episodes, 1):
@@ -828,42 +826,37 @@ def main() -> int:
         cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'
                     if cut and cut['head_s'] + cut['tail_s'] > 0.05 else '')
         print(f'{name}  N={grid.size:<5d} {episode["duration"]:.1f}s{cut_note}  '
-              f'{episode["outcome"]:<8} {episode.get("instruction_en", "")}')
+              f'{episode.get("instruction_en", "")}')
         for line in _report(spaces, verbose=args.dry_run):
             print(f'    {line}')
         records.append({'name': name, 'episode': episode, 'frames': grid.size})
-        if args.dry_run or out is None:
+        if not writing:
             continue
 
-        import h5py
-        notes = {'origin': ORIGIN, 'fk_root': ORIGIN, 'session': session_id,
-                 'end_action_source': args.end_action,
-                 'grid_hz': args.hz, 'max_age_s': args.max_age,
-                 'keep_idle_s': -1.0 if args.no_trim else args.keep_idle}
-        (out / 'data').mkdir(parents=True, exist_ok=True)
         with h5py.File(out / 'data' / f'{name}.h5', 'w') as handle:
-            export_episode(handle, episode, spaces, grid, notes)
+            export_episode(handle, spaces, grid)
         frames = spaces['camera']['state']['frame_index']
         for column, camera in enumerate(CAMERAS):
             plans[camera.name].append(resample_video.Plan(
                 out / f'video_{camera.name}' / f'{name}.mp4',
                 frames[:, column].tolist()))
 
-    if args.dry_run or out is None:
+    if not writing:
         return 0
-    videos = {} if args.no_video else export_videos(session, plans, args)
-    write_sidecars(out, session, episodes, args, intrinsics, records, videos)
+    if not args.no_video:
+        export_videos(session, plans, args)
+    write_sidecars(out, session, episodes, args, intrinsics, records)
     print(f'写到 {out}')
     return 0
 
 
-def export_videos(session: Session, plans: dict, args) -> dict:
+def export_videos(session: Session, plans: dict, args) -> None:
     if not resample_video.available():
         print('！找不到 ffmpeg/ffprobe，跳过视频', file=sys.stderr)
-        return {}
+        return
     # 实测视频占总耗时 97%（h5 0.5s / 全程 15s），进度条只看视频就够准了。
     # 分母用源帧总数而不是输出帧数：只导一小段时解码也得从头拉到那里。
-    totals = {c.name: max(len(session.video_pts(c.name)), 1) for c in CAMERAS}
+    totals = {c.name: max(len(session.video_pts(c.source)), 1) for c in CAMERAS}
     done = {c.name: 0 for c in CAMERAS}
     span = len(CAMERAS)
 
@@ -872,9 +865,8 @@ def export_videos(session: Session, plans: dict, args) -> dict:
             frac = sum(min(done[n] / totals[n], 1.0) for n in done) / span
             print(f'@progress {frac:.4f}', flush=True)
 
-    out = {}
     for camera in CAMERAS:
-        source = session.video_path(camera.name)
+        source = session.video_path(camera.source)
         if not source.is_file() or not plans[camera.name]:
             done[camera.name] = totals[camera.name]
             report()
@@ -889,19 +881,22 @@ def export_videos(session: Session, plans: dict, args) -> dict:
                                         on_progress=tick if args.progress else None)
         done[camera.name] = totals[camera.name]
         report()
-        for item in stats:
-            out.setdefault(item['file'], {})[camera.name] = item
         held = sum(s['held'] for s in stats)
         past = sum(s['past_end'] for s in stats)
         print(f'视频 {camera.name:<12} {len(stats)} 段  '
               f'{stats[0]["width"]}x{stats[0]["height"]}@{args.hz:g}  重复帧 {held}'
               + (f'  ！源提前解完 {past} 帧' if past else ''))
-    return out
 
 
 def write_sidecars(out: Path, session: Session, episodes: list, args,
-                   intrinsics: dict, records: list, videos: dict) -> None:
-    """meta.json / episode/*.json / episodes_all.json，布局照对面示例。"""
+                   intrinsics: dict, records: list) -> None:
+    """meta.json / episode/*.json / episodes_all.{json,h5}，布局照对面示例。
+
+    **字段取模板与样例的交集。** 采集侧的现场标注（物品编号、lint 告警、绝对时刻、
+    裁剪痕迹）一律不写 —— 对面按模板读，多出来的键谁也不认。单条里也不放
+    `episode_name`（文件名逐字就是它，robotwin 也没放）和视频路径
+    （三路都是 ``video_<camera>/<episode_name>.mp4``，拼得出来）。
+    """
     (out / 'episode').mkdir(parents=True, exist_ok=True)
     _dump(out / 'meta.json', dataset_meta(session, episodes, args, intrinsics))
     everything = []
@@ -909,25 +904,40 @@ def write_sidecars(out: Path, session: Session, episodes: list, args,
         episode = record['episode']
         entry = {
             'episode_id': episode_id(record['name']),
-            'file': f'{record["name"]}.h5',
             'start_frame': 0,
             'end_frame': record['frames'] - 1,
-            # 规范要的是一串候选说法；我们只有一条，先按单元素列表给
-            'instruction': [episode['instruction_en']] if episode.get('instruction_en') else [],
-            'instruction_zh': [episode['instruction_zh']] if episode.get('instruction_zh') else [],
-            'label': episode_label(episode, session.manifest['session_id']),
-            'outcome': episode['outcome'],
-            'video': {name: item['file'] for name, item in
-                      (videos.get(f'{record["name"]}.mp4') or {}).items()},
-            # 内参是源分辨率下的，mp4 已经降过，两边尺寸都给出来才好换算
-            'video_size': {name: [item['width'], item['height']] for name, item in
-                           (videos.get(f'{record["name"]}.mp4') or {}).items()},
-            'source': {k: v for k, v in episode.items()
-                       if k not in ('instruction_en', 'instruction_zh', 'outcome')},
+            # 规范要的是一串候选说法；我们只有一条，按单元素列表给
+            'instruction': ([episode['instruction_en']]
+                            if episode.get('instruction_en') else []),
         }
         _dump(out / 'episode' / f'{record["name"]}.json', {'episodes': [entry]})
-        everything.append(entry)
+        # 键顺序也照 robotwin：episode_name 插在 id 后面
+        everything.append({'episode_id': entry['episode_id'],
+                           'episode_name': record['name'],
+                           **{k: v for k, v in entry.items() if k != 'episode_id'}})
     _dump(out / 'episodes_all.json', {'episodes': everything})
+    write_episode_index(out / 'episodes_all.h5', everything)
+
+
+def write_episode_index(path: Path, entries: list) -> None:
+    """`episodes_all.json` 的 h5 版，字段照对面样例里的同名文件。
+
+    他们那份还有一个 `instruction_eval`，我们没有评测说法集，就不给了。
+    指令补成 ``(N, K)`` 的定宽表 —— h5 存不了锯齿数组。
+    """
+    import h5py
+    text = h5py.string_dtype('utf-8')
+    with h5py.File(path, 'w') as handle:
+        for key in ('start_frame', 'end_frame'):
+            handle.create_dataset(key, data=np.array(
+                [e[key] for e in entries], np.int64))
+        handle.create_dataset('episode_id', dtype=text, data=np.array(
+            [e['episode_id'] for e in entries], dtype=object))
+        width = max((len(e['instruction']) for e in entries), default=0)
+        rows = [e['instruction'] + [''] * (width - len(e['instruction']))
+                for e in entries]
+        handle.create_dataset('instruction', dtype=text, data=np.array(
+            rows, dtype=object).reshape(len(entries), width))
 
 
 def _dump(path: Path, payload) -> None:
@@ -939,12 +949,15 @@ def _report(spaces: dict, verbose: bool) -> list[str]:
     """每条 episode 的健康度。**有效率必须印出来** —— 某路整段没数据（比如
     FPC inactive 时 `fpc_commands` 一行都没）会得到一个形状完全正常、内容全 NaN
     的数据集，不看这一行就发现不了。
+
+    space 的名字一律现从 `spaces` 取。这里曾经另列过一份，`base_space` 删掉之后
+    没跟着改，`--dry-run` 就一路 KeyError 到被人撞上为止。
     """
     lines = list(spaces['camera'].get('warnings') or [])
     coverage = []
-    for key in ('joint', 'end', 'actuator'):
+    for key, space in spaces.items():
         for section in ('state', 'action'):
-            mask = (spaces[key].get(section) or {}).get('valid_mask')
+            mask = (space.get(section) or {}).get('valid_mask')
             if mask is not None:
                 coverage.append(f'{section}/{key} {np.mean(mask):.0%}')
     frames = spaces['camera']['state']['frame_index']
@@ -952,10 +965,10 @@ def _report(spaces: dict, verbose: bool) -> list[str]:
                  for i, n in enumerate(spaces['camera']['names'])]
     lines.append('有效率  ' + '  '.join(coverage))
     if verbose:
-        for key in ('camera', 'joint', 'end', 'actuator', 'base'):
+        for key, space in spaces.items():
             for section in ('state', 'action'):
-                payload = spaces[key].get(section) or {}
-                shapes = '  '.join(f'{f}{np.shape(a)}' for f, a in payload.items())
+                shapes = '  '.join(f'{f}{np.shape(a)}'
+                                   for f, a in (space.get(section) or {}).items())
                 if shapes:
                     lines.append(f'{section}/{key}_space  {shapes}')
     return lines

@@ -14,7 +14,7 @@
 | --- | --- |
 | **采样率** | **统一 30 Hz**。h5 的每一行、mp4 的每一帧，都落在同一条 30 Hz 栅格上 |
 | **对齐方式** | **h5 第 k 行 ⇔ mp4 第 k 帧**，同一时刻。不用查时间戳、不用插值 |
-| **一条 episode** | 1 个 `.h5` + 3 个同名 `.mp4`（head / wrist_left / wrist_right） |
+| **一条 episode** | 1 个 `.h5` + 3 个同名 `.mp4`（headcam / leftcam / rightcam） |
 | **世界坐标系** | **`torso_link`**，跟着机器人一起动。右手系，+X 前 / +Y 左 / +Z 上（REP-103） |
 | **长度单位** | 米 |
 | **角度单位** | 弧度 |
@@ -25,7 +25,8 @@
 | **相机光学系** | OpenCV 惯例：+X 图像右 / +Y 下 / +Z 进入场景 |
 | **视频** | H.264 mp4，30 fps，默认高 360（源分辨率可选） |
 | **缺数据** | `state` 侧填 `NaN` 并置 `valid_mask=0`，**绝不填 0** |
-| **episode 边界** | 已掐掉首尾的无动作空转，各留 1 s（§1.1）。原始边界在 `source.trim` 里 |
+| **episode 边界** | 已掉掉首尾的无动作空转，各留 1 s（§1.1） |
+| **收录范围** | **只有采集时标注为成功的 episode**，fail / discard 一律不导（§1.2） |
 
 ---
 
@@ -97,8 +98,17 @@ YB：     30 Hz       ├────┼────┼────┼───�
 夹爪这一项在实测的 13 条 episode 上**一次也没改变过边界**（夹爪动的时候手臂也在动），
 留着是为了「手臂停着只合爪」那种真实情形。
 
-裁多少记在 `source.trim` 里（§8）。`--no-trim` 关掉，`--keep-idle` 调余量。
+裁了多少会在导出日志里逐条打出来。`--no-trim` 关掉，`--keep-idle` 调余量。
 没录 `motion_control_status`、或整条都没动时，原样保留不裁。
+
+### 1.2 只收成功的
+
+采集时每条 episode 当场标 `success` / `fail` / `discard`，**导出只取 `success`**。
+失败轨迹对模仿学习是负样本，混在里面等于教模型把东西碰倒。丢掉几条会在导出日志
+第一行打出来。被丢掉的 episode **在原始采集里一样不动**，要的话可以自己改脚本重导。
+
+> 文件名里的序号在一次导出内连续，而 `round0_episode2` 这段是采集时的原始编号 ——
+> 中间跳号就是那几条没做成。
 
 ---
 
@@ -111,13 +121,14 @@ meta = json.load(open('meta.json'))                     # 整个数据集共用�
 eps  = json.load(open('episodes_all.json'))['episodes'] # 有哪些 episode
 
 ep = eps[0]
-f  = h5py.File(f'data/{ep["file"]}', 'r')
+name = ep['episode_name']                       # h5 和三个 mp4 共用这一个基名
+f  = h5py.File(f'data/{name}.h5', 'r')
 
 q      = f['state/joint_space/position'][:]     # (N, 29) 关节角，rad
 pose    = f['state/end_space/pose_unified'][:]  # (N, 2, 7) 双臂末端 xyz + 四元数
 grip    = f['state/actuator_space/value'][:]    # (N, 2) 夹爪 0=张开 1=夹紧
 target  = f['action/end_space/pose_unified'][:] # (N, 2, 7) 同一时刻的目标位姿
-video   = f'video_head/{ep["video"]["head"]}'   # 第 k 帧 == 第 k 行
+video   = f'video_headcam/{name}.mp4'           # 第 k 帧 == 第 k 行
 ```
 
 **唯一必须记住的一条：`h5` 的第 k 行和 `mp4` 的第 k 帧是同一时刻。**
@@ -130,12 +141,17 @@ video   = f'video_head/{ep["video"]["head"]}'   # 第 k 帧 == 第 k 行
 ```
 meta.json                                数据集级约定（机器人、坐标系、夹爪定义…）
 episodes_all.json                        全部 episode 的索引
+episodes_all.h5                          同一份索引的 h5 版（只有帧区间与指令）
 data/<name>.h5                           一条 episode 一个
 episode/<name>.json                      同一条的索引，单独一份
-video_head/<name>.mp4                    头部相机
-video_wrist_left/<name>.mp4              左腕相机
-video_wrist_right/<name>.mp4             右腕相机
+video_headcam/<name>.mp4                 头部相机
+video_leftcam/<name>.mp4                 左腕相机
+video_rightcam/<name>.mp4                右腕相机
 ```
+
+**相机的名字用对面样例的词**（`headcam`/`leftcam`/`rightcam`），不是采集端的流名。
+对面还有一路 `frontcam`（机器人前方的外部相机），我们没有，所以是三路不是四路 ——
+顺序一律读 `meta/camera_space/names`，别按位置硬编。
 
 同名的 `.h5` 和三个 `.mp4` 属于同一条 episode。文件名格式：
 
@@ -207,7 +223,8 @@ q_left_arm = f['state/joint_space/position'][:, left]
 - 中间那一维：`0` = 左臂，`1` = 右臂（`meta/end_space/names`）。
 - 最后一维 7 个数：`[x, y, z, qx, qy, qz, qw]`，位置单位 **米**，
   四元数 **xyzw 顺序**（不是 wxyz）。
-- 参考系是 `torso_link`（§5.1），写在 `meta/end_space/pose_frame`。
+- 参考系是 `torso_link`（§5.1），写在 `meta.json → world_frame`；
+  h5 里 `meta/end_space/state_pose_reference = "robot"` 指的就是它。
 - `pose` 用的是 URDF 里 `left/right_gripper_base` 这个 link 的原生朝向；
   `pose_unified` 把它转成了统一约定，两者位置相同、只差一个固定旋转。详见 §5.3。
 
@@ -219,7 +236,7 @@ q_left_arm = f['state/joint_space/position'][:, left]
 | `action/actuator_space/value` | (N, 2) | 目标开合 |
 
 **连续值，范围 [0, 1]，`0 = 完全张开`，`1 = 完全夹紧`**。不是二值开关。
-（`meta/actuator_space/value_convention` 里也写着这句。）
+（`meta.json → robot.gripper.normalized` 里也写着这句。）
 
 原始量是偏心关节角 0…2.7638 rad，方向相反，导出时已经取补并归一化。
 原始定义留在 `meta.json → robot.gripper.stored_raw`。
@@ -233,7 +250,7 @@ q_left_arm = f['state/joint_space/position'][:, left]
 | `state/camera_space/frame_index` | (N, 3) | 对应**原始采集**里的帧号 |
 
 第二维的 3 是相机，顺序在 `meta/camera_space/names`：
-`['head', 'wrist_left', 'wrist_right']`。
+`['headcam', 'leftcam', 'rightcam']`。
 
 `frame_index` 指的是**原始 mkv** 里的帧号，不是导出 mp4 的帧号。
 只有要回溯到原始素材时才需要它；用导出的 mp4 时直接按行号取帧即可。
@@ -244,9 +261,9 @@ q_left_arm = f['state/joint_space/position'][:, left]
 > 直接拿 K 往 mp4 像素上套会差 2~3 倍。换算：
 >
 > ```python
-> K  = f['state/camera_space/intrinsic'][0, 0]           # head
+> K  = f['state/camera_space/intrinsic'][0, 0]           # headcam
 > sw, sh = f['meta/camera_space/intrinsic_size'][0]      # [1280, 720]
-> vw, vh = ep['video_size']['head']                      # [640, 360]
+> vw, vh = 640, 360                                      # mp4 自己的尺寸，解一帧就知道
 > K = K * np.array([[vw/sw, vw/sw, vw/sw],
 >                   [vh/sh, vh/sh, vh/sh],
 >                   [1,     1,     1    ]])
@@ -296,7 +313,7 @@ world = extrinsic[:, :3] @ camera_xyz + extrinsic[:, 3]
 ```
 
 方向名叫 `base_T_cam`，写在 `meta/camera_space/extrinsic_direction`，
-上面那行公式原样写在 `meta/camera_space/extrinsic_formula`。
+上面那行公式原样写在 `meta.json → camera_space.extrinsic_formula`。
 
 > ⚠️ **不要拿「world2camera」「camera_to_world」这类叫法当依据。**
 > CV 圈和机器人圈把这些词指向相反的两边，我们已经因此弄反过一次。
@@ -329,8 +346,7 @@ world = extrinsic[:, :3] @ camera_xyz + extrinsic[:, 3]
 q_unified = q_raw ⊗ R_fix,   R_fix(xyzw) = (0, 0, √2/2, √2/2)
 ```
 
-`R_fix` 存在 `meta/end_space/unified_fix_quat_xyzw`，
-目标约定名存在 `meta/end_space/unified_convention`。
+`R_fix` 和目标约定名都在 `meta.json → ee_convention` 里，逐臂给。
 
 **跨机器人训练用 `pose_unified`，回放到本机用 `pose`。**
 
@@ -383,8 +399,7 @@ if np.isnan(f['action/joint_space/position'][:]).all():
 ## 7. 视频
 
 - H.264 / mp4，**30 fps**，和 h5 行一一对应。
-- 默认导出高度 360（`--video-height 0` 可以保持原始分辨率）。
-- 实际分辨率在 `episode/<name>.json → video_size`。
+- 默认导出高度 360（`--video-height 0` 可以保持原始分辨率）。实际尺寸解一帧就知道。
 - 某一刻相机没画面时，**重复上一帧**，不插黑帧 —— 黑帧是训练时一眼看不出的脏数据。
   这类帧在导出日志里以「重复帧 N」计数。
 - 腕相机画面里烧着一行日期时间。相机固件关不掉（`DeleteOSD` 是空壳、
@@ -395,40 +410,40 @@ if np.isnan(f['action/joint_space/position'][:]).all():
 
 ## 8. 索引文件
 
-`episodes_all.json` 和 `episode/<name>.json` 内容同构，前者是全部、后者是单条：
+`episode/<name>.json` 是单条，四个键：
 
 ```jsonc
 {"episodes": [{
-  "episode_id":  "00000001-0000",   // 前半段 = 文件名那个序号，后半段 = 文件内第几段
-  "file":        "….h5",
+  "episode_id":  "00000001-0000",  // 前半段 = 文件名那个序号，后半段 = 文件内第几段
   "start_frame": 0,
-  "end_frame":   622,               // 闭区间，帧数 = end - start + 1
-  "instruction":    ["Pick up the black square box with the left arm"],
-  "instruction_zh": ["左手拿起黑色方形盒子"],
-  "label":       ["pick_up_black_square_box", "g1", "20260821_102522",
-                  "round0", "episode0", "success"],
-  "outcome":     "success",         // success | fail
-  "video":       {"head": "….mp4", "wrist_left": "…", "wrist_right": "…"},
-  "video_size":  {"head": [640, 360], "…": []},
-  "source":      { /* 采集时的原始标注，见下 */ }
+  "end_frame":   622,              // 闭区间，帧数 = end - start + 1
+  "instruction": ["Pick up the black square box with the left arm"]
 }]}
 ```
 
+`episodes_all.json` 是全部，每条多一个 `episode_name`（不带扩展名，`data/` 与三个
+`video_*/` 都用它）。单条里不给，因为**文件名逐字就是它** —— 对面的样例也是这么分的。
+
+**这四个键是 `episodefile_template.json` 和对面样例的交集。** 模板里那个 `label`、
+样例里那个 `instruction_eval` 都只有一边有，我们两个都不给：没有独立的评测说法集，
+`label` 的内容也全都能从文件名和 `meta.json` 里推出来。采集现场的标注（物品编号、
+指令的结构化拆分、lint 告警、绝对时刻、裁剪痕迹）**一律不导出** —— 它们是采集端
+自己的记录，在 session 里原样存着，用 `tools/inspect_session.py` 看。视频路径也不给：
+三路都是 `video_<camera>/<episode_name>.mp4`，拼得出来。
+
 `instruction` 是**列表**：规范允许一条 episode 有多种说法，我们目前每条只有一句，
-按单元素列表给。`label` 是检索用的扁平标签，内容都能从别的字段推出来，纯为方便。
+按单元素列表给。
+
+`episodes_all.h5` 是同一份索引的 h5 版，四个 dataset：`episode_id`、`start_frame`、
+`end_frame`、`instruction`。对面样例里有同名文件（他们那份还多一个
+`instruction_eval`）。指令是 `(N, K)` 的定宽表 —— h5 存不了锯齿数组。
+
+> `episodes_all.*` 里没有一个字节是新的：`episode_name` 就是 `episode/` 下的文件名，
+> 其余字段逐条拼起来即可。留着它们是因为**对面的样例里就有这两个文件**，
+> 删掉等于单方面改交付布局。
 
 **`episode_id` 的前半段必须和文件名的序号逐字相同**，不然拿到 id 找不回文件；
 后半段是「该文件内第几段」，我们一个 h5 只放一条 episode，所以恒为 `0000`。
-
-`source` 是采集现场的原始标注，训练一般用不到，排查时有用：
-`round`/`episode` 是第几轮第几条，`t0`/`t1` 是原始采集里的绝对时间，
-`verb`/`arm`/`obj` 是指令的结构化拆分，`step_index`/`step_total` 是它在本轮里的位置，
-`lint_warnings` 是采集时的标注告警。
-
-`source.trim` 是 §1.1 掐空转留下的痕迹，**没裁就没有这个键**：
-`raw_t0`/`raw_t1` 是操作者点击的原始边界，`head_s`/`tail_s` 是首尾各裁掉几秒，
-`keep_idle_s` 是当时的余量设置。`t0`/`t1`/`duration` 已经是裁完的值。
-想还原成未裁的范围，用 `raw_t0`/`raw_t1` 重导一次即可 —— **原始采集没有被修改**。
 
 ---
 
@@ -447,8 +462,9 @@ if np.isnan(f['action/joint_space/position'][:]).all():
 h5 里 `meta/end_space/fk_provenance` 记着算末端位姿用的 URDF 与标定文件的 sha256。
 两次导出结果对不上时先比这个。
 
-h5 的 `meta` attrs 里还有导出时的参数：`grid_hz`、`max_age_s`（§6 的失效阈值）、
-`end_action_source`、`keep_idle_s`（§1.1 掐空转留的余量，`-1` = 本次没掐）。
+h5 的 `meta` attrs 只有三个：`version`、`gripper_unified="v1"`（夹爪归一化约定的版号，
+就是 §0 那条 0=张开 1=夹紧）、`patches`（对面用来记「这份数据事后打过哪些补丁」，
+我们没打过，是空表）。**导出参数不写进 h5**，说明性的约定统一在 `meta.json` 里给。
 
 ---
 

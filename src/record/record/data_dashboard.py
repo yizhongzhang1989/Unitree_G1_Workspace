@@ -27,6 +27,10 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
         '/api/replay/stop': lambda b: rec.stop(),
         '/api/session/delete': lambda b: rec.delete(b['session'], b.get('confirm', '')),
         '/api/convert/start': lambda b: rec.start_convert(b['session'], b['format']),
+        '/api/render/start': lambda b: rec.start_render(
+            b['session'], float(b['t0']), float(b['t1']), b.get('label', '')),
+        '/api/render/stop': lambda b: rec.stop_render(),
+        '/api/render/drop': lambda b: rec.drop_render(b['session'], b.get('label', '')),
         '/api/control/engage': lambda b: rec.trigger('engage'),
         '/api/control/estop': lambda b: rec.trigger('estop'),
     }
@@ -41,6 +45,7 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
         if u.path == '/api/state':
             return h.send_json({'status': rec.status(), 'sessions': rec.sessions(),
                                 'convert': rec.convert_state(),
+                                'render': rec.render_state(),
                                 'formats': rec.formats()})
         if u.path == '/api/session':
             return h.send_json(rec.detail(arg('id')))
@@ -58,6 +63,10 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
         if u.path == '/tools.zip':
             # B 一次拿全：tools/ + final.urdf + calibration.yaml
             return h.send_zip('record-tools.zip', rec.tools_bundle())
+        if u.path == '/verify.mp4':
+            # 内联放而不是下载：这东西是拿来在页上来回拖着看的
+            return h.send_file(rec.render_video(arg('id'), arg('label')),
+                               ctype='video/mp4')
         if u.path == '/bundle.zip':
             token = arg('token')
             root = rec.bundle(token)

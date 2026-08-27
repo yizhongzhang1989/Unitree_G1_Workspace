@@ -253,11 +253,8 @@ def preview_url(url: str) -> str:
     return url[:-1] + '1' if url.endswith('stream0') else url
 
 
-class PreviewPump:
-    """一路 RTSP 低帧率预览：ffmpeg 常驻解码，最新一帧 JPEG 留在内存里。
-
-    和 ``snapshot`` 那条路是两回事：快照抓的是 1080p 主码流、每次重新握手（腕部约
-    1.3 s），只适合点一下看一眼；预览要连续出帧，所以走子码流并把帧率压到 2。
+class _MjpegPump:
+    """常驻 ffmpeg，最新一帧 JPEG 留在内存里。子类只决定命令行和帧从哪来。
 
     **没人取帧就自己停**（``idle()`` + 调用方定期收）。页面一关就再没人来取，
     不停就是白烧 CPU，而这个面板经常整天开着。
@@ -269,15 +266,20 @@ class PreviewPump:
     IDLE_STOP = 6.0
     #: 起不来时的重试间隔。不退避的话相机不在线会变成每次轮询都 fork 一个 ffmpeg。
     RETRY = 5.0
+    STDIN = subprocess.DEVNULL
+    STARTING = '预览还在起'
 
-    def __init__(self, name: str, url: str, width: int = 480) -> None:
-        self.name, self.url, self.width = name, url, width
+    def __init__(self, name: str, width: int) -> None:
+        self.name, self.width = name, width
         self._lock = threading.Lock()
         self._frame = b''
         self._err = ''
         self._proc: subprocess.Popen | None = None
         self._retry_at = 0.0
         self._touched = time.monotonic()
+
+    def _args(self) -> list[str]:
+        raise NotImplementedError
 
     def frame(self) -> bytes:
         """最近一帧 JPEG。取帧这一下也是「有人在看」的唯一信号。"""
@@ -287,7 +289,7 @@ class PreviewPump:
             if self._frame:
                 return self._frame
             err = self._err
-        raise RuntimeError(err or f'{self.name} 预览还在起（腕部要等 RTSP 握手）')
+        raise RuntimeError(err or f'{self.name} {self.STARTING}')
 
     def idle(self) -> bool:
         return time.monotonic() - self._touched > self.IDLE_STOP
@@ -300,12 +302,8 @@ class PreviewPump:
                 return
             self._retry_at = time.monotonic() + self.RETRY
             self._err = ''
-            args = [*BASE, '-rtsp_transport', 'tcp', '-stimeout', '5000000',
-                    '-i', self.url, '-an',
-                    '-vf', f'fps={self.FPS},scale={self.width}:-2',
-                    '-q:v', '7', '-f', 'mjpeg', 'pipe:1']
             self._proc = subprocess.Popen(
-                args, stdin=subprocess.DEVNULL,
+                self._args(), stdin=self.STDIN,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             proc = self._proc
         threading.Thread(target=self._read, args=(proc,), daemon=True).start()
@@ -357,6 +355,86 @@ class PreviewPump:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+class PreviewPump(_MjpegPump):
+    """一路 RTSP 低帧率预览：ffmpeg 常驻解码。
+
+    和 ``snapshot`` 那条路是两回事：快照抓的是 1080p 主码流、每次重新握手（腕部约
+    1.3 s），只适合点一下看一眼；预览要连续出帧，所以走子码流并把帧率压到 2。
+    """
+
+    STARTING = '预览还在起（RTSP 要先握手，约 1~2 s）'
+
+    def __init__(self, name: str, url: str, width: int = 480) -> None:
+        super().__init__(name, width)
+        self.url = url
+
+    def _args(self) -> list[str]:
+        return [*BASE, '-rtsp_transport', 'tcp', '-stimeout', '5000000',
+                '-i', self.url, '-an',
+                '-vf', f'fps={self.FPS},scale={self.width}:-2',
+                '-q:v', '7', '-f', 'mjpeg', 'pipe:1']
+
+
+class HeadPreview(_MjpegPump):
+    """头部预览：帧本来就在内存里（走 ROS 订阅），只需要编码，不需要解码。
+
+    以前是每取一帧就 ``subprocess.run`` 起一个 ffmpeg —— 2 次/s 的 fork + 1.84 MB
+    管道写，光冷启动就吃掉小半个核。而这个预览恰恰是**遥操作全程开着的**
+    （操作者要在同一个页面上点开始/成功/失败），等于给控制栈常年挂了个负载。
+    """
+
+    STDIN = subprocess.PIPE
+
+    def __init__(self, width: int = 640) -> None:
+        super().__init__('head', width)
+        self._fmt: tuple = ()                       # (w, h, encoding)，收到第一帧才知道
+        self._pending: tuple | None = None
+        self._wake = threading.Event()
+        threading.Thread(target=self._feed, daemon=True).start()
+
+    def push(self, payload: bytes, width: int, height: int, encoding: str) -> None:
+        """ROS 回调调它。只放进单槽信箱：ffmpeg 卡住既不会阻塞回调也不会涨内存。"""
+        if encoding not in HeadRecorder.PIX:
+            return
+        with self._lock:
+            self._pending = (payload, width, height, encoding)
+        self._wake.set()
+
+    def _args(self) -> list[str]:
+        width, height, encoding = self._fmt
+        return [*BASE, '-f', 'rawvideo', '-pix_fmt', HeadRecorder.PIX[encoding],
+                '-s', f'{width}x{height}', '-i', 'pipe:0',
+                '-vf', f'scale={self.width}:-2', '-q:v', '7',
+                '-threads', '1', '-f', 'mjpeg', 'pipe:1']
+
+    def _ensure(self) -> None:
+        if self._fmt:                    # 还没收到帧就不知道分辨率，起不了
+            super()._ensure()
+
+    def _feed(self) -> None:
+        """独立线程里喂 ffmpeg：起进程和写管道都可能阻塞，不能放在 ROS 回调里。"""
+        while True:
+            self._wake.wait(0.5)
+            self._wake.clear()
+            with self._lock:
+                item, self._pending = self._pending, None
+            if item is None:
+                continue
+            payload, width, height, encoding = item
+            if (width, height, encoding) != self._fmt:
+                self.stop()
+                self._fmt = (width, height, encoding)
+            self._ensure()
+            proc = self._proc
+            if proc is None or proc.stdin is None:
+                continue
+            try:
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                self.stop()
 
 
 def probe_stream(url: str, timeout: float = 20.0) -> dict:

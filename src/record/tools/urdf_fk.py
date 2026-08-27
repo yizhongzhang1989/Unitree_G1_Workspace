@@ -24,6 +24,19 @@ import numpy as np
 
 MOVING = ('revolute', 'continuous', 'prismatic')
 
+HEAD_OPTICAL_FRAME = 'camera_color_optical_frame'
+
+#: 头部彩色镜头相对 `d435_link` 的位姿。URDF 里没有这一段 —— 它由 realsense-ros
+#: 从设备出厂标定里读出来发成 TF。2026-08-25 从跑着的栈上取的全精度值。
+#: **换一台 D435i 就要重取**；session 的 meta.json 里有 `head_optical` 时以它为准。
+#:
+#: 放在这儿而不是某个格式目录里：导出和对齐校验都要用它，各存一份就会漂开。
+HEAD_OPTICAL = {
+    'xyz': [-0.0008463825797662139, 0.015250945463776588, -2.4963012037915178e-05],
+    'quat': [-0.4998616034745607, 0.5031675567847118,
+             -0.49744304340790907, 0.4995109665825387],
+}
+
 
 @dataclass(frozen=True)
 class Joint:
@@ -34,6 +47,7 @@ class Joint:
     origin: np.ndarray                       # 4x4，T_parent<-child 在零位时的值
     axis: np.ndarray                         # 3，fixed 关节忽略
     mimic: tuple[str, float, float] | None = None   # (源关节, multiplier, offset)
+    limit: tuple[float, float] | None = None        # (lower, upper)，**mimic 必须按它夹**
 
 
 def rpy_to_matrix(rpy) -> np.ndarray:
@@ -222,10 +236,27 @@ class RobotModel:
         if joint.mimic is not None:
             source, multiplier, offset = joint.mimic
             angle = _value(values, source, joint.name, count) * multiplier + offset
+            angle = mimic_clamp(angle, joint.limit)
         else:
             angle = _value(values, joint.name, joint.name, count)
         step = (translate if joint.kind == 'prismatic' else rotate)(joint.axis, angle)
         return joint.origin[None] @ step
+
+
+def mimic_clamp(value, limit):
+    """把 mimic 算出来的值夹回那一段自己的 `<limit>`。
+
+    **不夹就是错的。** URDF 的 mimic 只能写线性式，而夹爪是连杆（非线性），
+    G1 的做法是把一根滑块拆成 8 段同轴、origin 全零的 prismatic 串联，靠每段先后
+    饱和拼出分段线性样条（实测饱和点 0.3455/0.6910/…/2.7638，正好八等分）。
+    不夹限位时八段相加退化成一条直线，开口从 100 mm 变成 47.6 mm，
+    实拍叠图里轮廓会从两根手指中间穿过去（verify_alignment 实测判定过）。
+
+    pinocchio 根本不认 `<mimic>`，所以它那边也得自己调这一下。
+    """
+    if limit is None:
+        return value
+    return np.clip(value, limit[0], limit[1])
 
 
 def _value(values: dict, key: str, requester: str, count: int) -> np.ndarray:
@@ -241,6 +272,7 @@ def _parse_joint(node) -> Joint:
     rpy = (origin.get('rpy') if origin is not None else None) or '0 0 0'
     axis = node.find('axis')
     mimic = node.find('mimic')
+    limit = node.find('limit')
     return Joint(
         name=node.get('name'),
         kind=node.get('type'),
@@ -252,4 +284,6 @@ def _parse_joint(node) -> Joint:
         mimic=None if mimic is None else (
             mimic.get('joint'), float(mimic.get('multiplier', 1.0)),
             float(mimic.get('offset', 0.0))),
+        limit=None if limit is None or limit.get('lower') is None else (
+            float(limit.get('lower')), float(limit.get('upper'))),
     )

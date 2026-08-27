@@ -94,6 +94,8 @@ class DataManager(Node):
         self.calibration = str(p('calibration', '').value) or _share(
             'camera_calibration', 'config', 'calibration.yaml')
         self.video_height = int(p('convert_video_height', 360).value)
+        self.render_fps = float(p('render_fps', 10.0).value)
+        self.render_width = int(p('render_width', 640).value)
         self.rate_hz = float(p('rate_hz', 50.0).value)
         self.ramp_s = float(p('ramp_s', 3.0).value)
         self.cmd_topic = p('command_topic', '/motion_control/command').value
@@ -124,6 +126,11 @@ class DataManager(Node):
         self._convert = {'running': False, 'session': '', 'format': '', 'token': '',
                          'log': [], 'error': '', 'done': False, 'bytes': 0,
                          'progress': 0.0}
+        self._render = {'running': False, 'session': '', 'label': '',
+                        'log': [], 'error': '', 'done': False, 'bytes': 0,
+                        'progress': 0.0}
+        #: 当前那个吐 `@progress` 的子进程。转换与渲染互斥，所以只有一个槽。
+        self._proc: subprocess.Popen | None = None
         #: 已封口 session 的概要。面板 1 Hz 轮询 sessions()，而一次概要要递归 stat 整个
         #: 目录、逐行解 events.jsonl（能到几 MB）；封口后这些数字不会再变，算一次就够。
         self._summary: dict[str, dict] = {}
@@ -181,6 +188,9 @@ class DataManager(Node):
         info['sealed'] = (d / 'DONE').is_file()
         info['bytes'] = _dir_size(d)
         info['streams'] = [s for s in _STREAMS if (d / 'video' / f'{s}.mkv').is_file()]
+        # 哪几段已经渲过校验视频。存在盘上而不是内存里，所以重启节点也还在
+        info['verified'] = {p.stem: p.stat().st_size
+                            for p in sorted((d / 'verify').glob('*.mp4'))}
         return info
 
     def frame(self, session_id: str, stream: str, at: float) -> bytes:
@@ -211,6 +221,8 @@ class DataManager(Node):
                 raise RuntimeError('这次采集正在回放，先停止')
             if self._convert['running'] and self._convert['session'] == session_id:
                 raise RuntimeError('这次采集正在转换，先等它跑完')
+            if self._render['running'] and self._render['session'] == session_id:
+                raise RuntimeError('这次采集正在渲染校验视频，先取消')
         size = _dir_size(d)
         shutil.rmtree(d)
         self._summary.pop(session_id, None)
@@ -226,14 +238,18 @@ class DataManager(Node):
     def tools_bundle(self) -> list:
         """B 上要的全套：`tools/` 整个 + 两个不在 session 里的配置文件。
 
-        URDF 和标定必须一起给：末端位姿和腕相机外参都要靠 FK 现算，而它俩
-        既不在 session 里也不在 tools/ 里。分开拿就会漏 —— 漏了还能跑，只是外参
-        退化成名义值，不报错，发现不了。
+        URDF 和标定必须一起给：末端位姿和腕相机外参都要靠 FK 现算，而它俩既不在
+        session 里也不在 tools/ 里。**标定尤其不能漏** —— 腕相机的 `camera_left` /
+        `camera_right` 两个 link 是它用 `create` 现建的，裸 URDF 里根本没有，
+        少了它导出直接报错。缺文件时当场警告，别让人拿着残包到 B 上才发现。
         """
         entries = tree_entries(TOOLS_DIR, 'tools/')
         for path in (self.urdf, self.calibration):
             if path and Path(path).is_file():
                 entries.append((Path(path).name, Path(path)))
+            else:
+                self.get_logger().warn(f'导出工具包里没有 {path or "（未配置）"}，'
+                                       'B 上跑转换会缺文件')
         return entries
 
     def raw_files(self, session_id: str) -> dict:
@@ -306,6 +322,8 @@ class DataManager(Node):
         with self._lock:
             if self._convert['running']:
                 raise RuntimeError(f'{self._convert["session"]} 正在转换，一次只能跑一个')
+            if self._render['running']:
+                raise RuntimeError('正在渲染校验视频，先取消或等它跑完')
             if self.state['playing']:
                 raise RuntimeError('正在回放，先停止')
             token = f'{session_id}.{fmt}.{int(time.time())}'
@@ -326,31 +344,14 @@ class DataManager(Node):
         out = self._bundles / token
         values = {'urdf': self.urdf, 'calibration': self.calibration,
                   'video_height': self.video_height}
-        error = ''
         try:
             command = converter.command(sys.executable, session, out, values,
                                         progress=True)
+        except ValueError as exc:
+            error = str(exc)
+        else:
             self.get_logger().info(f'转换 {token}: {" ".join(command)}')
-            # PYTHONUNBUFFERED：子进程的 stdout 接的是管道，默认块缓冲，
-            # 不加这个就要等它整个跑完才吐字，面板上的进度条等于没有
-            proc = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True,
-                                    stdin=subprocess.DEVNULL,
-                                    env={**os.environ, 'PYTHONUNBUFFERED': '1'})
-            for line in proc.stdout:
-                line = line.rstrip()
-                # 进度行不进日志：一秒好几条，会把真正要看的报告冲没
-                if line.startswith('@progress '):
-                    with self._lock:
-                        self._convert['progress'] = float(line.split()[1])
-                    continue
-                with self._lock:
-                    self._convert['log'].append(line)
-                self.get_logger().info(f'  {line}')
-            if proc.wait() != 0:
-                error = f'转换进程退出码 {proc.returncode}'
-        except Exception as exc:                       # noqa: BLE001
-            error = f'{type(exc).__name__}: {exc}'
+            error = self._pump(command, self._convert)
         with self._lock:
             self._convert.update(running=False, done=not error, error=error,
                                  progress=0.0 if error else 1.0,
@@ -360,6 +361,38 @@ class DataManager(Node):
             self.get_logger().error(f'转换 {token} 失败: {error}')
         else:
             self.get_logger().info(f'转换 {token} 完成，{_dir_size(out) / 1e6:.1f} MB')
+
+    def _pump(self, command: list, slot: dict) -> str:
+        """跑一个会吐 `@progress` 的子进程，把进度和日志喂进 `slot`。返回错误串，空 = 成功。
+
+        句柄挂在 `self._proc` 上给「取消」用 —— 转换与渲染互斥，同一时刻只会有一个。
+        """
+        try:
+            # PYTHONUNBUFFERED：子进程的 stdout 接的是管道，默认块缓冲，
+            # 不加这个就要等它整个跑完才吐字，面板上的进度条等于没有
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    stdin=subprocess.DEVNULL,
+                                    env={**os.environ, 'PYTHONUNBUFFERED': '1'})
+            self._proc = proc
+            for line in proc.stdout:
+                line = line.rstrip()
+                # 进度行不进日志：一秒好几条，会把真正要看的报告冲没
+                if line.startswith('@progress '):
+                    with self._lock:
+                        slot['progress'] = float(line.split()[1])
+                    continue
+                with self._lock:
+                    slot['log'].append(line)
+                self.get_logger().info(f'  {line}')
+            code = proc.wait()
+            if code == -signal.SIGTERM:
+                return '已取消'
+            return f'子进程退出码 {code}' if code else ''
+        except Exception as exc:                       # noqa: BLE001
+            return f'{type(exc).__name__}: {exc}'
+        finally:
+            self._proc = None
 
     def bundle(self, token: str) -> Path:
         """取件目录。token 只允许是 bundles 下的直接子目录。"""
@@ -385,12 +418,124 @@ class DataManager(Node):
                 self._convert.update(done=False, token='')
 
     def _sweep_bundles(self, ttl: float | None = None) -> None:
-        """清掉过期的临时产物。下载中断没触发删除时，靠这一条兜底。"""
+        """清掉过期的临时产物。下载中断没触发删除时，靠这一条兢底。"""
         cutoff = time.time() - (self.bundle_ttl_s if ttl is None else ttl)
         for path in self._bundles.glob('*'):
             if path.is_dir() and path.stat().st_mtime < cutoff:
                 shutil.rmtree(path, ignore_errors=True)
                 self.get_logger().info(f'清掉过期的临时产物 {path.name}')
+
+    # ------------------------------------------------------------------ 对齐校验
+
+    @staticmethod
+    def _render_path(session: Path, label: str) -> Path:
+        """校验视频就放在 session 里的 `verify/`。
+
+        不像转换产物那样另辟临时目录 —— 它小（一条 episode 约 0.6 MB）、和这次采集
+        绑死、还会反复回看。放进去就白得三件事：删采集时一并带走、同一段重渲原地
+        覆盖不会越攒越多、在文件树里能直接看见和下载。
+        `DONE` 只核对它自己列出的那些文件，多出来的目录不影响校验。
+        """
+        return _child(session / 'verify', f'{label or "whole"}.mp4', 'label')
+
+    def start_render(self, session_id: str, t0: float, t1: float, label: str) -> dict:
+        """渲染一段对齐校验视频：URDF 轮廓 + IK 目标点叠回头部实拍。
+
+        **离线一次性，不做成跟着回放实时合成。** 渲染实测 0.32 s/帧（640x360），
+        比 30 fps 慢两个数量级；而且回放时机器人是真在动的，那会儿不该有东西抢核。
+        所以它和回放、转换三者互斥，谁也不许并着跑。
+        """
+        session = self._dir(session_id)
+        if not (session / 'DONE').is_file():
+            raise RuntimeError(f'{session_id} 没有 DONE，还在录或异常中断，不能渲染')
+        video = self._render_path(session, label)
+        with self._lock:
+            if self._render['running']:
+                raise RuntimeError(f'{self._render["session"]} 正在渲染，一次只能跑一个')
+            if self._convert['running']:
+                raise RuntimeError('正在转换，先等它跑完')
+            if self.state['playing']:
+                raise RuntimeError('正在回放，先停止')
+            self._render = {'running': True, 'session': session_id, 'label': label,
+                            'log': [], 'error': '', 'done': False,
+                            'bytes': 0, 'progress': 0.0}
+        threading.Thread(target=self._run_render, daemon=True,
+                         args=(session, t0, t1, label, video)).start()
+        return {'session': session_id, 'label': label}
+
+    def stop_render(self) -> dict:
+        """取消渲染。整段采集能渲十几分钟，没有出口就等于把回放也锁死了。"""
+        with self._lock:
+            proc = self._proc if self._render['running'] else None
+        if proc is not None:
+            proc.terminate()
+        return self.render_state()
+
+    def render_state(self) -> dict:
+        with self._lock:
+            return dict(self._render, log=list(self._render['log'])[-40:])
+
+    def _run_render(self, session: Path, t0: float, t1: float,
+                    label: str, video: Path) -> None:
+        # 先渲进暂存目录再搬过去：取消或失败时上一份好的还在，不会被半截视频顶掉。
+        # 用目录而不是 `.mp4.part`：**ffmpeg 按扩展名认容器**，`.part` 结尾会报
+        # 「Unable to find a suitable output format」，而且报告那个 .txt 也要跟着搬。
+        stage = video.parent / '.tmp'
+        shutil.rmtree(stage, ignore_errors=True)
+        stage.mkdir(parents=True, exist_ok=True)
+        staged = stage / video.name
+        # 走子进程：渲染是 GIL 下的重活，塞进节点会把 executor 卡住，
+        # 而且 pinocchio 加载 URDF 就要 3.6 s，不该常驻在数据管理进程里。
+        command = [sys.executable, '-m', 'record.verify_alignment', str(session),
+                   '--t0', f'{t0:.6f}', '--t1', f'{t1:.6f}', '--label', label,
+                   '--fps', str(self.render_fps), '--width', str(self.render_width),
+                   '--out', str(staged), '--progress']
+        for flag, value in (('--urdf', self.urdf), ('--calibration', self.calibration)):
+            if value:
+                command += [flag, value]
+        self.get_logger().info(f'渲染 {session.name}/{label}: {" ".join(command)}')
+        error = self._pump(command, self._render)
+        if not error and not staged.is_file():
+            error = '渲染进程没留下视频'
+        if error:
+            self.get_logger().error(f'渲染 {session.name}/{label} 失败: {error}')
+        else:
+            for name in (staged, staged.with_suffix('.txt')):
+                if name.is_file():
+                    name.replace(video.parent / name.name)
+            # 子进程报的是暂存路径，照着去找是找不到的，补一行真实位置
+            with self._lock:
+                self._render['log'].append(
+                    f'存放 : {session.name}/verify/{video.name}（连同同名 .txt 报告）')
+            self.get_logger().info(
+                f'渲染 {session.name}/{label} 完成，{video.stat().st_size / 1e6:.1f} MB')
+        shutil.rmtree(stage, ignore_errors=True)
+        with self._lock:
+            self._render.update(running=False, done=not error, error=error,
+                                progress=0.0 if error else 1.0,
+                                bytes=video.stat().st_size if video.is_file() else 0)
+
+    def render_video(self, session_id: str, label: str) -> Path:
+        path = self._render_path(self._dir(session_id), label)
+        if not path.is_file():
+            raise ValueError(f'{session_id} 还没渲染过 {label or "整段"}')
+        return path
+
+    def drop_render(self, session_id: str, label: str) -> dict:
+        """删掉一段的校验视频。数据一改它就过时了，留着比没有更容易看错。"""
+        with self._lock:
+            if (self._render['running'] and self._render['session'] == session_id
+                    and self._render['label'] == label):
+                raise RuntimeError('这一段正在渲染，先取消')
+        path = self._render_path(self._dir(session_id), label)
+        size = path.stat().st_size if path.is_file() else 0
+        path.unlink(missing_ok=True)
+        path.with_suffix('.txt').unlink(missing_ok=True)
+        with self._lock:
+            if (self._render['session'] == session_id
+                    and self._render['label'] == label):
+                self._render.update(done=False, bytes=0, error='')
+        return {'session': session_id, 'label': label, 'bytes': size}
 
     # ------------------------------------------------------------------ 控制层
 
@@ -445,6 +590,8 @@ class DataManager(Node):
         with self._lock:
             if self.state['playing']:
                 raise RuntimeError('正在回放，先停止')
+            if self._render['running']:
+                raise RuntimeError('正在渲染校验视频，先按「取消」')
             d = self._dir(session_id)
             if not (d / 'DONE').is_file():
                 raise RuntimeError(f'{session_id} 没封口，不回放')

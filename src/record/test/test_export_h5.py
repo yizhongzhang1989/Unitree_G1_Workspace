@@ -199,7 +199,9 @@ def test_gripper_is_an_actuator_not_a_joint():
 
 
 def test_camera_layout_matches_spec():
-    assert [c.name for c in ex.CAMERAS] == ['head', 'wrist_left', 'wrist_right']
+    """导出用对面样例的词（headcam/leftcam/rightcam），session 里的流名另存。"""
+    assert [c.name for c in ex.CAMERAS] == ['headcam', 'leftcam', 'rightcam']
+    assert [c.source for c in ex.CAMERAS] == ['head', 'wrist_left', 'wrist_right']
     # 头部固连 torso_link，腕相机随手臂动 —— static_extrinsic 就是这个意思
     assert [int(c.static) for c in ex.CAMERAS] == [1, 0, 0]
 
@@ -269,6 +271,29 @@ def test_head_extrinsic_is_constant():
     assert space['static_extrinsic'] == [1, 0, 0]
     head = space['state']['extrinsic'][:, 0]
     assert np.allclose(head, head[0])
+
+
+@pytest.mark.skipif(not (G1_URDF.is_file() and G1_CALIBRATION.is_file()),
+                    reason='工作区里没有 G1 的 URDF 或标定')
+def test_wrist_camera_links_only_exist_after_calibration():
+    """`--calibration` 对本机是**必填**，不是“不给就退成名义值”。
+
+    腕相机的两个 link 是标定文件用 `create` 现建的，裸 URDF 里根本没有 ——
+    不给就报「torso_link 不是 camera_left 的祖先」，一点看不出要补什么。
+    文档一度写着“不给也能跑”，这条把它钉住。
+    """
+    import yaml
+    bare = urdf_fk.RobotModel.from_urdf(G1_URDF)
+    wrist = [c.frame for c in ex.CAMERAS if c.calib]
+    assert wrist, '没有靠标定建 link 的相机，这条测试该重写了'
+    for frame in wrist:
+        with pytest.raises(ValueError):
+            bare.chain(ex.ORIGIN, frame)
+
+    bare.apply_overrides(
+        yaml.safe_load(G1_CALIBRATION.read_text(encoding='utf-8'))['urdf_overrides'])
+    for frame in wrist:
+        assert bare.chain(ex.ORIGIN, frame)
 
 
 @pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')
@@ -388,20 +413,6 @@ def test_episode_id_suffix_is_the_segment_not_the_round():
         assert ex.episode_id(name) == '00000007-0000'
 
 
-def test_episode_label_is_flat_and_searchable():
-    label = ex.episode_label({'round': 0, 'episode': 2, 'outcome': 'success',
-                              'verb': 'Pick up',
-                              'obj': {'en': 'natural wood block'}}, '20260826_050938')
-    assert label == ['pick_up_natural_wood_block', 'g1', '20260826_050938',
-                     'round0', 'episode2', 'success']
-
-
-def test_episode_label_survives_missing_annotation():
-    """没标注 verb/obj 的老 session 也得能导出，空标签直接丢掉而不是留空串。"""
-    label = ex.episode_label({'round': 1, 'episode': 0, 'outcome': ''}, 'sess')
-    assert label == ['g1', 'sess', 'round1', 'episode0']
-
-
 def test_dataset_meta_has_every_template_field():
     """对面的读取代码按 `datasetmeta_template.json` 写，缺字段就是 KeyError。"""
     meta = ex.dataset_meta(SimpleNamespace(manifest={'session_id': 's'}),
@@ -413,3 +424,17 @@ def test_dataset_meta_has_every_template_field():
         assert key in meta, f'meta.json 缺模板字段 {key}'
     assert {'eef_type', 'arm_type', 'view_num', 'embodiment_count'} <= set(meta['robot'])
     assert {'episodes', 'hours'} <= set(meta['scale'])
+
+
+def test_report_takes_space_names_from_the_data():
+    """`--dry-run` 的形状表曾经硬编码过一份 space 名单，`base_space` 删掉之后
+    没跟着改，于是 `--dry-run` 一直是 KeyError 而没人发现。"""
+    spaces = {
+        'camera': {'names': ['headcam'],
+                   'state': {'frame_index': np.zeros((3, 1), np.int32)}},
+        'joint': {'state': {'position': np.zeros((3, 29)),
+                            'valid_mask': np.ones(3, bool)}},
+    }
+    lines = ex._report(spaces, verbose=True)
+    assert any('state/joint_space  position(3, 29)' in line for line in lines)
+    assert any('state/joint 100%' in line for line in lines)

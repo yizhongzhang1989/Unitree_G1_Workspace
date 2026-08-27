@@ -51,24 +51,29 @@ class Round:
 
 
 def build_round(library, geometry, index: int = 0, seed: int | None = None,
-                n_items: int = 4, n_moves: int = 6, attempts: int = 8) -> Round:
+                n_items: int = 4, n_moves: int = 6, attempts: int = 8,
+                items: list | None = None) -> Round:
     """生成一个完整的 round。
 
     摆不开的场景就**重摆**：可达域只有 0.198 m²，四件物里卡进两件大的就再也腾挪
     不开，状态机一步都走不出来（实测 200 轮里有 4 轮如此）。重摆用的是同一个 rng，
     所以给定 seed 仍然逐位可复现。
+
+    传 ``items`` 就沿用这组物品，只重摆布局和指令 —— 换物品得起身去桌上换东西，
+    只换摆放和指令则手边这几件挪一挪就行。
     """
     seed = random.randrange(2 ** 31) if seed is None else int(seed)
     rng = random.Random(seed)
     best = None
     for _ in range(max(1, attempts)):
-        items = library.choose_group(geometry, size=n_items, rng=rng)
-        placements = layout_scene(items, geometry, rng=rng)
+        group = list(items) if items else library.choose_group(
+            geometry, size=n_items, rng=rng)
+        placements = layout_scene(group, geometry, rng=rng)
         # 状态机原地改坐标，给它副本，``placements`` 才一直是待会儿要画的那个初始局面
         moves, _ = simulate([replace(p) for p in placements], geometry,
                             n_moves=n_moves, rng=rng)
         if best is None or len(moves) > len(best[2]):
-            best = (items, placements, moves)
+            best = (group, placements, moves)
         if len(moves) >= n_moves:
             break
     items, placements, moves = best

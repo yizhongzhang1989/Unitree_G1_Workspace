@@ -143,8 +143,8 @@ rsync --version
 > 最省事的是**用相对路径**，直接绕开这件事（`sync_and_convert.ps1` 就是这么做的）。
 
 > Windows 有 260 字符路径上限，但实测够用：最长的那个是
-> `video_wrist_right/00000001-20260821_102522__g1__round0_episode0.mp4`，67 字符，
-> 放在 `C:\Users\...\Documents\robot\datasets\20260821\` 下也才 119。除非你把输出
+> `video_rightcam/00000001-20260821_102522__g1__round0_episode0.mp4`，64 字符，
+> 放在 `C:\Users\...\Documents\robot\datasets\20260821\` 下也才 116。除非你把输出
 > 目录嵌得非常深，不用管这条。
 
 ---
@@ -244,7 +244,10 @@ python3 convert.py <session 目录> --to yb -o <输出目录> \
 操作者要走去点「开始/成功」，实测这种空转能占到总时长的四成。判据是遥操作**目标**
 在不在变（末端目标位姿的速率 + 夹爪开度的幅度），所以「全程夹着东西递给另一只手」
 不会被误判成一直有动作，VR 扬机抖一下也不会。
-裁了多少记在 `episode/*.json` 的 `source.trim` 里，原始采集不动，`--no-trim` 可关。
+裁了多少在导出日志里逐条打出来，原始采集不动，`--no-trim` 可关。
+
+**只导标注为 success 的 episode**，`fail` / `discard` 一律跳过，丢掉几条会在
+日志第一行报出来。失败轨迹对模仿学习是负样本，混进去等于教模型把东西碰倒。
 
 **`--urdf` 是必填的。** 这两个文件不在 session 里，但已经随「导出工具」包一起给你了
 （就在 `tools/` 旁边）。它们在 A 上的出处：
@@ -256,9 +259,10 @@ python3 convert.py <session 目录> --to yb -o <输出目录> \
 
 为什么要它们：`end_space` 的末端位姿、腕相机的外参在原始数据里都没有，得靠正运动学
 从关节角现算，而机器人当时用的 URDF 是「`final.urdf` 叠上 `calibration.yaml` 里的
-`urdf_overrides`」。**不给 `--calibration` 也能跑，但外参会退化成 URDF 名义值**，
-和实际装配差几毫米。两个文件的 sha256 会写进 `meta/end_space/fk_provenance`，
-两次导出结果对不上时先比这个。
+`urdf_overrides`」。**`--calibration` 对本机是必填** —— 腕相机的 `camera_left` /
+`camera_right` 两个 link 是标定文件用 `create` 现建的，裸 URDF 里根本没有，不给就直接
+报错退出（头部则是静默退回 URDF 名义值，和实际装配差几毫米）。两个文件的 sha256 会写进
+`meta/end_space/fk_provenance`，两次导出结果对不上时先比这个。
 
 **转换会打一行有效率，别跳过它。** 某一路整段没数据时，输出的形状完全正常、内容全是
 NaN，不看这一行发现不了 —— `fpc_commands` 就这么整整丢过两个 session。
@@ -284,7 +288,7 @@ NaN，不看这一行发现不了 —— `fpc_commands` 就这么整整丢过两
 | `！session 没有 DONE，未正常收尾` | session 还没封口，或者你 rsync 时漏了收尾那一趟 |
 | `！找不到 ffmpeg/ffprobe，跳过视频` | 没进 PATH。`ffprobe -version` 自己试一下 |
 | `跑不了 yb：缺 python 模块 h5py` | `pip install h5py`，或 WSL 里 `apt install python3-h5py` |
-| `跑不了 yb：缺 python 模块 yaml` | `pip install pyyaml`，或 `apt install python3-yaml`。**别改成不带 `--calibration` 绕过去** —— 那样能跑完，但外参静默退成名义值 |
+| `跑不了 yb：缺 python 模块 yaml` | `pip install pyyaml`，或 `apt install python3-yaml`。**别改成不带 `--calibration` 绕过去** —— 腕相机的 link 就在那份文件里，不给直接报错 |
 | `跑不了 yb：缺 命令 ffmpeg` | 同上，ffmpeg 没进 PATH |
 | 有效率那行出现 `0%` | 那一路整段没录上，别拿这份数据训练 |
 | `--verify` 报不一致 | 传输没搞完，重跑一趟 `--checksum` |

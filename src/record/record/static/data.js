@@ -5,9 +5,11 @@ let DETAIL = null;      // 它的详情，避免每次轮询都重拉
 let PLAYING = false;
 let NOW = { session: '', label: '' };   // 正在放哪一段，用于列表高亮
 let SIG = '';           // 上一次渲染的列表指纹，没变就不重建 DOM
-let CSIG = '';          // 同上，转换进度的指纹
+let CSIG = '';          // 同上，转换与校验渲染进度的指纹
 let CONVERT = { running: false, session: '', format: '', token: '', log: [],
                 error: '', done: false, bytes: 0, progress: 0 };
+let RENDER = { running: false, session: '', label: '', log: [],
+               error: '', done: false, bytes: 0, progress: 0 };
 let FORMATS = [];       // 转换格式，来自 tools/converters.py，A/B 同一张表
 const RAW = {};         // session id -> 文件清单，展开过的才拉
 const OPEN = new Set(); // 展开着的树节点，key 是 `${id}/${目录相对路径}`
@@ -181,13 +183,117 @@ function playBtn(label, sid, t0, t1) {
   return b;
 }
 
+/** 对齐校验：URDF 轮廓 + IK 目标点叠回头部实拍。
+ *  渲染 0.32 s/帧，比 30 fps 慢两个数量级，只能离线跑完再看，不能跟着回放同步出画。 */
+function verifyBtn(d, e) {
+  const mine = RENDER.session === d.id && RENDER.label === e.label;
+  const done = (d.verified || {})[e.label] !== undefined;
+  const b = document.createElement('button');
+  b.dataset.act = 'verify';
+  b.textContent = RENDER.running && mine ? '取消' : (done ? '重渲' : '校验');
+  b.disabled = PLAYING || (RENDER.running && !mine);
+  b.title = RENDER.running && !mine
+    ? `${RENDER.label || '整段'} 正在渲染，一次只能跑一个`
+    : '渲染对齐校验视频：URDF 轮廓压在实拍上，IK 目标点画成深色空心圆';
+  b.onclick = async () => {
+    try {
+      if (RENDER.running && mine) {
+        await post('/api/render/stop');
+        banner('已取消渲染');
+      } else {
+        await post('/api/render/start',
+                   { session: d.id, t0: e.t0, t1: e.t1, label: e.label });
+        banner(`开始渲染校验视频：${e.label}`);
+      }
+      refresh();
+    } catch (err) { banner('渲染起不来：' + err.message, 'bad'); }
+  };
+  return b;
+}
+
+const verifyURL = (sid, label) =>
+  `/verify.mp4?id=${encodeURIComponent(sid)}&label=${encodeURIComponent(label)}`;
+
+/** 这一段的校验结果：渲染中显示进度，渲好了显示视频 + 报告 + 下载/删除。
+ *  产物存在 session 里，所以**不只是刚渲的那一段**有 —— 之前渲过的重开页面照样在。 */
+function renderBox(d, e) {
+  const mine = RENDER.session === d.id && RENDER.label === e.label;
+  const bytes = (d.verified || {})[e.label];
+  const busy = mine && RENDER.running;
+  if (bytes === undefined && !busy && !(mine && RENDER.error)) return null;
+  const box = document.createElement('div');
+  box.className = 'export vf-box';
+
+  if (busy) {
+    const pct = document.createElement('span');
+    pct.className = 'pct';
+    pct.textContent = `${Math.round((RENDER.progress || 0) * 100)}%`;
+    const tip = document.createElement('span');
+    tip.className = 'hint';
+    tip.textContent = '在服务器上跑，关掉这页也不会停';
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.innerHTML = `<div style="width:${((RENDER.progress || 0) * 100).toFixed(1)}%"></div>`;
+    box.append(pct, tip, bar);
+  }
+  if (mine && RENDER.error) {
+    const p = document.createElement('p');
+    p.className = 'hint warn';
+    p.textContent = RENDER.error;
+    box.appendChild(p);
+  }
+  if (bytes !== undefined) {
+    const v = document.createElement('video');
+    v.className = 'vf-video';
+    v.controls = true;
+    v.src = verifyURL(d.id, e.label);
+    box.appendChild(v);
+  }
+  // 数值报告（各路采样滞后、目标-实际距离、最佳时移）。对不齐到什么程度是个数、
+  // 不是“看着像”，所以它和视频一起摆出来。跑完的那份也落在视频旁边的 .txt 里
+  if (mine) {
+    const pre = document.createElement('pre');
+    pre.className = 'log';
+    pre.textContent = RENDER.log.slice(-8).join('\n') || '启动中…';
+    box.appendChild(pre);
+  }
+
+  if (bytes !== undefined) {
+    const a = document.createElement('a');
+    a.className = 'btn';
+    a.href = verifyURL(d.id, e.label);
+    a.download = `${d.id}_${e.label}_verify.mp4`;
+    a.textContent = `下载 ${size(bytes)}`;
+    const kill = document.createElement('button');
+    kill.className = 'danger';
+    kill.textContent = '删除';
+    kill.disabled = RENDER.running;
+    kill.onclick = async () => {
+      try {
+        await post('/api/render/drop', { session: d.id, label: e.label });
+        banner(`已删除 ${e.label} 的校验视频`);
+        loadDetail();
+      } catch (err) { banner('删不掉：' + err.message, 'bad'); }
+    };
+    const tip = document.createElement('span');
+    tip.className = 'hint';
+    tip.textContent = '左绿右红 = URDF 轮廓；深色空心圆 = IK 目标，亮色实心点 = 关节角正解。'
+      + `存在 ${d.id}/verify/ 里，重渲同一段会覆盖，删这次采集时一并删掉`;
+    box.append(a, kill, tip);
+  }
+  return box;
+}
+
 /** 只改按钮可用性与高亮。不能重跑 renderDetail —— 那会重拉 6 张预览帧，每张一个 ffmpeg */
 function syncDetail() {
   for (const el of document.querySelectorAll('#detail .card')) {
     el.classList.toggle('playing',
       PLAYING && NOW.session === PICKED && NOW.label === el.dataset.label);
-    const b = el.querySelector('.top button');
-    if (b) b.disabled = PLAYING;
+    const busy = RENDER.running && !(RENDER.session === PICKED
+                                     && RENDER.label === el.dataset.label);
+    for (const b of el.querySelectorAll('.top button')) {
+      b.disabled = PLAYING || (b.dataset.act === 'verify' ? busy : RENDER.running);
+    }
   }
 }
 
@@ -404,12 +510,19 @@ function epCard(d, e) {
   const dur = document.createElement('span');
   dur.className = 'dur';
   dur.textContent = [`${e.duration}s`, state.mark, e.extra].filter(Boolean).join(' · ');
-  top.append(who, dur, playBtn(e.label, d.id, e.t0, e.t1));
+  top.append(who, dur, verifyBtn(d, e), playBtn(e.label, d.id, e.t0, e.t1));
 
   const say = document.createElement('div');
   say.className = 'say';
   say.textContent = e.instruction || '';
-  card.append(top, say, shots(d.id, d.streams, e.at));
+  card.append(top, say);
+  const verify = renderBox(d, e);
+  if (verify) {
+    // 视频和报告在 20rem 宽的卡片里没法看，有结果时这张卡撜满整行
+    card.classList.add('vf-wide');
+    card.appendChild(verify);
+  }
+  card.appendChild(shots(d.id, d.streams, e.at));
   return card;
 }
 
@@ -463,26 +576,38 @@ async function refresh() {
 
   const st = data.status;
   const wasPlaying = PLAYING;
+  const wasRendering = RENDER.running;
   PLAYING = st.playing;
   NOW = { session: st.session, label: st.label };
   CONVERT = data.convert || CONVERT;
+  RENDER = data.render || RENDER;
   FORMATS = data.formats || FORMATS;
   renderSessions(data.sessions);
   transport(st);
   syncDetail();
   peerLink(st.peer_port, st.peer_alive);
-  // 转换那一格得跟着进度动（进度条、日志滚动、完成后冒出下载链接），
-  // 但别每秒无脑重建整个详情 —— 那会把缩略图闪掉、把展开的段落收回去
+  // 转换与校验渲染那两格得跟着进度动（进度条、日志滚动、完成后冒出下载链接），
+  // 但别每秒无脑重建整个详情 —— 那会把缩略图闪掉、把展开的段落收回去。
+  // 跑完之后指纹就不再变，所以那个 <video> 只会被建一次，不会边看边被换掉
   const sig = [CONVERT.running, CONVERT.done, CONVERT.token, CONVERT.error,
-               CONVERT.log.length, (CONVERT.progress || 0).toFixed(3)].join('|');
+               CONVERT.log.length, (CONVERT.progress || 0).toFixed(3),
+               RENDER.running, RENDER.done, RENDER.error, RENDER.session,
+               RENDER.label, RENDER.log.length,
+               (RENDER.progress || 0).toFixed(3)].join('|');
   if (sig !== CSIG) {
     CSIG = sig;
-    if (DETAIL && !FILE) renderDetail(DETAIL);
+    // 渲完了得重拉详情：“哪几段有视频”是后端扫盘得出的，不在轮询的状态里
+    if (DETAIL && !FILE) {
+      if (wasRendering && !RENDER.running) loadDetail();
+      else renderDetail(DETAIL);
+    }
   }
 
   if (st.error) banner('回放出错：' + st.error, 'bad', true);
   else if (st.playing) banner('回放中 —— 手放在急停上', 'live', true);
   else if (CONVERT.running) banner(`转换中：${CONVERT.session} → ${CONVERT.format}`, 'live', true);
+  else if (RENDER.running) banner(`渲染校验视频：${RENDER.session} · ${RENDER.label || '整段'}`
+                                  + ` ${Math.round((RENDER.progress || 0) * 100)}%`, 'live', true);
   else if (wasPlaying) banner('回放结束，手臂停在原地', '', true);
   else banner(`盘余 ${st.disk_free_gb} GB`, '', true);
 }

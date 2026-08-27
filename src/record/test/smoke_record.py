@@ -109,11 +109,13 @@ def main() -> int:
                 ok = s['online'] if s['key'] == 'head' else _rtsp_ok(s['topic'])
                 streams[s['key']] = ok
                 print(f'  视频 {s["key"]:<12} {"开" if ok else "跳过（探不到）"}')
+        # 先 roll 再开录：没 roll 就开录的话，生任务和摆桌子那几十秒全录进视频，
+        # 所以 start_session 会直接拒掉
+        print('生成一轮摆放…')
+        call('/api/round/preview', {'seed': 20260821})
         print('开 session…')
         call('/api/session/start', {'streams': streams, 'note': 'smoke'})
-
-        print('生成一轮摆放…')
-        call('/api/round/start', {'seed': 20260821})
+        call('/api/round/start', {})
         detail = call('/api/state')['status']['round_detail']
         print(f'  物品 {[i["zh"] for i in detail["items"]]}')
         print(f'  episode {len(detail["episodes"])} 条，lint 警告 '
@@ -137,7 +139,26 @@ def main() -> int:
         assert st['episode'] != st['episode_slot'], f'重录后这两个还相等，测试没测到点上: {st}'
         time.sleep(args.hold)
         call('/api/episode/end', {'outcome': 'discard'})
+        st = call('/api/state')['status']
+        assert st['slot_takes'].get('0') == ['fail', 'discard'], st['slot_takes']
         call('/api/round/end', {})
+
+        # 「结束本轮」把这一轮退回预览：桌子还照它摆着，再开一轮不该逼人重摆一次
+        st = call('/api/state')['status']
+        assert st['pending_round'], f'结束本轮后配置被清空了: {st}'
+        assert st['pending_round']['seed'] == detail['seed'], st['pending_round']
+        st = call('/api/round/start', {})['result']
+        assert st['round'] == 1, st
+        assert st['round_detail']['seed'] == detail['seed'], st['round_detail']['seed']
+        assert st['slot_takes'] == {}, f'新一轮该从零开始: {st["slot_takes"]}'
+        call('/api/round/end', {})
+
+        # 只换摆放和指令，物品不动 —— 换物品要起身去桌上找东西，代价差一个数量级
+        before = [i['item_id'] for i in detail['items']]
+        st = call('/api/round/preview', {'keep_items': True})['result']
+        got = [i['item_id'] for i in st['pending_round']['items']]
+        assert got == before, f'keep_items 换了物品: {got} != {before}'
+        assert st['pending_round']['seed'] != detail['seed'], '没重 roll'
 
         print('封口…')
         result = call('/api/session/stop', {})['result']

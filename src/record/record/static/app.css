@@ -37,12 +37,15 @@ main { padding: .7rem .9rem; display: grid; gap: 1.1rem; align-content: start; }
 .panel { background: none; border: 0; border-radius: 0; padding: 0; }
 /* grid 子项默认 min-width:auto，会被宽表顶宽，于是横向滚动条跑到整页上去了 */
 main > * { min-width: 0; }
-/* 采集页撑满视口：摆桌与指令吃掉剩余高度，数据一览折叠后它跟着长高，
-   而不是留一片空白。靠 flex 而不是 calc(100vh - 一个猜的值)：顶栏会换行。 */
-.fill { display: flex; flex-direction: column; min-height: 100vh; }
+/* 采集页撑满视口、整页不滚：摆桌与指令吃掉剩余高度，指令多了在自己那栏滚；
+   数据一览封顶后在卡片里滚。靠 flex 而不是 calc(100vh - 一个猜的值)：顶栏会换行。 */
+.fill { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .fill > main { flex: 1 1 auto; min-height: 0;
-               align-content: stretch; grid-template-rows: minmax(0, 1fr) auto; }
-.fill > main > .panel:first-of-type { display: flex; flex-direction: column; min-height: 0; }
+               display: flex; flex-direction: column; gap: .8rem; }
+.fill > main > .panel:first-of-type { flex: 1 1 auto; display: flex;
+                                      flex-direction: column; min-height: 0; }
+.fill > main > #streams-card { flex: 0 0 auto; max-height: 45vh;
+                               display: flex; flex-direction: column; min-height: 0; }
 .fill .split { flex: 1 1 auto; min-height: 0; }
 .row { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
 .hint { color: var(--muted); font-size: .82rem; }
@@ -100,6 +103,8 @@ tr.off { opacity: .45; }
 .stage > .row { margin-top: .2rem; }
 .cams { display: grid; gap: .35rem;
         grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+/* 一屏布局下三路必须同时看得见，宽度不够也不许折行 —— 折了就把样例图挤没 */
+.fill .cams { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 700px) { .cams { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .cam { position: relative; background: var(--sunken); border: 1px solid var(--line);
        border-radius: 4px; overflow: hidden; aspect-ratio: 16 / 9; }
@@ -113,23 +118,29 @@ tr.off { opacity: .45; }
              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 左栏跟着分区一起长高，自己滚；别固定死 30rem 然后下面空一大片 */
-.episodes { display: grid; gap: 0; align-content: start;
-            min-height: 6rem; overflow: auto; }
+.episodes { display: flex; flex-direction: column; min-height: 6rem; overflow: auto; }
 /* 窄屏上两栏堆成一列，再撑满视口就变成“两个各自滚的长条”，不如整页滚 */
 @media (max-width: 950px) {
-  .fill { min-height: 0; }
-  .fill > main { grid-template-rows: none; align-content: start; }
+  .fill { height: auto; min-height: 0; overflow: visible; }
+  .fill > main { display: grid; grid-template-rows: none; align-content: start; }
+  .fill > main > #streams-card { max-height: none; display: block; }
+  .fill .cams { grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
   .episodes { max-height: 60vh; }
   .stage { grid-template-rows: none; }
   .scene svg { max-height: 60vh; }
 }
-/* 行而不是盒子：左侧一条竖线分隔，选中才上底色 */
-.ep { border: 0; border-left: 2px solid var(--line); border-radius: 0;
+/* 行而不是盒子：左侧一条竖线分隔，选中才上底色。
+   `flex: 0 0 auto` 每条按内容自适应；容器高度是撑出来的定值，默认 shrink:1 会把每条压矮。 */
+.ep { flex: 0 0 auto; border: 0; border-left: 2px solid var(--line); border-radius: 0;
       background: none; padding: .4rem .6rem; }
 .ep:hover { background: var(--sunken); }
 .ep.active { border-left-color: var(--accent); background: #e0f2fe; }
 .ep.done { opacity: .5; }
-.ep.preview { border-left-style: dashed; }
+/* 录过但一次都没成：别跟没录的混在一起，也别像成功那样淡出视线 */
+.ep.tried { border-left-color: var(--warn); }
+/* 别叫 `preview`：数据页的 `.preview` 是 `display:flex; height:100%`，跨页撞名会把
+   每条指令撑成整栏高，只看得见一条 —— 两个页共用一份 app.css。 */
+.ep.ep-preview { border-left-style: dashed; }
 .ep .acts { display: flex; gap: .35rem; margin-top: .25rem; }
 .ep .acts button { padding: .2rem .55rem; font-size: .78rem; }
 /* 指令是操作者真要读的那行字，比周围的元信息大一号 */
@@ -138,6 +149,7 @@ tr.off { opacity: .45; }
 .tag { font-size: .72rem; padding: .05rem .4rem; border-radius: 4px;
        background: #e2e8f0; color: #475569; margin-right: .3rem; }
 .tag.pass { background: #ffedd5; color: #9a3412; }
+.tag.take { background: #dbeafe; color: #1d4ed8; }
 
 .hint.warn { color: var(--bad); font-weight: 600; }
 .bar { height: .35rem; border-radius: 999px; background: #e2e8f0;
@@ -174,8 +186,8 @@ button.icon { font-size: .8rem; line-height: 1; padding: .45rem .7rem; }
 /* h2 是 flex，float 在里面不算数，靠 margin 推到右边 */
 .fold { margin-left: auto; padding: .1rem .5rem; font-size: .8rem; line-height: 1.2; }
 .folded #streams-body { display: none; }
-/* 让宽表在卡片内部横滚，否则它把整页撑宽，折叠按钮会被挤到屏幕外 */
-#streams-body { overflow-x: auto; }
+/* 让宽表在卡片内部滚，否则它把整页撑宽/撑长，折叠按钮会被挤到屏幕外 */
+#streams-body { overflow: auto; min-height: 0; }
 /* 列宽跟着内容走，不摊成 100%：话题名和说明长短悬殊，摊开只会让「收到/已写」
    这几列被推到屏幕另一头。装得下就按内容宽，装不下再自己换行。 */
 #streams { width: auto; max-width: 100%; }
@@ -267,7 +279,15 @@ a.btn:hover { background: #075985; }
 .card .top { display: flex; align-items: center; gap: .45rem; padding: .45rem .6rem; }
 .card .who { font-weight: 600; font-size: .84rem; }
 .card .dur { color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
-.card .top button { margin-left: auto; padding: .18rem .7rem; font-size: .78rem; }
+.card .top button { padding: .18rem .7rem; font-size: .78rem; }
+/* 只让第一个按钮把整组推到右边，后面的紧挨着它排 */
+.card .top button:first-of-type { margin-left: auto; }
+/* 对齐校验：进度条 / 日志 / 结果视频，塞在指令和预览图之间 */
+.card.vf-wide { grid-column: 1 / -1; }
+.card .vf-box { margin: 0 .6rem .5rem; gap: .35rem; }
+.card .vf-box .log { max-height: 11rem; }
+.vf-video { flex: 1 1 100%; width: 100%; max-height: 60vh; display: block;
+            border-radius: 4px; background: #000; }
 .card .say { padding: 0 .6rem .45rem; font-size: .8rem; color: var(--fg);
              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
              overflow: hidden; min-height: 1.2rem; }

@@ -2,7 +2,6 @@
 
 let STATE = null;          // 最近一次 /api/state
 let PICKED = null;         // 开录前的勾选；开录后由后端的 recording 字段接管
-let DONE = new Set();      // 本轮已标注的 episode
 let SCENE_KEY = '';        // 当前画的是哪一轮，变了才重拉 SVG
 let FOLDED = false;
 let WAS_LOCKED = null;
@@ -59,6 +58,17 @@ function renderStreams(streams, locked) {
   sum.className = 'hint' + (locked && dead ? ' warn' : '');
 }
 
+const OUTCOME_ZH = { success: '成', fail: '败', discard: '弃' };
+
+// 已录次数由后端给（刷页不丢）。每录一遍就是独立的一条 episode，旧的不会被覆盖
+function takesTag(takes) {
+  const n = {};
+  for (const o of takes) n[o] = (n[o] || 0) + 1;
+  const parts = Object.keys(OUTCOME_ZH).filter((k) => n[k]).map((k) => OUTCOME_ZH[k] + n[k]);
+  return `<span class="tag take" title="每次重录都另存一条，不覆盖旧的；不想要的标「丢弃」">`
+    + `已录 ${takes.length} · ${parts.join(' ')}</span>`;
+}
+
 function renderEpisodes(status) {
   const box = $('episodes');
   const committed = status.round_detail;
@@ -69,19 +79,24 @@ function renderEpisodes(status) {
   }
   const preview = !committed;
   const inEpisode = status.state === 'episode';
+  const slotTakes = status.slot_takes || {};
   box.innerHTML = '';
   detail.episodes.forEach((ep, i) => {
     const div = document.createElement('div');
     const active = inEpisode && status.episode_slot === i;
-    div.className = 'ep' + (active ? ' active' : '') + (DONE.has(i) ? ' done' : '')
-      + (preview ? ' preview' : '');
+    const takes = (committed && slotTakes[i]) || [];
+    const ok = takes.filter((o) => o === 'success').length;
+    // 正在录的这条不淡出：重录旧的成功记录还在，但眼下要读的就是它
+    div.className = 'ep' + (preview ? ' ep-preview' : '')
+      + (active ? ' active' : (ok ? ' done' : (takes.length ? ' tried' : '')));
     const pass = ep.verb === 'Pass' ? '<span class="tag pass">交接</span>' : '';
     const warn = (ep.lint_warnings || []).length
       ? `<span class="tag">lint ${ep.lint_warnings.length}</span>` : '';
     div.innerHTML = `
       <div><span class="tag">${i + 1}/${detail.episodes.length}</span>
            <span class="tag">${ep.verb}</span>
-           <span class="tag">${ep.arm}</span>${pass}${warn}</div>
+           <span class="tag">${ep.arm}</span>${pass}${warn}`
+      + `${takes.length ? takesTag(takes) : ''}</div>
       <div class="en">${ep.instruction_en}</div>
       <div class="zh">${ep.instruction_zh}</div>
       <div class="acts"></div>`;
@@ -96,7 +111,6 @@ function renderEpisodes(status) {
         b.onclick = async () => {
           try {
             await post('/api/episode/end', { outcome });
-            DONE.add(i);
           } catch (err) { banner('标注失败：' + err.message, 'bad'); }
           refresh();
         };
@@ -104,11 +118,10 @@ function renderEpisodes(status) {
       }
     } else if (!inEpisode && status.state === 'round') {
       const b = document.createElement('button');
-      b.textContent = DONE.has(i) ? '重录' : '开始';
+      b.textContent = takes.length ? '重录' : '开始';
       b.onclick = async () => {
         try {
           await post('/api/episode/start', { index: i });
-          DONE.delete(i);
         } catch (err) { banner('开始 episode 失败：' + err.message, 'bad'); }
         refresh();
       };
@@ -127,9 +140,13 @@ function renderControls(status) {
   const live = status.state !== 'idle';
   const inRound = status.state === 'round' || status.state === 'episode';
   const pending = !!status.pending_round;
-  $('btn-start').disabled = live;
+  $('btn-start').disabled = live || !pending;
+  $('btn-start').title = pending || live ? ''
+    : '先生成一轮任务并摆好桌子 —— 开录后再摆，那几十秒会全录进视频';
   $('btn-stop').disabled = !live;
-  $('btn-preview').disabled = !!status.library_error;
+  // 本轮固化后不能重 roll：桌上已经照它摆好了，换任务得先「结束本轮」
+  $('btn-preview').disabled = !!status.library_error || inRound;
+  $('btn-reroll').disabled = !!status.library_error || inRound || !pending;
   $('btn-shot').disabled = live;
   $('shot-hint').textContent = live
     ? '录制中不抓快照 —— 解码会跟录制抢 CPU。'
@@ -140,11 +157,11 @@ function renderControls(status) {
 
   const hint = $('round-hint');
   if (inRound) {
-    hint.textContent = '本轮已固化，逐条执行。';
+    hint.textContent = '本轮已固化，逐条执行。同一条可以重录多遍，旧的不会被覆盖；要换任务先「结束本轮」。';
   } else if (pending && !live) {
     hint.textContent = '预览中，未开录。照样例摆好桌子后再点「开始 session」，摆桌过程不进视频。';
   } else if (pending) {
-    hint.textContent = '预览中。摆好桌子后点「开始本轮」固化。';
+    hint.textContent = '预览中。摆好桌子后点「开始本轮」固化；「结束本轮」不丢这套配置，可以直接再开一轮。';
   } else {
     hint.textContent = '先生成任务，照着样例摆好真实桌面，再开录。';
   }
@@ -191,27 +208,26 @@ async function refresh() {
   const key = sceneKey(data.status);
   if (key !== SCENE_KEY) {
     SCENE_KEY = key;
-    DONE = new Set();
     if (key) loadScene();
     else $('scene').innerHTML = '<p class="hint">还没有摆放样例</p>';
   }
 }
 
-$('btn-preview').onclick = async () => {
-  const st = (STATE && STATE.status) || {};
-  const inRound = st.state === 'round' || st.state === 'episode';
-  if (inRound && !confirm('本轮还没结束。生成新任务会先结束本轮，已录的部分照常保留。')) return;
+// keepItems: 桌上那几件东西不动，只重摆位置和换指令 —— 换物品得起身去找，贵得多
+async function rollRound(keepItems) {
+  banner('生成中…');            // 摆不开就重摆，实测能到 2.3 s，不吭声会以为点漏了
   try {
-    if (inRound) await post('/api/round/end');
-    await post('/api/round/preview');
+    await post('/api/round/preview', keepItems ? { keep_items: true } : {});
     await refresh();
   } catch (err) { banner('生成失败：' + err.message, 'bad'); }
-};
+}
+
+$('btn-preview').onclick = () => rollRound(false);
+$('btn-reroll').onclick = () => rollRound(true);
 $('btn-start').onclick = async () => {
   try {
-    const had = STATE && STATE.status && STATE.status.pending_round;
     await post('/api/session/start', { streams: PICKED, note: $('note').value });
-    if (had) await post('/api/round/start', {});   // 开录即固化，不再单独点一次
+    await post('/api/round/start', {});   // 开录即固化，不再单独点一次
     refresh();
   } catch (err) { banner('开录失败：' + err.message, 'bad'); }
 };

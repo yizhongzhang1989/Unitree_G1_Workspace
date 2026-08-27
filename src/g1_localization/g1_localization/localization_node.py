@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import math
 import threading
+from typing import TypeVar
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -56,6 +58,8 @@ from g1_localization.transforms import (
 #: `pose.covariance[0]` 借来当标志位：世界原点还没设。协方差本身一律置零，理由见
 #: `_publish_pose`。
 ORIGIN_UNSET_COV = -1.0
+
+_T = TypeVar('_T')
 
 
 def _to_tf(translation, rotation) -> np.ndarray:
@@ -77,20 +81,27 @@ class LocalizationNode(Node):
 
     def __init__(self) -> None:
         super().__init__('g1_localization')
-        p = self.declare_parameter
 
-        odom_topic = p('odom_topic', '/aft_mapped_to_init').value
-        self._base = p('base_frame', 'torso_link').value
-        self._lidar = p('lidar_frame', 'livox_frame').value
-        self._root = p('root_frame', 'pelvis').value
-        self._world = p('world_frame', 'world').value
+        # `declare_parameter(...).value` 的静态类型是 `Any | None`，这里钉回默认值的类型。
+        def p(name: str, default: _T) -> _T:
+            value = self.declare_parameter(name, default).value
+            return default if value is None else value
+
+        odom_topic = p('odom_topic', '/aft_mapped_to_init')
+        self._base = p('base_frame', 'torso_link')
+        self._lidar = p('lidar_frame', 'livox_frame')
+        self._root = p('root_frame', 'pelvis')
+        self._world = p('world_frame', 'world')
         # 必须与 config/point_lio_g1.yaml 的 mapping.extrinsic_T 一致：那是「雷达在 IMU
         # 体系下的位置」，而 Point-LIO 输出的是 IMU 体的位姿，这里要用它退回雷达。
         self._lidar_in_imu = np.asarray(
-            p('lidar_in_imu_translation', [-0.011, -0.02329, 0.04412]).value,
+            p('lidar_in_imu_translation', [-0.011, -0.02329, 0.04412]),
             dtype=np.float64)
-        self._publish_tf = bool(p('publish_tf', True).value)
-        self._warn_period = float(p('warn_period_s', 5.0).value)
+        # 腰角 TF 是 100 Hz、里程计是 10 Hz，两条流各自异步，里程计 stamp 常常比缓冲区里
+        # 最新的腰角样本新几毫秒。tf2 不外插，不等就会有约一半的帧发不出 TF。
+        self._tf_wait = Duration(
+            nanoseconds=int(1e9 * p('tf_lookup_timeout_s', 0.05)))
+        self._warn_period = p('warn_period_s', 5.0)
 
         self._lock = threading.Lock()
         self._t_imu_base: np.ndarray | None = None   # 常量，等 TF 到齐才算得出
@@ -100,7 +111,7 @@ class LocalizationNode(Node):
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
-        self._tf_broadcaster = TransformBroadcaster(self) if self._publish_tf else None
+        self._tf_broadcaster = TransformBroadcaster(self) if p('publish_tf', True) else None
 
         qos = QoSProfile(depth=20, history=HistoryPolicy.KEEP_LAST,
                          reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -112,7 +123,7 @@ class LocalizationNode(Node):
         self.create_timer(self._warn_period, self._on_watchdog)
 
         tf_note = ('，并广播 %s -> %s' % (self._world, self._root)
-                   if self._publish_tf else '（不发 TF）')
+                   if self._tf_broadcaster else '（不发 TF）')
         self.get_logger().info(
             '世界定位就绪：%s -> ~/torso_pose（%s -> %s）；~/set_origin 钉原点%s'
             % (odom_topic, self._world, self._base, tf_note))
@@ -179,7 +190,7 @@ class LocalizationNode(Node):
         valid = t_world_odom is not None
         t_world_base = (t_world_odom @ t_odom_base) if valid else np.eye(4)
         self._publish_pose(msg, t_world_base, twist_base, valid)
-        if self._publish_tf and valid:
+        if valid:
             self._publish_root_tf(msg, t_world_base)
 
     def _publish_pose(self, msg: Odometry, t_world_base: np.ndarray,
@@ -204,9 +215,12 @@ class LocalizationNode(Node):
 
     def _publish_root_tf(self, msg: Odometry, t_world_base: np.ndarray) -> None:
         """广播 `world -> pelvis`。腰角必须取里程计这一帧的 stamp，理由见模块头。"""
+        if self._tf_broadcaster is None:
+            return
         try:
             tf = self._tf_buffer.lookup_transform(
-                self._base, self._root, Time.from_msg(msg.header.stamp)).transform
+                self._base, self._root, Time.from_msg(msg.header.stamp),
+                timeout=self._tf_wait).transform
         except Exception as exc:
             self.get_logger().warn(
                 '查不到 %s -> %s @ 该时刻，本帧不发 TF：%s'

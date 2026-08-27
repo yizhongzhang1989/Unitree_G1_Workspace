@@ -272,7 +272,7 @@ foreach ($s in $sealed) {
     )
     if ($r.ExitCode -ne 0) {
         Stop-With "转换失败：$($s.Name)（code $($r.ExitCode)）" `
-                  '缺依赖看 README §5 那张表。别为了绕过报错去掉 --calibration —— 外参会静默退成名义值'
+                  '缺依赖看 README §5 那张表。别为了绕过报错去掉 --calibration —— 腕相机的 link 就在那份文件里'
     }
 
     # 有效率那行：某一路整段没录上时形状完全正常、内容全是 NaN，只有这行看得出来。
@@ -308,8 +308,9 @@ eps = json.loads((out / 'episodes_all.json').read_text(encoding='utf-8'))['episo
 print('  episode %d 条' % len(eps))
 
 for ep in eps:
-    print('  %s' % ep['file'])
-    with h5py.File(out / 'data' / ep['file'], 'r') as f:
+    name = ep['episode_name']
+    print('  %s' % name)
+    with h5py.File(out / 'data' / (name + '.h5'), 'r') as f:
         n = int(f['timestamp'].shape[0])
         cams = [c.decode() if isinstance(c, bytes) else c
                 for c in f['meta/camera_space/names'][:]]
@@ -320,11 +321,14 @@ for ep in eps:
 
     declared = ep['end_frame'] - ep['start_frame'] + 1
     if declared != n:
-        problems.append('%s: 索引声明 %d 帧，h5 是 %d 行' % (ep['file'], declared, n))
+        problems.append('%s: 索引声明 %d 帧，h5 是 %d 行' % (name, declared, n))
 
     # h5 第 k 行 == mp4 第 k 帧，是 YB 唯一必须记住的一条，所以逐帧解码硬核对
-    for cam, fname in ep['video'].items():
-        path = out / ('video_' + cam) / fname
+    for cam in cams:
+        path = out / ('video_' + cam) / (name + '.mp4')
+        if not path.is_file():
+            problems.append('%s: 缺 %s 的 mp4' % (name, cam))
+            continue
         r = subprocess.run([ffprobe, '-v', 'error', '-select_streams', 'v:0',
                             '-count_frames', '-show_entries', 'stream=nb_read_frames',
                             '-of', 'csv=p=0', str(path)],
@@ -332,23 +336,27 @@ for ep in eps:
         try:
             k = int(r.stdout.decode().strip())
         except ValueError:
-            problems.append('%s: ffprobe 数不出 %s 的帧数' % (ep['file'], cam))
+            problems.append('%s: ffprobe 数不出 %s 的帧数' % (name, cam))
             continue
         print('    %-12s mp4 %5d 帧   h5 %5d 行   %s'
               % (cam, k, n, 'ok' if k == n else '不一致'))
         if k != n:
-            problems.append('%s: %s 是 %d 帧，h5 是 %d 行' % (ep['file'], cam, k, n))
+            problems.append('%s: %s 是 %d 帧，h5 是 %d 行' % (name, cam, k, n))
 
     # YB 规范 §5.2 的自查办法一：腕相机拧在夹爪上，到同侧末端的距离必须全程是常数。
     # 这条一旦不成立，多半是外参方向反了（认公式不认名字）。
-    for cam, arm in (('wrist_left', 0), ('wrist_right', 1)):
-        if cam not in cams or arm >= pose.shape[1]:
+    # 相机名要和 meta/camera_space/names 逐字一致，写错了下面一条也不查、还报"通过"。
+    for cam, arm in (('leftcam', 0), ('rightcam', 1)):
+        if cam not in cams:
+            problems.append('%s: h5 里没有 %s 这一路，自检的外参不变量没跑' % (name, cam))
+            continue
+        if arm >= pose.shape[1]:
             continue
         ci = cams.index(cam)
         d = np.linalg.norm(ext[:, ci, :, 3] - pose[:, arm, :3], axis=1)
         d = d[np.isfinite(d)]
         if d.size == 0:
-            problems.append('%s: %s 的外参整段是 NaN' % (ep['file'], cam))
+            problems.append('%s: %s 的外参整段是 NaN' % (name, cam))
             continue
         spread = float(np.ptp(d))
         print('    %-12s -> %-16s %.4f cm   极差 %.6f mm'
@@ -356,7 +364,7 @@ for ep in eps:
         if spread > 1e-6:
             problems.append('%s: %s 到同侧末端的距离不是常数（极差 %.4f mm），'
                             '外参方向可能反了（YB 规范 §5.2）'
-                            % (ep['file'], cam, spread * 1000))
+                            % (name, cam, spread * 1000))
 
 if problems:
     print('')
