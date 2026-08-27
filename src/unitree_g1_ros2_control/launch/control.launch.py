@@ -6,13 +6,16 @@ from urllib.parse import urlparse
 from xml.dom.minidom import Document
 from xml.etree import ElementTree
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (PackageNotFoundError,
+                                         get_package_share_directory)
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.logging import get_logger
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 import xacro
+import yaml
 
 
 _TOPOLOGIES = {
@@ -60,6 +63,79 @@ _HARDWARE_ARGUMENTS = {
 }
 
 
+def _calibrated_joint_origins() -> dict:
+    """拿 camera_calibration 标出来的关节 origin。没装/没标就空表。
+
+    运行时读文件而不写 package.xml 依赖 —— 标定包本身要靠控制栈出 TF，
+    反向声明会成环。这是仓库里已有的惯例。
+    """
+    try:
+        path = (Path(get_package_share_directory("camera_calibration"))
+                / "config" / "calibration.yaml")
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (PackageNotFoundError, OSError, yaml.YAMLError) as error:
+        get_logger("control.launch").debug(f"没拿到相机标定：{error}")
+        return {}
+    return data.get("urdf_overrides") or {}
+
+
+def _apply_joint_origins(root, overrides: dict) -> list:
+    """把标定出来的关节叠到内存里的 DOM 上。
+
+    不去改 model/final.urdf：那是个 git submodule，改了会和上游分叉，
+    submodule 一更新就没了。也不能另发一份 static TF 盖 —— 同一个 child frame
+    两个 publisher，tf2 只会取最后到的那个，行为不确定。
+
+    头部那条边 URDF 里本来就有，只改 origin；腕相机的光心 URDF 里压根没有
+    （只有支架的可视化 link），所以 create 的那些是新插一条边进去。
+    """
+    log = get_logger("control.launch")
+    applied = []
+    for joint in root.iter("joint"):
+        entry = overrides.get(joint.get("name"))
+        if not entry or "xyz" not in entry or "rpy" not in entry:
+            continue
+        # 存的是 T_parent<-child。URDF 要是被改过挂点，这个 origin 就不是这条边的了。
+        for tag in ("parent", "child"):
+            node = joint.find(tag)
+            expected = entry.get(tag)
+            if expected and node is not None and node.get("link") != expected:
+                log.warning(
+                    f"{joint.get('name')} 的 {tag} 是 {node.get('link')}，"
+                    f"标定时是 {expected}，跳过这条覆盖")
+                break
+        else:
+            _set_origin(joint, entry)
+            applied.append(joint.get("name"))
+
+    links = {link.get("name") for link in root.iter("link")}
+    for name, entry in overrides.items():
+        if name in applied or not entry.get("create"):
+            continue
+        if "xyz" not in entry or "rpy" not in entry:
+            continue
+        if entry.get("parent") not in links:
+            log.warning(f"URDF 里没有 {entry.get('parent')}，{name} 挂不上去")
+            continue
+        if entry.get("child") not in links:
+            ElementTree.SubElement(root, "link", name=entry["child"])
+        joint = ElementTree.SubElement(root, "joint",
+                                       name=name, type="fixed")
+        ElementTree.SubElement(joint, "parent", link=entry["parent"])
+        ElementTree.SubElement(joint, "child", link=entry["child"])
+        _set_origin(joint, entry)
+        applied.append(name)
+    return applied
+
+
+def _set_origin(joint, entry: dict) -> None:
+    origin = joint.find("origin")
+    if origin is None:
+        origin = ElementTree.SubElement(joint, "origin")
+    origin.set("xyz", " ".join(str(v) for v in entry["xyz"]))
+    origin.set("rpy", " ".join(str(v) for v in entry["rpy"]))
+
+
 def _robot_description(context, package_share: Path, topology: str) -> str:
     mappings = dict(_TOPOLOGIES[topology])
     mappings.update({
@@ -78,6 +154,11 @@ def _robot_description(context, package_share: Path, topology: str) -> str:
         filename = mesh.get("filename")
         if filename and not urlparse(filename).scheme and not Path(filename).is_absolute():
             mesh.set("filename", model_prefix + filename)
+    if LaunchConfiguration("use_camera_calibration").perform(context).lower() == "true":
+        applied = _apply_joint_origins(root, _calibrated_joint_origins())
+        if applied:
+            get_logger("control.launch").info(
+                "已叠加相机标定的关节 origin：" + "、".join(applied))
     return ElementTree.tostring(root, encoding="unicode")
 
 
@@ -194,6 +275,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("joint_states_topic", default_value="/joint_states"),
         DeclareLaunchArgument("robot_description_topic", default_value="/robot_description"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
+        # 展开 URDF 时叠加 camera_calibration 标出来的关节 origin（目前是 d435_joint）。
+        # 关掉就用 URDF 里的名义值。
+        DeclareLaunchArgument("use_camera_calibration", default_value="true"),
         *[
             DeclareLaunchArgument(name, default_value=value)
             for name, value in _HARDWARE_ARGUMENTS.items()

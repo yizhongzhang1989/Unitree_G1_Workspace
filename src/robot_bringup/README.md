@@ -22,11 +22,11 @@
 | `ros2 launch robot_bringup ikt_pose_commander.launch.py controlled_frame:=left_gripper_base` | 同上，改控左手 |
 | `ros2 launch robot_bringup ikt_pose_commander.launch.py enable_dashboard:=false` | 只启 Commander，不开网页 |
 | `ros2 launch robot_bringup gravity_float_demo.launch.py` | 激活 FPC 并让双臂进入可徒手推动的失重状态；连接已有 manager |
-| `ros2 control switch_controllers --stop forward_position_controller` | 停掉 demo 遗留的 active FPC |
+| `ros2 control switch_controllers --deactivate forward_position_controller` | 停掉 demo 遗留的 active FPC |
 | `ros2 param set /forward_position_controller compensation_scale 0.0` | 临时关掉手臂重力补偿 |
 | `ros2 run robot_bringup enter_debug_mode` | 释放运控模式、交出 `/lowcmd`；走 ros2_control 时不需要 |
 | `ros2 run robot_bringup exit_debug_mode` | 卸力斜坡 + 交还 `ai` 模式；控制栈被强杀后的兜底 |
-| `kill -INT "$(pgrep -f 'ros2 launch robot_bringup all_data' \| head -1)"` | 正确停控制栈；**绝不要 `pkill`**，原因见下文 |
+| `kill -INT -- -"$(ps -o pgid= -p "$(pgrep -f 'ros2 launch robot_bringup all_data' \| head -1)" \| tr -d ' ')"` | 正确停控制栈（**发给进程组**）；**绝不要 `pkill`**，原因见下文 |
 
 网页端口：`8770` 末端联调、`8200` 整机 controller、`8210` 底层只读、`8180` IK Commander、`8010`/`8011` 相机自带页。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，`localhost` 常先解析到 IPv6 `::1`，表现为页面能开、数据不来。远程转发 `ssh -L 8770:127.0.0.1:8770 user@robot`，其余端口同理。
 
@@ -192,7 +192,9 @@ Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅两路 `WrenchStamped`，�
 
 网页节点通过同源 URL `/api/cameras/<left|right>/video_feed` 代理相机 MJPEG，因此远程只需转发 `8770`。后台独立探测相机 `/status`；某台相机断流时只有对应栏显示离线占位，KWR57、夹爪及另一台相机不受影响。没人看页面时 `/status` 报 `idle` 但仍算在线；页面一打开流就自己起来，断流后每秒自动重连。
 
-单独跑网页节点时默认仍连本机 `8010/8011`；相机服务在其他主机或端口时设置 `left_camera_url`、`right_camera_url`，`end_effectors_dashboard.launch.py` 还暴露 `camera_timeout_s` 和 `camera_poll_period_s`。双总线四设备接线下两栏都应在线；单侧离线时按页面显示的总线和设备节点查对应通道。
+代理用两个不同的超时：`camera_timeout_s`（默认 1.0）只管 `/status` 轮询，MJPEG 流用 `camera_stream_timeout_s`（默认 10.0）。相机是按需拉流，从代理接上到第一帧要经过 1 Hz 监管轮询 + RTSP 握手，冷启动 1~3 秒，**拿 1 秒去等首帧会每次都在首帧前超时断开**，表现为相机日志里「开始拉流」后恰好 2 秒就「没人要图，停止拉流」，页面永远白着。
+
+单独跑网页节点时默认仍连本机 `8010/8011`；相机服务在其他主机或端口时设置 `left_camera_url`、`right_camera_url`，`end_effectors_dashboard.launch.py` 还暴露 `camera_timeout_s`、`camera_stream_timeout_s` 和 `camera_poll_period_s`。双总线四设备接线下两栏都应在线；单侧离线时按页面显示的总线和设备节点查对应通道。
 
 ## 底层数据监控页
 把 `LowState` 的每一个字段铺出来，包括 `g1_motion_control` 那个页面没有的力矩、电压、`sensor` 和 `mode`：
@@ -307,10 +309,13 @@ tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq
 
 电机失去命令后不再接受位置指令，`tau_est` 掉到约 0，只剩绕组阻尼——**手感是“紧”而不是“软”**，很容易误判成软件把命令锁死了。字段含义见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
 
-停止：`Ctrl-C` 结束 demo 后，controller 仍是 active，需要显式停回去。
-```bash
-ros2 control switch_controllers --stop forward_position_controller
-```
+停止：`Ctrl-C` 后 launch 自己收尾——先把 `forward_position_controller` 切回 inactive，再跑一遍 `exit_debug_mode`（2 s 卸力斜坡 + 交还 `ai`），手臂缓降到自然下垂位。两步都必须做：controller 还 active 时它的 1 kHz 流会把斜坡想降掉的增益一帧帧顶回去。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `release_on_exit` | `true` | 退出时停 controller + 卸力 + 交还 `ai` |
+
+交还 `ai` 之后总线不再独占，**再跑一次 demo 需要先重新进调试模式**（重启控制栈，或 `enter_debug_mode`）。要连着玩几轮就加 `release_on_exit:=false`，但那样手臂会保持最后一帧持续吃电流，必须自己盯着卸力。
 
 ### 进入调试模式
 用 ros2_control 时不需要这一步：`G1TopicSystem` 在 Engage 时自己走 MotionSwitcher `CheckMode`(1001) → `ReleaseMode`(1003)。**只有绕开 controller、自己发 `/lowcmd` 时才需要显式切换**。
@@ -346,13 +351,17 @@ ros2 run robot_bringup enter_debug_mode
 > | `gloria_ros` 的 `disable_on_shutdown` | 两只 Gloria-M 一直留在使能态 |
 > | `native_bridge_node` 的 USB 传输取消 | CANalyst-II 固件卡死，之后每次启动都报 `LIBUSB_ERROR_TIMEOUT`，**只能物理拔插复位** |
 >
-> 必须用信号时也要发 SIGINT，且**只发给 launch 进程**，由它按依赖顺序转发：
+> 必须用信号时也要发 SIGINT，且发给**整个进程组**：
 >
 > ```bash
-> kill -INT "$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)"
+> LP=$(pgrep -f 'ros2 launch robot_bringup all_data' | head -1)
+> kill -INT -- -"$(ps -o pgid= -p "$LP" | tr -d ' ')"
 > ```
 >
-> 发给整个进程组（`kill -INT -- -PID`）会让子进程被直接杀死，launch 来不及编排关闭，效果和 `pkill` 一样。
+> ❗ 2026-08-26 更正：之前写的「只发给 launch 进程，由它转发」是错的。**`ros2 launch`
+> 在关闭路径上从不主动发 SIGINT**（见 `launch/actions/execute_local.py` 的
+> `__get_shutdown_timer_actions`，它只挂 SIGTERM / SIGKILL 两级升级定时器）。Ctrl-C 能用
+> 是因为内核把 SIGINT 送给前台进程组的每一个成员。只发给 launch 进程等于绕开了这套清理。
 
 控制栈被强杀、崩溃或从未启动时该路径不会执行，关节会保持最后一帧命令持续吃电流。用这个工具兜底：
 ```bash

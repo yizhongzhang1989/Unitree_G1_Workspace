@@ -307,6 +307,7 @@ class EndEffectorsDashboard(Node):
         self.declare_parameter("left_camera_url", "http://127.0.0.1:8010")
         self.declare_parameter("right_camera_url", "http://127.0.0.1:8011")
         self.declare_parameter("camera_timeout_s", 1.0)
+        self.declare_parameter("camera_stream_timeout_s", 10.0)
         self.declare_parameter("camera_poll_period_s", 2.0)
         self.declare_parameter("html_path", "")
 
@@ -327,6 +328,8 @@ class EndEffectorsDashboard(Node):
             "mit_torque_limit").get_parameter_value().double_value
         self._camera_timeout = gp(
             "camera_timeout_s").get_parameter_value().double_value
+        self._camera_stream_timeout = gp(
+            "camera_stream_timeout_s").get_parameter_value().double_value
         self._camera_poll_period = gp(
             "camera_poll_period_s").get_parameter_value().double_value
         html_override = gp(
@@ -526,6 +529,7 @@ class EndEffectorsDashboard(Node):
             ("mit_velocity_limit", self._velocity_limit),
             ("mit_torque_limit", self._torque_limit),
             ("camera_timeout_s", self._camera_timeout),
+            ("camera_stream_timeout_s", self._camera_stream_timeout),
             ("camera_poll_period_s", self._camera_poll_period),
         )
         for name, value in positive:
@@ -685,8 +689,10 @@ class EndEffectorsDashboard(Node):
             raise ValueError("unknown hand")
         camera_url = self._config[hand]["camera_url"]
         try:
+            # 相机按需拉流，首帧要等 RTSP 冷启动，不能用 /status 那个 1 s 超时
             upstream = self._camera_opener.open(
-                camera_url + "/video_feed", timeout=self._camera_timeout)
+                camera_url + "/video_feed",
+                timeout=self._camera_stream_timeout)
         except Exception as exc:  # noqa: BLE001
             downstream._send_json(  # type: ignore[attr-defined]
                 503, {"ok": False, "message": f"camera unavailable: {exc}"})
@@ -703,7 +709,8 @@ class EndEffectorsDashboard(Node):
             downstream.send_header("X-Content-Type-Options", "nosniff")
             downstream.end_headers()
             while not self._camera_stop.is_set():
-                chunk = upstream.read(64 * 1024)
+                # read1 才是有多少转多少；read 会攒满 64 KB 再返回，等于压帧
+                chunk = upstream.read1(64 * 1024)
                 if not chunk:
                     return
                 downstream.wfile.write(chunk)

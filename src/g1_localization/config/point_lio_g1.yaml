@@ -1,0 +1,111 @@
+/**:
+  ros__parameters:
+    common:
+      # 点云必须走 points_full：/head/lidar/points 是 16 字节瘦身布局，没有逐点 time。
+      lid_topic: "/head/lidar/points_full"
+      imu_topic: "/head/lidar/imu"
+      con_frame: false
+      con_frame_num: 1
+      cut_frame: false
+      cut_frame_time_interval: 0.1
+      # 实测点云 header.stamp 标帧首、IMU 标即时，两者与本机墙钟的斜率都是 1.0
+      # （0.999956 / 0.999998），同一时钟源无漂移，不需要补偿。
+      time_lag_imu_to_lidar: 0.0
+
+    # Point-LIO 无条件发 TF 且没有开关，launch 里已把 /tf 重映射掉。这两个名字只用于
+    # 它自己的 Odometry 消息，故意不叫 odom/world，免得看起来像是机器人 TF 树的一部分。
+    odom_header_frame_id: "lio_odom"
+    odom_child_frame_id: "lio_body"
+
+    preprocess:
+      # 2 = Velodyne。**不能填 1(AVIA)**：上游把 AVIA 分支连同 livox_ros_driver2 一起
+      # 注释掉了，switch(lidar_type) 里只剩 OUST64/VELO16/HESAI/UNILIDAR，填 1 收不到点。
+      # 上游自带的 config/mid360.yaml 正是填的 1，直接拿来用是坏的。
+      # 我们的字段 x,y,z,intensity(f32) + time(f32) + ring(u16) 与 velodyne_ros::Point
+      # 的注册逐个吻合，走这条分支零改动。
+      lidar_type: 2
+      # ring 实测只有 0~3。MID360 是非重复扫描，这 4 个值是四个发射器、不是俯仰分层
+      # （四者 el 分布完全相同）。给了逐点 time 之后 given_offset_time=true，
+      # velodyne_handler 里 N_SCANS 只在没有 time 时才用来推算 yaw，所以此处不敏感。
+      scan_line: 4
+      # 3 = 纳秒。实测 time 为 [5000, 10000, 15000, ...] 等差 5000 ns，
+      # 一帧 span ≈ 100.3e6 ns ≈ 10 Hz 的帧周期。
+      timestamp_unit: 3
+      # 剔掉雷达自己所在的头部外壳：实测 0~0.3 m 有 6.14% 的点，平均距离 0.154 m ± 2 mm。
+      # 这些点刚性固连、在雷达系里永远静止，会把里程计锚死，比手臂危害更大。
+      # 代价几乎为零：实测 0.3~1.5 m 之间总共只有 0.33% 的点
+      # （blind 0.3 剔 6.13%，1.5 剔 6.46%）。顺带把抬起的手臂也挡在外面。
+      # 前提是手臂垂着时测的，也没有近距离障碍物；换场景要复测这条分布。
+      blind: 1.0
+
+    mapping:
+      imu_en: true
+      start_in_aggressive_motion: false
+      extrinsic_est_en: false
+      imu_time_inte: 0.005
+      # 饱和判定用的是**归一化前**的原始读数（Estimator.cpp 里 acc_avr 先判饱和、
+      # 再乘 G_m_s2/acc_norm），所以必须按消息里的数值填。我们喂的是 /head/lidar/imu，
+      # head_lidar_node 已把 Livox 的 g 换算成 m/s²，于是 3 g -> 3 × 9.80665 = 29.42。
+      # 照抄上游的 3.0 会让静止时的 9.81 就超过 0.99×3.0，开机即误判 IMU 饱和。
+      satu_acc: 29.42
+      # rad/s，两侧单位一致不用换算。35 rad/s ≈ 2005 °/s，对应内置 IMU 的 ±2000°/s 量程。
+      # 实测静止时陀螺模长最大 0.017 rad/s。
+      satu_gyro: 35.0
+      # 9.81 = 加速度以 m/s² 为单位。若改喂原始 /utlidar/imu_livox_mid360 则要回到 1.0，
+      # 且 satu_acc 要同步改回 3.0。
+      acc_norm: 9.81
+      lidar_meas_cov: 0.01
+      acc_cov_output: 500.0
+      gyr_cov_output: 1000.0
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      imu_meas_acc_cov: 0.01
+      imu_meas_omg_cov: 0.01
+      gyr_cov_input: 0.01
+      acc_cov_input: 0.1
+      plane_thr: 0.1
+      match_s: 81.0
+      # 实测水平只有 285° 有回波（正前方 az ∈ [-45°, +45°] 是盲区，推测头部外壳遮挡）。
+      # 这里仍填 360：该参数用于按 FOV 裁剪地图，填小了反而会误剔真实点。
+      fov_degree: 360.0
+      det_range: 100.0
+      gravity_align: true
+      gravity: [0.0, 0.0, -9.810]
+      gravity_init: [0.0, 0.0, -9.810]
+      # 雷达在 IMU 体系下的位姿（MID360 内置 IMU 相对雷达光心的官方值，上游同值）。
+      # 驱动发出来的 IMU 与点云同为 frame_id=livox_frame 且未做额外旋转 —— 静止时
+      # accel z = -0.999 g，与 URDF 里 mid360_joint 的 roll=π 倒装一致，故旋转取单位阵。
+      extrinsic_T: [-0.011, -0.02329, 0.04412]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+
+    odometry:
+      # 保持 false。它只管**发布**、不管计算：Point-LIO 内部照样逐点更新滤波器。
+      # true 时会把逐点更新的中间态也发出来（实测约 1450 Hz），那些中间态位置峰峰能到
+      # 60 mm，但位置二阶导 32~53 m/s² 而同期 IMU 实测只有 0.04 m/s²、相关系数近 0
+      # ——是没收敛的过程量，不是机器人真在动。关掉后每帧点云出一条收敛值，10 Hz。
+      # 带宽够：真实遥操作 session 实测躯干晃动主频 0.07~1.22 Hz，Nyquist 5 Hz 有 4 倍余量。
+      # 关掉还顺带避免下游 Python 节点被 1450 Hz 的回调压垮。
+      publish_odometry_without_downsample: false
+
+    publish:
+      path_en: false
+      scan_publish_en: true
+      scan_bodyframe_pub_en: false
+
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
+
+    # 上游把下面这些放在 launch 里覆盖，这里收进同一份配置，只留一个要看的地方。
+    use_imu_as_input: false
+    prop_at_freq_of_imu: true
+    check_satu: true
+    init_map_size: 10
+    point_filter_num: 1
+    space_down_sample: true
+    filter_size_surf: 0.2
+    filter_size_map: 0.2
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false

@@ -1,0 +1,306 @@
+version: 1
+intrinsics:
+  camera_left:
+  - width: 1920
+    height: 1080
+    camera_matrix:
+    - 1288.0500580790772
+    - 0.0
+    - 962.7846482992204
+    - 0.0
+    - 1286.4328947081983
+    - 539.1991855355855
+    - 0.0
+    - 0.0
+    - 1.0
+    distortion_model: plumb_bob
+    distortion_coefficients:
+    - -0.3695273310372018
+    - 0.1442085998492567
+    - 0.000601204521993741
+    - 0.001046958783541406
+    - -0.031400147200281614
+    rms: 0.1892
+    images: 15
+    coverage: 0.6729
+    fov_deg:
+    - 73.4
+    - 45.54
+    stamp: '2026-08-25T02:50:49'
+    board:
+      squares_x: 12
+      squares_y: 9
+      square_size: 0.03
+      marker_size: 0.0225
+      dictionary: DICT_5X5_100
+      corner_count: 88
+      width_m: 0.36
+      height_m: 0.27
+    source: camera_calibration
+  - width: 640
+    height: 360
+    camera_matrix:
+    - 429.6067719041053
+    - 0.0
+    - 319.27680838773415
+    - 0.0
+    - 429.24354296987343
+    - 173.74748778579226
+    - 0.0
+    - 0.0
+    - 1.0
+    distortion_model: plumb_bob
+    distortion_coefficients:
+    - -0.36868268854120634
+    - 0.1491656229782097
+    - 0.0034640344671356335
+    - 0.0017945337433631504
+    - -0.03195800343727233
+    rms: 1.7396
+    images: 13
+    coverage: 0.6655
+    fov_deg:
+    - 73.36
+    - 45.5
+    stamp: '2026-08-25T02:50:56'
+    board:
+      squares_x: 12
+      squares_y: 9
+      square_size: 0.03
+      marker_size: 0.0225
+      dictionary: DICT_5X5_100
+      corner_count: 88
+      width_m: 0.36
+      height_m: 0.27
+    source: camera_calibration
+  camera_right:
+  - width: 1920
+    height: 1080
+    camera_matrix:
+    - 1282.3107242175934
+    - 0.0
+    - 962.6706477085626
+    - 0.0
+    - 1280.5699474956832
+    - 566.559803916971
+    - 0.0
+    - 0.0
+    - 1.0
+    distortion_model: plumb_bob
+    distortion_coefficients:
+    - -0.36521902500511283
+    - 0.13826878761104464
+    - -0.00030518628220215275
+    - 0.0007564259773636415
+    - -0.027589878842681964
+    rms: 0.5609
+    images: 15
+    coverage: 0.6837
+    fov_deg:
+    - 73.64
+    - 45.73
+    stamp: '2026-08-25T02:52:53'
+    board:
+      squares_x: 12
+      squares_y: 9
+      square_size: 0.03
+      marker_size: 0.0225
+      dictionary: DICT_5X5_100
+      corner_count: 88
+      width_m: 0.36
+      height_m: 0.27
+    source: camera_calibration
+  - width: 640
+    height: 360
+    camera_matrix:
+    - 424.06120223022253
+    - 0.0
+    - 313.72148840811246
+    - 0.0
+    - 424.6210305729453
+    - 186.29946137873125
+    - 0.0
+    - 0.0
+    - 1.0
+    distortion_model: plumb_bob
+    distortion_coefficients:
+    - -0.38950305585697736
+    - 0.21364486374442693
+    - -0.001088659888782442
+    - 0.0011729537889003385
+    - -0.08625637512645506
+    rms: 1.5735
+    images: 15
+    coverage: 0.6168
+    fov_deg:
+    - 74.08
+    - 45.94
+    stamp: '2026-08-25T02:55:12'
+    board:
+      squares_x: 12
+      squares_y: 9
+      square_size: 0.03
+      marker_size: 0.0225
+      dictionary: DICT_5X5_100
+      corner_count: 88
+      width_m: 0.36
+      height_m: 0.27
+    source: camera_calibration
+extrinsics:
+  camera_left:
+    parent: left_gripper_base
+    child: camera_left
+    method: all
+    samples: 9
+    consistency:
+      count: 9
+      angle_rms_deg: 1.2308669256816365
+      angle_max_deg: 2.0849267176951636
+      trans_rms_mm: 10.398910769885376
+      trans_max_mm: 16.879558239947382
+    translation:
+    - 0.0023944936762324703
+    - 0.04336009777594194
+    - 0.059457601917243086
+    rotation:
+    - -0.004193217635562618
+    - -0.1086240437963812
+    - 0.9940572538608601
+    - 0.005780145481594386
+    rpy:
+    - -0.21772708311876873
+    - 0.007080930435738706
+    - 3.129189465039453
+    reference_correction:
+      angle_deg: 2.2033
+      trans_mm: 15.879
+      translation:
+      - -0.011762094535200975
+      - -0.010465688344423988
+      - -0.002061848578352027
+      rotation:
+      - -0.006656977850508336
+      - 0.001243512977489958
+      - -0.01799427514979824
+      - 0.999815155107786
+      rpy:
+      - -0.01335667776830154
+      - 0.002246993149555125
+      - -0.03600632454920363
+    residual_mm: 6.591
+    well_posed: true
+    stamp: '2026-08-25T02:58:25'
+  camera_right:
+    parent: right_gripper_base
+    child: camera_right
+    method: all
+    samples: 9
+    consistency:
+      count: 9
+      angle_rms_deg: 1.7264228691972
+      angle_max_deg: 3.3941901622374067
+      trans_rms_mm: 8.412608270469727
+      trans_max_mm: 16.44646750158474
+    translation:
+    - 0.004747922775257204
+    - 0.042150455696880654
+    - 0.0641001300732549
+    rotation:
+    - 0.013793927093288189
+    - -0.10855155716533474
+    - 0.9939940063395183
+    - 0.001484039568210084
+    rpy:
+    - -0.21755339911939706
+    - -0.02774791191934426
+    - -3.141548184812725
+    reference_correction:
+      angle_deg: 2.2033
+      trans_mm: 15.879
+      translation:
+      - -0.011762094535200975
+      - -0.010465688344423988
+      - -0.002061848578352027
+      rotation:
+      - -0.006656977850508336
+      - 0.001243512977489958
+      - -0.01799427514979824
+      - 0.999815155107786
+      rpy:
+      - -0.01335667776830154
+      - 0.002246993149555125
+      - -0.03600632454920363
+    residual_mm: 6.591
+    well_posed: true
+    stamp: '2026-08-25T02:58:26'
+profile_relations: {}
+urdf_overrides:
+  d435_joint:
+    parent: torso_link
+    child: d435_link
+    xyz:
+    - 0.0448674
+    - 0.0070306
+    - 0.4275033
+    rpy:
+    - 0.0553102
+    - 0.8440717
+    - 0.0280982
+    previous_xyz:
+    - 0.0576235
+    - 0.01753
+    - 0.42987
+    previous_rpy:
+    - 0.0
+    - 0.8307767239493009
+    - 0.0
+    calibrated_frame: camera_color_optical_frame
+    correction:
+      angle_deg: 2.3142
+      trans_mm: 7.364
+    residual_mm: 3.187
+    condition: 18.7
+    samples:
+      camera_left: 3
+      camera_right: 3
+    source: camera_calibration solve_all
+    stamp: '2026-08-24T10:58:05'
+    # 2026-08-25 用 head_compare 实拍验证过：这一版轮廓贴合最好。
+    # 后来 01:13 那次叠加标定（rpy 0.0174/0.8575/0.0255）实测更差，已回滚掉。
+    # 别在这个值之上再跑一次头部标定叠加 —— solve_all 的 ΔH 方向存疑，
+    # 连续两次都往同方向加 pitch 0.76°，不收敛。
+    verified_by: head_compare 2026-08-25
+  right_camera_optical_joint:
+    parent: right_camera_mount_link
+    child: camera_right
+    create: true
+    xyz:
+    - 0.0047479
+    - 0.0421505
+    - 0.0641001
+    rpy:
+    - -0.2175534
+    - -0.0277479
+    - -3.1415482
+    calibrated_from: right_gripper_base
+    method: all
+    samples: 9
+    source: camera_calibration solve_extrinsic
+    stamp: '2026-08-25T02:58:26'
+  left_camera_optical_joint:
+    parent: left_camera_mount_link
+    child: camera_left
+    create: true
+    xyz:
+    - 0.0023945
+    - 0.0433601
+    - 0.0594576
+    rpy:
+    - -0.2177271
+    - 0.0070809
+    - 3.1291895
+    calibrated_from: left_gripper_base
+    method: all
+    samples: 9
+    source: camera_calibration solve_extrinsic
+    stamp: '2026-08-25T02:58:25'

@@ -68,6 +68,23 @@ ros2 run head_sensors verify_head_view --out /tmp/verify
 
 MID-360 在 URDF 里是**倒装**的（`mid360_link` 相对 `torso_link` 的 `rpy` roll = π，pitch = 0.0511），IMU 静止读到 `az ≈ -0.97 g` 与之吻合。
 
+点云出**两路**，同样的距离过滤、只差打包布局：
+
+| 话题 | `point_step` | 字段 | 给谁用 |
+|---|---|---|---|
+| `/head/lidar/points` | 16 | `x,y,z,intensity` | 只要坐标的下游 |
+| `/head/lidar/points_full` | 22 | 再加 `ring` + `time` | 激光惯性里程计（`g1_localization`） |
+
+里程计靠逐点 `time` 做运动去畸变，瘦身布局喂不了它。两路都只在**有订阅者时**才打包，
+没人订就只走统计，所以默认两路全开也不额外花钱。
+
+> **`PointCloud2.data` 只能用 `array.array('B', ...)` 赋值。**
+> rclpy 对 `uint8[]` 只对 `array.array` 短路，赋 `bytes` 会走逐元素 `isinstance` 断言 ——
+> 实测一帧 9500 点（209 KB）**29.9 ms vs 0.044 ms，678 倍**，10 Hz 下就是 30% 单核，
+> 还会把同节点里 200 Hz 的 IMU 回调饿死（实测掉到 164 Hz）。`pointcloud.py` 的
+> `_as_payload()` 统一处理，别绕过它。点云与 IMU 另外分在不同的回调组 +
+> `MultiThreadedExecutor`，两件事都做了 IMU 才回到 200 Hz。
+
 在自己的节点里用：
 ```python
 from head_sensors.pointcloud import cloud_to_xyzi, filter_range
@@ -76,7 +93,14 @@ xyzi = cloud_to_xyzi(msg)            # (N, 4) float32，零拷贝解析
 pts, dist = filter_range(xyzi, 0.1, 70.0)
 ```
 
+要保留 `ring`/`time` 就走 `cloud_to_structured` + `range_mask` + `repack_like`。
+
 `cloud_to_xyzi` 按 `msg.fields` 现场构造 numpy dtype，不写死 22 字节布局，换固件也不用改。
+
+实测的雷达视野（2026-08-25，见 `g1_localization` 的 README）：
+**水平只有 285° 有回波**，正前方 `az ∈ [-45°, +45°]` 是盲区（推测头部外壳遮挡）；
+垂直向上 6.2° ~ 向下 53.8°，与 MID-360 标称的 -7°~52° 倒装后吻合。
+近处 0~0.3 m 有 6.14% 的点是雷达自己所在的头部外壳（平均距离 0.154 m）。
 
 ## 相机
 `head_camera.launch.py` 只做两件事：转发参数给官方 `rs_launch.py`，再补一条挂载 TF。
@@ -196,9 +220,17 @@ shot.depth   # float32 米，未命中为 inf
 shot.label   # 命中的几何体下标，配 shot.names 用
 ```
 
-输出 `_depth16.png`（16UC1 毫米，与 RealSense 深度同格式，可直接与实拍相减）、`_depth.png`（JET 着色）、`_parts.png`（按几何体上色，看哪个 link 挡住了视野）。中立位下命中 14.9% 像素、深度 0.351~0.536 m —— 视野被自己的双手夹爪占掉约 15%。
+输出 `_depth16.png`（16UC1 毫米，与 RealSense 深度同格式，可直接与实拍相减）、`_depth.png`（JET 着色）、`_parts.png`（按几何体上色，看哪个 link 挡住了视野）。中立位下命中 14.6% 像素、深度 0.352~0.532 m —— 视野被自己的双手夹爪占掉约 15%。
 
-两点取舍：**深度是逐三角形常数**（取重心深度）而不是逐像素平面插值，**画家算法**代替 z-buffer。G1 网格三角形边长在毫米量级，近似误差同量级，换来能直接用 `cv2.fillConvexPoly`、不必在 Python 里逐像素循环；刚体自视角下没有互相穿插的三角形，结果与 z-buffer 一致。实测加载 URDF 约 4 s（只一次），之后 45 万三角形每帧约 0.55 s。
+### 两条光栅化路径，按要不要逐像素深度选
+
+`render()` 是逐像素 z-buffer，透视正确地插值逆深度；代价是那个逐三角形的 Python
+循环（一帧有九万多个三角形能活下来），**640x360 实测 12.4 s/帧**。要深度图就只能走它。
+
+`silhouette()` 只出 `label`，**0.32 s/帧，快约 40 倍**：闭合网格的正面三角形之并就是
+它的剪影，所以单个几何体内部不需要比深度，整块交给一次 `cv2.fillPoly`；几何体之间
+按最近深度从远到近画家算法覆盖。两者命中像素实测重合 99.7%。只要轮廓的场合
+（叠图对齐、自遮挡掩膜）用它；`record` 的 `verify_alignment` 就是这么干的。
 
 相机朝向默认按 **ROS 光学坐标系**（x 右 / y 下 / z 前），加 `--link-frame` 则按 link 坐标系（x 前 / y 左 / z 上）。要往场景里放桌子、材质和光照，那才轮到真正的渲染器。
 

@@ -10,8 +10,13 @@ LAYOUT = {sum(BLOCK[name] for name in fields): fields for fields in (
     ('base', 'left', 'right', 'grip'))}
 
 
-def split_command(values) -> dict[str, np.ndarray]:
-    """按长度分块并归一化臂四元数；非法帧抛 ``ValueError``。"""
+def split_command(values, *, arm_poses: bool = True) -> dict[str, np.ndarray]:
+    """按长度分块；非法帧抛 ``ValueError``。
+
+    ``arm_poses`` 为真时那两个 7 值块是末端位姿，四元数在这里校验并归一化；
+    逐关节透传模式下同一个块是 7 个关节角，没有四元数可言，所以这道校验必须
+    跟着模式走，不能写死在协议里。分块长度两种模式完全相同。
+    """
     # 一次拷贝后各块都只是视图；既不改 ROS message，也不为 2/4/7/14/20 再逐块分配。
     data = np.array(values, dtype=np.float64, copy=True)
     fields = LAYOUT.get(data.size)
@@ -21,14 +26,15 @@ def split_command(values) -> dict[str, np.ndarray]:
     for name in fields:
         chunks[name] = data[offset:offset + BLOCK[name]]
         offset += BLOCK[name]
-    for name in ('left', 'right'):
-        pose = chunks.get(name)
-        if pose is None:
-            continue
-        norm = float(np.linalg.norm(pose[3:]))
-        if not 0.5 < norm < 2.0:
-            raise ValueError(f'{name} 四元数模长 {norm:.3f} 异常')
-        pose[3:] /= norm
+    if arm_poses:
+        for name in ('left', 'right'):
+            pose = chunks.get(name)
+            if pose is None:
+                continue
+            norm = float(np.linalg.norm(pose[3:]))
+            if not 0.5 < norm < 2.0:
+                raise ValueError(f'{name} 四元数模长 {norm:.3f} 异常')
+            pose[3:] /= norm
     return chunks
 
 

@@ -1,0 +1,4747 @@
+<!DOCTYPE html>
+<!-- saved from url=(0063)http://10.172.100.47:12316/instruction_prompt_and_patterns.html -->
+<html lang="zh-CN" data-immersive-translate-page-theme="light"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Instruction Spec — 采集端 prompt 格式 &amp; 现有 pattern</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",Roboto,sans-serif;
+     max-width:1200px;margin:0 auto;padding:30px 20px 96px;line-height:1.55;color:#1f2328;}
+h1{border-bottom:2px solid #1f2328;padding-bottom:8px;font-size:26px;}
+h2{margin-top:44px;border-bottom:1px solid #d0d7de;padding-bottom:6px;font-size:22px;}
+h3{margin-top:26px;font-size:18px;}
+h4{margin-top:18px;font-size:15px;color:#57606a;}
+code{background:#f6f8fa;padding:2px 5px;border-radius:4px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;}
+pre{background:#f6f8fa;padding:12px 14px;border-radius:6px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;overflow-x:auto;line-height:1.5;}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px;}
+th,td{border:1px solid #d0d7de;padding:7px 10px;text-align:left;vertical-align:top;}
+th{background:#f6f8fa;font-weight:600;}
+tr:nth-child(even) td{background:#fbfcfd;}
+.num{font-variant-numeric:tabular-nums;text-align:right;}
+.pill{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;font-family:monospace;color:white;}
+.pill-pp{background:#0969da;}
+.pill-tea{background:#1a7f37;}
+.pill-sm{background:#9a6700;}
+.callout{background:#fff8c5;border-left:4px solid #d4a72c;padding:10px 14px;border-radius:4px;margin:12px 0;}
+.callout-blue{background:#ddf4ff;border-left:4px solid #0969da;padding:10px 14px;border-radius:4px;margin:12px 0;}
+.callout-red{background:#ffebe9;border-left:4px solid #cf222e;padding:10px 14px;border-radius:4px;margin:12px 0;}
+.callout-green{background:#dafbe1;border-left:4px solid #1a7f37;padding:10px 14px;border-radius:4px;margin:12px 0;}
+.toc{background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:12px 20px;margin-bottom:24px;}
+.toc h4{margin:0 0 6px;color:#1f2328;letter-spacing:0;text-transform:none;}
+.toc ol{margin:4px 0 0 20px;padding:0;}
+.toc a{color:#0969da;text-decoration:none;}
+.toc a:hover{text-decoration:underline;}
+.no{color:#cf222e;font-weight:700;}
+.ok{color:#1a7f37;font-weight:700;}
+.slot{color:#8250df;font-weight:600;}
+</style></head><body>
+
+<h1>Instruction Spec — 采集端 prompt 格式 &amp; 现有 pattern</h1>
+<p style="color:#6a737d">
+Owner: 数据训练团队 · 面向: 采集系统开发 · 标注系统开发 · 生成日期: 2026-08-02
+</p>
+
+<div class="callout-blue">
+<b>这份文档只讲两件事</b>:
+<ol>
+<li><b>Part 1 — 我们要的 prompt 格式</b> (未来采集必须遵守的模板)</li>
+<li><b>Part 2 — 目前数据里已有的所有 pattern</b> (按业务模式分组罗列, 让你知道现在收上来的都长什么样)</li>
+</ol>
+</div>
+
+<div class="toc">
+<h4>目录</h4>
+<ol>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p1">Part 1 · 我们要的 prompt 格式</a>
+<ol>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p1-1">1.1 公共骨架 (一句话记住)</a></li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p1-2">1.2 硬约束 (5 条, 无例外)</a></li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p1-3">1.3 12 个合法 verb + 各自模板</a></li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p1-4">1.4 slot 词表约束</a></li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p1-5">1.5 lint 规则 (发布前验收, 不阻塞运行时数据落盘)</a></li>
+</ol>
+</li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2">Part 2 · 目前已有的 pattern</a>
+<ol>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2-a">A. Pickplace G1 · 桌面双臂 pick&amp;place</a></li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2-b">B. Pickplace G1 · 泡茶 / 倒水 / 开合盖</a></li>
+<li><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2-c">C. Supermarket · 装篮子 / 传递</a></li>
+</ol>
+</li>
+</ol>
+</div>
+
+<hr>
+
+<!-- ==================== PART 1 ==================== -->
+<h2 id="p1">Part 1 · 我们要的 prompt 格式</h2>
+
+<h3 id="p1-1">1.1 公共骨架 (一句话记住)</h3>
+
+<div class="callout-green">
+<pre style="background:transparent;padding:0;margin:0;font-size:14px;">{Verb} the {obj} [{prep} the {target} [{context_prep} the {context}]] with the {arm} arm
+</pre>
+</div>
+
+<p>翻译:</p>
+<ul>
+<li><b>{Verb}</b>: 一个动词 (12 个合法之一, 见 §1.3)</li>
+<li><b>the {obj}</b>: 直接宾语 (物品, 词表来自训练团队的物品词表)</li>
+<li><b>[{prep} the {target}]</b>: 目标位置 (可选; 无目标就省略), 如 <code>into the brown basket</code></li>
+<li><b>[{context_prep} the {context}]</b>: 空间上下文 (可选), 如 <code>on the tea tray</code></li>
+<li><b>with the {arm} arm</b>: 手臂标识 (必写, 不允许省略)</li>
+</ul>
+
+<p><b>例子</b>:</p>
+<pre>Pick up the toy burger with the right arm
+Place the silver can to the left of the yellow plate with the right arm
+Pass the pink cup to the left arm with the right arm
+Pour tea into the cup on the tea tray with the right arm</pre>
+
+<h3 id="p1-2">1.2 硬约束 (5 条, 无例外)</h3>
+
+<table>
+<thead><tr><th>#</th><th>约束</th><th>反例 (❌ 禁止)</th><th>正例 (✅ 正确)</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>无句号结尾</td><td><code>Pick up the ball.</code></td><td><code>Pick up the ball with the right arm</code></td></tr>
+<tr><td>2</td><td>用 <code>with the ... arm</code>, 不用 <code>using the ... arm</code></td><td><code>Pick up the ball using the right arm</code></td><td><code>Pick up the ball with the right arm</code></td></tr>
+<tr><td>3</td><td>手臂用 <code>arm</code>, 不用 <code>hand</code></td><td><code>Pick up the ball with the right hand</code></td><td><code>Pick up the ball with the right arm</code></td></tr>
+<tr><td>4</td><td>动词只能是 12 个合法之一 (见 §1.3)</td><td><code>Grab / Grasp / Lift / Hand over / Put down</code> 等</td><td>用等价的合法 verb 替代 (见后面转换表)</td></tr>
+<tr><td>5</td><td>不加冗余修饰词</td><td><code>Place the held burger into ...</code> (<code>held</code> 是废话)<br><code>Move the ball rapidly with ...</code> (<code>rapidly</code> 是不必要副词)</td><td><code>Place the burger into ...</code></td></tr>
+</tbody>
+</table>
+
+<h4>禁用动词 → 合法动词 转换表</h4>
+<table>
+<thead><tr><th>禁用</th><th>换成</th><th>为什么</th></tr></thead>
+<tbody>
+<tr><td><code>Put down</code></td><td><code>Place ... on the table</code></td><td><code>Put down</code> 语义窄, <code>Place on</code> 已经覆盖</td></tr>
+<tr><td><code>Hand over</code></td><td><code>Pass</code></td><td><code>Pass</code> 是标准词; <code>Hand over ... from ... to ...</code> 句式也要改成 <code>Pass ... to X arm with Y arm</code></td></tr>
+<tr><td><code>Grab / Grasp / Take</code></td><td><code>Pick up</code></td><td>统一为 <code>Pick up</code></td></tr>
+<tr><td><code>Lift</code> (作为 pick 的意思)</td><td><code>Pick up</code></td><td>同上</td></tr>
+<tr><td><code>Drop</code></td><td><code>Place ... into ...</code></td><td>Drop 隐含"扔"的粗暴语义, 不用</td></tr>
+<tr><td><code>Move</code></td><td>按语义换成 <code>Place</code> 或 <code>Push</code></td><td><code>Move</code> 太宽泛不精确</td></tr>
+<tr><td><code>Set</code> (放置)</td><td><code>Place</code></td><td>统一为 <code>Place</code></td></tr>
+</tbody>
+</table>
+
+<h3 id="p1-3">1.3 12 个合法 verb + 各自模板</h3>
+
+<table>
+<thead><tr><th>Verb</th><th>模板</th><th>用途</th><th>使用在</th></tr></thead>
+<tbody>
+
+<tr><td rowspan="2"><code>Pick up</code></td>
+<td><code>Pick up the {obj} with the {arm} arm</code></td>
+<td>从桌面拿起</td><td rowspan="2">全部业务</td></tr>
+<tr><td><code>Pick up the {obj} from the {source} with the {arm} arm</code></td>
+<td>从指定位置拿起 (如 <code>from the cup</code>, <code>from the tea tray</code>)</td></tr>
+
+<tr><td rowspan="6"><code>Place</code></td>
+<td><code>Place the {obj} with the {arm} arm</code></td>
+<td>放下, 不指定位置</td><td rowspan="6">pickplace / 泡茶 / supermarket</td></tr>
+<tr><td><code>Place the {obj} into the {target} with the {arm} arm</code></td>
+<td>放入容器 (篮子、盒子、碗)</td></tr>
+<tr><td><code>Place the {obj} on the {target} with the {arm} arm</code></td>
+<td>放到平面 (桌面、盘子)</td></tr>
+<tr><td><code>Place the {obj} to the {LR} of the {target} with the {arm} arm</code><br><small>其中 <span class="slot">{LR}</span> ∈ <code>left / right</code></small></td>
+<td>相对另一个物体的左右方位</td></tr>
+<tr><td><code>Place the {obj} in front of the {target} with the {arm} arm</code><br><code>Place the {obj} behind the {target} with the {arm} arm</code></td>
+<td>相对另一个物体的前后方位</td></tr>
+<tr><td><code>Place the {obj} at the {position} of the {target} with the {arm} arm</code><br><small><span class="slot">{position}</span> ∈ <code>front left / front center / front right / center left / center / center right / back left / back center / back right</code></small></td>
+<td>目标表面上的命名区域；Scoop 2.0 使用 <code>at the front center of the table</code></td></tr>
+
+<tr><td><code>Pass</code></td>
+<td><code>Pass the {obj} to the {arm_to} arm with the {arm_from} arm</code><br><small>约束: <span class="slot">arm_to ≠ arm_from</span></small></td>
+<td>两手之间传递</td>
+<td>pickplace / supermarket</td></tr>
+
+<tr><td rowspan="2"><code>Pour</code></td>
+<td><code>Pour {material} into the {target} with the {arm} arm</code></td>
+<td>倾倒液体/粉末</td><td rowspan="2">仅泡茶</td></tr>
+<tr><td><code>Pour {material} from the {source} into the {target} with the {arm} arm</code></td>
+<td>指定源</td></tr>
+
+<tr><td><code>Put</code> (归位)</td>
+<td><code>Put the {obj} back {prep} the {target} with the {arm} arm</code><br><small><span class="slot">{prep}</span> ∈ <code>into / on</code>; 副词 <code>back</code> <b>必写</b></small></td>
+<td>归位到<b>原来的位置</b> (勺子归杯、盖子归罐)</td>
+<td>仅泡茶</td></tr>
+
+<tr><td><code>Scoop</code></td>
+<td><code>Scoop {material} from the {source} with the spoon</code><br><small><b>特例</b>: 尾部用 <code>with the spoon</code> (不是 arm) — 强调工具</small></td>
+<td>用勺子舀</td>
+<td>仅泡茶</td></tr>
+
+<tr><td><code>Open</code></td>
+<td><code>Open the lid of the {obj} with the {arm} arm</code></td>
+<td>开盖</td>
+<td>仅泡茶</td></tr>
+
+<tr><td><code>Hold</code> (稳住)</td>
+<td><code>Hold the {obj} steady with the {arm} arm</code><br><small>副词 <code>steady</code> <b>必写</b></small></td>
+<td>副手扶罐 (配合开合盖)</td>
+<td>仅泡茶</td></tr>
+
+<tr><td><code>Push</code></td>
+<td><code>Push the {obj} toward the {target} with the {arm} arm</code></td>
+<td>推</td>
+<td>仅 supermarket sm_v1 有 8 条, 极少用</td></tr>
+
+</tbody>
+</table>
+
+<div class="callout">
+<b>数一下</b>: 上面是 9 个动词根 (Pick up · Place · Pass · Pour · Put · Scoop · Open · Hold · Push), 其中 Place 有多个关系/介词分支。采集端按物理语义选择分支。
+<br><b>前后方位的 canonical 与兼容边界</b>: 存储文本固定使用 <code>in front of</code>（前）和 <code>behind</code>（后）；<code>to the front of</code> / <code>to the back of</code> 等只由训练侧 parser 为历史数据和 augmentation 做兼容，不是采集端 canonical。命名桌面区域 <code>at the front center of the table</code> 表示物体仍在桌面上，不能写成 <code>in front of the table</code>。
+</div>
+
+<h3 id="p1-4">1.4 slot 词表约束</h3>
+
+<table>
+<thead><tr><th>Slot</th><th>值域</th><th>约束</th></tr></thead>
+<tbody>
+<tr><td><span class="slot">{obj}</span></td><td>物品短语 (由训练团队维护的物品词表)</td><td>一物一名; 不允许同一物品出现多种描述</td></tr>
+<tr><td><span class="slot">{target}</span></td><td>容器 / 表面短语 (同上词表)</td><td>同上; 常见: brown woven basket · felt bag · pink bowl · yellow plate · table · cup · tea tray</td></tr>
+<tr><td><span class="slot">{source}</span></td><td>物品原来位置</td><td>常见: cup · tea tray · table · container</td></tr>
+<tr><td><span class="slot">{material}</span></td><td>液体/粉末物质</td><td>目前枚举: <code>tea</code> · <code>milk powder</code> · <code>tea leaves</code> · <code>mixed grains</code> · <code>laundry detergent</code></td></tr>
+<tr><td><span class="slot">{arm}, {arm_from}, {arm_to}</span></td><td>严格 <code>right</code> / <code>left</code></td><td>Pass 里 <code>arm_from ≠ arm_to</code></td></tr>
+<tr><td><span class="slot">{LR}</span></td><td>严格 <code>left</code> / <code>right</code></td><td>用于 <code>Place ... to the {LR} of the ...</code> (只横向)</td></tr>
+<tr><td><span class="slot">{prep}</span> (Put back)</td><td>严格 <code>into</code> / <code>on</code></td><td>选一个, 不能省</td></tr>
+</tbody>
+</table>
+
+<h4>物品命名原则</h4>
+<div class="callout">
+<ul>
+<li><b>一物一名</b>: 每个物理物品在词表中只有一个规范名字。禁止 <code>hamburger</code> / <code>hamburger model</code> / <code>toy burger</code> 混用。</li>
+<li><b>玩具用 <code>toy</code> 前缀</b>: 玩具/仿真件用 <code>toy {noun}</code>, 例: <code>toy burger</code>, <code>toy steamed bun</code></li>
+<li><b>方块用 <code>block</code>, 魔方用 <code>cube</code></b>: 普通方块玩具用 <code>block</code>; Rubik's cube 用 <code>cube</code></li>
+<li><b>颜色描述要准</b>: 只加实际主色, 不加冗余色。用 <code>banana</code> 而非 <code>yellow banana</code>。</li>
+</ul>
+</div>
+
+<h3 id="p1-5">1.5 lint 规则 (发布前验收, 不阻塞运行时数据落盘)</h3>
+
+<div class="callout-red">
+<b>关于"lint"的作用范围 — 请务必读完再往下看</b>
+<ul>
+<li><b>lint 是"发布前"跑的规范验收</b>: 在采集系统<b>上线</b>、或某个新场景/新模板<b>被启用前</b>, 通过<b>批量随机模拟</b>验证 prompt 生成器的输出是否符合规范。</li>
+<li><b>lint 不是运行时的门槛</b>: 采集作业实际跑起来后, <b>即使 instruction 里出现了本节列出的不合规写法, 数据依然必须正常落盘</b>。</li>
+<li><b>为什么这样区分</b>: 数据丢了比数据脏难修复得多。假如你发现 "这条 instruction 尾部漏了 with the right arm", 训练团队可以事后走一次 offline 改写脚本修正 (成本 = 10 分钟); 但如果因为 lint 报错采集端直接放弃这条数据, 那对应的<b>视频、动作、时间戳都彻底丢了</b>, 无法找回。</li>
+<li><b>发现问题的正确姿势</b>: 采集系统运行时如果日志或校验层检测到 instruction 违反了 lint 规则, 应当<b>记录警告</b> (写 log / 打 metric / 上报到 dashboard), 但<b>不阻塞数据落盘</b>, 让训练团队看到反馈后可以决定统一 offline 修还是回头改采集端。</li>
+</ul>
+</div>
+
+<h4>发布前的验收方式 · <u>所有模式都必须做</u></h4>
+
+<div class="callout-blue">
+<b>在采集系统 / 每个新场景模板<b>上线前</b>, 无论 prompt 由哪种方式生成, 都要跑一次批量随机模拟</b>. 这是通用的发布前验收方法, 不是某种生成方式的特殊做法。
+<pre style="background:transparent;padding:8px 0;">for each business scene in [pickplace, tea, supermarket, ...]:
+    for each language in [en, zh]:
+        for i in range(N):   # N = 1000 或 3000, 依成本而定
+            prompt = generator.generate(scene, language, seed=i)
+            check_all_lint_rules(prompt)     # 见下方 12 条
+</pre>
+
+<b>验收合格条件 (按生成方式不同, 判定阈值不同)</b>:
+<table style="margin-top:8px;">
+<thead><tr><th>生成方式</th><th>典型例子</th><th>合格条件</th><th>为什么这样</th></tr></thead>
+<tbody>
+<tr>
+<td><b>模板 fill-in-the-blank</b></td>
+<td>动词 / 物品 / target 从枚举词表里挑, 按 §1.3 模板拼</td>
+<td><b>N 次采样内 lint 命中数 = 0</b></td>
+<td>输出面是有限的 (verb × obj × target 的乘积), 只要模板对 + 词表对, 就不可能出错. 有命中就是模板 bug, 修完再上</td>
+</tr>
+<tr>
+<td><b>规则引擎 + 随机 slot 组合</b></td>
+<td>模板 + 随机采样 slot, 加一些条件逻辑 (如 arm_from ≠ arm_to)</td>
+<td><b>N 次采样内 lint 命中数 = 0</b></td>
+<td>同上, 有随机性但输出面仍有限, 每个组合都应该合规</td>
+</tr>
+<tr>
+<td><b>LLM 动态生成</b></td>
+<td>用 GPT-4 / Claude / 自训模型基于场景描述生成 instruction</td>
+<td><b>N 次采样内 lint 命中率 &lt; 0.5%</b></td>
+<td>LLM 输出面无穷, 无法穷举, 只能用概率上界; 若达不到 0.5% 需要调 prompt template 或加 few-shot 让 LLM 更贴规范</td>
+</tr>
+<tr>
+<td><b>其他方式</b></td>
+<td>如果未来引入新的生成方式 (强化学习 policy / 图神经网络 / ...)</td>
+<td>参照上面, <b>有限输出 → 命中数 = 0</b>; <b>无限输出 → 命中率 &lt; 0.5%</b></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+
+<b>建议 N 的取值</b>: N ≥ 1000 是底线, 有条件推荐 3000; N 应<b>覆盖所有 slot 排列组合</b>的关键路径 (每个 verb × 每种 arm × 主要 target)。
+</div>
+
+<h4>运行时: 记录警告, 不阻塞落盘</h4>
+
+<div class="callout">
+<b>发布上线以后, 采集系统运行时如果检测到 instruction 违反 lint, 一律记录警告不阻塞</b>:
+<ul>
+<li>写 log / 打 metric / 上报到 dashboard</li>
+<li>数据 (视频、动作、时间戳) 照常落盘</li>
+<li>训练团队从 log / metric 拉不合规 sample, 决定 offline 修还是回头改采集端</li>
+</ul>
+<b>LLM 生成场景尤其要注意</b>: 因为 LLM 输出面无穷, 上线后<b>必然</b>会有零星命中。这不是 bug, 是"发布前 &lt; 0.5% 上限"下的正常情况, 训练团队会周期性 review。</div>
+
+<h4>lint 检查项 (14 条)</h4>
+
+<p>下面任一命中都算不合规。<b>发布前批量模拟</b>时用来判定合格, <b>运行时</b>只用来记录警告 (不阻塞落盘)。</p>
+
+<ol>
+<li>句尾出现 <code>.</code> (句号)</li>
+<li>包含 <code>using the (right|left) arm</code></li>
+<li>包含 <code>with the (right|left) hand</code></li>
+<li>包含 <code>the held </code> (冗余修饰)</li>
+<li>以 <code>Put down </code> 开头 (用 <code>Place ... on the table</code> 代替)</li>
+<li>以 <code>Hand over </code> 开头 (用 <code>Pass</code> 代替)</li>
+<li>包含 <code>draining tray</code> (合并为 <code>tea tray</code>)</li>
+<li>包含裸 <code>on the tray</code> (必须写全 <code>on the tea tray</code>)</li>
+<li>使用了不在 12 个合法 verb 集之外的动词</li>
+<li>Pass 里 <code>arm_from == arm_to</code> (自己传给自己)</li>
+<li>Pass 句式必须完全匹配 <code>Pass the {obj} to the {arm_to} arm with the {arm_from} arm</code>; 出现 <code>Pass ... from the ... arm</code> 或缺失尾部 <code>with the ... arm</code> 一律不合规</li>
+<li>obj / target 不在物品词表内</li>
+<li>采集端用 <code>to the front of</code> / <code>to the back of</code> 代替 canonical 的 <code>in front of</code> / <code>behind</code></li>
+<li><code>at the {position} of the {target}</code> 中 position 不在九宫格白名单，或把桌面区域误写成 <code>in front of the table</code></li>
+</ol>
+
+<hr>
+
+<!-- ==================== PART 2 ==================== -->
+<h2 id="p2">Part 2 · 目前已有的 pattern</h2>
+
+<p style="color:#6a737d">下面按业务模式分组, 列出<b>数据里真实出现的</b> template + 物品清单 + 复合任务序列。所有数据来自 2026-07-30 canonical batch (10,964 条 good+medium episode, 已通过合规扫描)。</p>
+
+<table>
+<thead><tr>
+<th>业务分组</th><th>Dataset</th><th>时间</th><th>episode</th><th>不同动词种类</th>
+</tr></thead>
+<tbody>
+<tr>
+<td rowspan="2"><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2-a"><span class="pill pill-pp">A. 桌面 pick&amp;place</span></a></td>
+<td><code>pp_g1</code> (老)</td><td>2026-05</td><td class="num">1737</td><td>Pick up · Place · Pass</td>
+</tr>
+<tr>
+<td><code>pp_g1_v2</code> (新)</td><td>2026-07-24~27</td><td class="num">1986</td><td>Pick up · Place · Pass</td>
+</tr>
+<tr>
+<td rowspan="2"><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2-b"><span class="pill pill-tea">B. 泡茶 / 倒水 / 开合盖</span></a></td>
+<td><code>pp_tea</code> (老)</td><td>2026-05~06</td><td class="num">1660</td><td>Pick up · Pour · Place · Put · Scoop · Open · Hold</td>
+</tr>
+<tr>
+<td><code>pp_tea_v2</code> (新)</td><td>2026-07-28~29</td><td class="num">627</td><td>Pick up · Pour · Place</td>
+</tr>
+<tr>
+<td rowspan="3"><a href="http://10.172.100.47:12316/instruction_prompt_and_patterns.html#p2-c"><span class="pill pill-sm">C. Supermarket 装篮子</span></a></td>
+<td><code>sm_v1</code> (最老)</td><td>2026-04~06</td><td class="num">1983</td><td>Pick up · Place · Push</td>
+</tr>
+<tr>
+<td><code>sm_v2</code> (中)</td><td>2026-07-15~17</td><td class="num">2202</td><td>Pick up · Place · Pass</td>
+</tr>
+<tr>
+<td><code>sm_v3</code> (新)</td><td>2026-07-22</td><td class="num">769</td><td>Pick up · Place</td>
+</tr>
+<tr>
+<td colspan="3"><b>合计</b></td><td class="num"><b>10,964</b></td><td></td>
+</tr>
+</tbody>
+</table>
+
+<!-- ========== 分组 A ========== -->
+<h3 id="p2-a"><span class="pill pill-pp">A</span> 桌面 pick&amp;place (task_id=15, pp_g1 谱系)</h3>
+
+<h4>场景描述</h4>
+<p>G1 双臂机器人在方形桌面上做 pick&amp;place。桌面摆放各种家居物品 (餐具、玩具、日用品、食品), 机器人任务是拿起 → 放置到指定容器 / 平面 / 相对位置, 或在两手之间传递。物品可能被打散摆在桌上, 也可能被摆在盘子/碗/篮子里。</p>
+
+<h4>用到的 template (数据里真实出现的骨架分布)</h4>
+
+<table>
+<thead><tr><th>Skeleton</th><th>pp_g1 (老)</th><th>pp_g1_v2 (新)</th><th>模板</th></tr></thead>
+<tbody>
+<tr><td>Pick up (无 source)</td><td class="num">807</td><td class="num">894</td><td><code>Pick up the {obj} with the {arm} arm</code></td></tr>
+<tr><td>Pass to-arm</td><td class="num">188</td><td class="num">268</td><td><code>Pass the {obj} to the {arm_to} arm with the {arm_from} arm</code></td></tr>
+<tr><td>Place into</td><td class="num">181</td><td class="num">99</td><td><code>Place the {obj} into the {target} with the {arm} arm</code></td></tr>
+<tr><td>Place on</td><td class="num">218</td><td class="num">330</td><td><code>Place the {obj} on the {target} with the {arm} arm</code></td></tr>
+<tr><td>Place to-LR-of</td><td class="num">230</td><td class="num">218</td><td><code>Place the {obj} to the {left|right} of the {target} with the {arm} arm</code></td></tr>
+<tr><td>Place in-front-of</td><td class="num">75</td><td class="num">92</td><td><code>Place the {obj} in front of the {target} with the {arm} arm</code></td></tr>
+<tr><td>Place behind</td><td class="num">34</td><td class="num">85</td><td><code>Place the {obj} behind the {target} with the {arm} arm</code></td></tr>
+<tr><td>Place (无 target)</td><td class="num">4</td><td class="num">0</td><td><code>Place the {obj} with the {arm} arm</code></td></tr>
+</tbody></table>
+
+<h4>物品清单 (数据里真实出现的)</h4>
+<p><b>pp_g1</b>: 共 160 种 unique object 短语。样例:<br>
+<code>toy burger · toy steamed bun · yellow and green sponge · grapes · blue and white facial cleanser · blue block · red block · yellow block · tennis ball · banana · corn · brown and white striped towel · brown dish brush · Rubik's cube · mini basketball · metal spatula · fox cup lid · purple drink bottle · light yellow drink bottle · white shower gel bottle · black square box · natural wood block · orange-black chips bag · green chips bag · yellow chips bag · purple chips bag · white-gray chips bag · orange-yellow candy bag · silver can · red can · packaged bread · waffle · white milk carton · white unicorn plush</code> ...</p>
+
+<p><b>pp_g1_v2</b> (新 batch, 物品有新增): 共 92 种 unique object 短语, 有部分老物品 + 新引入:<br>
+<code>silver can · blue roller brush · off-white spatula · pink clip · pink cup · silver metal bowl · dustpan · white storage box · green cylinder can · black square box · mint green dish brush · light yellow drink bottle · silver stir stick · carton drink · fox cup lid</code> ...</p>
+
+<h4>常见 target</h4>
+<table>
+<thead><tr><th>pp_g1 top target</th><th>次数</th><th>pp_g1_v2 top target</th><th>次数</th></tr></thead>
+<tbody>
+<tr><td>pink bowl</td><td>50</td><td>table</td><td>165</td></tr>
+<tr><td>beige bowl</td><td>46</td><td>yellow plate</td><td>163</td></tr>
+<tr><td>white storage box</td><td>44</td><td>silver metal bowl</td><td>71</td></tr>
+<tr><td>blue plate</td><td>41</td><td>blue plate</td><td>67</td></tr>
+<tr><td>blue and white patterned bowl</td><td>39</td><td>brown basket</td><td>35</td></tr>
+<tr><td>table</td><td>38</td><td>white storage box</td><td>33</td></tr>
+</tbody></table>
+
+<h4>典型 instruction 例子</h4>
+<pre>Pick up the silver can with the right arm
+Pass the silver can to the left arm with the right arm
+Place the silver can to the right of the yellow plate with the right arm
+Place the pink clip in front of the pink cup with the left arm
+Place the blue block on the table with the right arm
+Place the toy burger into the brown basket with the left arm</pre>
+
+<!-- ========== 分组 B ========== -->
+<h3 id="p2-b"><span class="pill pill-tea">B</span> 泡茶 / 倒水 / 开合盖 (task_id=15, pp_tea 谱系)</h3>
+
+<h4>场景描述</h4>
+<p>G1 双臂机器人做<b>茶艺相关的复合任务</b>。桌上有茶壶、茶杯、勺子、玻璃罐、盖子等。任务包括:</p>
+<ul>
+<li><b>倒茶</b>: 拿起茶壶 → 倒茶入杯 → 放回茶壶</li>
+<li><b>倒水 (新)</b>: 拿起茶壶 → 倒水入九宫格 cup 的指定位置 → 放回</li>
+<li><b>开合玻璃罐盖</b>: 一手扶罐 + 另一手开盖 → 盖子放桌 → 再拿起盖 → 归位</li>
+<li><b>舀 (材料)</b>: 老 Scoop 为拿勺 → 舀 → 倒 → 归位；<b>Scoop 2.0</b> 增加左手 <code>Hold ... steady</code>，并在物料容器距桌面 front center 超过 120 mm 时先移动容器</li>
+</ul>
+
+<h4>用到的 template</h4>
+
+<table>
+<thead><tr><th>Skeleton</th><th>pp_tea (老)</th><th>pp_tea_v2 (新)</th><th>模板</th></tr></thead>
+<tbody>
+<tr><td>Pick up (无 source)</td><td class="num">149</td><td class="num">68</td><td><code>Pick up the {obj} with the {arm} arm</code></td></tr>
+<tr><td>Pick up from</td><td class="num">302</td><td class="num">115</td><td><code>Pick up the {obj} from the {source} with the {arm} arm</code></td></tr>
+<tr><td>Pour into (可能带上下文)</td><td class="num">344</td><td class="num">280</td><td><code>Pour {material} into the {target} [on the tea tray] with the {arm} arm</code><br>或 <code>Pour {material} from the {source} into the {target} ...</code></td></tr>
+<tr><td>Place on</td><td class="num">234</td><td class="num">87</td><td><code>Place the {obj} on the {target} with the {arm} arm</code></td></tr>
+<tr><td>Place (无 target)</td><td class="num">42</td><td class="num">77</td><td><code>Place the {obj} with the {arm} arm</code></td></tr>
+<tr><td>Put back into</td><td class="num">156</td><td class="num">0</td><td><code>Put the {obj} back into the {target} with the {arm} arm</code></td></tr>
+<tr><td>Put back on</td><td class="num">100</td><td class="num">0</td><td><code>Put the {obj} back on the {target} with the {arm} arm</code></td></tr>
+<tr><td>Scoop from</td><td class="num">166</td><td class="num">0</td><td><code>Scoop {material} from the {source} with the spoon</code></td></tr>
+<tr><td>Open lid-of</td><td class="num">100</td><td class="num">0</td><td><code>Open the lid of the {obj} with the {arm} arm</code></td></tr>
+<tr><td>Hold steady</td><td class="num">56</td><td class="num">0</td><td><code>Hold the {obj} steady with the {arm} arm</code></td></tr>
+</tbody></table>
+
+<div class="callout">
+<b>pp_tea_v2 (新, 倒水专项)</b> 相比 pp_tea (老) 大幅简化, 只保留 Pick up + Pour + Place 三种动作 (627 条), 但引入了<b>九宫格 cup 位置</b>作为新维度 (见下面 target 表)。开合盖 / 舀 / 归位这些复杂动作只在老 pp_tea 里存在。
+</div>
+
+<h4>物品清单</h4>
+<ul>
+<li><b>pp_tea (老)</b>: 9 种 unique object 短语 — <code>teapot · lid · spoon · glass jar · dark teapot · ceramic cup · glass teapot · fox cup lid</code></li>
+<li><b>pp_tea_v2 (新)</b>: 3 种 — <code>teapot · tea · teapot by its handle</code></li>
+</ul>
+
+<h4>Material 词表 (Pour/Scoop 用)</h4>
+<table>
+<thead><tr><th>material</th><th>pp_tea</th><th>pp_tea_v2</th></tr></thead>
+<tbody>
+<tr><td><code>tea</code></td><td>185</td><td>280</td></tr>
+<tr><td><code>laundry detergent</code></td><td>97</td><td>0</td></tr>
+<tr><td><code>mixed grains</code></td><td>96</td><td>0</td></tr>
+<tr><td><code>milk powder</code></td><td>72</td><td>0</td></tr>
+<tr><td><code>tea leaves</code></td><td>60</td><td>0</td></tr>
+</tbody></table>
+
+<h4>常见 target</h4>
+<ul>
+<li><b>pp_tea</b>: <code>cup</code>(379) · <code>table</code>(175) · <code>tea tray</code>(139) · <code>glass jar</code>(59) · <code>bowl</code>(51) · <code>mug</code>(36) · <code>teapot</code>(34) · <code>dark teapot</code>(21)</li>
+<li><b>pp_tea_v2 (九宫格 cup 是新维度)</b>: <code>cup</code>(69) · <code>left cup</code>(50) · <code>right cup</code>(50) · <code>tea tray</code>(46) · <code>table</code>(41) · <code>back cup</code>(30) · <code>front cup</code>(29) · <code>back right cup</code>(16) · <code>front left cup</code>(16) · <code>back left cup</code>(?) · <code>front right cup</code>(?)</li>
+</ul>
+
+<h4>复合任务序列 (采集验收时逐条核对)</h4>
+
+<table>
+<thead><tr><th>复合任务</th><th>完整序列</th><th>约束</th></tr></thead>
+<tbody>
+<tr>
+<td><b>倒茶</b><br><small>Pour Tea (老)</small></td>
+<td>
+1. <code>Pick up the teapot [from the {source}] with the {arm} arm</code><br>
+2. <code>Pour tea into the {target} [on the tea tray] with the {arm} arm</code><br>
+3. <code>Place the teapot [on the {target}] with the {arm} arm</code>
+</td>
+<td>Step 1 与 Step 3 的 <code>{arm}</code> 必须一致 (同一只手拿起同一只手放回)</td>
+</tr>
+<tr>
+<td><b>倒水入九宫格</b><br><small>Pour Water (新, pp_tea_v2)</small></td>
+<td>
+1. <code>Pick up the teapot from the tea tray with the {arm} arm</code><br>
+2. <code>Pour tea into the {cell_target} on the tea tray with the {arm} arm</code><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<small>其中 <span class="slot">{cell_target}</span> ∈ <code>cup / left cup / right cup / front cup / back cup / front left cup / front right cup / back left cup / back right cup</code></small><br>
+3. <code>Place the teapot on the tea tray with the {arm} arm</code>
+</td>
+<td>Step 2 的九宫格位置词汇必须精确; 不允许出现 <code>middle cup</code>, 未列在词表内</td>
+</tr>
+<tr>
+<td><b>开合玻璃罐盖</b><br><small>Lid Manipulation (仅 pp_tea 老)</small></td>
+<td>
+1. <code>Hold the glass jar steady with the {arm_A} arm</code><br>
+2. <code>Open the lid of the glass jar with the {arm_B} arm</code><br>
+3. <code>Place the lid on the {target} with the {arm_B} arm</code><br>
+4. <code>Pick up the lid with the {arm_B} arm</code><br>
+5. <code>Put the lid back {into|on} the glass jar with the {arm_B} arm</code>
+</td>
+<td>Step 1 与 Step 2-5 的手臂必须相反 (一只扶一只做); Step 5 target 必须是 Step 1 的 <code>glass jar</code></td>
+</tr>
+<tr>
+<td><b>舀物</b><br><small>Scoop Material (仅 pp_tea 老)</small></td>
+<td>
+1. <code>Pick up the spoon [from the {source}] with the {arm} arm</code><br>
+2. <code>Scoop {material} from the {source} with the spoon</code><br>
+3. <code>Pour {material} [from the {source}] into the {target} with the {arm} arm</code><br>
+4. <code>Put the spoon back into the cup with the {arm} arm</code>
+</td>
+<td>Step 2 与 Step 3 的 <code>{material}</code> 必须一致; Step 4 target 必须是 Step 1 的 source</td>
+</tr>
+</tbody></table>
+
+<h4 id="scoop-2">Scoop 2.0 · 双臂 5/7 步规范</h4>
+<div class="callout-green">
+<b>分支条件</b>: 物料容器到桌面 <code>front center</code> 的距离 ≤ 120 mm 时直接执行 5 步；距离 &gt; 120 mm 时先由左手把容器移动到 <code>at the front center of the table</code>，执行 7 步。右手负责勺子，左手负责移动/固定物料容器。
+</div>
+
+<h5>直接 Scoop：5 步</h5>
+<pre>1. Pick up the spoon from the cup{spoon_location} with the right arm
+2. Hold the {material_container}{source_location} steady with the left arm
+3. Scoop {material} from the {material_container}{source_location} with the spoon
+4. Pour {material} from the spoon into the {target}{target_location} with the right arm
+5. Put the spoon back into the cup{spoon_location} with the right arm</pre>
+
+<h5>先移动物料容器：7 步</h5>
+<p>物料容器初始在茶盘上时 Step 1 使用 <code>from the tea tray</code>：</p>
+<pre>1. Pick up the {material_container} from the tea tray with the left arm
+2. Place the {material_container} at the front center of the table with the left arm
+3. Pick up the spoon from the cup{spoon_location} with the right arm
+4. Hold the {material_container} steady with the left arm
+5. Scoop {material} from the {material_container} with the spoon
+6. Pour {material} from the spoon into the {target}{target_location} with the right arm
+7. Put the spoon back into the cup{spoon_location} with the right arm</pre>
+<p>物料容器初始不在茶盘上时，只有 Step 1 改为：</p>
+<pre>1. Pick up the {material_container} with the left arm</pre>
+<p>移动后容器已在桌面 front center，因此 Step 4/5 不再添加 <code>on the tea tray</code>。</p>
+
+<h5>固定词表与组合白名单</h5>
+<table>
+<thead><tr><th>material</th><th>material_container</th><th>允许 target</th></tr></thead>
+<tbody>
+<tr><td><code>tea leaves</code></td><td><code>tea leaf container</code></td><td><code>teapot / mug</code></td></tr>
+<tr><td><code>milk powder</code></td><td><code>milk powder container</code></td><td><code>mug / cup</code></td></tr>
+<tr><td><code>mixed grains</code></td><td><code>mixed-grain container</code></td><td><code>bowl</code></td></tr>
+<tr><td><code>mung beans</code></td><td><code>mung bean container</code></td><td><code>bowl</code></td></tr>
+</tbody></table>
+<p>位置槽只允许：</p>
+<pre>物品在茶盘上: {spoon_location}/{source_location}/{target_location} = " on the tea tray"
+物品不在茶盘上: {spoon_location}/{source_location}/{target_location} = ""
+从茶盘拿起容器: from the tea tray（不能写 on the tea tray）</pre>
+<p><b>跨步骤约束</b>: Scoop 与 Pour 的 material 一致；Hold 与 Scoop 的 material_container/source_location 一致；Pick up spoon 与 Put spoon back 的 cup/spoon_location 一致；Scoop 固定以 <code>with the spoon</code> 结尾；Step 5/7 固定使用 <code>Put ... back</code>。</p>
+
+<h4>采集验收清单 (pp_tea 组)</h4>
+<div class="callout-blue">
+<ol>
+<li>倒茶: 每次 <code>Pick up teapot</code> 后是否都有对应 <code>Place teapot</code>? 缺失 = 茶壶悬空</li>
+<li>开合盖: <code>Hold ... steady</code> 与 <code>Open the lid</code> 是否<b>同时出现</b>且用<b>不同手臂</b>?</li>
+<li>开合盖最后一步是 <code>Put ... back ...</code> 而不是 <code>Place ... on ...</code>? <code>back</code> 是归位语义, 必写</li>
+<li>Scoop 之后是否有对应 <code>Pour {material}</code> 用同一 material?</li>
+<li>Scoop 尾部是 <code>with the spoon</code> 而不是 <code>with the {arm} arm</code>?</li>
+<li>Scoop 2.0 是否严格按 120 mm 阈值选择 5/7 步，且包含左手 <code>Hold ... steady</code>?</li>
+<li>Scoop 2.0 的 7 步版本是否使用精确 canonical <code>at the front center of the table</code>，移动后 Hold/Scoop 是否已去掉旧的 <code>on the tea tray</code>?</li>
+<li>pp_tea_v2 里九宫格 cup 名称只用词表里 8 种, 不出现 <code>middle cup</code> / <code>center cup</code> / <code>top cup</code> / <code>bottom cup</code>；这不限制 Place 新增的桌面区域 <code>at the center/front center of the table</code></li>
+</ol>
+</div>
+
+<h4>典型 instruction 例子</h4>
+<pre>Pick up the teapot from the tea tray with the right arm
+Pour tea into the back left cup on the tea tray with the right arm
+Place the teapot on the tea tray with the right arm
+
+Hold the glass jar steady with the left arm
+Open the lid of the glass jar with the right arm
+Place the lid on the table with the right arm
+Pick up the lid with the right arm
+Put the lid back on the glass jar with the right arm
+
+Pick up the spoon from the cup with the right arm
+Scoop milk powder from the container with the spoon
+Pour milk powder into the mug with the right arm
+Put the spoon back into the cup with the right arm</pre>
+
+<!-- ========== 分组 C ========== -->
+<h3 id="p2-c"><span class="pill pill-sm">C</span> Supermarket 装篮子 (task_id=14, sm 谱系)</h3>
+
+<h4>场景描述</h4>
+<p>G1 双臂机器人做<b>超市结账/整理场景</b>。桌面上有零食、罐头、瓶装饮料、日用品等超市商品, 机器人任务是<b>把物品装进指定篮子/袋子</b> (felt bag / brown woven basket)。sm_v3 是"棕色框专项"高度聚焦的简化版本, 只有 4 物品 × 1 篮子。sm_v2 引入了两手传递 (Pass) 和物品放到多种盘子上。</p>
+
+<h4>用到的 template</h4>
+
+<table>
+<thead><tr><th>Skeleton</th><th>sm_v1</th><th>sm_v2</th><th>sm_v3</th><th>模板</th></tr></thead>
+<tbody>
+<tr><td>Pick up (无 source)</td><td class="num">1000</td><td class="num">1045</td><td class="num">385</td><td><code>Pick up the {obj} with the {arm} arm</code></td></tr>
+<tr><td>Place into</td><td class="num">975</td><td class="num">768</td><td class="num">384</td><td><code>Place the {obj} into the {target} [on the table] with the {arm} arm</code></td></tr>
+<tr><td>Place on</td><td class="num">0</td><td class="num">202</td><td class="num">0</td><td><code>Place the {obj} on the {target} with the {arm} arm</code></td></tr>
+<tr><td>Pass to-arm</td><td class="num">0</td><td class="num">187</td><td class="num">0</td><td><code>Pass the {obj} to the {arm_to} arm with the {arm_from} arm</code></td></tr>
+<tr><td>Push toward</td><td class="num">8</td><td class="num">0</td><td class="num">0</td><td><code>Push the {obj} toward the {target} with the {arm} arm</code> (仅 sm_v1 8 条, 极边缘)</td></tr>
+</tbody></table>
+
+<h4>物品清单</h4>
+<ul>
+<li><b>sm_v1 (最老)</b>: 4 种 — <code>bottled grape juice · green potato chip bag · yellow bag of candy · mango</code></li>
+<li><b>sm_v2 (中)</b>: 10 种 — <code>hamburger · white conditioner tube · blue plate · coconut fiber pot brush · white bun · yellow rubber duck · pink peach</code> 等 (含被 Pass 的 3 种)</li>
+<li><b>sm_v3 (新, 聚焦)</b>: 4 种 — <code>hamburger · coconut fiber pot brush · white conditioner tube · blue plate</code></li>
+</ul>
+
+<h4>常见 target</h4>
+<table>
+<thead><tr><th>Dataset</th><th>唯一/主要 target</th></tr></thead>
+<tbody>
+<tr><td><b>sm_v1</b></td><td><code>felt bag</code> (975) · <code>center</code> (8 push 用)</td></tr>
+<tr><td><b>sm_v2</b></td><td><code>brown woven basket</code> (460) · <code>table</code> (202) · <code>pink plate</code> (129) · <code>yellow plate</code> (93) · <code>white plate</code> (86)</td></tr>
+<tr><td><b>sm_v3</b></td><td><code>brown woven basket</code> (384 唯一)</td></tr>
+</tbody></table>
+
+<h4>复合任务序列</h4>
+<table>
+<thead><tr><th>复合任务</th><th>序列</th><th>约束</th></tr></thead>
+<tbody>
+<tr>
+<td><b>装篮子</b><br><small>Pick + Place-into</small></td>
+<td>
+1. <code>Pick up the {obj} with the {arm} arm</code><br>
+2. <code>Place the {obj} into the {basket} [on the table] with the {arm} arm</code>
+</td>
+<td>Step 1 和 Step 2 的 <code>{arm}</code> 一致; sm_v1 / sm_v3 全部走这种双步</td>
+</tr>
+<tr>
+<td><b>传递装篮</b><br><small>Pick + Pass + Place-into (仅 sm_v2)</small></td>
+<td>
+1. <code>Pick up the {obj} with the {arm_A} arm</code><br>
+2. <code>Pass the {obj} to the {arm_B} arm with the {arm_A} arm</code><br>
+3. <code>Place the {obj} into the {basket} with the {arm_B} arm</code>
+</td>
+<td>Step 1 用 arm_A, Step 2 传给 arm_B, Step 3 是 arm_B 放; 手臂顺序必须正确</td>
+</tr>
+</tbody></table>
+
+<h4>采集验收清单 (sm 组)</h4>
+<div class="callout-blue">
+<ol>
+<li>每次 <code>Pick up</code> 后是否有对应 <code>Place ... into ...</code>? 缺失 = 拿了不放</li>
+<li>Pass 步骤是否 <code>arm_from ≠ arm_to</code>? 自传自不合法</li>
+<li>Pass 后紧接的 <code>Place</code> 是否用 arm_to (即 Pass 的接收手)? 否则手臂链条断裂</li>
+<li>sm_v3 里 target 是否只有 <code>brown woven basket</code>? sm_v3 是聚焦场景, 不允许 target 多样化</li>
+</ol>
+</div>
+
+<h4>典型 instruction 例子</h4>
+<pre># sm_v1 (最老, felt bag)
+Pick up the mango with the right arm
+Place the mango into the felt bag with the right arm
+
+# sm_v2 (中, 多种 target + Pass)
+Pick up the hamburger with the right arm
+Place the hamburger into the brown woven basket on the table with the right arm
+Pick up the pink peach with the right arm
+Pass the pink peach to the left arm with the right arm
+Place the pink peach into the brown woven basket with the left arm
+
+# sm_v3 (新, 棕色框聚焦)
+Pick up the white conditioner tube with the right arm
+Place the white conditioner tube into the brown woven basket on the table with the right arm</pre>
+
+<hr>
+
+<h2>附录 · 各分组交给采集端的三条最简要求</h2>
+
+<div class="callout-green">
+<b>A. 桌面 pick&amp;place</b> — 记住 3 个动作: <b>Pick up · Place · Pass</b>. Place 有 5 种介词分支 (into/on/to-LR-of/in-front-of/behind), 采集端只需要按物理位置准确选一个。
+</div>
+
+<div class="callout-green">
+<b>B. 泡茶 / 开合盖</b> — 记住 3 类复合任务, 每类的完整步骤序列必须齐 (§B 复合任务序列). Pour/Scoop 的 material 词表只有 5 种. 九宫格 cup 位置只用 8 种词汇 (left/right/front/back cup + 4 组合). Scoop 尾部是 <code>with the spoon</code>, Put 里 <code>back</code> 必写, Hold 里 <code>steady</code> 必写。
+</div>
+
+<div class="callout-green">
+<b>C. Supermarket 装篮子</b> — 主要就是 Pick + Place-into 两步循环. sm_v2 引入 Pass 支持双手传递. target 简单: 老的 <code>felt bag</code>, 新的 <code>brown woven basket</code>. sm_v3 是聚焦场景, target 只能有一个。
+</div>
+
+
+
+<div id="crx-mouse-redesign-content-root" style="position: fixed; top: 0px; left: 0px; width: 0px; height: 0px; overflow: visible; z-index: 2147483647; pointer-events: none;"></div></body><div id="immersive-translate-browser-popup" style="all: initial"><template shadowrootmode="open"><style>/** 基础色阶定义 **/
+:root,
+#mount[data-theme="light"],
+#mount:not([data-theme="dark"]) {
+  /* 中性灰阶（light） */
+  --c-00: #000000;
+  --c-22: #222222;
+  --c-33: #333333;
+  --c-66: #666666;
+  --c-83: #838383;
+  --c-99: #999999;
+  --c-c7: #c7c7c7;
+  --c-cc: #cccccc;
+  --c-e6: #e6e6e6;
+  --c-f5: #f5f5f5;
+  --c-ff: #ffffff;
+  /* 品牌主色阶（light） */
+  --p-main: #ea4c89;
+  --p-hover: #ec5e95;
+  --p-active: #e34a85;
+  --p-special: #ee71a2;
+  --p-disabled: #f4a5c4;
+  --p-text-disabled: #f9c9dc;
+  --p-weak: #fdedf3;
+  /* Surface 层级（light，TC 填充-1） */
+  --s-1: #f3f5f6;
+  --s-1-hover: #f6f8f9;
+  --s-1-active: #edf1f2;
+  --s-1-weak: #fafbfb;
+  /* 输入/边框（light，TC 填充-2） */
+  --input-bg-base: #fafbfc;
+  --input-border: #ecf0f7;
+  --input-border-strong: #e0e0e6;
+  --input-bg-strong: #fafdff;
+}
+
+:root[data-theme="dark"],
+[data-theme="dark"] {
+  /* 中性灰阶（dark） */
+  --c-00: #ffffff;
+  --c-22: #dbdbdb;
+  --c-33: #dbdbdb;
+  --c-66: #b3b3b3;
+  --c-83: #838383;
+  --c-99: #707070;
+  --c-c7: #666666;
+  --c-cc: #5c5c5c;
+  --c-e6: #3b3b3b;
+  --c-f5: #262626;
+  --c-ff: #222222;
+  /* 品牌主色阶（dark） */
+  --p-main: #e23c7c;
+  --p-hover: #ea4c89;
+  --p-active: #d5467d;
+  --p-special: #a93a65;
+  --p-disabled: #7e2f4d;
+  --p-text-disabled: #522335;
+  --p-weak: #26171d;
+  /* Surface 层级（dark，TC 填充-1） */
+  --s-1: #2d2e2f;
+  --s-1-hover: #323434;
+  --s-1-active: #202121;
+  --s-1-weak: #262627;
+  /* 输入/边框（dark，TC 填充-2） */
+  --input-bg-base: #2b2d30;
+  --input-border: #3e434b;
+  --input-border-strong: #43474b;
+  --input-bg-strong: #1f2123;
+}
+
+:root,
+#mount [data-theme] {
+  /* 业务/通用变量引用色阶（全局可见，含 Shadow DOM） */
+  --primary: var(--p-main);
+  --primary-hover: var(--p-hover);
+  --primary-inverse: #fff;
+  --modal-background: var(--s-1);
+  --modal-border: var(--input-border);
+  --modal-text: var(--c-22);
+  --modal-text-secondary: var(--c-66);
+  --modal-error: var(--p-main);
+  --modal-required: #f53f3f;
+  --modal-success: #68cd52;
+  --modal-button-background: var(--p-main);
+  --modal-button-text: var(--c-ff);
+  --modal-input-background: var(--input-bg-base);
+  --modal-check-color: var(--p-main);
+  --background-color: var(--c-ff);
+  --background-light-green: var(--s-1-weak, #f5f7f9);
+  --text-black-2: var(--c-22);
+  --text-gray-2: var(--c-22);
+  --text-gray-6: var(--c-66);
+  --text-gray-9: var(--c-99);
+  --text-gray-c2: var(--c-c7);
+  --switch-background-color: var(--c-c7, hsl(205deg, 16%, 77%));
+  --float-ball-more-button-border-color: var(--c-f5, #f6f6f6);
+  --float-ball-more-button-background-color: var(--c-ff);
+  --float-ball-more-button-hover-color: var(--p-weak);
+  --float-ball-more-button-svg-color: #6c6f73;
+  --service-bg-hover: var(--s-1-hover, #f7faff);
+  --service-bg: var(--s-1-weak, #fafbfb);
+}
+
+#mount {
+  --font-family: system-ui, -apple-system, "Segoe UI", "Roboto", "Ubuntu",
+    "Cantarell", "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+    "Segoe UI Symbol", "Noto Color Emoji";
+  /* PC/H5 兼容的字号、间距、圆角、阴影变量 */
+  --f-12: 12px;
+  --f-14: 14px;
+  --f-15: 15px;
+  --f-16: 16px;
+  --f-18: 18px;
+  --f-20: 20px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-18: 18px;
+  --space-24: 24px;
+  --radius-8: 8px;
+  --radius-12: 12px;
+  --radius-16: 16px;
+  --control-height-lg: 44px;
+  --width-28: 28px;
+  --width-24: 24px;
+  --width-20: 20px;
+  --width-18: 18px;
+  --width-16: 16px;
+  --width-label-md: 56px;
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.12);
+
+  /* 常规变量 */
+  --line-height: 1.5;
+  --font-weight: 400;
+  --font-size: 16px;
+  --border-radius: 4px;
+  --border-width: 2px;
+  --outline-width: 3px;
+  --spacing: 16px;
+  --typography-spacing-vertical: 24px;
+  --block-spacing-vertical: calc(var(--spacing) * 2);
+  --block-spacing-horizontal: var(--spacing);
+  --grid-spacing-vertical: 0;
+  --grid-spacing-horizontal: var(--spacing);
+  --form-element-spacing-vertical: 12px;
+  --form-element-spacing-horizontal: 16px;
+  --nav-element-spacing-vertical: 16px;
+  --nav-element-spacing-horizontal: 8px;
+  --nav-link-spacing-vertical: 8px;
+  --nav-link-spacing-horizontal: 8px;
+  --form-label-font-weight: var(--font-weight);
+  --transition: 0.2s ease-in-out;
+  --modal-overlay-backdrop-filter: blur(4px);
+  --switch-color: var(--primary-inverse);
+  --switch-checked-background-color: var(--primary);
+  --icon-xia: url("data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGcgaWQ9IkZyYW1lIj4KPHBhdGggaWQ9IlZlY3RvciIgZD0iTTguMDAyOTEgOS42Nzk4M0wzLjgzMzM5IDUuNTEyMjFMMy4wMjUzOSA2LjMxOTgzTDguMDAzMjkgMTEuMjk1MUwxMi45NzYyIDYuMzE5ODNMMTIuMTY3OSA1LjUxMjIxTDguMDAyOTEgOS42Nzk4M1oiIGZpbGw9IiM4MzgzODMiLz4KPC9nPgo8L3N2Zz4K");
+  /* 兼容旧变量：主色直接引用品牌主色阶 */
+  --primary: var(--p-main);
+  --primary-hover: var(--p-hover);
+  --primary-inverse: #fff;
+  /* Modal 业务变量引用色阶 */
+  --modal-background: var(--s-1);
+  --modal-border: var(--input-border);
+  --modal-text: var(--c-22);
+  --modal-text-secondary: var(--c-66);
+  --modal-error: var(--p-main);
+  --modal-required: #f53f3f;
+  --modal-success: #68cd52;
+  --modal-button-background: var(--p-main);
+  --modal-button-text: var(--c-ff);
+  --modal-input-background: var(--input-bg-base);
+  --modal-check-color: var(--p-main);
+  --background-color: var(--c-ff);
+  --background-light-green: var(--s-1-weak, #f5f7f9);
+  --text-black-2: var(--c-22);
+  --text-gray-2: var(--c-22);
+  --text-gray-6: var(--c-66);
+  --text-gray-9: var(--c-99);
+  --text-gray-c2: var(--c-c7);
+  --switch-background-color: var(--c-c7, hsl(205deg, 16%, 77%));
+  --float-ball-more-button-border-color: var(--c-f5, #f6f6f6);
+  --float-ball-more-button-background-color: var(--c-ff);
+  --float-ball-more-button-hover-color: var(--p-weak);
+  --float-ball-more-button-svg-color: #6c6f73;
+  --service-bg-hover: var(--s-1-hover, #f7faff);
+  --service-bg: var(--s-1-weak, #fafbfb);
+  line-height: var(--line-height);
+  font-family: var(--font-family);
+  font-size: var(--font-size);
+}
+
+@media (max-width: 480px) {
+  :root,
+  #mount {
+    --f-12: 10px;
+    --f-14: 12px;
+    --f-15: 13px;
+    --f-16: 14px;
+    --f-18: 16px;
+    --f-20: 18px;
+    --space-4: 4px;
+    --space-6: 4px;
+    --space-8: 6px;
+    --space-12: 8px;
+    --space-16: 12px;
+    --space-18: 14px;
+    --space-24: 18px;
+    --radius-8: 6px;
+    --radius-12: 10px;
+    --radius-16: 12px;
+    --control-height-lg: 38px;
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.1);
+    --width-28: 24px;
+    --width-24: 20px;
+    --width-20: 16px;
+    --width-18: 14px;
+    --width-16: 12px;
+    --width-label-md: 52px;
+  }
+}
+
+#mount * {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:where(#mount) a,
+:where(#mount) [role="link"] {
+  --color: var(--primary);
+  --background-color: transparent;
+  outline: none;
+  background-color: var(--background-color);
+  color: var(--color);
+  -webkit-text-decoration: var(--text-decoration);
+  text-decoration: var(--text-decoration);
+  transition: background-color var(--transition), color var(--transition),
+    box-shadow var(--transition), -webkit-text-decoration var(--transition);
+  transition: background-color var(--transition), color var(--transition),
+    text-decoration var(--transition), box-shadow var(--transition);
+  transition: background-color var(--transition), color var(--transition),
+    text-decoration var(--transition), box-shadow var(--transition),
+    -webkit-text-decoration var(--transition);
+}
+:where(#mount) a:is([aria-current], :hover, :active, :focus),
+:where(#mount) [role="link"]:is([aria-current], :hover, :active, :focus) {
+  --color: var(--primary-hover);
+  --text-decoration: underline;
+}
+
+:where(#mount) label {
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--text-gray-2, #222222);
+}
+
+:where(#mount) button {
+  width: 100%;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.3;
+  min-height: 44px;
+  border-radius: 12px;
+  padding: 0 14px;
+  border: none;
+  background-color: var(--primary, #ea4c89);
+  color: #ffffff;
+  cursor: pointer;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+
+:where(#mount) button:hover {
+  background-color: var(--primary-hover, #f082ac);
+}
+
+:where(#mount) button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+:where(#mount) select,
+:where(#mount) input,
+:where(#mount) textarea {
+  font-family: inherit;
+  color: var(--text-gray-2, #222222);
+}
+
+:where(#mount) select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  font-family: inherit;
+  color: var(--text-gray-2, inherit);
+  font-size: 13px;
+  line-height: 1.3;
+  outline: none;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 12px;
+  background-color: var(--popup-item-background-color, transparent);
+  background-image: var(--icon-xia, none);
+  background-repeat: no-repeat;
+  background-position: center right 12px;
+  background-size: 16px auto;
+  cursor: pointer;
+}
+
+:where(#mount) input[type="checkbox"] {
+  accent-color: var(--primary, #ea4c89);
+}
+
+[type="checkbox"],
+[type="radio"] {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  width: 1.25em;
+  height: 1.25em;
+  margin-top: -0.125em;
+  margin-right: 0.375em;
+  margin-left: 0;
+  -webkit-margin-start: 0;
+  margin-inline-start: 0;
+  -webkit-margin-end: 0.375em;
+  margin-inline-end: 0.375em;
+  border-width: var(--border-width);
+  font-size: inherit;
+  vertical-align: middle;
+  cursor: pointer;
+}
+[type="checkbox"]::-ms-check,
+[type="radio"]::-ms-check {
+  display: none;
+}
+[type="checkbox"]:checked,
+[type="checkbox"]:checked:active,
+[type="checkbox"]:checked:focus,
+[type="radio"]:checked,
+[type="radio"]:checked:active,
+[type="radio"]:checked:focus {
+  --background-color: var(--primary);
+  --border-color: var(--primary);
+  background-image: var(--icon-checkbox);
+  background-position: center;
+  background-size: 0.75em auto;
+  background-repeat: no-repeat;
+}
+[type="checkbox"] ~ label,
+[type="radio"] ~ label {
+  display: inline-block;
+  margin-right: 0.375em;
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+[type="checkbox"]:indeterminate {
+  --background-color: var(--primary);
+  --border-color: var(--primary);
+  background-image: var(--icon-minus);
+  background-position: center;
+  background-size: 0.75em auto;
+  background-repeat: no-repeat;
+}
+
+[type="radio"] {
+  border-radius: 50%;
+}
+[type="radio"]:checked,
+[type="radio"]:checked:active,
+[type="radio"]:checked:focus {
+  --background-color: var(--primary-inverse);
+  border-width: 0.35em;
+  background-image: none;
+}
+
+:where(#mount) [type="checkbox"][role="switch"] {
+  --background-color: var(--switch-background-color);
+  --border-color: var(--switch-background-color);
+  --color: var(--switch-color);
+  width: 2.25em;
+  height: 1.25em;
+  border: var(--border-width) solid var(--border-color);
+  border-radius: 1.25em;
+  background-color: var(--background-color);
+  line-height: 1.25em;
+}
+:where(#mount) [type="checkbox"][role="switch"]:focus {
+  --background-color: var(--switch-background-color);
+  --border-color: var(--switch-background-color);
+}
+:where(#mount) [type="checkbox"][role="switch"]:checked {
+  --background-color: var(--switch-checked-background-color);
+  --border-color: var(--switch-checked-background-color);
+}
+:where(#mount) [type="checkbox"][role="switch"]:before {
+  display: block;
+  width: calc(1.25em - (var(--border-width) * 2));
+  height: 100%;
+  border-radius: 50%;
+  background-color: var(--color);
+  content: "";
+  transition: margin 0.1s ease-in-out;
+}
+:where(#mount) [type="checkbox"][role="switch"]:checked {
+  background-image: none;
+}
+:where(#mount) [type="checkbox"][role="switch"]:checked::before {
+  margin-left: calc(1.125em - var(--border-width));
+  -webkit-margin-start: calc(1.125em - var(--border-width));
+  margin-inline-start: calc(1.125em - var(--border-width));
+}
+
+:where(#mount) [type="checkbox"][aria-invalid="false"],
+:where(#mount) [type="checkbox"]:checked[aria-invalid="false"],
+:where(#mount) [type="radio"][aria-invalid="false"],
+:where(#mount) [type="radio"]:checked[aria-invalid="false"],
+:where(#mount) [type="checkbox"][role="switch"][aria-invalid="false"],
+:where(#mount) [type="checkbox"][role="switch"]:checked[aria-invalid="false"] {
+  --border-color: var(--form-element-valid-border-color);
+}
+:where(#mount) [type="checkbox"][aria-invalid="true"],
+:where(#mount) [type="checkbox"]:checked[aria-invalid="true"],
+:where(#mount) [type="radio"][aria-invalid="true"],
+:where(#mount) [type="radio"]:checked[aria-invalid="true"],
+:where(#mount) [type="checkbox"][role="switch"][aria-invalid="true"],
+:where(#mount) [type="checkbox"][role="switch"]:checked[aria-invalid="true"] {
+  --border-color: var(--form-element-invalid-border-color);
+}
+
+.text-black {
+  color: var(--text-black-2);
+}
+
+.text-gray-2 {
+  color: var(--text-gray-2);
+}
+
+.text-gray-6 {
+  color: var(--text-gray-6);
+}
+
+.text-gray-9 {
+  color: var(--text-gray-9);
+}
+
+.text-gray-c2 {
+  color: var(--text-gray-c2);
+}
+
+.pt-4 {
+  padding-top: 16px;
+}
+
+.p-2 {
+  padding: 8px;
+}
+
+.pl-5 {
+  padding-left: 48px;
+}
+
+.p-0 {
+  padding: 0;
+}
+
+.pl-2 {
+  padding-left: 8px;
+}
+
+.pl-4 {
+  padding-left: 24px;
+}
+
+.pt-2 {
+  padding-top: 8px;
+}
+
+.pb-2 {
+  padding-bottom: 8px;
+}
+
+.pb-4 {
+  padding-bottom: 16px;
+}
+
+.pb-5 {
+  padding-bottom: 20px;
+}
+
+.pr-5 {
+  padding-right: 48px;
+}
+
+.text-sm {
+  font-size: 13px;
+}
+
+.text-base {
+  font-size: 16px;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-row {
+  flex-direction: row;
+}
+
+.flex-wrap {
+  flex-wrap: wrap;
+}
+
+.flex-end {
+  justify-content: flex-end;
+}
+
+.flex-grow {
+  flex-grow: 1;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.mb-0 {
+  margin-bottom: 0px;
+}
+
+.mb-2 {
+  margin-bottom: 8px;
+}
+
+.mb-4 {
+  margin-bottom: 16px;
+}
+
+.mb-3 {
+  margin-bottom: 12px;
+}
+
+.inline-block {
+  display: inline-block;
+}
+
+.py-2 {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.py-2-5 {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.mt-0 {
+  margin-top: 0;
+}
+
+.mt-2 {
+  margin-top: 8px;
+}
+
+.mt-3 {
+  margin-top: 12px;
+}
+
+.mt-4 {
+  margin-top: 16px;
+}
+
+.mt-5 {
+  margin-top: 20px;
+}
+
+.mt-6 {
+  margin-top: 24px;
+}
+
+.mb-1 {
+  margin-bottom: 4px;
+}
+
+.ml-4 {
+  margin-left: 24px;
+}
+
+.ml-3 {
+  margin-left: 16px;
+}
+
+.ml-2 {
+  margin-left: 8px;
+}
+
+.ml-1 {
+  margin-left: 4px;
+}
+
+.mr-1 {
+  margin-right: 4px;
+}
+
+.mr-2 {
+  margin-right: 8px;
+}
+
+.mr-3 {
+  margin-right: 16px;
+}
+
+.mx-2 {
+  margin-left: 8px;
+  margin-right: 8px;
+}
+
+.pl-3 {
+  padding-left: 12px;
+}
+
+.pr-3 {
+  padding-right: 12px;
+}
+
+.p-3 {
+  padding: 12px;
+}
+
+.px-1 {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.px-3 {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.pt-3 {
+  padding-top: 12px;
+}
+
+.px-6 {
+  padding-left: 18px;
+  padding-right: 18px;
+}
+
+.px-4 {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.pt-6 {
+  padding-top: 20px;
+}
+
+.py-3 {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.py-0 {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.left-auto {
+  left: auto !important;
+}
+
+.max-h-28 {
+  max-height: 112px;
+}
+
+.max-h-30 {
+  max-height: 120px;
+}
+
+.overflow-y-scroll {
+  overflow-y: scroll;
+}
+
+.text-xs {
+  font-size: 12px;
+}
+
+.inline-flex {
+  display: inline-flex;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.flex-3 {
+  flex: 3;
+}
+
+.flex-4 {
+  flex: 4;
+}
+
+.flex-2 {
+  flex: 2;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.max-content {
+  width: max-content;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.items-end {
+  align-items: flex-end;
+}
+
+.items-baseline {
+  align-items: baseline;
+}
+
+.my-5 {
+  margin-top: 48px;
+  margin-bottom: 48px;
+}
+
+.my-4 {
+  margin-top: 24px;
+  margin-bottom: 24px;
+}
+
+.my-3 {
+  margin-top: 16px;
+  margin-bottom: 16px;
+}
+
+.pt-3 {
+  padding-top: 12px;
+}
+
+.px-3 {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.pt-2 {
+  padding-top: 8px;
+}
+
+.px-2 {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.pt-1 {
+  padding-top: 4px;
+}
+
+.px-1 {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.pb-2 {
+  padding-bottom: 8px;
+}
+
+.justify-end {
+  justify-content: flex-end;
+}
+
+.w-auto {
+  width: auto;
+}
+
+.shrink-0 {
+  flex-shrink: 0;
+}
+
+.text-right {
+  text-align: right;
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.close {
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  background-image: var(--icon-close);
+  background-position: center;
+  background-size: auto 1rem;
+  background-repeat: no-repeat;
+  opacity: 0.5;
+  transition: opacity var(--transition);
+}
+
+.padding-two-column {
+  padding-left: 40px;
+  padding-right: 40px;
+}
+
+.muted {
+  color: #999;
+}
+
+.text-label {
+  color: #666;
+}
+
+.display-none {
+  display: none;
+}
+
+/* dark use #18232c */
+@media (prefers-color-scheme: dark) {
+  .text-label {
+    color: #9ca3af;
+  }
+}
+
+.text-decoration-none {
+  text-decoration: none;
+}
+
+.text-decoration-none:is([aria-current], :hover, :active, :focus),
+[role="link"]:is([aria-current], :hover, :active, :focus) {
+  --text-decoration: none !important;
+  background-color: transparent !important;
+}
+
+.text-overflow-ellipsis {
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.max-w-20 {
+  max-width: 180px;
+  white-space: nowrap;
+}
+
+[data-theme="light"],
+#mount:not([data-theme="dark"]) {
+  --popup-footer-background-color: #e8eaeb;
+  --popup-content-background-color: #ffffff;
+  --popup-item-background-color: #f3f5f6;
+  --popup-item-hover-background-color: #eaeced;
+  --popup-trial-pro-background-color: #f9fbfc;
+  --service-select-content-shadow: 0px 2px 12px 0px rgba(75, 76, 77, 0.2);
+  --service-select-border-color: #fafafa;
+  --service-select-selected-background-color: #f3f5f6;
+  --download-app-background: #f3f5f6;
+  --translate-language-background-color: #f3f5f6;
+  --translate-language-icon-color: #666666;
+  --translate-language-text-color: #222222;
+  --translate-language-hover-background-color: #fdedf3;
+  --translate-language-hover-icon-color: #e95d93;
+  --popup-scrollbar-thumb-color: var(--c-c7);
+  --popup-scrollbar-thumb-hover-color: var(--c-99);
+  --popup-scrollbar-thumb-active-color: var(--p-main);
+  --error-bg: #fdedf3;
+  --error-text: #222;
+  --error-link: #ea4c89;
+}
+
+[data-theme="dark"] {
+  --popup-footer-background-color: #0d0d0d;
+  --popup-content-background-color: #191919;
+  --popup-item-background-color: #272727;
+  --popup-item-hover-background-color: #333333;
+  --popup-trial-pro-background-color: #222222;
+  --service-select-content-shadow: 0px 2px 12px 0px rgba(0, 0, 0, 0.9);
+  --service-select-border-color: #2c2c2c;
+  --service-select-selected-background-color: #333333;
+  --download-app-background: #333;
+  --translate-language-background-color: #2d2e2f;
+  --translate-language-icon-color: #b3b3b3;
+  --translate-language-text-color: #b3b3b3;
+  --translate-language-hover-background-color: #a97b8c;
+  --translate-language-hover-icon-color: rgba(255, 255, 255, 0.9);
+  --popup-scrollbar-thumb-color: var(--c-c7);
+  --popup-scrollbar-thumb-hover-color: var(--c-99);
+  --popup-scrollbar-thumb-active-color: var(--p-main);
+  --error-bg: #26171d;
+  --error-text: #dbdbdb;
+  --error-link: #ea4c89;
+}
+
+#mount {
+  min-width: 268px;
+}
+
+body {
+  padding: 0;
+  margin: 0 auto;
+  min-width: 268px;
+  border-radius: 10px;
+}
+
+.popup-container {
+  font-size: 16px;
+  --font-size: 16px;
+  color: #666;
+  background-color: var(--popup-footer-background-color);
+  width: 316px;
+  min-width: 316px;
+  position: relative;
+  overflow: hidden;
+}
+
+.popup-content {
+  background-color: var(--popup-content-background-color);
+  border-radius: 0px 0px 12px 12px;
+  padding: 14px 16px;
+}
+
+.popup-userscript-three-feature-layout {
+  background-color: var(--popup-footer-background-color);
+}
+
+.popup-userscript-three-feature-layout .popup-content {
+  padding-bottom: 20px;
+  border-radius: 0 0 12px 12px;
+}
+
+.popup-userscript-three-feature-layout .popup-footer {
+  border-radius: 0;
+}
+
+.immersive-translate-popup-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 100%;
+  touch-action: none;
+}
+
+.immersive-translate-popup-wrapper {
+  background: var(--background-color);
+  border-radius: 10px;
+  border: 1px solid var(--muted-border-color);
+}
+
+.main-button {
+  font-size: 16px;
+  font-weight: 700;
+  vertical-align: middle;
+  border-radius: 12px;
+  padding: unset;
+  height: 48px;
+  line-height: 48px;
+  flex: 1;
+}
+
+select.translate-service,
+select.min-select {
+  --form-element-spacing-horizontal: 0;
+  margin-bottom: 0px;
+  max-width: unset;
+  flex: 1;
+  overflow: hidden;
+  font-size: 13px;
+  border: none;
+  border-radius: 8px;
+  padding-right: 30px;
+  padding-left: 0px;
+  background-position: center right 12px;
+  background-size: 16px auto;
+  background-image: var(--icon-xia);
+  text-overflow: ellipsis;
+  color: var(--text-gray-2);
+  background-color: transparent;
+  box-shadow: unset !important;
+  cursor: pointer;
+}
+
+select.more {
+  background-position: center right;
+  padding-right: 20px;
+}
+
+select.translate-service {
+  color: var(--text-black-2);
+  background-image: url("data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iOCIgaGVpZ2h0PSI4IiB2aWV3Qm94PSIwIDAgOCA4IiBmaWxsPSJub25lIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxnIG9wYWNpdHk9IjAuOCI+PHBhdGggZD0iTTMuNDc5NzMgNi4zODY0M0wwLjcyOTI5NyAzLjMyMjE2QzAuNjE2ODggMy4xOTY5NCAwLjU1NDY5NSAzLjAzNDU5IDAuNTU0Njg4IDIuODY2M0MwLjU1NDY4OCAyLjQ4OTI0IDAuODYwNTQ3IDIuMTgzNTkgMS4yMzc4NCAyLjE4MzU5SDYuNzM4NzFDNi45MDcwNyAyLjE4MzU4IDcuMDY5NTEgMi4yNDU3MiA3LjE5NDg4IDIuMzU4MDlDNy40NzU3NCAyLjYwOTg2IDcuNDk5MTkgMy4wNDE0OCA3LjI0NzI2IDMuMzIyMTZMNC40OTY4MiA2LjM4NjQ0QzQuNDgwMzIgNi40MDQ4MiA0LjQ2MjgzIDYuNDIyMjkgNC40NDQ0NCA2LjQzODc4QzQuMTYzNTggNi42OTA1NSAzLjczMTY2IDYuNjY3MTEgMy40Nzk3MyA2LjM4NjQzWiIgZmlsbD0iIzk5OTk5OSIvPjwvZz48L3N2Zz4K");
+  background-size: 8px auto;
+}
+
+.min-select-container.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.popup-footer {
+  background-color: var(--popup-footer-background-color);
+  height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+/* Footer 三栏布局样式 */
+.footer-link-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  min-width: 72px;
+}
+
+.footer-icon-btn {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.footer-icon-btn svg {
+  color: #999999;
+}
+
+[data-theme="dark"] .footer-icon-btn svg {
+  color: #707070;
+}
+
+.footer-link-text {
+  font-size: 12px;
+  line-height: 18px;
+  color: #666666;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .footer-link-text {
+  color: #b3b3b3;
+}
+
+.footer-link-btn-right {
+  justify-content: flex-end;
+}
+
+.footer-center-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #999999;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.footer-center-text.is-overflowing {
+  justify-content: flex-start;
+}
+
+.footer-center-text.is-overflowing .footer-center-content {
+  animation: footer-scroll-text 12s linear infinite;
+}
+
+@keyframes footer-scroll-text {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.footer-center-content {
+  display: inline-flex;
+  align-items: center;
+}
+
+.footer-scroll-gap {
+  display: inline-block;
+  width: 80px;
+  flex-shrink: 0;
+}
+
+[data-theme="dark"] .footer-center-text {
+  color: #707070;
+}
+
+.footer-text-content {
+  display: inline-block;
+}
+
+.footer-privacy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.footer-version-inline-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: #999999;
+  line-height: 1;
+  border-bottom: 1px solid transparent;
+}
+
+.footer-release-new-badge {
+  width: 28px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+[data-theme="dark"] .footer-version-inline-text {
+  color: #707070;
+}
+
+.footer-version-inline-text:hover {
+  background-color: transparent;
+}
+
+.translate-language-row {
+  gap: 4px;
+}
+
+.translate-language-exchange {
+  width: 36px;
+  height: 48px;
+  background-color: var(--translate-language-background-color);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--translate-language-icon-color);
+  flex-shrink: 0;
+  cursor: pointer;
+  margin-right: 8px;
+}
+
+.translate-language-exchange:hover {
+  color: var(--translate-language-hover-icon-color);
+}
+
+.translate-language-exchange-active {
+  background-color: var(--translate-language-hover-background-color);
+  color: var(--translate-language-hover-icon-color);
+}
+
+.translate-language-exchange-active:hover {
+  background-color: var(--translate-language-hover-background-color);
+  color: var(--translate-language-hover-icon-color);
+}
+
+.translate-language-arrow {
+  width: 24px;
+  height: 24px;
+  margin: 0;
+}
+
+.translation-service-container {
+  background-color: var(--popup-item-background-color);
+  border-radius: 12px;
+}
+
+.translation-service-primary-field {
+  position: relative;
+}
+
+.translation-service-guide-hitbox {
+  position: absolute;
+  right: 46px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: auto;
+}
+
+.min-select-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 44px;
+  background-color: var(--popup-item-background-color);
+  padding-left: 16px;
+}
+
+.min-select-container:first-child {
+  border-top-left-radius: 10px;
+  border-top-right-radius: 10px;
+}
+
+.min-select-container:last-child {
+  border-bottom-left-radius: 10px;
+  border-bottom-right-radius: 10px;
+}
+
+.min-select-container:only-child {
+  border-radius: 10px;
+}
+
+.popup-ai-context-label {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  flex: 1;
+  min-width: 60px;
+  flex-shrink: 0;
+  margin-bottom: 0;
+}
+
+.popup-ai-context-switch {
+  align-self: center;
+  margin: 0;
+  margin-inline-end: 12px;
+}
+
+.translate-mode {
+  width: 36px;
+  height: 48px;
+  border-radius: 12px;
+  background-color: var(--translate-language-background-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  color: var(--translate-language-text-color);
+  margin-right: 8px;
+}
+
+/* 快捷操作设置标题栏 */
+.widgets-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 4px;
+  margin-top: 20px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.widgets-header-title {
+  color: #999999;
+}
+
+.widgets-header-action {
+  color: #999999;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.widgets-header-action:hover {
+  color: #666666;
+}
+
+.widgets-container {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.popup-userscript-three-feature-layout .widgets-container-compact-monkey {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 12px;
+}
+
+.popup-userscript-three-feature-layout .widgets-container-compact-monkey.widgets-four-items {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.widgets-container.widgets-single-item {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 12px;
+}
+
+.widgets-container.widgets-single-item .widget-item {
+  max-width: none;
+}
+
+/* 当只有两个小组件时的样式优化 */
+.widgets-container.widgets-two-items {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.widgets-container.widgets-two-items .widget-item {
+  max-width: none;
+}
+
+.widget-item {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  background-color: transparent;
+  border: 1px solid #eef0f2;
+  box-sizing: border-box;
+  font-size: 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  padding: 0 14px;
+  text-align: left;
+  gap: 6px;
+}
+
+.widget-item.widget-item-single {
+  flex: 1 1 auto;
+  flex-direction: row;
+  justify-content: center;
+  border: 1px solid #eef0f2;
+  border-radius: 16px;
+  padding: 0 14px;
+  background: transparent;
+}
+
+.popup-userscript-three-feature-layout .widget-item-compact {
+  min-height: 44px;
+  flex-direction: row;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+}
+
+.widget-item svg {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+}
+
+.widget-icon-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--c-66, #666666);
+  font-size: 14px;
+  line-height: 21px;
+  text-align: left;
+  word-break: keep-all;
+}
+
+.popup-userscript-three-feature-layout .widget-item-compact .widget-icon-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  line-height: 21px;
+  text-align: left;
+}
+
+.widget-item.widget-item-single .widget-icon-text {
+  white-space: nowrap;
+  text-align: left;
+  color: var(--c-66, #666666);
+}
+
+[data-theme="dark"] .widget-item,
+[data-theme="dark"] .widget-item.widget-item-single {
+  border-color: #2e2e2e;
+}
+
+[data-theme="dark"] .widget-icon-text,
+[data-theme="dark"] .widget-item.widget-item-single .widget-icon-text {
+  color: var(--c-66, #666666);
+}
+
+[data-theme="dark"] .more-settings-icon {
+  fill: #191919;
+}
+
+.share-button-container {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 2px 3px 0 8px;
+}
+
+.share-button-container svg {
+  fill: var(--text-gray-9);
+}
+
+.min-select-container:hover,
+.widget-item:hover {
+  background-color: var(--popup-item-hover-background-color);
+}
+
+.main-button:hover {
+  background-color: #f5508f;
+}
+
+.share-button-container:hover {
+  background-color: var(--popup-item-background-color);
+  border-radius: 6px;
+}
+
+.error-boundary {
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+  display: flex;
+  padding: 12px;
+  font-size: 14px;
+  color: rgba(0, 0, 0, 0.88);
+  word-break: break-all;
+  margin: 12px;
+  border-radius: 12px;
+  flex-direction: column;
+}
+
+.upgrade-pro {
+  border-radius: 11px;
+  background: linear-gradient(57deg, #272727 19.8%, #696969 82.2%);
+  padding: 2px 8px;
+  transform: scale(0.85);
+}
+
+.upgrade-pro span {
+  background: linear-gradient(180deg, #ffeab4 17.65%, #f8c235 85.29%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+.upgrade-pro svg {
+  margin-top: -2px;
+}
+
+.upgrade-pro:hover {
+  background: linear-gradient(57deg, #3d3d3d 19.8%, #949494 82.2%);
+}
+
+.border-bottom-radius-0 {
+  border-bottom-left-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}
+
+.trial-pro-container {
+  border-radius: 0px 0px 12px 12px;
+  background: var(--popup-trial-pro-background-color);
+  display: flex;
+  align-items: center;
+  height: 44px;
+  padding-left: 16px;
+  padding-right: 12px;
+  font-size: 12px;
+}
+
+.trial-pro-container label {
+  line-height: 13px;
+  color: var(--text-black-2);
+}
+
+.trial-pro-container img {
+  margin-left: 5px;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+
+.upgrade-pro-discount-act {
+  height: 25px;
+  display: flex;
+  padding: 0 4px;
+  align-items: center;
+  border-radius: 15px;
+  background: linear-gradient(
+    90deg,
+    #cefbfa 11.33%,
+    #d7f56f 63.75%,
+    #fccd5e 100%
+  );
+  transform: scale(0.9);
+  box-shadow: 0px 1.8px 3.6px 0px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+}
+
+.upgrade-pro-discount-act span {
+  font-size: 12px;
+  font-weight: 700;
+  margin-left: 4px;
+  color: #222222;
+}
+
+.upgrade-pro-discount-act:hover {
+  text-decoration: unset;
+  background: linear-gradient(
+    90deg,
+    #e2fffe 11.33%,
+    #e6ff91 63.75%,
+    #ffdf93 100%
+  );
+}
+
+.custom-select-container {
+  width: 200px;
+  position: relative;
+  flex: 1;
+}
+
+#translation-service-select {
+  padding-right: 12px;
+}
+
+.custom-select-content {
+  border-radius: 12px;
+  background: var(--popup-content-background-color);
+  box-shadow: var(--service-select-content-shadow);
+  border: 1px solid var(--service-select-border-color);
+  padding: 8px;
+  position: absolute;
+  left: -68px;
+  right: 0;
+  z-index: 100;
+  overflow-y: auto;
+}
+
+.custom-select-item.default {
+  width: 100%;
+  padding: 0;
+}
+
+.custom-select-item {
+  font-size: 14px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--text-black-2);
+  width: auto;
+  overflow: hidden;
+  height: 30px;
+  line-height: 30px;
+}
+
+.custom-select-item-img {
+  width: 24px;
+  height: 24px;
+  margin-right: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .custom-select-item-img {
+    margin-right: 6px;
+  }
+}
+
+.custom-select-content .custom-select-item.selected,
+.custom-select-content .custom-select-item:hover {
+  background: var(--service-select-selected-background-color);
+}
+
+.custom-select-item > span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-select-item-pro {
+  font-size: 12px;
+  margin-left: 6px;
+  display: flex;
+}
+
+.custom-select-item-pro img {
+  margin: 0 3px;
+  width: 20px;
+  flex-shrink: 0;
+}
+
+.service-select-inline-sponsor-container {
+  width: 50px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.service-select-inline-sponsor-marquee {
+  min-width: max-content;
+  display: inline-flex;
+  align-items: center;
+  column-gap: 12px;
+  animation: service-select-inline-sponsor-scroll 10s linear infinite;
+}
+
+.service-select-inline-sponsor-track {
+  min-width: max-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@keyframes service-select-inline-sponsor-scroll {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(calc(-50% - 6px));
+  }
+}
+
+.custom-select-group-header {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-gray-9);
+  padding: 8px 8px 6px;
+  margin-top: 2px;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.custom-select-group-header--recommendation {
+  padding-top: 4px;
+}
+
+.custom-select-group-header-tip {
+  display: inline-flex;
+  align-items: center;
+  color: #bcbcbc;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.more-container {
+  position: relative;
+}
+
+.new-menu-indicator {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background-color: #ef3434;
+  border-radius: 50%;
+  right: 18px;
+  top: 4px;
+}
+
+.download-app {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 8px;
+  background: var(--download-app-background);
+  padding: 4px 8px;
+  color: var(--text-gray-6);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease-in-out;
+}
+
+/* Popup 动画效果 */
+@keyframes popup-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes popup-fade-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+  }
+}
+
+.popup-generic-content {
+  animation: popup-fade-in 0.2s ease-out;
+}
+
+.popup-generic-content.hiding {
+  animation: popup-fade-out 0.15s ease-in;
+}
+
+select.min-select {
+  --form-element-spacing-horizontal: 0;
+  max-width: 128px;
+  overflow: hidden;
+  color: var(--primary);
+  font-size: 13px;
+  border: none;
+  padding: 0;
+  padding-right: 20px;
+  text-overflow: ellipsis;
+  color: var(--color);
+}
+select.min-select-secondary {
+  color: var(--color);
+}
+select.min-select:focus {
+  outline: none;
+  border: none;
+  --box-shadow: none;
+}
+
+select.min-select-left {
+  padding-right: 0px;
+  /* padding-left: 24px; */
+  /* background-position: center left 0; */
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+select.transform-padding-left {
+  padding-left: 12px;
+  transform: translateX(-12px);
+  background-position: center right 0px;
+}
+
+select.text-gray-6 {
+  color: var(--text-gray-6);
+}
+
+/* dark use black, for windows */
+@media (prefers-color-scheme: dark) {
+  select.translate-service option,
+  select.min-select option {
+    background-color: #666666;
+  }
+}
+
+select.min-select-no-arrow {
+  background-image: none;
+  padding-right: 0;
+}
+
+.activity-tips {
+  border-radius: 8px;
+  padding: 0px 8px;
+  height: 26px;
+  background: linear-gradient(
+    83deg,
+    #faccde -0.87%,
+    #fce7ef 43.13%,
+    #fbd6e4 72.08%,
+    #ffb3d1 96.34%
+  );
+  color: #333;
+  cursor: pointer;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.activity-tips-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.countdown-container {
+  min-width: 50px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+.activity-tips-text {
+  font-weight: 600;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 非会员升级提示 */
+.upgrade-tips {
+  padding: 0px 6px 0px 4px;
+  height: 18px;
+  color: #ea4c89;
+  cursor: pointer;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.upgrade-tips svg:first-child {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  filter: drop-shadow(0px 4px 4px rgba(236, 76, 140, 0.2));
+}
+
+.upgrade-tips-text {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.upgrade-tips-switch {
+  position: relative;
+  width: 30px;
+  height: 18px;
+  border-radius: 24px;
+  background: #cccccc;
+  flex-shrink: 0;
+}
+
+.upgrade-tips-switch-thumb {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: #ffffff;
+}
+
+/* 抽屉组件样式 */
+.drawer-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 0.25s ease,
+    visibility 0.25s ease;
+}
+
+.drawer-overlay.drawer-visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.drawer-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #ffffff;
+  border-radius: 12px 12px 0 0;
+  z-index: 101;
+  transform: translateY(100%);
+  transition: transform 0.3s ease;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.drawer-visible .drawer-panel {
+  transform: translateY(0);
+}
+
+[data-theme="dark"] .drawer-panel {
+  background: #222222;
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  flex-shrink: 0;
+}
+
+.drawer-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #333333;
+}
+
+[data-theme="dark"] .drawer-title {
+  color: #e0e0e0;
+}
+
+.drawer-close {
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #999999;
+  border-radius: 4px;
+  transition: background-color 0.2s ease;
+}
+
+.drawer-close:hover {
+  background-color: #f3f5f6;
+}
+
+[data-theme="dark"] .drawer-close:hover {
+  background-color: #333333;
+}
+
+.drawer-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+/*
+ * Popup 抽屉滚动条：默认保持低对比，悬停时增强可见性，拖动时才使用品牌色。
+ * 轨道透明，避免在 316px 的紧凑工作区内形成额外的视觉分栏。
+ */
+.drawer-body-hover > .popup-drawer-container,
+.drawer-body-selection > .popup-drawer-container,
+.drawer-body-more-settings > .more-settings-drawer,
+.service-select-drawer-content {
+  scrollbar-color: var(--popup-scrollbar-thumb-color) transparent;
+  scrollbar-width: thin;
+  overscroll-behavior-y: contain;
+}
+
+.drawer-body-hover > .popup-drawer-container::-webkit-scrollbar,
+.drawer-body-selection > .popup-drawer-container::-webkit-scrollbar,
+.drawer-body-more-settings > .more-settings-drawer::-webkit-scrollbar,
+.service-select-drawer-content::-webkit-scrollbar {
+  display: block;
+  width: 6px;
+  height: 6px;
+}
+
+.drawer-body-hover > .popup-drawer-container::-webkit-scrollbar-track,
+.drawer-body-selection > .popup-drawer-container::-webkit-scrollbar-track,
+.drawer-body-more-settings > .more-settings-drawer::-webkit-scrollbar-track,
+.service-select-drawer-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.drawer-body-hover > .popup-drawer-container::-webkit-scrollbar-thumb,
+.drawer-body-selection > .popup-drawer-container::-webkit-scrollbar-thumb,
+.drawer-body-more-settings > .more-settings-drawer::-webkit-scrollbar-thumb,
+.service-select-drawer-content::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  background-color: var(--popup-scrollbar-thumb-color);
+  background-clip: padding-box;
+  border: 1px solid transparent;
+  border-radius: 999px;
+}
+
+.drawer-body-hover > .popup-drawer-container::-webkit-scrollbar-thumb:hover,
+.drawer-body-selection > .popup-drawer-container::-webkit-scrollbar-thumb:hover,
+.drawer-body-more-settings > .more-settings-drawer::-webkit-scrollbar-thumb:hover,
+.service-select-drawer-content::-webkit-scrollbar-thumb:hover {
+  background-color: var(--popup-scrollbar-thumb-hover-color);
+}
+
+.drawer-body-hover > .popup-drawer-container::-webkit-scrollbar-thumb:active,
+.drawer-body-selection > .popup-drawer-container::-webkit-scrollbar-thumb:active,
+.drawer-body-more-settings > .more-settings-drawer::-webkit-scrollbar-thumb:active,
+.service-select-drawer-content::-webkit-scrollbar-thumb:active {
+  background-color: var(--popup-scrollbar-thumb-active-color);
+}
+
+.drawer-body.drawer-body-hover {
+  padding: 0 12px;
+  display: flex;
+  overflow: hidden;
+  flex: 1;
+}
+
+.drawer-body.drawer-body-more-settings {
+  padding: 0 12px;
+  display: flex;
+  overflow: hidden;
+}
+
+.drawer-body-hover > .popup-drawer-container,
+.drawer-body-selection > .popup-drawer-container,
+.drawer-body-more-settings > .more-settings-drawer {
+  width: 100%;
+  min-height: 0;
+  padding-inline: 8px;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.drawer-body-hover > .popup-drawer-container,
+.drawer-body-selection > .popup-drawer-container {
+  padding-block-end: 20px;
+}
+
+.drawer-body-more-settings > .more-settings-drawer {
+  padding-block-end: 16px;
+}
+
+.drawer-body-hover > .popup-drawer-container > *,
+.drawer-body-selection > .popup-drawer-container > *,
+.drawer-body-more-settings > .more-settings-drawer > * {
+  flex-shrink: 0;
+}
+
+/* Popup 核心选择器：沿用通用底部抽屉，仅替换展开容器。 */
+.drawer-panel.select-drawer-panel {
+  max-height: 90%;
+  background: var(--popup-content-background-color);
+}
+
+.select-drawer-panel .drawer-header {
+  padding: 16px 16px 12px;
+}
+
+.service-select-drawer-panel .drawer-header {
+  padding: 16px;
+}
+
+.drawer-body.select-drawer-body {
+  min-height: 0;
+  padding: 0 12px 12px;
+  display: flex;
+  overflow: hidden;
+}
+
+.drawer-body.service-select-drawer-body {
+  padding: 4px 12px 12px;
+}
+
+.service-select-drawer-content {
+  position: static;
+  inset: auto;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+  overflow-y: auto;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.service-select-drawer-content .custom-select-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.service-select-drawer-content .custom-select-group +
+  .custom-select-group {
+  margin-top: 12px;
+}
+
+.service-select-drawer-content .custom-select-group--recommendation {
+  gap: 6px;
+}
+
+.service-select-drawer-content .custom-select-group-header {
+  min-height: 18px;
+  margin: 0;
+  padding: 0 4px;
+  gap: 4px;
+  color: #999999;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  letter-spacing: 0;
+}
+
+.service-select-drawer-content
+  .custom-select-group-header--recommendation {
+  min-width: 0;
+  padding: 0;
+}
+
+.service-select-drawer-content .custom-select-group-header-badge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: var(--space-4);
+  padding: 2px 8px 2px 6px;
+  color: var(--p-main);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  background: var(--p-weak);
+  border-radius: 100px;
+}
+
+.service-select-drawer-content .service-recommendation-badge-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.service-select-drawer-content .custom-select-group-header-badge-text {
+  flex-shrink: 0;
+}
+
+.service-select-drawer-content .custom-select-group-header-context {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-select-drawer-content
+  .custom-select-group-header-tip--recommendation {
+  flex-shrink: 0;
+}
+
+.service-select-drawer-content
+  .service-recommendation-tip-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.service-select-drawer-content .custom-select-item {
+  width: 100%;
+  min-height: 34px;
+  height: auto;
+  padding: 5px 8px;
+  line-height: 20px;
+}
+
+.service-select-drawer-content .custom-select-item.selected {
+  background: var(--p-weak);
+}
+
+.service-select-drawer-content .custom-select-item-membership-badge {
+  margin-left: 2px;
+}
+
+.service-select-drawer-content .custom-select-item-membership-badge img {
+  width: 24px;
+  height: 12px;
+  margin: 0;
+}
+
+.service-select-drawer-content .custom-select-item:focus-visible {
+  outline: 2px solid var(--p-main);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .select-drawer-overlay,
+  .select-drawer-overlay .drawer-panel {
+    transition-duration: 0.01ms;
+  }
+}
+
+.drawer-footer {
+  padding: 12px 20px;
+  border-top: 1px solid #eef0f2;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+[data-theme="dark"] .drawer-footer {
+  border-top: 1px solid #2e2e2e;
+}
+
+.drawer-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.drawer-footer-actions-single {
+  justify-content: center;
+}
+
+.drawer-footer-text {
+  font-size: 12px;
+  cursor: pointer;
+  color: #999999;
+  text-decoration: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+.drawer-footer-actions .drawer-footer-text:first-child {
+  text-align: left;
+}
+
+.drawer-footer-actions .drawer-footer-text:last-child {
+  text-align: right;
+}
+
+.drawer-footer-actions-single .drawer-footer-text {
+  flex: 0 1 auto;
+  max-width: 100%;
+  text-align: center;
+}
+
+.drawer-footer-text:hover {
+  text-decoration: underline;
+}
+
+/* 抽屉内容区域样式 */
+.drawer-section {
+  margin-bottom: 16px;
+}
+
+.drawer-section:last-child {
+  margin-bottom: 0;
+}
+
+.drawer-section-highlight {
+  background-color: #f9f9f9;
+  border-radius: 12px;
+  padding: 16px;
+}
+
+[data-theme="dark"] .drawer-section-highlight {
+  background-color: #2a2a2a;
+}
+
+.drawer-section-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #666666;
+  margin-bottom: 12px;
+}
+
+[data-theme="dark"] .drawer-section-title {
+  color: #999999;
+}
+
+.drawer-section-divider {
+  height: 1px;
+  background-color: #eef0f2;
+  margin: 16px 0;
+}
+
+/* ========== 通用抽屉组件样式 ========== */
+.popup-drawer-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.popup-drawer-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 6px;
+  border-radius: 12px;
+  background: #f3f5f6;
+}
+
+[data-theme="dark"] .popup-drawer-tabs {
+  background: #2a2a2a;
+}
+
+.popup-drawer-tabs button {
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  color: #666666;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.popup-drawer-tabs button.active {
+  color: #222222;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="dark"] .popup-drawer-tabs button {
+  color: #b3b3b3;
+}
+
+[data-theme="dark"] .popup-drawer-tabs button.active {
+  color: #f3f3f3;
+  background: #1f1f1f;
+}
+
+.popup-drawer-card {
+  background: #f3f5f6;
+  border-radius: 12px;
+  padding: 12px 12px 16px;
+}
+
+[data-theme="dark"] .popup-drawer-card {
+  background: #2a2a2a;
+}
+
+.popup-drawer-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 21px;
+  gap: 12px;
+}
+
+.popup-drawer-card-header input[type="checkbox"][role="switch"] {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.popup-drawer-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #222222;
+  line-height: 21px;
+}
+
+.popup-drawer-card-title-row {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.popup-drawer-premium-icon {
+  width: 24px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+
+[data-theme="dark"] .popup-drawer-card-title {
+  color: #e0e0e0;
+}
+
+.popup-drawer-card-description {
+  margin-top: 10px;
+  color: #777777;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.popup-drawer-card-description-tip {
+  margin-top: 4px;
+  color: #d46b08;
+}
+
+[data-theme="dark"] .popup-drawer-card-description {
+  color: #a5a5a5;
+}
+
+[data-theme="dark"] .popup-drawer-card-description-tip {
+  color: #f6ad55;
+}
+
+.popup-drawer-card-divider {
+  height: 1px;
+  width: calc(100% + 24px);
+  background-color: #ffffff;
+  margin: 12px -12px 16px;
+}
+
+[data-theme="dark"] .popup-drawer-card-divider {
+  background-color: #333333;
+}
+
+.popup-drawer-demo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.popup-drawer-demo-region-fixed {
+  height: 51px;
+  max-height: 51px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.popup-drawer-demo-region-min {
+  min-height: 51px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.popup-drawer-demo-selection {
+  width: 100%;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.popup-drawer-demo-icon {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.popup-drawer-demo-plus,
+.popup-drawer-demo-equal {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 21px;
+  color: #333333;
+}
+
+[data-theme="dark"] .popup-drawer-demo-plus,
+[data-theme="dark"] .popup-drawer-demo-equal {
+  color: #e0e0e0;
+}
+
+.popup-drawer-demo-logo {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.popup-drawer-demo-logo img {
+  width: 28px;
+  height: 28px;
+  display: block;
+  filter: drop-shadow(0 4px 12px rgba(255, 166, 201, 0.5));
+}
+
+.popup-drawer-demo-lasso {
+  width: 38px;
+  height: 24px;
+  border: 3px solid #ea4c89;
+  border-right-color: transparent;
+  border-radius: 52% 48% 50% 46%;
+  transform: rotate(-10deg);
+  box-shadow: 0 4px 12px rgba(255, 166, 201, 0.5);
+  box-sizing: border-box;
+}
+
+.popup-drawer-demo-result {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 21px;
+  color: #333333;
+}
+
+.popup-drawer-demo-result-ellipsis {
+  min-width: 0;
+  max-width: calc(100% - 72px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .popup-drawer-demo-result {
+  color: #e0e0e0;
+}
+
+.popup-drawer-trigger {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.popup-drawer-trigger-label {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: #999999;
+  padding-left: 4px;
+}
+
+.popup-drawer-trigger-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.popup-drawer-trigger-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid #eef0f2;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: #333333;
+  background: #ffffff;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.popup-drawer-trigger-option-disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.popup-drawer-trigger-option:not(.popup-drawer-trigger-option-selected):hover {
+  border-color: #d0d3d6;
+}
+
+.popup-drawer-trigger-option-selected {
+  border: 0.5px solid #ea4c89;
+  background: #fdedf3;
+  box-shadow: 0px 4px 12px rgba(255, 166, 201, 0.5);
+}
+
+[data-theme="dark"] .popup-drawer-trigger-option {
+  background: #1f1f1f;
+  border-color: #333333;
+  color: #e0e0e0;
+}
+
+[data-theme="dark"]
+  .popup-drawer-trigger-option:not(
+    .popup-drawer-trigger-option-selected
+  ):hover {
+  border-color: #444444;
+}
+
+[data-theme="dark"] .popup-drawer-trigger-option-selected {
+  background: rgba(233, 76, 137, 0.2);
+  border-color: #ea4c89;
+  box-shadow: 0 4px 12px 0 rgba(255, 166, 201, 0.3);
+}
+
+.popup-drawer-trigger-option-with-icon {
+  gap: 8px;
+}
+
+/* ========== 通用抽屉演示区域样式 ========== */
+/* 键帽样式 */
+.popup-drawer-demo-keycap {
+  min-width: 72px;
+  padding: 9px;
+  height: auto;
+  box-sizing: border-box;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  color: #ffffff;
+  background:
+    radial-gradient(
+      60px 36px at 85% 100%,
+      rgba(208, 208, 208, 0.2),
+      rgba(255, 255, 255, 0)
+    ),
+    radial-gradient(72px 36px at 50% 0%, #101010 0%, #242424 100%);
+  box-shadow:
+    2px 2px 3.5px rgba(0, 0, 0, 0.4),
+    inset 0.5px 0.7px 0.4px rgba(255, 255, 255, 0.5),
+    inset -0.5px -0.5px 0.2px rgba(0, 0, 0, 0.6);
+}
+
+.popup-drawer-demo-keycap-text {
+  max-width: 50px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 小圆点样式 */
+.popup-drawer-demo-mini-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ea4c89;
+  flex-shrink: 0;
+  align-self: center;
+  box-shadow: 0 4px 12px rgba(255, 166, 201, 0.5);
+}
+
+[data-theme="dark"] .drawer-section-divider {
+  background-color: #333333;
+}
+
+/* 开关行 */
+.drawer-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+}
+
+.drawer-switch-row.drawer-row-border {
+  border-bottom: 1px solid #eef0f2;
+  margin-bottom: 8px;
+  padding-bottom: 12px;
+}
+
+[data-theme="dark"] .drawer-switch-row.drawer-row-border {
+  border-bottom-color: #333333;
+}
+
+.drawer-switch-label {
+  font-size: 14px;
+  color: #222222;
+}
+
+[data-theme="dark"] .drawer-switch-label {
+  color: #e0e0e0;
+}
+
+/* 链接行 */
+.drawer-link-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  cursor: pointer;
+  border-bottom: 1px solid #eef0f2;
+  font-size: 14px;
+  color: #222222;
+}
+
+.drawer-link-row:last-child {
+  border-bottom: none;
+}
+
+[data-theme="dark"] .drawer-link-row {
+  border-bottom-color: #333333;
+  color: #e0e0e0;
+}
+
+.drawer-link-row:hover {
+  color: #ea4c89;
+}
+
+/* 演示区域 */
+.drawer-demo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+.drawer-demo-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #eef0f2;
+}
+
+[data-theme="dark"] .drawer-demo-icon {
+  background-color: #333333;
+  border-color: #444444;
+}
+
+.drawer-demo-plus,
+.drawer-demo-equal {
+  font-size: 16px;
+  color: #999999;
+}
+
+.drawer-demo-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.drawer-demo-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.drawer-demo-result {
+  font-size: 14px;
+  color: #222222;
+  padding: 8px 12px;
+  background-color: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #eef0f2;
+}
+
+[data-theme="dark"] .drawer-demo-result {
+  background-color: #333333;
+  border-color: #444444;
+  color: #e0e0e0;
+}
+
+/* 触发方式选项 */
+.drawer-options {
+  display: flex;
+  gap: 8px;
+}
+
+.drawer-options-wrap {
+  flex-wrap: wrap;
+}
+
+.drawer-option {
+  padding: 8px 16px;
+  font-size: 14px;
+  color: #666666;
+  background-color: #f3f5f6;
+  border-radius: 8px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+}
+
+[data-theme="dark"] .drawer-option {
+  background-color: #333333;
+  color: #b3b3b3;
+}
+
+.drawer-option:hover {
+  background-color: #eaeced;
+}
+
+[data-theme="dark"] .drawer-option:hover {
+  background-color: #3a3a3a;
+}
+
+.drawer-option-selected {
+  border-color: #ea4c89;
+  background-color: #fdedf3;
+  color: #ea4c89;
+  box-shadow: 0px 4px 12px rgba(255, 166, 201, 0.5);
+}
+
+[data-theme="dark"] .drawer-option-selected {
+  background-color: rgba(234, 76, 137, 0.2);
+}
+
+.drawer-body.drawer-body-selection {
+  padding: 0 12px;
+  display: flex;
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+
+/* ========== 更多设置抽屉样式 ========== */
+.more-settings-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.more-settings-quick-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.more-settings-feature-card {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 12px;
+  cursor: pointer;
+  background-color: #f3f5f6;
+  transition: background-color 0.2s ease;
+}
+
+.more-settings-feature-card:hover {
+  background-color: #e8eaec;
+}
+
+.more-settings-feature-card:active {
+  background-color: #dde0e2;
+}
+
+.more-settings-feature-card-label {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: #666666;
+  white-space: nowrap;
+}
+
+.more-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.more-settings-switch-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  min-height: 21px;
+  gap: 12px;
+}
+
+.more-settings-switch-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 21px;
+  color: #222222;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.more-settings-switch-row input[type="checkbox"] {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+[data-theme="dark"] .more-settings-switch-label {
+  color: #e0e0e0;
+}
+
+.more-settings-cache-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 4px;
+}
+
+.more-settings-cache-size {
+  color: #999999;
+}
+
+.more-settings-cache-clean-link {
+  color: #ea4c89;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.more-settings-cache-clean-link:hover {
+  text-decoration: underline;
+}
+
+.more-settings-clean-cache-toast {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 112px;
+  height: 32px;
+  padding: 8px 16px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 18px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.more-settings-clean-cache-toast-icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border-radius: 50%;
+  background: #1fc16b;
+}
+
+.more-settings-clean-cache-toast-icon::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 7px;
+  height: 4px;
+  border-left: 1.5px solid #ffffff;
+  border-bottom: 1.5px solid #ffffff;
+  transform: rotate(-45deg);
+}
+
+.more-settings-clean-cache-toast-text {
+  white-space: nowrap;
+}
+
+[data-theme="dark"] .more-settings-cache-size {
+  color: #8a8a8a;
+}
+
+[data-theme="dark"] .more-settings-feature-card {
+  background-color: #2a2a2a;
+}
+
+[data-theme="dark"] .more-settings-feature-card:hover {
+  background-color: #333333;
+}
+
+[data-theme="dark"] .more-settings-feature-card:active {
+  background-color: #3a3a3a;
+}
+
+[data-theme="dark"] .more-settings-feature-card-label {
+  color: #e0e0e0;
+}
+
+/* 动作按钮样式 */
+.more-settings-action-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  color: #222222;
+  background-color: #f3f5f6;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.more-settings-action-button:hover {
+  background-color: #e8eaec;
+}
+
+.more-settings-action-button:active {
+  background-color: #dde0e2;
+}
+
+.more-settings-action-button-label {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 21px;
+  color: inherit;
+  text-align: center;
+}
+
+[data-theme="dark"] .more-settings-action-button {
+  color: #e0e0e0;
+  background-color: #2a2a2a;
+}
+
+[data-theme="dark"] .more-settings-action-button:hover {
+  background-color: #333333;
+}
+
+[data-theme="dark"] .more-settings-action-button:active {
+  background-color: #3a3a3a;
+}
+
+[data-theme="dark"] .more-settings-action-button-label {
+  color: #e0e0e0;
+}
+
+/* 错误消息组件样式 */
+.error-message-container {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px 16px;
+  margin-top: 6px;
+  margin-bottom: -14px;
+  border: 1px solid #f53f3f;
+  border-radius: 12px;
+  background-color: var(--error-bg);
+}
+
+.error-message-icon-wrapper {
+  width: 21px;
+  height: 21px;
+  min-width: 21px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+}
+
+.error-message-icon {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #f53f3f;
+}
+
+.error-message-text {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 21px;
+  color: var(--error-text);
+}
+
+.error-message-text a {
+  color: var(--error-link);
+  text-decoration: underline;
+}
+
+.ad-banner-container {
+  margin-top: 10px;
+  margin-bottom: -5px;
+}
+
+/*
+ * 在组件动态注入完整样式前提供首帧布局约束，避免 Chromium 根据远程图片或长文本的
+ * 中间布局放大扩展 Popup。几何规则需与 components/ad-banner/styles.ts 保持一致。
+ */
+.imt-ad-banner {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  height: 77px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.imt-ad-banner__bg-image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.imt-ad-banner__right-image {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  display: block;
+  width: 126px;
+  max-width: 100%;
+  height: 126px;
+  transform: translateY(-50%);
+  object-fit: contain;
+}
+
+.imt-ad-banner__content {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.imt-ad-banner__title,
+.imt-ad-banner__desc {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.imt-ad-banner__slider {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.imt-ad-banner__slides {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+}
+
+.imt-ad-banner__slide {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+html {
+  font-size: 17px;
+}
+
+@media print {
+  .imt-fb-container {
+    display: none !important;
+  }
+}
+
+#mount {
+  position: absolute;
+  display: none;
+  min-width: 250px;
+  height: auto;
+  --font-size: 17px;
+  font-size: 17px;
+}
+
+/* float-ball */
+.imt-fb-container {
+  position: fixed;
+  padding: 0;
+  top: 335px;
+  width: fit-content;
+  display: flex;
+  flex-direction: column;
+  display: none;
+  direction: ltr;
+  background-color: transparent !important;
+}
+
+.imt-fb-container.active .imt-manga-button {
+  opacity: 1;
+}
+
+.imt-fb-container.left {
+  align-items: flex-start;
+  left: 0;
+}
+
+.imt-fb-container.right {
+  align-items: flex-end;
+  right: 0;
+}
+
+.imt-fb-btn {
+  cursor: pointer;
+  background: var(--float-ball-more-button-background-color);
+  height: 36px;
+  box-shadow: 0 0 10px 0 rgba(0, 0, 0, 0.08);
+}
+
+.imt-fb-btn.left {
+  border-top-right-radius: 36px;
+  border-bottom-right-radius: 36px;
+  padding-left: 3px;
+}
+
+.imt-fb-btn.right {
+  border-top-left-radius: 36px;
+  border-bottom-left-radius: 36px;
+  padding-right: 3px;
+}
+
+.imt-fb-btn.mini.left {
+  transform: translateX(-22px);
+}
+
+.imt-fb-btn.mini.right {
+  transform: translateX(22px);
+}
+
+.imt-fb-btn.mini.active {
+  transform: translateX(0);
+}
+
+.imt-fb-btn div {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
+.imt-fb-btn .imt-fb-hit-area {
+  position: absolute;
+  top: 0;
+  height: 36px;
+  bottom: -6px;
+  left: -6px;
+  right: -6px;
+  background: transparent;
+}
+
+.imt-fb-btn.mini.right .imt-fb-hit-area {
+  left: -10px;
+}
+
+.imt-fb-btn.mini.left .imt-fb-hit-area {
+  right: -10px;
+}
+
+.imt-fb-btn.left div {
+  border-top-right-radius: 34px;
+  border-bottom-right-radius: 34px;
+  justify-content: flex-end;
+}
+
+.imt-fb-btn.right div {
+  border-top-left-radius: 34px;
+  border-bottom-left-radius: 34px;
+}
+
+.imt-fb-logo-img {
+  width: 20px;
+  height: 20px;
+  margin: 0 10px;
+}
+
+.imt-fb-logo-img-big-bg {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  background-color: #ed6d8f;
+  border-radius: 50%;
+  margin: 0 5px;
+}
+
+.imt-float-ball-translated {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  bottom: 4px;
+  right: 4px;
+}
+
+.btn-animate {
+  -webkit-transform: translate3d(0, 0, 0);
+  transform: translate3d(0, 0, 0);
+  -webkit-transition:
+    opacity ease-out 250ms,
+    -webkit-transform ease-out 250ms;
+  transition:
+    opacity ease-out 250ms,
+    -webkit-transform ease-out 250ms;
+  transition:
+    opacity ease-out 250ms,
+    transform ease-out 250ms;
+  transition:
+    opacity ease-out 250ms,
+    transform ease-out 250ms,
+    -webkit-transform ease-out 250ms;
+}
+
+.imt-fb-setting-btn {
+  margin-right: 18px;
+  width: 28px;
+  height: 28px;
+}
+
+.immersive-translate-popup-wrapper {
+  background: var(--background-color);
+  border-radius: 20px;
+  box-shadow: 2px 10px 24px 0px #0e121614;
+  border: none;
+}
+
+.popup-container {
+  border-radius: 20px;
+  position: relative;
+  overflow: hidden;
+}
+
+.popup-content {
+  border-radius: 20px 20px 12px 12px;
+}
+.popup-footer {
+  border-radius: 20px;
+}
+
+.popup-userscript-three-feature-layout {
+  border-radius: 20px;
+}
+
+.popup-userscript-three-feature-layout .popup-content {
+  border-radius: 20px 20px 12px 12px;
+}
+
+.popup-userscript-three-feature-layout .popup-footer {
+  border-radius: 0;
+}
+
+.imt-fb-close-button {
+  cursor: pointer;
+  position: absolute;
+  left: -10px;
+  bottom: -20px;
+}
+.imt-fb-container.left .imt-fb-close-button {
+  left: auto;
+  right: -10px;
+}
+
+.imt-fb-close-content {
+  padding: 22px;
+  width: 320px;
+  pointer-events: all;
+}
+
+.imt-fb-close-title {
+  font-weight: 500;
+  color: var(--text-black-2);
+}
+
+.imt-fb-close-radio-content {
+  background-color: var(--background-light-green);
+  padding: 8px 20px;
+}
+
+.imt-fb-radio-sel,
+.imt-fb-radio-nor {
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.imt-fb-radio-sel {
+  border: 2px solid var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.imt-fb-radio-sel div {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background-color: var(--primary);
+}
+
+.imt-fb-radio-nor {
+  border: 2px solid var(--input-border-strong);
+}
+
+.imt-fb-primary-btn {
+  background-color: var(--primary);
+  width: 72px;
+  height: 32px;
+  color: white;
+  border-radius: 8px;
+  text-align: center;
+  line-height: 32px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.imt-fb-default-btn {
+  border: 1px solid var(--primary);
+  width: 72px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--primary);
+  line-height: 32px;
+  text-align: center;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.imt-fb-guide-container {
+  width: 312px;
+  transform: translateY(-45%);
+}
+
+.imt-fb-guide-bg {
+  position: absolute;
+  left: 30px;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: -1;
+  height: 100%;
+  width: 90%;
+}
+
+.imt-fb-guide-bg.left {
+  transform: scaleX(-1);
+}
+
+.imt-fb-guide-content {
+  margin: 16px -30px 80px 0px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.imt-fb-guide-content.left {
+  margin: 16px 21px 60px 32px;
+}
+
+.imt-fb-guide-img {
+  width: 220px;
+  height: 112px;
+}
+
+.imt-fb-guide-message {
+  font-size: 14px;
+  line-height: 28px;
+  color: #333333;
+  white-space: pre-wrap;
+  text-align: center;
+  font-weight: 700;
+  margin-bottom: 20px;
+}
+
+.imt-manga-guide-message {
+  font-size: 16px;
+  line-height: 24px;
+  color: #333333;
+  text-align: center;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+.imt-fb-guide-button {
+  margin-top: 16px;
+  line-height: 40px;
+  height: 40px;
+  padding: 0 20px;
+  width: unset;
+}
+
+.imt-fb-side {
+  border-radius: 50%;
+  cursor: pointer;
+  pointer-events: all;
+  position: relative;
+}
+
+.imt-fb-side {
+  margin: 10px 0;
+}
+
+.imt-fb-side::before,
+.imt-manga-button::before,
+.imt-fb-round-button::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  bottom: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background-color: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.imt-fb-side:hover::before,
+.imt-manga-button:hover::before,
+.imt-fb-round-button:hover::before {
+  background-color: var(--float-ball-more-button-hover-color);
+}
+
+.imt-fb-new-badge {
+  width: 26px;
+  height: 14px;
+  padding: 3px;
+  background-color: #f53f3f;
+  border-radius: 4px;
+  position: absolute;
+  top: -5px;
+  right: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.imt-fb-message-center-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background-color: #ea4c89;
+  color: #ffffff;
+  position: absolute;
+  top: -6px;
+  right: -4px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 700;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.imt-fb-container.left .imt-fb-message-center-badge {
+  right: auto;
+  left: -4px;
+}
+
+.imt-fb-side * {
+  pointer-events: inherit;
+}
+
+.imt-fb-more-button {
+  width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+/* Sheet.css */
+.immersive-translate-sheet {
+  position: fixed;
+  transform: translateY(100%);
+  /* Start off screen */
+  left: 0;
+  right: 0;
+  background-color: var(--background-color);
+  transition: transform 0.3s ease-out;
+  /* Smooth slide transition */
+  box-shadow: 0px -2px 10px rgba(0, 0, 0, 0.1);
+  /* Ensure it's above other content */
+  bottom: 0;
+  border-top-left-radius: 16px;
+  border-top-right-radius: 16px;
+  overflow: hidden;
+}
+
+.immersive-translate-sheet.visible {
+  transform: translateY(0);
+}
+
+.immersive-translate-sheet-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity 0.3s ease-out;
+}
+
+.immersive-translate-sheet-backdrop.visible {
+  opacity: 1;
+}
+
+.popup-container-sheet {
+  max-width: 100vw;
+  width: 100vw;
+}
+
+.imt-no-events svg * {
+  pointer-events: none !important;
+}
+
+.imt-manga-button {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: all;
+  margin: 0 0 10px 0;
+  background-color: var(--float-ball-more-button-background-color);
+  border-radius: 50%;
+  box-shadow: 0 2px 10px 0 rgba(0, 0, 0, 0.08);
+  right: 8px;
+}
+
+.imt-manga-feedback {
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.imt-fb-round-button {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: var(--float-ball-more-button-background-color);
+  border-radius: 50%;
+  box-shadow: 0 0 10px 0 rgba(0, 0, 0, 0.08);
+  position: relative;
+}
+
+.imt-fb-round-button > svg {
+  z-index: 1;
+}
+
+.imt-fb-upgrade-button {
+  cursor: pointer;
+  margin-top: 10px;
+}
+
+.imt-fb-power-user-card {
+  position: absolute;
+  bottom: -130px;
+  width: 266px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 2px 10px 24px 0 rgba(14, 18, 22, 0.08);
+  border: 1px solid rgba(250, 251, 251, 1);
+  pointer-events: all;
+  z-index: 2;
+  background: linear-gradient(172deg, rgba(255, 255, 255, 0.30) 4.36%, #FFF 35.98%), linear-gradient(0deg, rgba(255, 255, 255, 0.40) 0%, rgba(255, 255, 255, 0.40) 100%), radial-gradient(39.95% 47.41% at -0.53% 55.22%, #E0C4F7 0%, rgba(224, 196, 247, 0.00) 100%), radial-gradient(56.37% 54.27% at 86.17% 0%, #E0C4F6 0%, rgba(224, 196, 246, 0.00) 100%), radial-gradient(42.04% 37.43% at -0.53% 3.75%, #AED5FF 0%, rgba(174, 213, 255, 0.00) 100%), radial-gradient(66.88% 52.09% at 36.81% 19.55%, #757ED8 0%, #6B6AC0 100%), #FFF;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.imt-fb-power-user-card.right {
+  right: 60px;
+}
+
+.imt-fb-power-user-card.right::after {
+  content: '';
+  position: absolute;
+  right: -10px;
+  top: 130px;
+  border-width: 10px 0 10px 10px;
+  border-style: solid;
+  border-color: transparent transparent transparent #fff;
+  filter: drop-shadow(2px 0 2px rgba(14, 18, 22, 0.06));
+}
+
+.imt-fb-power-user-card.left {
+  left: 60px;
+}
+
+.imt-fb-power-user-card.left::after {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 130px;
+  border-width: 10px 10px 10px 0;
+  border-style: solid;
+  border-color: transparent #fff transparent transparent;
+  filter: drop-shadow(-2px 0 2px rgba(14, 18, 22, 0.06));
+}
+
+.imt-fb-power-user-card-banner {
+  display: block;
+  width: 128px;
+  height: auto;
+  margin-top: 8px;
+  border-radius: 8px 8px 0 0;
+}
+
+.imt-fb-power-user-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 16px 24px 0;
+  box-sizing: border-box;
+}
+
+.imt-fb-power-user-card-title {
+  color: #333;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+  text-align: center;
+}
+
+.imt-fb-power-user-card-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.imt-fb-power-user-card-body {
+  padding: 12px 24px 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.imt-fb-power-user-card-desc {
+  color: #333;
+  font-size: 14px;
+  line-height: 22px;
+  text-align: center;
+}
+
+.imt-fb-power-user-card-primary {
+  margin-top: 16px;
+  height: 37px;
+  border-radius: 8px;
+  background: linear-gradient(110deg, #F497BC 17.37%, #EC4C8C 89.68%);
+  color: var(--ZX-FFFFFF, #FFF);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 21px; /* 150% */
+  display: flex;
+  padding: 8px;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  flex: 1 0 0;
+}
+
+.imt-manga-translated {
+  position: absolute;
+  left: 24px;
+  top: 20px;
+}
+
+.imt-float-ball-loading {
+  animation: imt-loading-animation 0.6s infinite linear !important;
+}
+
+.imt-manga-guide-bg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: -1;
+  width: 100%;
+  transform: translateY(-50%);
+}
+.imt-manga-guide-content {
+  position: absolute;
+  top: 15px;
+  left: 0;
+  right: 0;
+  margin: 0 40px 0;
+}
+
+.img-manga-guide-button {
+  width: fit-content;
+  margin: 0 auto;
+}
+
+.img-manga-close {
+  position: absolute;
+  bottom: -200px;
+  width: 32px;
+  height: 32px;
+  left: 0;
+  right: 0;
+  margin: auto;
+  cursor: pointer;
+}
+
+.imt-fb-container.dragging .imt-manga-button,
+.imt-fb-container.dragging .btn-animate:not(.imt-fb-btn) {
+  display: none !important;
+}
+
+.imt-fb-container.dragging .imt-fb-btn {
+  border-radius: 50% !important;
+  width: 36px !important;
+  height: 36px !important;
+  display: flex !important;
+  align-items: center !important;
+  cursor: move !important;
+}
+
+.imt-fb-container.dragging .imt-fb-btn div {
+  border-radius: 50% !important;
+  width: 36px !important;
+  height: 36px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 !important;
+}
+
+.imt-fb-container.dragging .imt-fb-btn.left,
+.imt-fb-container.dragging .imt-fb-btn.right {
+  border-radius: 50% !important;
+}
+
+.imt-fb-container.dragging .imt-fb-btn.left div,
+.imt-fb-container.dragging .imt-fb-btn.right div {
+  border-radius: 50% !important;
+}
+
+.imt-fb-container.dragging .imt-fb-logo-img {
+  margin: 0 !important;
+}
+
+.imt-fb-container.dragging .imt-float-ball-translated {
+  right: 2px !important;
+  bottom: 2px !important;
+}
+
+@-webkit-keyframes imt-loading-animation {
+  from {
+    -webkit-transform: rotate(0deg);
+  }
+
+  to {
+    -webkit-transform: rotate(359deg);
+  }
+}
+
+@keyframes imt-loading-animation {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(359deg);
+  }
+}
+
+.imt-fb-icon {
+  color: #666666;
+}
+
+[data-theme="dark"] .imt-fb-icon {
+  color: #b3b3b3;
+}
+
+[data-theme="light"] .imt-fb-icon {
+  color: #666666;
+}
+
+/* 悬浮球设置弹窗样式 */
+.imt-fb-setting-wrapper {
+  border-radius: 12px;
+  box-shadow: 2px 10px 24px 0px rgba(0, 0, 0, 0.06);
+}
+
+.imt-fb-setting-content {
+  padding: 16px;
+  width: 350px;
+  pointer-events: all;
+  box-sizing: border-box;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.imt-fb-setting-title {
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--text-black-2);
+}
+
+.imt-fb-setting-preview {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 24px 0;
+}
+
+.imt-fb-preview-wrapper {
+  display: flex;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.imt-fb-preview-item {
+  width: 99px;
+  height: 57px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  position: relative;
+  overflow: hidden;
+}
+
+.imt-fb-preview-item.light {
+  background-color: #f3f5f6;
+  border-top-left-radius: 12px;
+  border-bottom-left-radius: 12px;
+}
+
+.imt-fb-preview-item.dark {
+  background-color: #444;
+  border-top-right-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+
+.imt-fb-preview-ball {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  box-shadow: 0 0 10px 0 rgba(0, 0, 0, 0.08);
+  transition: all 0.2s ease;
+}
+
+.imt-fb-preview-ball.light {
+  background-color: #fff;
+  border-top-left-radius: 36px;
+  border-bottom-left-radius: 36px;
+}
+
+.imt-fb-preview-ball.dark {
+  background-color: #111;
+  border-top-left-radius: 36px;
+  border-bottom-left-radius: 36px;
+}
+
+.imt-fb-preview-ball.full {
+  width: 41px;
+  justify-content: center;
+}
+
+.imt-fb-preview-ball.mini {
+  width: 41px;
+  justify-content: center;
+  transform: translateX(21px);
+}
+
+.imt-fb-preview-ball .imt-fb-preview-logo {
+  flex-shrink: 0;
+}
+
+/* 选项区域 */
+.imt-fb-setting-options {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.imt-fb-setting-option-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.imt-fb-setting-option-label {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 21px;
+  color: var(--text-black-2);
+}
+
+/* Toggle 开关样式 */
+.imt-fb-toggle {
+  width: 30px;
+  height: 18px;
+  background-color: var(--switch-background-color);
+  border-radius: 24px;
+  position: relative;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  flex-shrink: 0;
+}
+
+.imt-fb-toggle.checked {
+  background-color: var(--primary);
+}
+
+.imt-fb-toggle.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.imt-fb-toggle-thumb {
+  width: 14px;
+  height: 14px;
+  background-color: var(--switch-color);
+  border-radius: 50%;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease;
+  box-shadow: 0 0 10px 0 rgba(0, 0, 0, 0.08);
+}
+
+.imt-fb-toggle.checked .imt-fb-toggle-thumb {
+  transform: translateX(12px);
+}
+
+.imt-fb-setting-hide-options {
+  background-color: var(--background-light-green);
+  padding: 8px 20px;
+  border-radius: 8px;
+  margin-top: 8px;
+}
+
+.imt-fb-setting-more-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.imt-fb-setting-more-arrow {
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid #8c8c8c;
+  border-bottom: 2px solid #8c8c8c;
+  transform: rotate(-45deg);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.imt-fb-setting-more-arrow.expanded {
+  transform: rotate(45deg);
+}
+
+.imt-fb-setting-action-options {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.imt-fb-setting-action-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 4px;
+}
+
+.imt-fb-setting-save-btn {
+  background-color: var(--primary);
+  color: white;
+  border-radius: 8px;
+  text-align: center;
+  line-height: 45px;
+  height: 45px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 16px;
+  transition: opacity 0.2s ease;
+}
+
+.imt-fb-setting-hide-save-btn {
+  margin-top: 12px;
+}
+
+.imt-fb-setting-save-btn:hover {
+  opacity: 0.9;
+}
+
+.imt-fb-setting-save-btn:active {
+  opacity: 0.8;
+}
+</style><div id="mount" style="display: block;"><div hidden="" id="immersive-translate-popup-overlay" class="immersive-translate-popup-overlay" style="z-index: 2147483647; background-color: rgba(0, 0, 0, 0.5);"><div class="immersive-translate-popup-wrapper" style="position: fixed; top: 50%; left: 50%; transform: translateX(-50%) translateY(-50%);"></div></div></div></template></div></html>

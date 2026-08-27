@@ -7,6 +7,8 @@
 ROS 图、也不想连 VR 桥。
 """
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -37,6 +39,38 @@ class _Silent:
 
     def warning(self, *args, **kwargs):
         pass
+
+
+class _FakeClient:
+    """只记下被调了几次，不拉 ROS 图。``call_async`` 返回一个可以手动完成的 future。"""
+
+    def __init__(self, ready=True):
+        self.ready, self.calls, self.callbacks = ready, 0, []
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, _request):
+        self.calls += 1
+        self.callbacks.append([])
+        handle = self
+        index = len(self.callbacks) - 1
+
+        class _Future:
+            def add_done_callback(self, callback):
+                handle.callbacks[index].append(callback)
+
+        return _Future()
+
+    def finish(self, index=-1):
+        """把第 ``index`` 次调用当成已返回。"""
+        for callback in self.callbacks[index]:
+            callback(_Result())
+
+
+class _Result:
+    def result(self):
+        return type('R', (), {'success': True, 'message': 'ok'})()
 
 
 def _frame(squeeze, trigger, position, orientation=UNIT):
@@ -76,6 +110,12 @@ def node():
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
                     'right': np.array([0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])}
     teleop._grip = np.zeros(2)
+    # A/X 归位：按键沿同真实初值（连上就按着不算一次），服务客户端换成假的。
+    teleop._homing = {'left': None, 'right': None}
+    teleop._home_held = {'left': True, 'right': True}
+    teleop._trigger = {name: _FakeClient() for name in
+                       ('home_left', 'home_right', 'home_cancel')}
+    teleop._now = lambda: 100.0
     teleop.get_logger = lambda: _Silent()
     return teleop
 
@@ -544,6 +584,10 @@ def buttons(node):
     node._button_cooldown = 0.0
     node._button_stamp = 0.0
     node._button_held = True          # 与真实初值一致：连上就按着不算一次
+    node._button_down, node._button_used = None, True
+    node._estop_hold = 1e9            # 长按单独测，别把短按那几条带进去
+    node._lock, node._status = threading.Lock(), {}
+    node._trigger['estop'] = _FakeClient()
     node._now = lambda: next(clock)
     node._advance = lambda: fired.append(1)
     fired: list[int] = []
@@ -563,30 +607,92 @@ def test_both_hands_required(buttons):
     buttons._check_button(_by(False, True))
     assert buttons.fired == []
     buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
     assert len(buttons.fired) == 1
 
 
-def test_holding_does_not_repeat(buttons):
+def test_holding_fires_only_on_release(buttons):
+    """按住期间一步不推：那段时间留给长按急停。"""
     buttons._check_button(_by(False, False))
     for _ in range(20):
         buttons._check_button(_by(True, True))
-    assert len(buttons.fired) == 1               # 按住只算一次
+    assert buttons.fired == []
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1               # 松手才算一次
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 2
+
+
+def test_running_estops_on_press_not_release(buttons):
+    """策略行走 + 上肢 VR 那个阶段，推进一步本来就是急停——按下即走，不等松手。"""
+    buttons._status = {'state': 'running'}
     buttons._check_button(_by(False, False))
     buttons._check_button(_by(True, True))
-    assert len(buttons.fired) == 2               # 松开再按才是第二次
+    assert len(buttons.fired) == 1
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1               # 松手不再补一次
+
+
+@pytest.mark.parametrize('state', ['idle', 'estop', 'stand'])
+def test_the_other_steps_still_wait_for_release(buttons, state):
+    """engage / start 那两步仍然等松手，否则从站立长按会先把步态策略拉起来。"""
+    buttons._status = {'state': state}
+    buttons._check_button(_by(False, False))
+    buttons._check_button(_by(True, True))
+    assert buttons.fired == []
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+
+
+def test_holding_both_buttons_estops_from_any_state(buttons):
+    """长按不查 _ADVANCE 表：站立状态下长按也是直接急停，而不是先启动策略。"""
+    buttons._estop_hold = 2.0
+    buttons._status = {'state': 'stand'}
+    buttons._check_button(_by(False, False))
+    for _ in range(5):
+        buttons._check_button(_by(True, True))
+    assert buttons._trigger['estop'].calls == 1
+    assert buttons.fired == []
+    buttons._check_button(_by(False, False))     # 松手不再补一次短按
+    assert buttons.fired == []
+    assert buttons._trigger['estop'].calls == 1  # 也不重复急停
+
+
+def test_a_short_press_never_estops(buttons):
+    buttons._estop_hold = 5.0
+    buttons._check_button(_by(False, False))
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+    assert buttons._trigger['estop'].calls == 0
 
 
 def test_stale_frames_cannot_fake_a_press(buttons):
     """一次掉帧不能凭空推进状态机——恢复后必须真的松手再按。"""
     buttons._check_button(_by(False, False))
     buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
     assert len(buttons.fired) == 1
-    buttons._check_button(None)                  # 帧不新鲜
+    buttons._check_button(_by(True, True))
+    buttons._check_button(None)                  # 按着的时候掉帧
     buttons._check_button(_by(True, True))       # 恢复时仍按着
+    buttons._check_button(_by(False, False))
     assert len(buttons.fired) == 1
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 2
+
+
+def test_a_stale_frame_cancels_the_estop_hold(buttons):
+    """掉帧期间手柄状态未知，不能拿掉帧前的按下时刻继续累计成长按。"""
+    buttons._estop_hold = 3.0
     buttons._check_button(_by(False, False))
     buttons._check_button(_by(True, True))
-    assert len(buttons.fired) == 2
+    buttons._check_button(None)
+    for _ in range(10):
+        buttons._check_button(_by(True, True))
+    assert buttons._trigger['estop'].calls == 0
 
 
 def test_advance_table_covers_the_whole_cycle():
@@ -596,3 +702,191 @@ def test_advance_table_covers_the_whole_cycle():
     assert _ADVANCE['stand'][0] == 'start'
     assert _ADVANCE['running'][0] == 'estop'
     assert _ADVANCE['estop'][0] == 'engage'
+
+
+# --------------------------------------------------------------------- A/X 归位
+
+LIMITED = {'left': [0.31, 0.26, 0.09, 0.0, 0.0, 0.0, 1.0],
+           'right': [0.31, -0.26, 0.09, 0.0, 0.0, 0.0, 1.0]}
+
+
+def _ax(pressed, squeeze=0.0, position=(0.0, 0.0, 0.0)):
+    return {side: {'grip': {'position': list(position), 'orientation': list(UNIT)},
+                   'buttons': {'squeeze': squeeze, 'a_x': side in pressed}}
+            for side in ('left', 'right')}
+
+
+def test_a_x_calls_the_service_for_that_hand_only(node):
+    node._update_arms(_ax(()), LIMITED)               # 先松手，解除初始的"按着"
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_right'].calls == 1
+    assert node._trigger['home_left'].calls == 0
+    assert node._homing['right'] is not None and node._homing['left'] is None
+
+
+def test_holding_a_x_does_not_call_again(node):
+    node._update_arms(_ax(()), LIMITED)
+    for _ in range(20):
+        node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_right'].calls == 1
+
+
+def test_homing_follows_limited_pose_instead_of_driving(node):
+    """归位期间本节点只跟随策略层的指令：自己再发一份就是两个目标对着干。"""
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert np.allclose(node._pose['right'], LIMITED['right'])
+    assert node._clutch['right'] is None
+
+
+def test_squeeze_cancels_homing_and_takes_over_without_a_jump(node):
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    assert node._trigger['home_cancel'].calls == 1
+    # 标志由服务返回时清——取消也走同一条返回路径，不能在这里抢先清掉。
+    assert node._homing['right'] is not None
+    node._trigger['home_right'].finish()
+    assert node._homing['right'] is None
+    here = node._pose['right'][:3].copy()
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    assert np.array_equal(node._pose['right'][:3], here)      # 接合瞬间零位移
+
+
+def test_pressing_a_x_again_cancels(node):
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_cancel'].calls == 1
+    assert node._trigger['home_right'].calls == 1             # 没有重复下单
+
+
+def test_homing_does_not_start_while_the_clutch_is_held(node):
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    node._update_arms(_ax(('right',), squeeze=1.0), LIMITED)
+    assert node._trigger['home_right'].calls == 0
+
+
+def test_service_not_ready_does_not_pretend_to_home(node):
+    node._trigger['home_right'].ready = False
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._homing['right'] is None
+
+
+def test_a_lost_service_reply_eventually_hands_control_back(node):
+    """服务阻塞在策略层，策略层没了的话不能让那只手永远卡在跟随里。"""
+    from g1_motion_control.vr_teleop import _HOME_TIMEOUT_S
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._homing['right'] is not None
+    node._now = lambda: 100.0 + _HOME_TIMEOUT_S + 1.0
+    node._update_arms(_ax(()), LIMITED)
+    assert node._homing['right'] is None
+
+
+# ------------------------------------------------------------- 断联期间交还上肢
+
+STAND = {'left': [0.15, 0.25, -0.05, *UNIT], 'right': [0.15, -0.25, -0.05, *UNIT]}
+#: 断联期间回放把左臂开到了别处
+MOVED = {'left': [0.30, 0.10, 0.25, *UNIT], 'right': [0.15, -0.25, -0.05, *UNIT]}
+
+
+class _Sent:
+    """``_tick`` 只往 ``data`` 上写，不必为此拉 std_msgs。"""
+
+    data: list = []
+
+
+class _Recorder:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, message):
+        self.sent.append(list(message.data))
+
+
+@pytest.fixture
+def ticking(node):
+    """补上 ``_tick`` 用得到、``_update_arms`` 用不到的那些字段。"""
+    node._lock = threading.Lock()
+    node._frame, node._frame_stamp, node._timeout = None, 0.0, 0.3
+    node._status = {}
+    node._seeded = node._offline = False
+    node._twist = np.zeros(3)
+    node._rate = 50.0
+    node._height = node._height0 = 0.80
+    node._h_lo, node._h_hi, node._height_rate = 0.50, 0.80, 0.15
+    node._vx_max, node._vy_max, node._wz_max, node._deadzone = 0.4, 0.2, 1.0, 0.05
+    node._button_held, node._button_stamp, node._button_cooldown = True, 0.0, 1.0
+    node._button_down, node._button_used, node._estop_hold = None, True, 1.0
+    node._message, node._publisher = _Sent(), _Recorder()
+    return node
+
+
+def _live(limited):
+    return {'arms_live': True, 'arm_mode': 'ik', 'limited_pose': limited,
+            'grip': [0.3, 0.3]}
+
+
+def _vr(squeeze, position):
+    frame = {side: {'grip': {'position': list(position), 'orientation': list(UNIT)},
+                    'buttons': {'squeeze': squeeze, 'trigger': 0.0}}
+             for side in ('left', 'right')}
+    frame['session_active'] = True
+    return frame
+
+
+def _teleop_then_disconnect(node):
+    """接管 -> 握 squeeze 把手往前推 30 cm -> 浏览器退出 -> 回放把手臂开走。"""
+    node._status = _live(STAND)
+    node._tick()                                     # 播种
+    node._frame, node._frame_stamp = _vr(1.0, (0.0, 0.0, 0.0)), 100.0
+    node._tick()                                     # 接合
+    for k in range(1, 7):                            # 分帧推，别踩 _MAX_HAND_STEP_M
+        node._frame = _vr(1.0, (0.0, -0.01 * k, -0.05 * k))
+        node._tick()
+    node._frame = None
+    node._tick()
+    node._status = _live(MOVED)
+
+
+def test_a_lost_headset_hands_the_arms_back(ticking):
+    """断联期间照发就是和回放抢同一个目标。策略层的上肢目标没有超时，不发即冻结。"""
+    ticking._status = _live(STAND)
+    for _ in range(20):
+        ticking._tick()
+    assert {len(data) for data in ticking._publisher.sent} == {4}
+
+
+def test_nothing_is_published_before_the_arms_are_live(ticking):
+    """``arms_live`` 为假时一帧不发。这是「先按 B/Y 站起来再 squeeze」那套流程的依据，
+    但回放要求 ``arms_live`` 为真，所以回放刚做完时这道闸门是开着的。"""
+    ticking._status = {'arms_live': False, 'arm_mode': 'ik'}
+    ticking._frame, ticking._frame_stamp = _vr(0.0, (0.0, 0.0, 0.0)), 100.0
+    for _ in range(20):
+        ticking._tick()
+    assert ticking._publisher.sent == []
+
+
+@pytest.mark.parametrize('squeeze', [0.0, 1.0], ids=['disengage', 'engage'])
+def test_reconnecting_realigns_on_the_current_pose(ticking, squeeze):
+    """恢复第一帧不能拿断联时的陈旧目标一把拽过去（实测 418 mm）。
+
+    握不握 squeeze 都要守：离合只决定 ``_pose`` 会不会被更新，不决定它会不会被发。
+    """
+    _teleop_then_disconnect(ticking)
+    ticking._frame, ticking._frame_stamp = _vr(squeeze, (0.0, -0.06, -0.30)), 100.0
+    ticking._tick()
+    assert np.allclose(ticking._publisher.sent[-1][4:11], MOVED['left'])
+
+
+def test_reconnecting_keeps_the_pelvis_height(ticking):
+    """别拿 ``_seeded`` 那条播种路径当重连对齐用：它会把高度复位成参数默认值。"""
+    _teleop_then_disconnect(ticking)
+    ticking._height = 0.55
+    ticking._frame, ticking._frame_stamp = _vr(0.0, (0.0, -0.06, -0.30)), 100.0
+    ticking._tick()
+    assert ticking._publisher.sent[-1][3] == pytest.approx(0.55)

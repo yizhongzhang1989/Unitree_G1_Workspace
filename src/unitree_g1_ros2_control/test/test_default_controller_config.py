@@ -21,6 +21,26 @@ def _load_control_launch():
     return module
 
 
+def _context(module, **overrides):
+    """把 generate_launch_description 声明的那些参数备齐。
+
+    use_camera_calibration 默认关掉：开着的话用例结果会取决于这台机器
+    装没装 camera_calibration、标没标过。
+    """
+    context = LaunchContext()
+    context.launch_configurations.update({
+        "topology": "dual",
+        "controller_manager": "/controller_manager",
+        "joint_states_topic": "/joint_states",
+        "robot_description_topic": "/robot_description",
+        "use_sim_time": "false",
+        "use_camera_calibration": "false",
+        **module._HARDWARE_ARGUMENTS,
+        **overrides,
+    })
+    return context
+
+
 def test_default_controller_claims_g1_body_and_both_grippers():
     forward_config = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "forward_position_controller.yaml").read_text(
@@ -136,9 +156,7 @@ def test_arm_stiffness_default_is_owned_by_hardware_plugin():
     module = _load_control_launch()
 
     assert module._HARDWARE_ARGUMENTS["arm_stiffness_scale"] == ""
-    context = LaunchContext()
-    context.launch_configurations.update(module._HARDWARE_ARGUMENTS)
-    description = module._robot_description(context, PACKAGE_ROOT, "dual")
+    description = module._robot_description(_context(module), PACKAGE_ROOT, "dual")
     hardware = ElementTree.fromstring(description).find(
         "./ros2_control/hardware")
     parameters = {
@@ -153,9 +171,7 @@ def test_arm_stiffness_default_is_owned_by_hardware_plugin():
 
 def test_arm_stiffness_explicit_override_reaches_hardware_plugin():
     module = _load_control_launch()
-    context = LaunchContext()
-    context.launch_configurations.update(module._HARDWARE_ARGUMENTS)
-    context.launch_configurations["arm_stiffness_scale"] = "2.5"
+    context = _context(module, arm_stiffness_scale="2.5")
 
     description = module._robot_description(context, PACKAGE_ROOT, "dual")
     hardware = ElementTree.fromstring(description).find(
@@ -172,9 +188,7 @@ def test_gripper_gains_only_come_from_gain_file():
     assert "gripper_kp" not in module._HARDWARE_ARGUMENTS
     assert "gripper_kd" not in module._HARDWARE_ARGUMENTS
 
-    context = LaunchContext()
-    context.launch_configurations.update(module._HARDWARE_ARGUMENTS)
-    description = module._robot_description(context, PACKAGE_ROOT, "dual")
+    description = module._robot_description(_context(module), PACKAGE_ROOT, "dual")
     hardware = ElementTree.fromstring(description).find(
         "./ros2_control/hardware")
     parameters = {
@@ -187,22 +201,14 @@ def test_gripper_gains_only_come_from_gain_file():
 
 def test_control_launch_loads_both_motion_controllers_inactive():
     module = _load_control_launch()
-    context = LaunchContext()
-    context.launch_configurations.update({
-        "topology": "dual",
-        "controller_manager": "/controller_manager",
-        "joint_states_topic": "/joint_states",
-        "robot_description_topic": "/robot_description",
-        "use_sim_time": "false",
-        **module._HARDWARE_ARGUMENTS,
-    })
-    nodes = module._control_nodes(context)
+    nodes = module._control_nodes(_context(module))
     spawners = {
         str(node._Node__arguments[0]): node._Node__arguments
         for node in nodes
         if isinstance(node, Node) and
         node._Node__node_executable == "spawner"
     }
+
     def parameter_files(arguments):
         return [
             Path(arguments[index + 1]).name
@@ -217,3 +223,108 @@ def test_control_launch_loads_both_motion_controllers_inactive():
     assert parameter_files(spawners["joint_trajectory_controller"]) == [
         "default_31dof_param.yaml", "joint_trajectory_controller.yaml"]
     assert "arm_gravity_compensation" not in spawners
+
+
+_HEAD_JOINT = """<robot name="t">
+  <joint name="d435_joint" type="fixed">
+    <origin rpy="0 0.8307767 0" xyz="0.0576235 0.01753 0.42987"/>
+    <parent link="torso_link"/>
+    <child link="d435_link"/>
+  </joint>
+</robot>"""
+
+
+def _origin_of(root, joint):
+    node = [j for j in root.iter("joint") if j.get("name") == joint][0]
+    return node.find("origin")
+
+
+def test_calibrated_joint_origin_replaces_the_nominal_one():
+    module = _load_control_launch()
+    root = ElementTree.fromstring(_HEAD_JOINT)
+    applied = module._apply_joint_origins(root, {"d435_joint": {
+        "parent": "torso_link", "child": "d435_link",
+        "xyz": [0.058, 0.0175, 0.4299], "rpy": [-0.0167, 0.8676, -0.0036]}})
+    assert applied == ["d435_joint"]
+    origin = _origin_of(root, "d435_joint")
+    assert origin.get("xyz") == "0.058 0.0175 0.4299"
+    assert origin.get("rpy") == "-0.0167 0.8676 -0.0036"
+
+
+def test_calibrated_origin_is_skipped_when_the_urdf_moved_the_joint():
+    """存的是 T_parent<-child。URDF 改了挂点就不是同一条边，叠上去是错的。"""
+    module = _load_control_launch()
+    root = ElementTree.fromstring(_HEAD_JOINT.replace("torso_link", "pelvis"))
+    applied = module._apply_joint_origins(root, {"d435_joint": {
+        "parent": "torso_link", "child": "d435_link",
+        "xyz": [1.0, 2.0, 3.0], "rpy": [0.0, 0.0, 0.0]}})
+    assert applied == []
+    assert _origin_of(root, "d435_joint").get("xyz") == "0.0576235 0.01753 0.42987"
+
+
+def test_unknown_joints_in_the_override_file_are_ignored():
+    module = _load_control_launch()
+    root = ElementTree.fromstring(_HEAD_JOINT)
+    assert module._apply_joint_origins(root, {"some_other_joint": {
+        "parent": "a", "child": "b", "xyz": [0, 0, 0], "rpy": [0, 0, 0]}}) == []
+    assert _origin_of(root, "d435_joint").get("xyz") == "0.0576235 0.01753 0.42987"
+
+
+_WRIST_MOUNT = """<robot name="t">
+  <link name="left_camera_mount_link"/>
+</robot>"""
+
+
+def test_wrist_camera_link_is_injected_because_the_urdf_has_no_optical_frame():
+    module = _load_control_launch()
+    root = ElementTree.fromstring(_WRIST_MOUNT)
+    applied = module._apply_joint_origins(root, {"left_camera_optical_joint": {
+        "parent": "left_camera_mount_link", "child": "camera_left", "create": True,
+        "xyz": [-0.0004, 0.0401, 0.0724], "rpy": [-0.24, 0.036, -3.111]}})
+    assert applied == ["left_camera_optical_joint"]
+    assert "camera_left" in {link.get("name") for link in root.iter("link")}
+    joint = [j for j in root.iter("joint")][0]
+    assert joint.get("type") == "fixed"
+    assert joint.find("parent").get("link") == "left_camera_mount_link"
+    assert joint.find("child").get("link") == "camera_left"
+    assert joint.find("origin").get("xyz") == "-0.0004 0.0401 0.0724"
+
+
+def test_injected_joint_is_skipped_when_its_parent_link_is_missing():
+    module = _load_control_launch()
+    root = ElementTree.fromstring(_WRIST_MOUNT)
+    assert module._apply_joint_origins(root, {"right_camera_optical_joint": {
+        "parent": "right_camera_mount_link", "child": "camera_right", "create": True,
+        "xyz": [0, 0, 0], "rpy": [0, 0, 0]}}) == []
+    assert list(root.iter("joint")) == []
+
+
+def test_existing_joint_is_edited_not_duplicated_even_when_create_is_set():
+    """create 只是“没有就建”，有了就该改 —— 建重了 URDF 直接不合法"""
+    module = _load_control_launch()
+    root = ElementTree.fromstring(_HEAD_JOINT)
+    applied = module._apply_joint_origins(root, {"d435_joint": {
+        "parent": "torso_link", "child": "d435_link", "create": True,
+        "xyz": [1.0, 2.0, 3.0], "rpy": [0.0, 0.0, 0.0]}})
+    assert applied == ["d435_joint"]
+    assert len(list(root.iter("joint"))) == 1
+    assert _origin_of(root, "d435_joint").get("xyz") == "1.0 2.0 3.0"
+
+
+def test_missing_camera_calibration_package_is_not_fatal():
+    """标定包是可选的，没装也得能启控制栈"""
+    module = _load_control_launch()
+    assert isinstance(module._calibrated_joint_origins(), dict)
+
+
+def test_urdf_still_has_the_links_the_camera_overrides_hang_off():
+    """URDF 是 submodule，link 一改名这些覆盖就静静失效，只留一行 warning"""
+    module = _load_control_launch()
+    description = module._robot_description(_context(module), PACKAGE_ROOT, "dual")
+    root = ElementTree.fromstring(description)
+    links = {link.get("name") for link in root.iter("link")}
+    assert {"torso_link", "d435_link",
+            "left_camera_mount_link", "right_camera_mount_link"} <= links
+    assert "d435_joint" in {j.get("name") for j in root.iter("joint")}
+    # 腕相机光心不在 URDF 里，标定完才插进去
+    assert not {"camera_left", "camera_right"} & links

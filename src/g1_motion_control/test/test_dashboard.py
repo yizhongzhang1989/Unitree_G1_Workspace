@@ -193,6 +193,7 @@ def test_dashboard_observes_arm_blocks_without_clearing_other_fields():
     node = DashboardNode.__new__(DashboardNode)
     node._lock = threading.Lock()
     node._command_pose = {}
+    node._status = {'arm_mode': 'ik'}
 
     full = Float64MultiArray()
     full.data = [0.0] * 4 + [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0] \
@@ -207,6 +208,18 @@ def test_dashboard_observes_arm_blocks_without_clearing_other_fields():
     node._on_command(Float64MultiArray(data=[0.7, 0.8, 0.9, 0.0, 0.0, 0.0, 1.0]))
     assert node._command_pose['left'][:3] == [0.1, 0.2, 0.3]
     assert node._command_pose['right'][:3] == [0.7, 0.8, 0.9]
+
+
+def test_dashboard_drops_arm_blocks_in_passthrough_mode():
+    """透传模式下臂块是 14 个关节角；照旧当位姿画出来就是在编末端命令。"""
+    node = DashboardNode.__new__(DashboardNode)
+    node._lock = threading.Lock()
+    node._command_pose = {'left': [0.1] * 7}
+    node._status = {'arm_mode': 'passthrough'}
+
+    # 7 个关节角的后四位模长常常正好落在合法四元数区间里，光靠协议校验拦不住。
+    node._on_command(Float64MultiArray(data=[0.3, 0.2, 0.1, 0.5, 0.4, 0.3, 0.2]))
+    assert node._command_pose == {}
 
 
 def _post(node, body: bytes, length=None):

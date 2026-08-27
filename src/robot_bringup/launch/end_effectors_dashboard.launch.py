@@ -35,6 +35,8 @@ def _dashboard_node(context):
                 "right_camera_url").perform(context),
             "camera_timeout_s": float(
                 LaunchConfiguration("camera_timeout_s").perform(context)),
+            "camera_stream_timeout_s": float(LaunchConfiguration(
+                "camera_stream_timeout_s").perform(context)),
             "camera_poll_period_s": float(LaunchConfiguration(
                 "camera_poll_period_s").perform(context)),
         }],
@@ -51,6 +53,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("left_camera_url", default_value="http://127.0.0.1:8010"),
         DeclareLaunchArgument("right_camera_url", default_value="http://127.0.0.1:8011"),
         DeclareLaunchArgument("camera_timeout_s", default_value="1.0"),
+        DeclareLaunchArgument("camera_stream_timeout_s", default_value="10.0"),
         DeclareLaunchArgument("camera_poll_period_s", default_value="2.0"),
         OpaqueFunction(function=_dashboard_node),
     ])

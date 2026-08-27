@@ -1,7 +1,8 @@
 import json
 import threading
+import time
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -10,6 +11,7 @@ from geometry_msgs.msg import WrenchStamped
 from rclpy.serialization import serialize_message
 
 from robot_bringup.end_effectors.dashboard_node import (
+    EndEffectorsDashboard,
     _control_route,
     _finite_fields,
     _make_handler,
@@ -229,6 +231,95 @@ class HandlerTest(unittest.TestCase):
             self._post("/api/hands/left/gripper/service/reboot")
         self.assertEqual(raised.exception.code, 404)
         self.assertEqual(self.node.calls, [])
+
+
+class _SlowCameraHandler(BaseHTTPRequestHandler):
+    """相机按需拉流，头部立刻回、首帧要等 RTSP 冷启动"""
+
+    protocol_version = "HTTP/1.0"
+    first_frame_delay_s = 0.6
+
+    def log_message(self, *args):
+        del args
+
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header(
+            "Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.end_headers()
+        time.sleep(self.first_frame_delay_s)
+        self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n\r\nJPEG\r\n")
+
+
+class CameraProxyTest(unittest.TestCase):
+    """回归：首帧比 camera_timeout_s 晚到时代理不能自己断开"""
+
+    def setUp(self) -> None:
+        self.camera = ThreadingHTTPServer(("127.0.0.1", 0), _SlowCameraHandler)
+        self.camera.daemon_threads = True
+        self.thread = threading.Thread(
+            target=self.camera.serve_forever, daemon=True)
+        self.thread.start()
+        camera_url = f"http://127.0.0.1:{self.camera.server_address[1]}"
+
+        self.node = EndEffectorsDashboard.__new__(EndEffectorsDashboard)
+        self.node._config = {hand: {"camera_url": camera_url}
+                             for hand in ("left", "right")}
+        self.node._camera_opener = build_opener(ProxyHandler({}))
+        self.node._camera_stop = threading.Event()
+        self.node._camera_timeout = 0.2
+        self.node._camera_stream_timeout = 5.0
+
+    def tearDown(self) -> None:
+        self.camera.shutdown()
+        self.camera.server_close()
+        self.thread.join(timeout=1.0)
+
+    def test_waits_out_camera_cold_start(self) -> None:
+        downstream = _CollectingDownstream()
+        forwarder = threading.Thread(
+            target=self.node.proxy_camera_stream,
+            args=("left", downstream),
+            daemon=True)
+        forwarder.start()
+        self.assertTrue(downstream.first_chunk.wait(3.0),
+                        "代理在首帧到达前就断开了")
+        self.node._camera_stop.set()
+        forwarder.join(timeout=3.0)
+        self.assertEqual(downstream.status, 200)
+        self.assertIn(b"JPEG", b"".join(downstream.chunks))
+
+
+class _CollectingDownstream:
+    """只实现 proxy_camera_stream 用到的那几个 BaseHTTPRequestHandler 接口"""
+
+    def __init__(self) -> None:
+        self.status = None
+        self.headers_sent = {}
+        self.chunks = []
+        self.first_chunk = threading.Event()
+        self.wfile = self
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.headers_sent[name] = value
+
+    def end_headers(self):
+        pass
+
+    def write(self, chunk):
+        self.chunks.append(chunk)
+        self.first_chunk.set()
+
+    def flush(self):
+        pass
+
+    def _send_json(self, status, payload):
+        self.status = status
+        self.chunks.append(json.dumps(payload).encode())
+        self.first_chunk.set()
 
 
 class HtmlContractTest(unittest.TestCase):

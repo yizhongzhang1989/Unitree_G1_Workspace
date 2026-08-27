@@ -56,6 +56,9 @@ _ARGS = {
     # 424x240 是 848x480 的恰好一半：内参整除（fx 608.451 → 304.226）、FOV 不变（仍 69.74°x43.03°）。
     # 别改成 320x240：那是从 16:9 横向裁出来的，水平 FOV 会掍到 55.48°。
     'color_profile': '424x240x30',
+    # YUYV 是相机在 USB 上的原生格式，选它就少一道 YUYV->RGB8 转换、DDS 字节少 1/3，
+    # 720p 录制实测 150%->114% 单核且不再丢帧；默认仍为 RGB8，不动现有下游。
+    'color_format': 'RGB8',
     'depth_profile': '424x240x30',
     'align_depth': 'false',
     'pointcloud': 'false',
@@ -86,6 +89,7 @@ def generate_launch_description() -> LaunchDescription:
                 'enable_color': 'true',
                 'enable_depth': 'true',
                 'rgb_camera.color_profile': LaunchConfiguration('color_profile'),
+                'rgb_camera.color_format': LaunchConfiguration('color_format'),
                 'depth_module.depth_profile': LaunchConfiguration('depth_profile'),
                 'align_depth.enable': LaunchConfiguration('align_depth'),
                 'pointcloud.enable': LaunchConfiguration('pointcloud'),

@@ -15,7 +15,10 @@
       idle / estop --按一次--> 站立(stand) --再按--> 策略接管(running) --再按--> 急停
 
   要两只手一起按是为了防误触。派发看的是策略层**当前上报的状态**而不是本地计数，
-  所以别人用 ``ros2 service call`` 插手之后不会错位。
+  所以别人用 ``ros2 service call`` 插手之后不会错位。**触发时机看这一步要干什么**：
+  ``running`` 下那一步本来就是急停，**按下即走**；``engage`` / ``start`` 那两步
+  **松手才走**，因为按住 ``estop_hold_s``（默认 1 s）**不看当前状态直接急停**，
+  而从站立按下就推进的话长按会先把步态策略拉起来、中间那一秒机器人已经在跑了。
 * **下肢**：**左摇杆**管水平速度 ``(vx, vy)``，**右摇杆**管转向 ``wz`` 与盆骨高度。
   限幅和语义都跟 ``teleop_keyboard.py`` 一致：速度松手归零，**高度是绝对量**（推着才变，
   松手停在当前值、不回弹）。
@@ -28,6 +31,10 @@
 * **夹爪**：``trigger`` 直接映射，**0 = 完全打开、1 = 夹紧**。注意 ``eccentric_joint``
   是 **0 rad 闭合、2.76377 rad 打开**（见 unitree_g1_description/model/Gloria-M/README.md），
   所以这里是**反向**映射；写反了就是该松手的时候夹紧。
+* **归位**：单手按 **A/X**（右手 A / 左手 X）把**那一只**手送回预备姿势。轨迹不在
+  这儿算：调策略层的 ``~/home_left`` / ``~/home_right``，和 B/Y 调 engage 完全同构。
+  归位期间本节点**只跟随不驱动**（目标钉在 ``limited_pose`` 上），否则 50 Hz 的
+  陈旧目标会和插值对着干、走完还把手臂拽回去。握 squeeze 或再按一次 A/X 即取消。
 
 坐标系：平移和转角**各自**可选「世界」或「局部」，随便搭配出四种手感。参数是
 ``arm_position_frame`` / ``arm_rotation_frame``，取值 ``world`` / ``local``；默认
@@ -55,7 +62,10 @@
 ----
 * 只在策略层报 ``arms_live`` 之后才发指令；播种与接管原点取策略层的
   ``limited_pose``（IK + 关节限速后的可达指令），本节点不自己建 IK，也不做可达性夹紧。
-* VR 帧超时（``frame_timeout_s``）或退出 VR 会话：速度立刻归零、双臂冻结、高度保持。
+* VR 帧超时（``frame_timeout_s``）或退出 VR 会话：速度立刻归零、高度保持，**上肢块
+  整个停发**。策略层的上肢目标只在收到时覆写、没有超时，停发即冻结，同时把上肢
+  所有权让给回放之类的其它发布者（照发就是两个 50 Hz 源抢同一个目标）。恢复的第一
+  帧之前按当时的 ``limited_pose`` 重新对齐一次，否则陈旧目标会一帧拽过去。
 * squeeze 有接合/释放迟滞；WebXR 报推算位置时冻结但保留离合，距上一帧真实跟踪位置
   超过 ``_MAX_HAND_STEP_M`` 才无跳变重锚。策略层 IK 出口的 ``arm_rate_limit`` 是最后
   一道关节跳变保护。
@@ -102,6 +112,8 @@ _TOOL_AXIS_MAP = '-x +y -z'
 # 平移 local-floor (+X 右, +Y 上, -Z 前) -> 躯干 (+X 前, +Y 左, +Z 上)。
 _BASE_AXIS_MAP = '-y +z -x'
 _MAX_HAND_STEP_M = 0.1
+# 归位服务是阻塞的。这是本地兜底：策略层掉了不能让那只手永远卡在“跟随”里。
+_HOME_TIMEOUT_S = 10.0
 # 平移与转角各自的参考系。含义见模块 docstring 的「坐标系」。
 _FRAME_MODES = ('world', 'local')
 # 参数名 -> 存在节点上的属性名。默认值只写在 declare_parameter 那里。
@@ -260,6 +272,11 @@ class VRTeleop(Node):
         # 双手 B/Y 两次推进之间的最小间隔，防按键抖动连发。
         self._button_cooldown = float(
             p('button_cooldown_s', 1.0).get_parameter_value().double_value)
+        # 双手 B/Y 按住这么久 -> 不看当前状态直接急停。非正值会让按下即急停、短按全废。
+        self._estop_hold = float(
+            p('estop_hold_s', 1.0).get_parameter_value().double_value)
+        if self._estop_hold <= 0.0:
+            raise ValueError('estop_hold_s 必须为正（秒）')
 
         self._lock = threading.Lock()
         self._frame: dict | None = None
@@ -270,6 +287,8 @@ class VRTeleop(Node):
         self._status: dict = {}
         # 下面这几个只在控制线程里读写，不需要加锁。
         self._seeded = False
+        # 头显连接的边沿。和 _seeded 分开：那个管 arms_live 的接管边沿，还会复位盆骨高度。
+        self._offline = False
         self._pose: dict[str, np.ndarray] = {}
         self._grip = np.zeros(2)
         self._clutch: dict[str, tuple | None] = {side: None for side in SIDES}
@@ -278,6 +297,13 @@ class VRTeleop(Node):
         # 初始当作"按着"：连上之后必须真的松手再按才算一次，避免启动瞬间误触。
         self._button_held = True
         self._button_stamp = 0.0
+        # 本次按住的起始时刻，以及“已被长按急停消费掉”（消费了就不再补一次短按）。
+        self._button_down: float | None = None
+        self._button_used = True
+        # A/X 归位：每侧一个超时时刻（None = 没在归位）加一个按键沿。
+        # 这两个会被服务回调那个线程碰，但只是整个替换字典项，不需要加锁。
+        self._homing: dict[str, float | None] = {side: None for side in SIDES}
+        self._home_held = {side: True for side in SIDES}
 
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -298,7 +324,8 @@ class VRTeleop(Node):
             .get_parameter_value().string_value.rstrip('/')
         self._trigger = {
             name: self.create_client(Trigger, f'{policy}/{name}', callback_group=slow)
-            for name in ('engage', 'start', 'estop')
+            for name in ('engage', 'start', 'estop',
+                         'home_left', 'home_right', 'home_cancel')
         }
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -307,8 +334,10 @@ class VRTeleop(Node):
         self._thread.start()
         self.get_logger().info(
             '头显里打开采集页并 Enter VR。'
-            '双手同时按 B/Y 推进：站立 -> 启动策略 -> 急停；'
-            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）。'
+            '双手同时按 B/Y 推进：站立 -> 启动策略 -> 急停（急停那一步按下即走），'
+            f'按住 {self._estop_hold:.1f} s 不看状态直接急停；'
+            'squeeze 按住才跟随手，trigger 控夹爪（0 开 / 1 夹）；'
+            '单手按 A/X 把那只手送回预备姿势。'
             f'上肢参考系：平移 {self._pos_frame} / 转角 {self._rot_frame}。')
 
     def _on_set_parameters(self, parameters):
@@ -507,65 +536,122 @@ class VRTeleop(Node):
             self._seeded = False        # 失去接管后重新播种，不留旧目标。
             return
         if not self._seeded:
-            limited = status.get('limited_pose') or {}
-            if not all(side in limited for side in SIDES):
+            if not self._reseed(status):
                 return                  # 手臂刚接管，正解还没落到 status 上。
-            # 用 IK + 关节限速后真正下发的末端指令播种。它一定可达、无编码器静差，
-            # 又不会把别的发布者已经推飞的笛卡尔目标原样复读回去。
-            self._pose = {side: np.asarray(limited[side], dtype=np.float64)
-                          for side in SIDES}
             self._grip = np.asarray(status.get('grip') or (0.0, 0.0),
                                     dtype=np.float64)
-            self._clutch = {side: None for side in SIDES}
+            self._homing = {side: None for side in SIDES}
+            self._home_held = {side: True for side in SIDES}
             self._twist = np.zeros(3)
             self._height = self._height0
             self._seeded = True
             self.get_logger().info('手臂已接管，双臂目标已按策略层发布的位姿播种')
 
         if frame is None:
-            # 掉帧/退出 VR：立刻停车，手臂、夹爪和高度都冻结在最后一帧。
-            self._twist = np.zeros(3)
-            self.get_logger().warning('VR 帧不新鲜，已停车并冻结上肢',
-                                      throttle_duration_sec=2.0)
-        else:
-            self._update_command(frame)
-            self._update_arms(frame, status.get('limited_pose') or {})
+            # 掉帧/退出 VR：停车，上肢块**整个不发**。策略层的 `_pose` 只在收到时覆写、
+            # 没有超时，不发就等于冻结，同时把上肢让给回放之类的其它发布者——
+            # 照发就是两个 50 Hz 源抢同一个目标。
+            if not self._offline:       # 下面几项是状态复位，断联期间重做没意义
+                self._offline = True
+                self._twist = np.zeros(3)
+                self._cancel_home('VR 帧不新鲜')
+                self._home_held = {side: True for side in SIDES}
+                self.get_logger().warning('VR 帧不新鲜，已停车并交还上肢')
+            self._send(base=(*self._twist, self._height))
+            return
 
-        self._message.data = join_command(
-            base=(*self._twist, self._height),
-            left=self._pose['left'], right=self._pose['right'], grip=self._grip)
+        if self._offline:
+            # 断联期间别人可能把手臂开走了，拿陈旧目标恢复会一帧拽过去（实测 418 mm）。
+            if not self._reseed(status):
+                return
+            self._offline = False
+            self.get_logger().info('头显恢复，双臂目标已按策略层当前位姿重新对齐')
+
+        self._update_command(frame)
+        self._update_arms(frame, status.get('limited_pose') or {})
+
+        base = (*self._twist, self._height)
+        if status.get('arm_mode', 'ik') == 'ik':
+            self._send(base=base, left=self._pose['left'],
+                       right=self._pose['right'], grip=self._grip)
+        else:
+            # 透传模式下那两个 7 值块是关节角。VR 只会算末端位姿，填进去就是拿
+            # 四元数当关节目标发，所以这时只发下肢。
+            self.get_logger().warning('策略层是逐关节透传模式，VR 只发下肢指令',
+                                      throttle_duration_sec=5.0)
+            self._send(base=base)
+
+    def _reseed(self, status: dict) -> bool:
+        """双臂目标重设为 ``limited_pose``、清掉离合；正解还没落下来就返回假。
+
+        用 IK + 关节限速后真正下发的末端指令：一定可达、无编码器静差，又不会把别的
+        发布者已经推飞的笛卡尔目标原样复读回去。
+        """
+        limited = status.get('limited_pose') or {}
+        if not all(side in limited for side in SIDES):
+            return False
+        self._pose = {side: np.asarray(limited[side], dtype=np.float64)
+                      for side in SIDES}
+        self._clutch = {side: None for side in SIDES}
+        return True
+
+    def _send(self, **chunks) -> None:
+        self._message.data = join_command(**chunks)
         self._publisher.publish(self._message)
 
     def _check_button(self, frame) -> None:
-        """双手同时按 B/Y 的上升沿：推进状态机一步。
+        """双手同时按 B/Y：推进状态机一步，按满 ``estop_hold_s`` 则不看状态直接急停。
 
-        帧不新鲜时按"按住"处理——恢复之后必须真的松手再按才算一次，否则一次掉帧
-        就可能凭空触发一步。
+        推进的时机**看这一步要干什么**：``running``（策略行走 + 上肢 VR）那一步本来
+        就是急停，**按下即走**；``engage`` / ``start`` 则**松手才走**——按下就推进的话，
+        从站立长按会先把步态策略拉起来、再急停，中间那一秒机器人已经在跑了。
+
+        帧不新鲜时按"按住且已消费"处理：长按计时作废，且恢复后必须真的松手再按
+        才算一次，否则一次掉帧就可能凭空触发一步。
         """
         if frame is None:
-            self._button_held = True
+            self._button_held, self._button_down, self._button_used = True, None, True
             return
         pressed = all(((frame.get(side) or {}).get('buttons') or {}).get('b_y')
                       for side in SIDES)
-        if (pressed and not self._button_held
-                and self._now() - self._button_stamp > self._button_cooldown):
-            self._button_stamp = self._now()
+        now = self._now()
+        down, up = pressed and not self._button_held, self._button_held and not pressed
+        if down:
+            self._button_down, self._button_used = now, False
+        held_for = now - self._button_down if self._button_down is not None else 0.0
+        cooled = now - self._button_stamp > self._button_cooldown
+
+        if pressed and not self._button_used and held_for >= self._estop_hold:
+            self._button_used, self._button_stamp = True, now
+            self.get_logger().warning(f'双手长按 B/Y {held_for:.1f} s -> 直接急停')
+            self._call('estop', '急停')
+        elif cooled and (up and not self._button_used
+                         # 这一步本来就是急停，没有“先把策略拉起来”的风险，按下即走
+                         or down and self._next_step()[1] == 'estop'):
+            self._button_used, self._button_stamp = True, now
             self._advance()
         self._button_held = pressed
 
-    def _advance(self) -> None:
+    def _next_step(self) -> tuple[str, str, str]:
+        """当前上报的状态，以及“推进一步”该调的服务与中文名（不认得就两个空串）。"""
         with self._lock:
             state = self._status.get('state', '')
-        name, label = _ADVANCE.get(state, (None, ''))
-        if name is None:
+        return (state, *_ADVANCE.get(state, ('', '')))
+
+    def _advance(self) -> None:
+        state, name, label = self._next_step()
+        if not name:
             self.get_logger().warning(
                 f'收到 B/Y，但策略层状态是「{state or "未知"}」，先确认它起来了')
             return
+        self.get_logger().info(f'B/Y -> {label}')
+        self._call(name, label)
+
+    def _call(self, name: str, label: str) -> None:
         client = self._trigger[name]
         if not client.service_is_ready():
             self.get_logger().warning(f'{label}：服务 {name} 还没就绪')
             return
-        self.get_logger().info(f'B/Y -> {label}')
         client.call_async(Trigger.Request()).add_done_callback(
             lambda future: self._report(label, future))
 
@@ -578,6 +664,47 @@ class VRTeleop(Node):
         else:
             # 最常见的是"站立插值还没走完"——等满 stand_s 再按一次即可。
             self.get_logger().warning(f'{label}被拒绝：{result.message}')
+
+    # -- A/X 归位 ---------------------------------------------------------------
+
+    def _check_home(self, side: str, pressed: bool, clutching: bool) -> None:
+        """A/X 上升沿：把这一只手交给策略层的归位服务。再按一次或握 squeeze 都取消。"""
+        deadline = self._homing[side]
+        if deadline is not None and self._now() > deadline:
+            self._homing[side] = deadline = None
+            self.get_logger().warning(f'{side} 归位服务超时没返回，已恢复手动')
+        if deadline is not None:
+            if clutching or (pressed and not self._home_held[side]):
+                self._cancel_home('squeeze 接管' if clutching else '再按一次 A/X')
+        elif pressed and not self._home_held[side] and not clutching:
+            self._start_home(side)
+        self._home_held[side] = pressed
+
+    def _start_home(self, side: str) -> None:
+        client = self._trigger[f'home_{side}']
+        if not client.service_is_ready():
+            self.get_logger().warning(f'{side} 归位：服务还没就绪')
+            return
+        self._homing[side] = self._now() + _HOME_TIMEOUT_S
+        self._clutch[side] = None
+        self.get_logger().info(f'A/X -> {side} 归位')
+        client.call_async(Trigger.Request()).add_done_callback(
+            lambda future: self._home_returned(side, future))
+
+    def _home_returned(self, side: str, future) -> None:
+        self._homing[side] = None
+        self._report(f'{side} 归位', future)
+
+    def _cancel_home(self, reason: str) -> None:
+        """取消两侧归位。标志留给服务返回时清：取消也是走同一条返回路径。"""
+        if not any(deadline is not None for deadline in self._homing.values()):
+            return
+        client = self._trigger['home_cancel']
+        if not client.service_is_ready():
+            self.get_logger().warning('取消归位：服务还没就绪')
+            return
+        client.call_async(Trigger.Request())
+        self.get_logger().info(f'取消归位（{reason}）')
 
     def _stick(self, frame: dict, side: str) -> np.ndarray:
         """取一个摇杆的 ``[x, y]``，已去死区。"""
@@ -640,7 +767,13 @@ class VRTeleop(Node):
             squeeze = float(buttons.get('squeeze', 0.0) or 0.0)
             clutch = self._clutch[side]
             active = squeeze >= (self._squeeze_off if clutch is not None else self._squeeze_on)
-            if position is None:
+            self._check_home(side, bool(buttons.get('a_x')), active)
+            if self._homing[side] is not None:
+                # 归位由策略层驱动，这里只把目标钉在它已经限速的指令上：
+                # 自己再发一份就是两个目标对着干，走完还会把手臂拽回去。
+                if side in limited:
+                    self._pose[side] = np.asarray(limited[side], dtype=np.float64)
+            elif position is None:
                 # 只冻结，不动 clutch。**千万别在这里作废 ``previous``**：那样恢复帧会
                 # 无条件重锚，把跨这一帧的位移整段丢掉。emulated 标志逐帧抖时会按比例
                 # 丢运动（实测 1/2 抖动 -> 手走 900 mm 目标走 0 mm，完全冻住）。

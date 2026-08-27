@@ -1,0 +1,21 @@
+# ChArUco 标定板。算法不写死任何尺寸，改这里就够了。
+#
+# squares_x * squares_y 个格子里有一半是 marker：12*9 = 108 格 -> 54 个 marker。
+# DICT_5X5_50 只有 50 个，装不下，所以最小得用 DICT_5X5_100。
+#
+# 朝向和字典是用 dashboard 的「探测板参数」在实物上定下来的：
+# 12x9 共面残差 2.21 px，9x12 是 100.14 px —— 两者角点数一样多（都是 88），
+# 只有残差能区分。字典在 100/250/1000 之间残差完全相同（后者是前者的超集），取最小的。
+
+board:
+  squares_x: 12             # 横向格数
+  squares_y: 9              # 纵向格数
+  square_size: 0.030        # 方格边长，米
+  marker_size: 0.0225       # marker 边长，米
+  dictionary: DICT_5X5_100
+
+# 探测时遍历的候选集
+probe:
+  dictionaries: [DICT_5X5_50, DICT_5X5_100, DICT_5X5_250, DICT_5X5_1000,
+                 DICT_4X4_100, DICT_4X4_250, DICT_6X6_100, DICT_6X6_250]
+  orientations: [[12, 9], [9, 12]]

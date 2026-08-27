@@ -2,11 +2,17 @@ import ast
 import importlib.util
 from pathlib import Path
 from typing import Any, Dict, List, cast
+from unittest import mock
 
 import pytest
 import yaml
 from launch import LaunchContext
-from launch.actions import IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.utilities import (
     normalize_to_list_of_substitutions,
     perform_substitutions,
@@ -152,6 +158,7 @@ def test_end_effectors_dashboard_expands_to_one_web_node():
         "left_camera_url": "http://127.0.0.1:8010",
         "right_camera_url": "http://127.0.0.1:8011",
         "camera_timeout_s": "1.0",
+        "camera_stream_timeout_s": "10.0",
         "camera_poll_period_s": "2.0",
     })
     actions = module._dashboard_node(context)
@@ -228,6 +235,50 @@ def test_ikt_pose_commander_uses_named_position_controllers():
     assert "max_joint_accel" not in parameters
     dashboard = by_executable["ikt_pose_commander_dashboard"]
     assert _node_package(dashboard) == "robot_bringup"
+
+
+def test_gravity_float_demo_releases_the_robot_when_the_demo_exits():
+    """The demo must undo both of its side effects, in that order.
+
+    The firmware has no watchdog: once the demo stops publishing, the last frame
+    the controller wrote keeps drawing current until something actively winds it
+    down. Deactivating the controller has to come first or its 1 kHz stream
+    fights the fade-out.
+    """
+    module = _load_launch("gravity_float_demo.launch.py")
+    description = module.generate_launch_description()
+    arguments = {
+        entity.name: entity
+        for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument)
+    }
+    assert arguments["release_on_exit"].default_value[0].text == "true"
+
+    handlers = [
+        entity for entity in description.entities
+        if isinstance(entity, RegisterEventHandler)
+    ]
+    on_exit = next(
+        value for value in vars(handlers[-1].event_handler).values()
+        if isinstance(value, list) and value)
+    release = next(
+        action for action in on_exit if isinstance(action, OpaqueFunction))
+
+    context = LaunchContext()
+    context.launch_configurations["release_on_exit"] = "false"
+    assert not release.condition.evaluate(context)
+    context.launch_configurations["release_on_exit"] = "true"
+    assert release.condition.evaluate(context)
+
+    commands: List[List[str]] = []
+    context.launch_configurations["controller_manager"] = "/cm"
+    with mock.patch.object(module.subprocess, "run",
+                           lambda command, **kwargs: commands.append(command)):
+        module._release(context)
+    assert commands[0] == [
+        "ros2", "control", "switch_controllers", "--controller-manager", "/cm",
+        "--deactivate", "forward_position_controller"]
+    assert commands[1] == ["ros2", "run", "robot_bringup", "exit_debug_mode"]
 
 
 @parametrize(

@@ -1,0 +1,99 @@
+# 三个相机：话题、可切换的分辨率档位、外参的父 link。
+#
+# role:
+#   reference —— 外参已知（URDF），用它把标定板定位到 torso_link 下
+#   target    —— 外参待标定
+#
+# switch.kind:
+#   camera_node —— 改 rtsp_url，节点会自动重开 ffmpeg
+#   realsense   —— 关掉彩色流、改 color_profile、再打开（光改 color_profile 不生效）
+#   none        —— 不支持切档
+#
+# profiles 只列硬件原生的档位。camera_node 能让 ffmpeg 缩到任意尺寸，但缩放档不标：
+# 找不到对应内参时它只 warn 不发 camera_info，不会给出假内参。
+
+cameras:
+  head:
+    label: 头部 D435i
+    topic: /head/camera/color/image_raw
+    info_topic: /head/camera/color/camera_info
+    frame: camera_color_optical_frame
+    parent_frame: torso_link
+    role: reference
+    # 头部外参估出来之后不能像腕相机那样发 static TF —— camera_color_optical_frame
+    # 已经由 URDF + realsense-ros 发着了，再发一份就是两个 publisher 抢同一个 child。
+    # 修正量要落到下面这个 URDF 关节的 origin 上（unitree_g1_description/model/final.urdf）。
+    # mount_parent 必须和 URDF 里该关节的 <parent link> 一致 —— 存的是
+    # T_parent<-child，写错了会静静地存一个差一段变换的 origin。
+    # 没有 mount_create：这条边 URDF 里已经有了，只改 origin。
+    mount_parent: torso_link
+    mount_frame: d435_link
+    mount_joint: d435_joint
+    switch:
+      kind: realsense
+      node: /head/camera
+      param: rgb_camera.color_profile
+    profiles:
+      # rs-enumerate-devices 实测的全部彩色流原生档位。帧率不影响内参，统一挂 30（九档都支持）。
+      # 这些档位彼此**不是**简单的缩放关系：848x480 -> 424x240 是缩放（fx 减半、FOV 不变），
+      # 848x480 -> 640x480 是横向裁剪（fx 不变、cx 差 104、FOV 从 69.74° 掉到 55.48°）。
+      # 所以一律逐档标定，关系用「判定档位关系」实测，别按比例猜。
+      - {width: 1920, height: 1080, value: 1920x1080x30}
+      - {width: 1280, height: 720, value: 1280x720x30}
+      - {width: 960, height: 540, value: 960x540x30}
+      - {width: 848, height: 480, value: 848x480x30}
+      - {width: 640, height: 480, value: 640x480x30}
+      - {width: 640, height: 360, value: 640x360x30}
+      - {width: 424, height: 240, value: 424x240x30}
+      - {width: 320, height: 240, value: 320x240x30}
+      - {width: 320, height: 180, value: 320x180x30}
+
+  camera_left:
+    label: 左腕
+    topic: /camera_left/image_raw
+    frame: camera_left            # 必须等于 camera_node 的 frame_id 参数（默认 = 节点名）
+    parent_frame: left_gripper_base
+    role: target
+    # URDF 里只有 left_camera_mount_link（支架的可视化模型），没有光心。
+    # 标完就往 URDF 里插一条 mount_parent -> frame 的边，跟头部一样由
+    # robot_state_publisher 发 TF，不再依赖 calib_tf_node 单独跑着。
+    mount_parent: left_camera_mount_link
+    mount_joint: left_camera_optical_joint
+    mount_create: true
+    switch:
+      kind: camera_node
+      node: /camera_left
+    # 硬件只有两路 RTSP 流（stream2 是 404、stream3 超时，探过了），只标这两路原生的：
+    #   stream0  1920x1080 h264 30fps  —— record 采集用的就是它，-c copy 直存
+    #   stream1   640x360  hevc 30fps  —— camera_node 默认拉的
+    # camera_node 的 image_width/height 能让 ffmpeg 缩到任意尺寸，但那些档位不标 ——
+    # 缩放档没有对应内参时 camera_node 只 warn 不发 camera_info，不会给出假内参。
+    profiles:
+      - {width: 1920, height: 1080, url: 'rtsp://admin:123456@192.168.123.97/stream0'}
+      - {width: 640, height: 360, url: 'rtsp://admin:123456@192.168.123.97/stream1'}
+
+  camera_right:
+    label: 右腕
+    topic: /camera_right/image_raw
+    frame: camera_right
+    parent_frame: right_gripper_base
+    role: target
+    mount_parent: right_camera_mount_link
+    mount_joint: right_camera_optical_joint
+    mount_create: true
+    switch:
+      kind: camera_node
+      node: /camera_right
+    profiles:
+      - {width: 1920, height: 1080, url: 'rtsp://admin:123456@192.168.123.98/stream0'}
+      - {width: 640, height: 360, url: 'rtsp://admin:123456@192.168.123.98/stream1'}
+
+# 第二阶段拍照前的静止判据：所有关节速度都低于阈值并持续这么久才放行。
+# camera_node 用「收到帧的时刻」打戳，RTSP 还有编解码延迟，动着拍图和 TF 必然错位。
+#
+# 0.1 rad/s 是按实测的速度本底噪声定的 —— 手臂真停住时读数也在 0.02~0.05 上下跳，
+# 阈值卡到 0.01 会永远放不了行。真在动的时候远不止 0.1，拦得住。
+motion_gate:
+  max_joint_speed: 0.1      # rad/s
+  settle_seconds: 0.5
+  joint_states_topic: /joint_states

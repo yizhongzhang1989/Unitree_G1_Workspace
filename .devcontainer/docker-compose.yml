@@ -27,6 +27,10 @@ services:
     network_mode: host
     # DDS 共享内存
     ipc: host
+    # 没有它 PID 1 就是下面那条 `sleep infinity`，而 sleep 不捕获 SIGCHLD、从不 wait()：
+    # ros2 launch 退出时来不及回收的子节点被 PID 1 收养后会永久停在僵尸态，只吃 PID 表项
+    # 不释放（实测反复启停 all_data.launch.py 8 次积累 75 个）。init 会插入 tini 代为回收。
+    init: true
     # 运行期代理必须显式传入，VS Code Server/Copilot 不会读取构建期 ARG，也不会继承宿主 shell。
     environment:
       HTTP_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
@@ -55,6 +59,8 @@ services:
       # 重力标定结果 ~/.ros/arm_gravity_compensation/ 要持久化。
       # 容器侧用户名跟宿主走（dev.sh build 传 $(id -un)），两边都用同一个变量。
       - ${HOME:-/home/unitree}/.ros:/home/${G1_USER_NAME:-unitree}/.ros
+      # .vscode-server 默认落在容器可写层，重建即丢扩展
+      - ${HOME:-/home/unitree}/.g1-vscode-server:/home/${G1_USER_NAME:-unitree}/.vscode-server
     working_dir: /workspace
 
     # devcontainer 需要容器常驻；dev.sh 用 `compose run` 会覆盖掉这一条

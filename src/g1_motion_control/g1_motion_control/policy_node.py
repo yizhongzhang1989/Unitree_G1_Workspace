@@ -6,15 +6,23 @@
                                                                           |
                                                               G1TopicSystem --> /lowcmd
 
-一个定时器算齐 31 轴：下肢 15 轴（12 腿 + 3 腰）由 ONNX 策略给出，上肢 14 轴由双臂
-IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终开启，没有开关。
+一个定时器算齐 31 轴：下肢 15 轴（12 腿 + 3 腰）由 ONNX 策略给出，上肢 14 轴由 ``arm_mode``
+决定怎么算，2 个夹爪偏心轴直接透传。手臂始终开启，没有开关。
+
+    arm_mode=ik           （默认）臂块是末端位姿，双臂 IK 解成 14 轴
+    arm_mode=passthrough  臂块就是 14 个关节目标，不解 IK
+
+两种模式的分块长度、出口限速、接管时机完全一致，只差那两个 7 值块怎么读；
+透传模式下 14 轴的顺序由 ``~/status`` 的 ``arm_joints`` 报出，不要在外面猜。
+徒手推手臂（“浮动”）就是透传模式的一个用法：发布方把实测关节角原样发回来，
+FPC 的手臂重力前馈于是成为唯一的力矩来源。本节点不实现它，也不知道它。
 
 ``~/command`` 一个话题按长度分块，各发布者只更新自己那部分，互不干扰：
 
     长度  2   [左夹爪, 右夹爪]
     长度  4   [vx, vy, wz, h]                      —— teleop_keyboard.py 发的就是它
-    长度  7   右臂位姿 [x, y, z, qx, qy, qz, qw]
-    长度 14   双臂位姿（先左后右）
+    长度  7   右臂：ik 模式下是 [x, y, z, qx, qy, qz, qw]，透传模式下是 7 个关节角
+    长度 14   双臂（先左后右）
     长度 20   全量，布局是 下肢 4 + 左臂 7 + 右臂 7 + 夹爪 2
 
 末端位姿指 ``*_gripper_base`` 相对 ``torso_link``。参考系选 torso_link 而不是 pelvis，
@@ -43,6 +51,12 @@ IK 从两个末端位姿解出，2 个夹爪偏心轴直接透传。手臂始终
   kp 在 ``release_ramp_s`` 内降到 0（只剩 kd，阻尼模式），最后一帧 kd 也归零
   （零力矩模式）。
 
+归位（``~/home_left`` / ``~/home_right`` / ``~/home_cancel``）把一只手送回预备姿势，
+走的是 **STAND 那套两段式关节空间插值**（先张肩再走）：两者本就是同一个问题。
+**不走笛卡尔**——同一末端位姿多解支最大差 2.67 rad，夹爪到位不等于位形是预备姿势。
+服务**阻塞到插值走完**才返回，与 ``arm_mode`` 正交；归位期间那一侧的臂块指令
+**整个忽略**，走完再把 ``_pose`` 重播种，所以上层的陈旧目标不会把手臂拽回去。
+
 看门狗：状态超时、姿态倾覆（对应官方 ``mdp::bad_orientation``，阈值同为 1.0 rad）、
 推理异常、输出非有限值，任一触发即急停。指令超时只把速度归零、保持高度，不急停
 ——遥控手松手不该让机器人卸力。上肢够不着或求解异常同样不急停，保持上一帧手臂目标
@@ -56,6 +70,7 @@ import math
 import threading
 import time
 from enum import Enum
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -95,6 +110,19 @@ class State(Enum):
 
 
 ACTIVE_STATES = (State.STAND, State.RUNNING)
+
+
+def _two_stage(elapsed: float, clear_s: float, total_s: float,
+               start, via, goal):
+    """先走到 ``via``（只张肩）再走向 ``goal``。STAND 和单臂归位是同一个动作。
+
+    ``clear_s`` 为 0 时自然退化成单段直插（第一段永远不成立）。
+    """
+    if elapsed < clear_s:
+        return start + (elapsed / clear_s) * (via - start)
+    span = total_s - clear_s
+    alpha = 1.0 if span <= 0.0 else min((elapsed - clear_s) / span, 1.0)
+    return via + alpha * (goal - via)
 
 
 def _resolve(reference: str) -> Path:
@@ -140,8 +168,12 @@ class MotionControlNode(Node):
             raise ValueError(f'passive_targets 长度必须是 {len(passive_slots)}')
 
         # -- 上肢 --------------------------------------------------------------
-        # 手臂 14 轴走 IK，夹爪偏心轴不进 IK 模型、直接透传。手臂的槽位要等
-        # /robot_description 到了、缩减模型建好才能定（顺序以模型为准）。
+        # 手臂 14 轴走 IK 或逐关节透传，夹爪偏心轴不进 IK 模型、直接透传。手臂的
+        # 槽位要等 /robot_description 到了、缩减模型建好才能定（顺序以模型为准）。
+        arm_mode = p('arm_mode', 'ik').get_parameter_value().string_value
+        if arm_mode not in ('ik', 'passthrough'):
+            raise ValueError(f"arm_mode 只能是 'ik' 或 'passthrough'，收到 {arm_mode!r}")
+        self._arm_mode = arm_mode
         self._arm_names = list(
             p('arm_joints', ['']).get_parameter_value().string_array_value)
         grippers = list(
@@ -241,6 +273,11 @@ class MotionControlNode(Node):
         self._clear_slots = [
             (index, 1.0 if name.startswith('left') else -1.0)
             for index, name in enumerate(self._joints) if 'shoulder_roll' in name]
+        # 单臂归位的总时长。第一段张肩直接复用 stand_clear_roll / stand_clear_s：
+        # 跟 STAND 是同一个动作（同一张实测表），不另开一套旋钮。
+        self._home_s = float(p('home_s', 2.0).get_parameter_value().double_value)
+        if self._clear_s > 0.0 and self._clear_s >= self._home_s:
+            raise ValueError('stand_clear_s 必须小于 home_s（它是总时长里的第一段）')
 
         self._state_timeout = float(
             p('state_timeout_s', 0.2).get_parameter_value().double_value)
@@ -310,14 +347,23 @@ class MotionControlNode(Node):
         self._stand_start = 0.0
         self._reason = ''
         self._spinning = True
-        # 上肢：_pose 是末端位姿指令的缓存（唯一真值），_arm_target 是 IK 解出、
-        # 实际发给 FPC 的关节目标，同时充当下一帧的热启动种子。
+        # 上肢：_pose 是臂指令的缓存（唯一真值，ik 模式是末端位姿、透传模式是关节角），
+        # _arm_target 是最终发给 FPC 的关节目标，同时充当 IK 下一帧的热启动种子。
         self._ik: ArmIK | None = None
         self._arm_slots: list[int] = []
+        # 透传模式把臂块散回 14 轴向量时用；下标是 14 轴内部的，不是 31 轴的。
+        self._side_slots: dict[str, list[int]] = {}
+        # 归位第一段要张的那根 shoulder_roll：{side: (该侧 7 轴内的下标, 向外的符号)}。
+        self._arm_clear: dict[str, tuple[int, float]] = {}
         self._arm_target = np.zeros(len(self._arm_names))
         self._reached: dict[str, np.ndarray] = {}
         self._pose: dict[str, np.ndarray] = {}
         self._arm_seed = False
+        # 归位：每侧一份 (起点, 中转, 终点, 起始时刻)，均为该侧 7 轴。
+        # ``_home_done`` 让阻塞的服务等控制环，``_home_result`` 非空 = 被中止。
+        self._homing: dict[str, tuple | None] = {'left': None, 'right': None}
+        self._home_done = {side: threading.Event() for side in ('left', 'right')}
+        self._home_result: dict[str, str] = {}
         # 站立插值走完（或策略接管）后置真，此后手臂与夹爪一直归 IK/透传管。
         self._arms_live = False
         self._grip = np.zeros(len(self._gripper_slots))
@@ -373,6 +419,11 @@ class MotionControlNode(Node):
         self.create_service(Trigger, '~/engage', self._on_engage, callback_group=services)
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
+        for side in ('left', 'right'):
+            self.create_service(Trigger, f'~/home_{side}', partial(self._on_home, side),
+                                callback_group=services)
+        self.create_service(Trigger, '~/home_cancel', self._on_home_cancel,
+                            callback_group=services)
         # 必须排在全部 declare_parameter 之后：声明本身会触发这个回调。
         self.add_on_set_parameters_callback(self._on_set_parameters)
         self.get_logger().info(
@@ -414,7 +465,7 @@ class MotionControlNode(Node):
     def _on_command(self, message: Float64MultiArray) -> None:
         """按长度分块，只覆写本次带来的字段，其余保持——上下肢发布者因此互不干扰。"""
         try:
-            chunk = split_command(message.data)
+            chunk = split_command(message.data, arm_poses=self._arm_mode == 'ik')
         except ValueError as error:
             self.get_logger().warning(f'丢弃非法指令：{error}')
             return
@@ -460,17 +511,27 @@ class MotionControlNode(Node):
         try:
             ik = ArmIK(message.data, self._arm_names, **self._ik_kwargs)  # type: ignore[arg-type]
             slots = [self._joints.index(name) for name in ik.joint_names]
+            # 透传模式把 7 值臂块散回 14 轴向量时按这两组下标。顺序一律以缩减模型
+            # 为准（同 IK 模式的输出），并随 status 的 arm_joints 报给上层。
+            sides = {side: [i for i, name in enumerate(ik.joint_names)
+                            if name.startswith(side)] for side in ('left', 'right')}
+            # 向外张开的符号同 _clear_slots：左臂 +、右臂 −。存的是该侧 7 轴内的下标。
+            clear = {side: (local, 1.0 if side == 'left' else -1.0)
+                     for side, slot in sides.items()
+                     for local, index in enumerate(slot)
+                     if 'shoulder_roll' in ik.joint_names[index]}
         except Exception as error:  # 建模失败不能拖垮节点，但 ~/start 会拒绝。
             self.get_logger().error(f'手臂 IK 建模失败，上肢不可用: {error}')
             return
         with self._lock:
-            self._ik, self._arm_slots = ik, slots
+            self._ik, self._arm_slots, self._side_slots = ik, slots, sides
+            self._arm_clear = clear
         tightened = [f'{name}≤{ik.upper[i]:.3f}' for i, name in enumerate(ik.joint_names)
                      if ik.upper[i] < ik.model.upperPositionLimit[i] - 1e-9]
         self.get_logger().info(
-            f'手臂 IK 就绪（{ik.model.nq} 轴，限位取自 URDF'
+            f'手臂模型就绪（{ik.model.nq} 轴，限位取自 URDF'
             + (f'，已收紧：{", ".join(tightened)}）' if tightened else '）')
-            + f'，关节限速 {self._arm_rate / 0.02:.1f} rad/s')
+            + f'，关节限速 {self._arm_rate / 0.02:.1f} rad/s，模式：{self._arm_mode}')
 
     # -- 服务 ------------------------------------------------------------------
 
@@ -553,6 +614,105 @@ class MotionControlNode(Node):
                             else '本来就没在运行')
         return response
 
+    # -- 归位 ------------------------------------------------------------------
+
+    def _on_home(self, side: str, _request, response):
+        """把一只手送回预备姿势（站立位姿里那一侧的 7 个关节角），走完才返回。"""
+        with self._lock:
+            if not self._arms_live or self._ik is None:
+                response.success, response.message = False, '手臂还没接管'
+                return response
+            if self._homing[side] is not None:
+                response.success, response.message = False, f'{side} 正在归位'
+                return response
+            self._home_result.pop(side, None)
+            self._home_done[side].clear()
+            self._homing[side] = self._home_plan(side)
+        self.get_logger().info(f'{side} 归位中，{self._home_s:.1f} s')
+        # 控制环走完（或中止）时置位。超时兜的是控制环整个停了的情况。
+        if not self._home_done[side].wait(self._home_s + 1.0):
+            with self._lock:
+                self._homing[side] = None
+            response.success, response.message = False, '归位超时，控制环没有推进'
+            return response
+        with self._lock:
+            aborted = self._home_result.pop(side, '')
+        response.success = not aborted
+        response.message = aborted or f'{side} 已回到预备姿势'
+        return response
+
+    def _on_home_cancel(self, _request, response):
+        with self._lock:
+            aborted = self._abort_home('已取消')
+        response.success = True
+        response.message = f'已取消 {", ".join(aborted)}' if aborted else '没有在跑的归位'
+        return response
+
+    def _abort_home(self, reason: str) -> list[str]:
+        """中止所有在跑的归位；调用方必须已经持有 ``_lock``。"""
+        aborted = []
+        for side, plan in self._homing.items():
+            if plan is None:
+                continue
+            self._homing[side] = None
+            self._reseed_arm(side)
+            self._home_result[side] = reason
+            self._home_done[side].set()
+            aborted.append(side)
+        return aborted
+
+    def _reseed_arm(self, side: str) -> None:
+        """把这一侧的臂指令缓存换成刚到的位形。持锁调用。
+
+        归位走完和中途取消都要做：不换的话上层手里那份归位前的旧目标
+        下一帧就把手臂拽回去了，而“停在这儿”是取消唯一说得通的语义。
+        """
+        self._pose[side] = np.array(
+            self._reached[side] if self._arm_mode == 'ik'
+            else self._arm_target[self._side_slots[side]])
+
+    def _home_plan(self, side: str) -> tuple:
+        """该侧的 (起点, 中转, 终点, 起始时刻)，前三项都是 7 轴关节角。持锁调用。
+
+        中转只把 shoulder_roll 往外张、**只张不收**，理由与 ``_clearance_pose`` 完全相同：
+        关节空间直线不避障，手臂贴着身体从侧后方摆回来时夹爪会扫进大腿。
+        """
+        slots = self._side_slots[side]
+        start = self._arm_target[slots].copy()
+        via = start.copy()
+        # clear_s 为 0 时必须让 via 恒等于 start，否则第一段被跳过、插值直接从张开的
+        # 那个位形起步，t=0 就是一个阶跃。没 shoulder_roll 的 URDF 同样退化成单段。
+        entry = self._arm_clear.get(side)
+        if self._clear_s > 0.0 and entry is not None:
+            local, sign = entry
+            via[local] = sign * max(sign * start[local], self._clear_roll)
+        return start, via, self._stand_pose[self._arm_slots][slots], self._now()
+
+    def _home_targets(self) -> tuple[dict, list[str]]:
+        """这一拍每个正在归位的侧该到哪儿，外加走完的那几侧。持锁调用。"""
+        targets, done = {}, []
+        for side, plan in self._homing.items():
+            if plan is None:
+                continue
+            start, via, goal, stamp = plan
+            elapsed = self._now() - stamp
+            targets[side] = _two_stage(
+                elapsed, self._clear_s, self._home_s, start, via, goal)
+            if elapsed >= self._home_s:
+                done.append(side)
+        return targets, done
+
+    def _finish_home(self, done: list[str]) -> None:
+        """放行阻塞着的服务，并把走完那几侧重播种成刚到的位形。"""
+        with self._lock:
+            for side in done:
+                if self._homing[side] is None:
+                    continue                    # 这一拍之前已经被取消了。
+                self._homing[side] = None
+                self._reseed_arm(side)
+                self._home_done[side].set()
+        self.get_logger().info(f'{", ".join(done)} 已回到预备姿势')
+
     def _estop(self, reason: str) -> bool:
         """置急停并卸力。并发触发时只有第一个真正执行切换。"""
         with self._lock:
@@ -562,6 +722,7 @@ class MotionControlNode(Node):
             self._state = State.ESTOP
             self._reason = reason
             self._arms_live = False
+            self._abort_home(f'急停：{reason}')
         self.get_logger().error(f'急停: {reason}')
         if was_active:
             ok, detail = self._switch_controller(activate=False)
@@ -610,16 +771,9 @@ class MotionControlNode(Node):
             if state is State.STAND:
                 # 两段：先把手臂侧开（腿不动），再全身走向站立位姿。理由见
                 # stand_clear_roll 旁边那段注释。
-                elapsed = self._now() - self._stand_start
-                if elapsed < self._clear_s:
-                    alpha = elapsed / self._clear_s
-                    origin, goal = self._stand_from, self._stand_via
-                else:
-                    span = self._stand_s - self._clear_s
-                    alpha = (1.0 if span <= 0.0 else
-                             min((elapsed - self._clear_s) / span, 1.0))
-                    origin, goal = self._stand_via, self._stand_pose
-                target = origin + alpha * (goal - origin)
+                target = _two_stage(
+                    self._now() - self._stand_start, self._clear_s, self._stand_s,
+                    self._stand_from, self._stand_via, self._stand_pose)
             else:
                 joint_pos = self._q[self._policy_slots]
                 joint_vel = self._dq[self._policy_slots]
@@ -639,6 +793,7 @@ class MotionControlNode(Node):
                 if not self._arms_live:
                     # 插值终点恒等于 _stand_pose。拿指令值而不是实测播种：实测带重力静差，
                     # 交接这一帧命令流会踩一个台阶。
+                    self._abort_home('手臂重新接管')
                     self._arm_target = self._stand_pose[self._arm_slots].copy()
                     self._grip = self._stand_pose[self._gripper_slots].copy()
                     self._reached = self._ik.fk(self._arm_target)
@@ -647,10 +802,18 @@ class MotionControlNode(Node):
                 if self._arm_seed:
                     # 没人发上肢指令时就停在接管那一刻的姿态；setdefault 让
                     # 交接与首帧之间已经收到的指令优先。
-                    for side, pose in self._reached.items():
-                        self._pose.setdefault(side, pose.copy())
+                    seed = self._reached if self._arm_mode == 'ik' else {
+                        side: self._arm_target[index]
+                        for side, index in self._side_slots.items()}
+                    for side, values in seed.items():
+                        self._pose.setdefault(side, np.array(values))
                     self._arm_seed = False
-                poses, grip = dict(self._pose), self._grip.copy()
+                home, home_done = self._home_targets()
+                # 归位那一侧的臂块整个不进求解：上层正在 50 Hz 发陈旧目标，让它进来
+                # 就是两个目标对着干（ik 模式下还会白跑逆解甚至触发逃生）。
+                poses = {side: pose for side, pose in self._pose.items()
+                         if side not in home}
+                grip = self._grip.copy()
 
         if stale:
             self._estop(stale)
@@ -675,19 +838,29 @@ class MotionControlNode(Node):
             # 上肢出什么事都只保持上一帧手臂目标，绝不能把正在平衡的下肢一起急停。
             try:
                 clock = time.monotonic()
-                # 热启动：种子就是上一帧已发布的目标，解天然连续。跨解支时仍可能跳，
-                # 所以出口按 arm_rate_limit 限速——这才是防"手腕突然翻 180 度"的那一道。
-                solved, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
-                # 逃生：热启动会把解一路推进回不来的解支（实测手臂翻到肩后、
-                # shoulder_roll 顶死限位，之后连原位都够不着）。残差大到不像"只是够不着"
-                # 时，拿站立位形当种子再解一次——那个种子从不落进陷阱。只有明显更好才采纳，
-                # 所以正常跟随根本不会触发（实测 ±3cm 轨迹 0.00%），代价也只有那一次求解。
-                if pos_err > self._rescue_err:
-                    alt, alt_pos, alt_ori, alt_iters = self._ik.solve(
-                        self._stand_pose[self._arm_slots], poses)
-                    if alt_pos < pos_err - self._rescue_err:
-                        solved, pos_err, ori_err = alt, alt_pos, alt_ori
-                        iters += alt_iters
+                if self._arm_mode != 'ik':
+                    # 透传：指令本身就是关节目标，不解 IK。出口那道 arm_rate_limit
+                    # 照样走——它拦的是发布者的阶跃，和 IK 的跨解支跳变一样致命。
+                    solved, pos_err, ori_err, iters = self._arm_target.copy(), 0.0, 0.0, 0
+                    for side, values in poses.items():
+                        solved[self._side_slots[side]] = values
+                else:
+                    # 热启动：种子就是上一帧已发布的目标，解天然连续。跨解支时仍可能跳，
+                    # 所以出口按 arm_rate_limit 限速——这才是防"手腕突然翻 180 度"的那一道。
+                    solved, pos_err, ori_err, iters = self._ik.solve(self._arm_target, poses)
+                    # 逃生：热启动会把解一路推进回不来的解支（实测手臂翻到肩后、
+                    # shoulder_roll 顶死限位，之后连原位都够不着）。残差大到不像"只是够不着"
+                    # 时，拿站立位形当种子再解一次——那个种子从不落进陷阱。只有明显更好才采纳，
+                    # 所以正常跟随根本不会触发（实测 ±3cm 轨迹 0.00%），代价也只有那一次求解。
+                    if pos_err > self._rescue_err:
+                        alt, alt_pos, alt_ori, alt_iters = self._ik.solve(
+                            self._stand_pose[self._arm_slots], poses)
+                        if alt_pos < pos_err - self._rescue_err:
+                            solved, pos_err, ori_err = alt, alt_pos, alt_ori
+                            iters += alt_iters
+                # 归位直接写关节目标，但仍走出口的 arm_rate_limit（插值本就比它慢很多）。
+                for side, values in home.items():
+                    solved[self._side_slots[side]] = values
                 self._arm_target = self._arm_target + np.clip(
                     solved - self._arm_target, -self._arm_rate, self._arm_rate)
                 self._reached = self._ik.fk(self._arm_target)
@@ -703,6 +876,10 @@ class MotionControlNode(Node):
 
         self._message.data = target.tolist()
         self._publisher.publish(self._message)
+        # 必须在 publish 之后放行：服务一返回上层就重新接管，早一拍的话终点那一帧
+        # 还没发出去就被它的旧目标顶掉了。
+        if arms and home_done:
+            self._finish_home(home_done)
 
     def _stale(self) -> str:
         now = self._now()
@@ -725,6 +902,10 @@ class MotionControlNode(Node):
                 'stale': self._stale(),
                 'ik_ready': self._ik is not None,
                 'arms_live': self._arms_live,
+                # 上层靠它决定臂块怎么填，以及透传时 14 轴排哪个顺序。
+                'arm_mode': self._arm_mode,
+                'arm_joints': list(self._ik.joint_names) if self._ik else [],
+                'homing': [side for side, plan in self._homing.items() if plan],
                 'ik_pos_err': round(pos_err, 4),
                 'ik_ms': round(solve_ms, 2),
                 'ik_rotation_weight': round(

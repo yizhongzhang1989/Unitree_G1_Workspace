@@ -91,7 +91,9 @@ class Capture(Node):
 def _overlay(color: Image, label: np.ndarray, names: List[str]) -> np.ndarray:
     """渲染轮廓叠到实拍图上，左臂绿、右臂红。"""
     buf = np.frombuffer(color.data, dtype=np.uint8).reshape(color.height, color.width, -1)
-    out = cv2.cvtColor(buf, cv2.COLOR_RGB2BGR) if color.encoding == 'rgb8' else buf.copy()
+    code = {'rgb8': cv2.COLOR_RGB2BGR,
+            'yuv422_yuy2': cv2.COLOR_YUV2BGR_YUY2}.get(color.encoding)
+    out = cv2.cvtColor(buf, code) if code is not None else buf.copy()
     for prefix, bgr in (('left_', (0, 255, 0)), ('right_', (0, 0, 255))):
         ids = [i for i, name in enumerate(names) if name.startswith(prefix)]
         contours, _ = cv2.findContours(np.isin(label, ids).astype(np.uint8),

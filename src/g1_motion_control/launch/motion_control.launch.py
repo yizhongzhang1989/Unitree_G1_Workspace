@@ -7,6 +7,11 @@
 那条 launch 会把 forward_position_controller 加载成 inactive；本层在 ``~/engage``
 的时候才去激活它，急停时再反激活。所以这里刻意不做任何 switch_controllers，
 和 gravity_float_demo.launch.py 的"启动即激活"是两种模式：那个是演示，这个要人确认。
+
+``arm_mode`` 选上肢怎么接指令，下肢策略不受影响：
+
+    arm_mode:=ik           （默认）臂块是末端位姿，VR / VLA 走这个
+    arm_mode:=passthrough  臂块就是 14 个关节目标，键盘的手臂浮动靠它
 """
 
 from pathlib import Path
@@ -45,6 +50,8 @@ def _nodes(context):
     if policy_path:
         overrides['policy_path'] = policy_path
 
+    overrides['arm_mode'] = LaunchConfiguration('arm_mode').perform(context)
+
     return [Node(
         package='g1_motion_control',
         executable='policy_node',
@@ -61,5 +68,8 @@ def generate_launch_description() -> LaunchDescription:
         # 留空则用 config/motion_control.yaml 里的 policy_path，即本包自带的
         # config/policy.onnx。换策略时可以直接指到 logs/ 里的绝对路径试跑。
         DeclareLaunchArgument('policy_path', default_value=''),
+        # ik：臂块是末端位姿，节点解 IK。passthrough：臂块就是 14 个关节目标。
+        DeclareLaunchArgument('arm_mode', default_value='ik',
+                             choices=['ik', 'passthrough']),
         OpaqueFunction(function=_nodes),
     ])
