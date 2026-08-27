@@ -34,6 +34,15 @@ def call(path, payload=None):
         raise SystemExit(f'{path} 失败: {exc.read().decode("utf-8", "replace")}') from exc
 
 
+def _rejected(path, payload, why: str) -> str:
+    """这一条必须被后端拒掉，返回它给的理由。call() 把 400 的 body 包成 SystemExit。"""
+    try:
+        call(path, payload)
+    except SystemExit as exc:
+        return str(exc).split('失败: ')[-1]
+    raise AssertionError(why)
+
+
 def _stop_group(proc: subprocess.Popen) -> None:
     """按进程组收尾。SIGTERM 让节点跑完 finally 把 ffmpeg 收掉，收不干净再补 SIGKILL。"""
     try:
@@ -111,12 +120,33 @@ def main() -> int:
                 print(f'  视频 {s["key"]:<12} {"开" if ok else "跳过（探不到）"}')
         # 先 roll 再开录：没 roll 就开录的话，生任务和摆桌子那几十秒全录进视频，
         # 所以 start_session 会直接拒掉
+        print('设桌面尺寸…')
+        full = call('/api/state')['status']['table']
+        small = call('/api/table', {'width_mm': 600, 'depth_mm': 200,
+                                    'near_mm': 100})['result']['table']
+        print(f'  {full["width_mm"]}x{full["depth_mm"]} -> '
+              f'{small["width_mm"]}x{small["depth_mm"]}，'
+              f'可放格心 {full["cells"]} -> {small["cells"]}')
+        assert small['cells'] < full['cells'], small
+        # 浅桌子先饿死容器，这时必须当场报错而不是等「生成任务」才炸
+        print('  拒掉过浅的桌面：' + _rejected(
+            '/api/table', {'width_mm': 500, 'depth_mm': 200, 'near_mm': 120},
+            '容器一件都放不下的桌面居然被接受了'))
+        assert call('/api/state')['status']['table'] == small, '失败的设定不该改状态'
+        call('/api/table', full)                 # 后面照完整可达域走
+
         print('生成一轮摆放…')
+        call('/api/round/preview', {'seed': 20260821})
+        # 改桌面会丢掉按旧桌面摆的那一轮：照它摆真桌子会摆到桌沿外面
+        assert call('/api/table', full)['result']['pending_round'] is None, '预览没被清掉'
         call('/api/round/preview', {'seed': 20260821})
         print('开 session…')
         call('/api/session/start', {'streams': streams, 'note': 'smoke'})
         call('/api/round/start', {})
         detail = call('/api/state')['status']['round_detail']
+        # 固化之后桌子已经照它摆好了，尺寸必须锁死
+        assert call('/api/state')['status']['table_locked'], '固化后桌面尺寸没锁上'
+        _rejected('/api/table', full, '固化后还能改桌面尺寸')
         print(f'  物品 {[i["zh"] for i in detail["items"]]}')
         print(f'  episode {len(detail["episodes"])} 条，lint 警告 '
               f'{len(detail["lint_warnings"])} 条')
@@ -153,11 +183,12 @@ def main() -> int:
         assert st['slot_takes'] == {}, f'新一轮该从零开始: {st["slot_takes"]}'
         call('/api/round/end', {})
 
-        # 只换摆放和指令，物品不动 —— 换物品要起身去桌上找东西，代价差一个数量级
-        before = [i['item_id'] for i in detail['items']]
+        # 只换摆放和指令，物品不动 —— 换物品要起身去桌上找东西，代价差一个数量级。
+        # 判据必须看 layout（桌上真摆着的），items 相同但 layout 丢件也算换了内容
+        before = sorted(p['item_id'] for p in detail['layout'])
         st = call('/api/round/preview', {'keep_items': True})['result']
-        got = [i['item_id'] for i in st['pending_round']['items']]
-        assert got == before, f'keep_items 换了物品: {got} != {before}'
+        got = sorted(p['item_id'] for p in st['pending_round']['layout'])
+        assert got == before, f'keep_items 换了桌面内容: {got} != {before}'
         assert st['pending_round']['seed'] != detail['seed'], '没重 roll'
 
         print('封口…')

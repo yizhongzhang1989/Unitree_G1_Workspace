@@ -11,9 +11,12 @@ import random
 from dataclasses import dataclass, field, replace
 
 from record.instruction.generator import expand, simulate
-from record.instruction.layout import layout_scene
+from record.instruction.layout import LayoutError, layout_scene
 from record.instruction.scene_svg import render_scene
 from record.instruction.templates import Instruction, lint
+
+#: 沿用同一组物品时，为了一件不丢最多重摆几次布局。单次 layout_scene 只要 3.1 ms。
+LAYOUT_TRIES = 120
 
 
 @dataclass
@@ -50,6 +53,19 @@ class Round:
         }
 
 
+def _place_all(items, geometry, rng: random.Random) -> list:
+    """摆下全部 ``items``，一件不允许丢。
+
+    重摆一次只要 3.1 ms（不跑状态机），所以给足预算：实测最难的一组
+    （15 cm 碗 + 25 cm 锅铲 + 一小件）单发摆全只有 18%，丢的每次都是那把锅铲。
+    """
+    for _ in range(LAYOUT_TRIES):
+        placements = layout_scene(items, geometry, rng=rng)
+        if len(placements) == len(items):
+            return placements
+    raise LayoutError(f'这 {len(items)} 件反复摆不进可达域，只能换一组物品')
+
+
 def build_round(library, geometry, index: int = 0, seed: int | None = None,
                 n_items: int = 4, n_moves: int = 6, attempts: int = 8,
                 items: list | None = None) -> Round:
@@ -60,23 +76,28 @@ def build_round(library, geometry, index: int = 0, seed: int | None = None,
     所以给定 seed 仍然逐位可复现。
 
     传 ``items`` 就沿用这组物品，只重摆布局和指令 —— 换物品得起身去桌上换东西，
-    只换摆放和指令则手边这几件挪一挪就行。
+    只换摆放和指令则手边这几件挪一挪就行。此时**桌面内容必须逐件不变**。
     """
     seed = random.randrange(2 ** 31) if seed is None else int(seed)
     rng = random.Random(seed)
     best = None
     for _ in range(max(1, attempts)):
-        group = list(items) if items else library.choose_group(
-            geometry, size=n_items, rng=rng)
-        placements = layout_scene(group, geometry, rng=rng)
+        if items:
+            placements = _place_all(items, geometry, rng)
+        else:
+            group = library.choose_group(geometry, size=n_items, rng=rng)
+            placements = layout_scene(group, geometry, rng=rng)
         # 状态机原地改坐标，给它副本，``placements`` 才一直是待会儿要画的那个初始局面
         moves, _ = simulate([replace(p) for p in placements], geometry,
                             n_moves=n_moves, rng=rng)
-        if best is None or len(moves) > len(best[2]):
-            best = (group, placements, moves)
+        if best is None or len(moves) > len(best[1]):
+            best = (placements, moves)
         if len(moves) >= n_moves:
             break
-    items, placements, moves = best
-    return Round(index=index, seed=seed, items=items, placements=placements,
+    placements, moves = best
+    # 桌上有什么以摆放为准：布局丢掉的物品不出现在样例图里，记进 items 会让下一次
+    # 「只换摆放」把它当作还在桌上，凭空要求操作者多摆一件
+    return Round(index=index, seed=seed, items=[p.item for p in placements],
+                 placements=placements,
                  svg=render_scene(placements, geometry, title=f'Round {index}'),
                  instructions=expand(moves), moves=moves)

@@ -8,6 +8,7 @@ import collections
 import math
 import random
 
+import numpy as np
 import pytest
 
 from record.instruction.builder import build_round
@@ -166,6 +167,33 @@ def test_layout_respects_mask_and_spacing(library, geometry):
                                     pb.cx, pb.cy, *pb.extent)
 
 
+def test_clip_with_full_extent_changes_nothing(geometry):
+    """面板的默认值就是 ``extent``，它必须是恒等裁剪，否则一开页面可达域就缩了。"""
+    same = geometry.clip(*geometry.extent)
+    assert np.array_equal(same.reachable, geometry.reachable)
+
+
+def test_clip_keeps_items_on_the_real_table(library, geometry):
+    """可达域是 IK 算的「手够得着哪」，桌子比它小的时候不裁就会摆到桌沿外面。"""
+    depth, width, near = 0.20, 0.60, 0.10
+    small = geometry.clip(depth, width, near)
+    assert 0 < small.reachable.sum() < geometry.reachable.sum()
+
+    rng = random.Random(5)
+    items = library.choose_group(small, size=4, rng=rng)
+    for p in layout_scene(items, small, rng=rng):
+        bw, bd = p.extent
+        assert near <= p.cx - bd / 2 and p.cx + bd / 2 <= near + depth + small.cell
+        assert abs(p.cy) + bw / 2 <= width / 2 + small.cell
+
+
+def test_shallow_table_starves_containers_before_anything_else(library, geometry):
+    """浅桌子先饿死的是容器，不是「没东西放得下」—— 面板的验收条件按这个写。"""
+    pool = library.usable(geometry.clip(0.20, 0.50, 0.12))
+    assert len(pool) > 40, '普通物品还剩一大把'
+    assert not [i for i in pool if i.is_container], '容器应该已经一件都放不下'
+
+
 # ---------------------------------------------------------------- 状态机
 
 def _round(library, geometry, seed):
@@ -177,6 +205,31 @@ def test_round_is_reproducible_from_seed(library, geometry):
     b = _round(library, geometry, 12345)
     assert [i.render_en() for i in a.instructions] == [i.render_en() for i in b.instructions]
     assert [p.as_dict() for p in a.placements] == [p.as_dict() for p in b.placements]
+
+
+def test_round_items_are_exactly_what_is_on_the_table(library, geometry):
+    """摆不下的物品会被 layout 丢掉，``items`` 不能还留着它 —— 面板照 layout 摆桌。"""
+    for seed in range(40):
+        rnd = _round(library, geometry, seed)
+        assert ([i.item_id for i in rnd.items]
+                == [p.item.item_id for p in rnd.placements])
+
+
+def test_keep_items_never_changes_what_is_on_the_table(library, geometry):
+    """「换摆放与指令」只许挪位置和换指令。
+
+    原来沿用的是**挑出来的那一组**而不是**摆下的那几件**，layout 每次丢掉的物品不同，
+    实测 60 次重 roll 有 10 次桌面内容变了 —— 操作者得起身去桌上加/撤一件。
+    """
+    for seed in range(12):
+        prev = _round(library, geometry, seed)
+        for step in range(3):
+            rnd = build_round(library, geometry, index=1, seed=7000 + step,
+                              n_items=4, n_moves=6, items=prev.items)
+            assert (sorted(p.item.item_id for p in rnd.placements)
+                    == sorted(p.item.item_id for p in prev.placements)), \
+                f'seed {seed} 第 {step} 次重 roll 换了桌面内容'
+            prev = rnd
 
 
 def test_atomic_steps_are_pick_then_optional_pass_then_place(library, geometry):

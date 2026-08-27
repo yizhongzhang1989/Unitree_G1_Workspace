@@ -33,6 +33,16 @@
       <button id="btn-round" disabled>开始本轮（固化）</button>
       <button id="btn-round-end" disabled>结束本轮</button>
       <span class="hint" id="round-hint"></span>
+      <span class="tblbox" title="真实桌面尺寸，改完点「生成任务」才生效；本轮固化后锁定">
+        <label class="hint">宽<input type="number" id="tbl-width" class="mm"
+               min="50" max="2000" step="10" title="桌子横向宽度，以机器人中线居中"></label>
+        <label class="hint">深<input type="number" id="tbl-depth" class="mm"
+               min="50" max="2000" step="10" title="从近边往远处量的桌面深度"></label>
+        <label class="hint">近<input type="number" id="tbl-near" class="mm"
+               min="0" max="1000" step="5"
+               title="靠近机器人那条桌沿到躯干中心的距离（torso_link 系 x）"></label>
+        <span class="hint" id="tbl-hint"></span>
+      </span>
     </div>
     <div class="split">
       <div id="episodes" class="episodes"></div>

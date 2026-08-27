@@ -136,6 +136,39 @@ async function loadScene() {
   $('scene').innerHTML = svg || '<p class="hint">还没有摆放样例</p>';
 }
 
+const TABLE_FIELDS = [['tbl-width', 'width_mm'], ['tbl-depth', 'depth_mm'],
+                      ['tbl-near', 'near_mm']];
+
+// 可达域是 IK 算出来的「手够得着哪」，与桌子多大无关；这三个数把它裁到真实桌面那块
+function renderTable(status) {
+  const t = status.table;
+  const locked = !!status.table_locked;
+  for (const [id, key] of TABLE_FIELDS) {
+    const el = $(id);
+    el.disabled = locked || !t;
+    // 正在改的那个框不能被 1 Hz 轮询覆盖，否则输一半就被打回去
+    if (t && (locked || document.activeElement !== el)) el.value = t[key];
+  }
+  $('tbl-hint').textContent = !t ? '物品库不可用'
+    : `可放 ${t.cells} 格 · ${locked ? '本轮固化用的' : `容器 ${t.containers} 件`}`;
+}
+
+async function applyTable() {
+  const body = {};
+  for (const [id, key] of TABLE_FIELDS) body[key] = Number($(id).value);
+  const had = STATE && STATE.status.pending_round;
+  try {
+    await post('/api/table', body);
+    await refresh();                                 // 预览被清掉了，整页都得跟着变
+    banner(`桌面 ${body.width_mm} x ${body.depth_mm} mm`
+      + (had ? ' · 旧预览已清掉，请重新生成任务' : ''));
+  } catch (err) {
+    banner('桌面尺寸不可用：' + err.message, 'bad');
+    if (STATE) renderTable(STATE.status);            // 退回后端认可的那组
+  }
+}
+for (const [id] of TABLE_FIELDS) $(id).onchange = applyTable;
+
 function renderControls(status) {
   const live = status.state !== 'idle';
   const inRound = status.state === 'round' || status.state === 'episode';
@@ -169,11 +202,12 @@ function renderControls(status) {
   const c = status.counts || {};
   if (!live) {
     banner(status.library_error ? '物品库异常：' + status.library_error : '待命',
-           status.library_error ? 'bad' : '');
+           status.library_error ? 'bad' : '', true);
   } else {
     banner(`录制中 · ${status.session} · round ${status.round} · `
       + `episode ${c.episodes || 0}（成 ${c.success || 0} / 败 ${c.fail || 0}）· `
-      + `${(status.bytes / 1e6).toFixed(1)} MB · 盘余 ${status.disk_free_gb} GB`, 'live');
+      + `${(status.bytes / 1e6).toFixed(1)} MB · 盘余 ${status.disk_free_gb} GB`,
+           'live', true);
   }
 }
 
@@ -200,6 +234,7 @@ async function refresh() {
   renderStreams(data.streams, locked);
   renderControls(data.status);
   renderEpisodes(data.status);
+  renderTable(data.status);
   renderCams(data.streams
     .filter((s) => s.kind === 'video' && s.key !== 'head_depth')
     .map((s) => s.key)

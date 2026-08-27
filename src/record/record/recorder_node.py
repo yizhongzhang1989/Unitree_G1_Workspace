@@ -130,6 +130,11 @@ class Recorder(Node):
         self._head_kept = 0.0
 
         self.library, self.geometry, self.library_error = self._load_library()
+        # 真实桌面那块矩形。恒等于「现有这一轮实际用的桌面」——改尺寸会丢掉旧预览
+        self._table: dict | None = None
+        self._table_geo = None            # self.geometry 裁到桌面那块之后的副本
+        if self.geometry is not None:
+            self._use_table(*self.geometry.extent)
         self.current_round: dict | None = None
         self._round_obj = None
         # 正在录的是指令表里的第几条。和 session.episode_index（本轮第几次录）
@@ -171,6 +176,51 @@ class Recorder(Node):
             return lib, load_geometry(), ''
         except Exception as exc:                       # noqa: BLE001
             return None, None, f'{type(exc).__name__}: {exc}'
+
+    def set_table(self, depth: float, width: float, near: float) -> dict:
+        """限定物品只摆在真实桌面那块矩形里（米）。
+
+        会丢掉还没固化的预览：那一轮是照旧桌面摆的，跟着它摆真桌子会摆到桌沿外面。
+        丢掉之后 ``self._table`` 就恒等于「现有这一轮实际用的桌面」，面板直接显示它。
+        """
+        with self._lock:
+            if self._round_is_live():
+                raise RuntimeError('本轮已固化，桌子也照它摆好了，改尺寸要先「结束本轮」')
+            self._use_table(depth, width, near)
+            self.pending_round, self._pending_obj = None, None
+            return self.status()
+
+    def _use_table(self, depth: float, width: float, near: float) -> None:
+        """可达掩码是离线跑 IK 得到的「手够得着哪」，与桌子多大无关 —— 桌子比它小时
+        照原样摆会把物品摆到桌沿外面。``library.usable`` 要 20 ms，所以只在这里算一次。
+
+        验收条件照抄 ``choose_group`` 要的那两条。只查「有物品放得下」不够：可达域纵深
+        只有 250 mm，浅桌子先饿死的是容器（实测 200x500 还剩 75 件普通物品、容器 0），
+        放过去的话点「生成任务」才报错，操作者看不出是桌子设小了。
+        """
+        if self.library is None:
+            raise RuntimeError(f'物品库不可用: {self.library_error}')
+        if not (depth > 0 and width > 0):
+            raise RuntimeError('桌面尺寸必须为正')
+        geo = self.geometry.clip(depth, width, near)
+        pool = self.library.usable(geo)
+        containers = sum(1 for i in pool if i.is_container)
+        ordinary = sum(1 for i in pool if i.role == 'ordinary')
+        cells = int(geo.reachable.sum())
+        if not containers or ordinary < self.n_items - 1:
+            raise RuntimeError(
+                f'这块桌面摆不出一轮任务：可放格心 {cells}，容器 {containers} 件、'
+                f'普通物品 {ordinary} 件（至少要 1 + {self.n_items - 1}）')
+        with self._lock:
+            self._table_geo = geo
+            self._table = {'depth_mm': round(depth * 1000), 'width_mm': round(width * 1000),
+                           'near_mm': round(near * 1000), 'cells': cells,
+                           'containers': containers}
+
+    def _round_is_live(self) -> bool:
+        """本轮已固化：桌子已经照它摆好了，摆放、指令、桌面尺寸都不能再动。"""
+        return (self.session is not None
+                and self.session.state in (State.ROUND, State.EPISODE))
 
     # -------------------------------------------------------------- 订阅与落盘
 
@@ -291,6 +341,7 @@ class Recorder(Node):
                 'head_camera_info': self._head_info,
                 'head_stream': dict(self._head_seen),
                 'table_geometry': self.geometry.meta if self.geometry else None,
+                'table': self._table,
                 'joint_order': list(sig.CANONICAL_JOINTS),
             }
             session = Session.create(self.root, streams, meta=meta)
@@ -340,7 +391,7 @@ class Recorder(Node):
         if self.library is None:
             raise RuntimeError(f'物品库不可用: {self.library_error}')
         from record.instruction.builder import build_round
-        return build_round(self.library, self.geometry, index=index, seed=seed,
+        return build_round(self.library, self._table_geo, index=index, seed=seed,
                            n_items=self.n_items, n_moves=self.n_moves, items=items)
 
     def _retitle(self, rnd, index: int):
@@ -348,7 +399,7 @@ class Recorder(Node):
         from dataclasses import replace
         from record.instruction.scene_svg import render_scene
         return replace(rnd, index=index,
-                       svg=render_scene(rnd.placements, self.geometry,
+                       svg=render_scene(rnd.placements, self._table_geo,
                                         title=f'Round {index}'))
 
     def preview_round(self, seed: int | None = None, keep_items: bool = False) -> dict:
@@ -361,7 +412,7 @@ class Recorder(Node):
         只挪位置在手边就能做完，两件事的代价差一个数量级。
         """
         with self._lock:
-            if self.session is not None and self.session.state in (State.ROUND, State.EPISODE):
+            if self._round_is_live():
                 raise RuntimeError('本轮还没结束，不能重 roll')
             items = None
             if keep_items:
@@ -566,6 +617,8 @@ class Recorder(Node):
             'bytes': sum(w.bytes_written for w in self.writers.values()),
             'disk_free_gb': round(disk / 1e9, 1),
             'library_error': self.library_error,
+            'table': self._table,
+            'table_locked': self._round_is_live(),
             'round_detail': self.current_round,
             'pending_round': self.pending_round,
             # JSON 的键只能是字符串，前端按 takes[i] 取（JS 会自动转成 "i"）

@@ -14,6 +14,9 @@ def panel(rec, port: int = 8220, host: str = '0.0.0.0') -> Panel:
         '/api/session/stop': lambda b: rec.stop_session(),
         '/api/round/preview': lambda b: rec.preview_round(
             b.get('seed'), keep_items=bool(b.get('keep_items'))),
+        '/api/table': lambda b: rec.set_table(
+            float(b['depth_mm']) / 1000.0, float(b['width_mm']) / 1000.0,
+            float(b['near_mm']) / 1000.0),
         '/api/round/start': lambda b: rec.start_round(b.get('seed')),
         '/api/round/end': lambda b: rec.end_round(),
         '/api/episode/start': lambda b: rec.start_episode(int(b['index'])),
