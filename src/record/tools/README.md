@@ -27,6 +27,7 @@ tools/
   resample_video.py    视频重采样到统一栅格
   converters.py        格式注册表 —— A 的面板和 B 的命令行读的是同一份
   convert.py           转换的统一入口
+  sync_and_convert.ps1 B 侧一键流程：同步 → 校验 → 转换 → 产物自检（见 §0）
   format/YB/export.py  YB 格式的转换脚本
   format/YB/README.md  YB 格式规范（交数据给别人时给这一份）
 ```
@@ -35,10 +36,10 @@ tools/
 
 ## 0. 日常怎么跑
 
-环境只配一次（§1）。之后每次增量同步 + 转换就是一条命令：
+环境只配一次（§1）。之后每次增量同步 + 转换就是一条命令（在**包根**执行，也就是 `final.urdf` 所在那层）：
 
 ```powershell
-.\sync_and_convert.ps1
+.\tools\sync_and_convert.ps1
 ```
 
 它按顺序做完 §2 的两趟 rsync、§2 的 `--verify`、§4 的转换，最后补一层产物自检
@@ -56,8 +57,14 @@ tools/
 密码不在脚本里，也不写进任何文件 —— ssh 自己弹提示，由你手输（两趟 rsync 各问一次）。
 配了公钥免密就一次都不问。
 
-> **脚本不在这个导出包里**，放在 `tools/` 的上一级、和 `final.urdf` 一起。
-> `tools/` 每次从面板重新导出都会被**整个覆盖**，所以别把它挪进 `tools/`。
+> **脚本随包一起分发，就在 `tools/` 里。** 但它会自己把工作目录钉在**包根**
+> （`tools/` 的上一级），数据落在 `datasets/` —— **不能落进 `tools/`**，
+> 因为 `tools/` 每次从面板重新导出都会被**整个覆盖**，数据会跟着没。
+> 把脚本拷到包根目录直接跑也行，两种布局都认。
+>
+> 改这个脚本时注意：它带中文，**必须存成 UTF-8 with BOM**。
+> Windows PowerShell 5.1 对没有 BOM 的 `.ps1` 按系统 ANSI（中文机是 cp936）解码，
+> 一跑就是满屏 `Unexpected token`。
 
 下面几节讲的是这条命令背后到底做了什么 —— 出问题时照着排查。
 

@@ -517,11 +517,7 @@ function epCard(d, e) {
   say.textContent = e.instruction || '';
   card.append(top, say);
   const verify = renderBox(d, e);
-  if (verify) {
-    // 视频和报告在 20rem 宽的卡片里没法看，有结果时这张卡撜满整行
-    card.classList.add('vf-wide');
-    card.appendChild(verify);
-  }
+  if (verify) card.appendChild(verify);
   card.appendChild(shots(d.id, d.streams, e.at));
   return card;
 }

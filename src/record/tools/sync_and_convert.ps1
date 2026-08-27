@@ -62,7 +62,18 @@ $env:PYTHONIOENCODING = 'utf-8'
 # 不加这个的话 convert.py 自己的 print 会被块缓冲攒到退出才吐，
 # 顺序排到它调起的 export.py 后面去
 $env:PYTHONUNBUFFERED = '1'
-Set-Location $PSScriptRoot
+
+# 本脚本既可能放在包根目录，也可能被收进 tools/ 里随包分发。两种都认。
+# 工作目录始终钉在**包根**：钉在 $PSScriptRoot 的话，datasets/ 会落进 tools/，
+# 而 tools/ 每次从面板重新导出都会被整个覆盖 —— 数据就跟着没了。
+if (Test-Path (Join-Path $PSScriptRoot 'convert.py')) {
+    $toolsDir = $PSScriptRoot
+    $rootDir  = Split-Path $PSScriptRoot -Parent
+} else {
+    $toolsDir = Join-Path $PSScriptRoot 'tools'
+    $rootDir  = $PSScriptRoot
+}
+Set-Location $rootDir
 
 $script:PathReloaded = $false
 
@@ -121,7 +132,6 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
 
 Write-Step '0. 环境自检'
 
-$toolsDir = Join-Path $PSScriptRoot 'tools'
 foreach ($f in 'convert.py', 'inspect_session.py', 'converters.py', 'session_reader.py') {
     if (-not (Test-Path (Join-Path $toolsDir $f))) {
         Stop-With "缺 tools/$f" ('整包重新从 A 的面板导出（⤓ 导出工具）。' +
@@ -129,15 +139,15 @@ foreach ($f in 'convert.py', 'inspect_session.py', 'converters.py', 'session_rea
     }
 }
 
-$urdf  = Join-Path $PSScriptRoot 'final.urdf'
-$calib = Join-Path $PSScriptRoot 'calibration.yaml'
+$urdf  = Join-Path $rootDir 'final.urdf'
+$calib = Join-Path $rootDir 'calibration.yaml'
 foreach ($f in $urdf, $calib) {
     if (-not (Test-Path $f)) {
         Stop-With "缺 $(Split-Path $f -Leaf)" '它随导出工具包一起给，就在 tools/ 旁边（README §4）'
     }
 }
 
-$py = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+$py = Join-Path $rootDir '.venv\Scripts\python.exe'
 if (-not (Test-Path $py)) {
     $found = Get-Command python -CommandType Application -ErrorAction SilentlyContinue
     if (-not $found) { Stop-With '找不到 python' 'README §1 路线 B：winget install Python.Python.3.12' }

@@ -43,6 +43,8 @@ import converters                                          # noqa: E402
 
 DEFAULT_ROOT = str(Path.home() / '.ros' / 'record' / 'sessions')
 DEFAULT_BUNDLES = str(Path.home() / '.ros' / 'record' / 'bundles')
+#: `_pump` 在子进程被 `terminate()` 掉时返回它。取消不是故障，调用方据此区别对待。
+CANCELLED = '已取消'
 _QOS = QoSProfile(depth=4, history=HistoryPolicy.KEEP_LAST,
                   reliability=ReliabilityPolicy.RELIABLE)
 _STREAMS = ('wrist_left', 'wrist_right', 'head')
@@ -387,7 +389,7 @@ class DataManager(Node):
                 self.get_logger().info(f'  {line}')
             code = proc.wait()
             if code == -signal.SIGTERM:
-                return '已取消'
+                return CANCELLED
             return f'子进程退出码 {code}' if code else ''
         except Exception as exc:                       # noqa: BLE001
             return f'{type(exc).__name__}: {exc}'
@@ -511,9 +513,16 @@ class DataManager(Node):
                 f'渲染 {session.name}/{label} 完成，{video.stat().st_size / 1e6:.1f} MB')
         shutil.rmtree(stage, ignore_errors=True)
         with self._lock:
-            self._render.update(running=False, done=not error, error=error,
-                                progress=0.0 if error else 1.0,
-                                bytes=video.stat().st_size if video.is_file() else 0)
+            if error == CANCELLED:
+                # 取消是正常操作不是故障，清空整个槽 —— 否则卡片上会永久挂着
+                # 一条撤不掉的红字和一个空日志框。点取消时前端已经弹过提示了。
+                self._render.update(running=False, done=False, session='',
+                                    label='', error='', log=[], bytes=0,
+                                    progress=0.0)
+            else:
+                self._render.update(running=False, done=not error, error=error,
+                                    progress=0.0 if error else 1.0,
+                                    bytes=video.stat().st_size if video.is_file() else 0)
 
     def render_video(self, session_id: str, label: str) -> Path:
         path = self._render_path(self._dir(session_id), label)
