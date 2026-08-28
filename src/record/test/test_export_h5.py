@@ -415,7 +415,7 @@ def test_episode_id_suffix_is_the_segment_not_the_round():
 
 def test_dataset_meta_has_every_template_field():
     """对面的读取代码按 `datasetmeta_template.json` 写，缺字段就是 KeyError。"""
-    meta = ex.dataset_meta(SimpleNamespace(manifest={'session_id': 's'}),
+    meta = ex.dataset_meta([SimpleNamespace(manifest={'session_id': 's'})],
                            [{'duration': 30.0}],
                            SimpleNamespace(hz=30.0, extrinsic='base_T_cam'),
                            {})
@@ -424,6 +424,15 @@ def test_dataset_meta_has_every_template_field():
         assert key in meta, f'meta.json 缺模板字段 {key}'
     assert {'eef_type', 'arm_type', 'view_num', 'embodiment_count'} <= set(meta['robot'])
     assert {'episodes', 'hours'} <= set(meta['scale'])
+
+
+def test_dataset_meta_combines_multiple_sessions():
+    sessions = [SimpleNamespace(manifest={'session_id': 's1'}),
+                SimpleNamespace(manifest={'session_id': 's2'})]
+    meta = ex.dataset_meta(sessions, [{'duration': 30.0}, {'duration': 60.0}],
+                           SimpleNamespace(hz=30.0, extrinsic='base_T_cam'), {})
+    assert 's1--s2 (2 sessions)' in meta['dataset_name']
+    assert meta['scale'] == {'episodes': 2, 'hours': 0.025}
 
 
 def test_report_takes_space_names_from_the_data():

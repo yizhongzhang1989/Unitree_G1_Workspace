@@ -644,13 +644,16 @@ def episode_id(name: str) -> str:
     return f'{name.split("-", 1)[0]}-0000'
 
 
-def dataset_meta(session: Session, episodes: list, args, intrinsics: dict) -> dict:
+def dataset_meta(sessions: list[Session], episodes: list, args, intrinsics: dict) -> dict:
     """数据集级 meta.json。"""
+    session_ids = [session.manifest['session_id'] for session in sessions]
+    dataset_name = session_ids[0] if len(session_ids) == 1 else (
+        f'{session_ids[0]}--{session_ids[-1]} ({len(session_ids)} sessions)')
     return {
         'format': FORMAT,
         'format_version': VERSION,
         'format_doc': FORMAT_DOC,
-        'dataset_name': f'G1 upper-body VR teleop / {session.manifest["session_id"]}',
+        'dataset_name': f'G1 upper-body VR teleop / {dataset_name}',
         'year': 2026,
         'environment': {'type': 'Real'},
         'robot': {
@@ -749,7 +752,7 @@ def _sha256(path) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('session')
+    ap.add_argument('sessions', nargs='+', help='一个或多个 session，合并进同一 dataset')
     ap.add_argument('-o', '--out', help='输出目录，--dry-run 时可省')
     ap.add_argument('--urdf', required=True)
     ap.add_argument('--calibration')
@@ -775,17 +778,30 @@ def main() -> int:
                     help='往 stdout 多吐 "@progress <0..1>" 行，给面板的进度条用')
     args = ap.parse_args()
 
-    session = Session(args.session)
-    if not session.sealed:
-        print('！session 没有 DONE，未正常收尾，数据可能不完整', file=sys.stderr)
+    sessions = [Session(path) for path in args.sessions]
+    session_ids = [session.manifest['session_id'] for session in sessions]
+    if len(set(session_ids)) != len(session_ids):
+        print('！session_id 重复，合并后文件名会冲突', file=sys.stderr)
+        return 2
+    for session in sessions:
+        if not session.sealed:
+            print(f'！{session.manifest["session_id"]} 这个 session 没有 DONE，未正常收尾，'
+                  '数据可能不完整', file=sys.stderr)
     urdf = Path(args.urdf)
     calibration_path = Path(args.calibration) if args.calibration else None
     model, calibration, applied = load_model(urdf, calibration_path)
-    add_head_optical(model, session.meta.get('head_optical') or HEAD_OPTICAL)
-    intrinsics = collect_intrinsics(session, calibration)
+    head_optical = sessions[0].meta.get('head_optical') or HEAD_OPTICAL
+    if any((s.meta.get('head_optical') or HEAD_OPTICAL) != head_optical
+           for s in sessions[1:]):
+        print('！多个 session 的 head_optical 不一致，不能共用同一份几何元数据',
+              file=sys.stderr)
+        return 2
+    add_head_optical(model, head_optical)
+    all_intrinsics = [collect_intrinsics(session, calibration) for session in sessions]
+    intrinsics = all_intrinsics[0]
     provenance = fk_provenance(model, urdf, calibration_path, applied)
 
-    print(f'session   {session.manifest["session_id"]}')
+    print(f'session   {len(sessions)} 个：{", ".join(session_ids)}')
     print(f'标定叠加  {", ".join(applied) or "无 —— 外参会是 URDF 名义值"}')
     print(f'外参方向  {args.extrinsic}（{EXTRINSIC_FORMULA[args.extrinsic]}）')
     print(f'参考系    {ORIGIN}')
@@ -801,12 +817,13 @@ def main() -> int:
             return 2
 
     # 只导 success。fail/discard 是采集现场判的「这一条没做成」，导出了就是拿失败轨迹去模仿
-    graded = session.episodes(include_discarded=True)
-    episodes = [e for e in graded if e['outcome'] == 'success']
-    dropped = len(graded) - len(episodes)
-    print(f'episode   {len(episodes)} 条 success'
+    graded = [session.episodes(include_discarded=True) for session in sessions]
+    picked = [[e for e in group if e['outcome'] == 'success'] for group in graded]
+    all_episodes = [e for group in picked for e in group]
+    dropped = sum(len(group) for group in graded) - len(all_episodes)
+    print(f'episode   {len(all_episodes)} 条 success'
           + (f'，丢掉 {dropped} 条 fail/discard' if dropped else ''))
-    if not episodes:
+    if not all_episodes:
         print('没有可导出的 episode', file=sys.stderr)
         return 1
     out = Path(args.out) if args.out else None
@@ -814,43 +831,49 @@ def main() -> int:
     if writing:
         import h5py
         (out / 'data').mkdir(parents=True, exist_ok=True)
-    session_id = session.manifest['session_id']
-    plans, records = {c.name: [] for c in CAMERAS}, []
-    for serial, episode in enumerate(episodes, 1):
-        if not args.no_trim:
-            trim_episode(session, episode, args.keep_idle)
-        grid = build_grid(episode['t0'], episode['t1'], args.hz)
-        spaces = build_spaces(session, model, grid, args, intrinsics, provenance)
-        name = episode_name(serial, session_id, episode)
-        cut = episode.get('trim')
-        cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'
-                    if cut and cut['head_s'] + cut['tail_s'] > 0.05 else '')
-        print(f'{name}  N={grid.size:<5d} {episode["duration"]:.1f}s{cut_note}  '
-              f'{episode.get("instruction_en", "")}')
-        for line in _report(spaces, verbose=args.dry_run):
-            print(f'    {line}')
-        records.append({'name': name, 'episode': episode, 'frames': grid.size})
-        if not writing:
-            continue
+    records = []
+    serial = 0
+    for order, session in enumerate(sessions):
+        plans = {c.name: [] for c in CAMERAS}
+        session_id = session.manifest['session_id']
+        for episode in picked[order]:
+            serial += 1
+            if not args.no_trim:
+                trim_episode(session, episode, args.keep_idle)
+            grid = build_grid(episode['t0'], episode['t1'], args.hz)
+            spaces = build_spaces(session, model, grid, args,
+                                  all_intrinsics[order], provenance)
+            name = episode_name(serial, session_id, episode)
+            cut = episode.get('trim')
+            cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'
+                        if cut and cut['head_s'] + cut['tail_s'] > 0.05 else '')
+            print(f'{name}  N={grid.size:<5d} {episode["duration"]:.1f}s{cut_note}  '
+                  f'{episode.get("instruction_en", "")}')
+            for line in _report(spaces, verbose=args.dry_run):
+                print(f'    {line}')
+            records.append({'name': name, 'episode': episode, 'frames': grid.size})
+            if not writing:
+                continue
 
-        with h5py.File(out / 'data' / f'{name}.h5', 'w') as handle:
-            export_episode(handle, spaces, grid)
-        frames = spaces['camera']['state']['frame_index']
-        for column, camera in enumerate(CAMERAS):
-            plans[camera.name].append(resample_video.Plan(
-                out / f'video_{camera.name}' / f'{name}.mp4',
-                frames[:, column].tolist()))
+            with h5py.File(out / 'data' / f'{name}.h5', 'w') as handle:
+                export_episode(handle, spaces, grid)
+            frames = spaces['camera']['state']['frame_index']
+            for column, camera in enumerate(CAMERAS):
+                plans[camera.name].append(resample_video.Plan(
+                    out / f'video_{camera.name}' / f'{name}.mp4',
+                    frames[:, column].tolist()))
+        if writing and not args.no_video:
+            export_videos(session, plans, args, order, len(sessions))
 
     if not writing:
         return 0
-    if not args.no_video:
-        export_videos(session, plans, args)
-    write_sidecars(out, session, episodes, args, intrinsics, records)
+    write_sidecars(out, sessions, all_episodes, args, intrinsics, records)
     print(f'写到 {out}')
     return 0
 
 
-def export_videos(session: Session, plans: dict, args) -> None:
+def export_videos(session: Session, plans: dict, args,
+                  order: int, batches: int) -> None:
     if not resample_video.available():
         print('！找不到 ffmpeg/ffprobe，跳过视频', file=sys.stderr)
         return
@@ -862,8 +885,9 @@ def export_videos(session: Session, plans: dict, args) -> None:
 
     def report() -> None:
         if args.progress:
+            # 每个 session 占整条进度的一段，不然合并导出时进度条会一次次弹回 0
             frac = sum(min(done[n] / totals[n], 1.0) for n in done) / span
-            print(f'@progress {frac:.4f}', flush=True)
+            print(f'@progress {(order + frac) / batches:.4f}', flush=True)
 
     for camera in CAMERAS:
         source = session.video_path(camera.source)
@@ -888,7 +912,7 @@ def export_videos(session: Session, plans: dict, args) -> None:
               + (f'  ！源提前解完 {past} 帧' if past else ''))
 
 
-def write_sidecars(out: Path, session: Session, episodes: list, args,
+def write_sidecars(out: Path, sessions: list[Session], episodes: list, args,
                    intrinsics: dict, records: list) -> None:
     """meta.json / episode/*.json / episodes_all.{json,h5}，布局照对面示例。
 
@@ -898,7 +922,7 @@ def write_sidecars(out: Path, session: Session, episodes: list, args,
     （三路都是 ``video_<camera>/<episode_name>.mp4``，拼得出来）。
     """
     (out / 'episode').mkdir(parents=True, exist_ok=True)
-    _dump(out / 'meta.json', dataset_meta(session, episodes, args, intrinsics))
+    _dump(out / 'meta.json', dataset_meta(sessions, episodes, args, intrinsics))
     everything = []
     for record in records:
         episode = record['episode']

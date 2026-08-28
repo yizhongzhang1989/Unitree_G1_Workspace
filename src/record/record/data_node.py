@@ -137,7 +137,8 @@ class DataManager(Node):
         self.state = {'playing': False, 'session': '', 'label': '',
                       'phase': 'idle', 'progress': 0.0, 'elapsed': 0.0,
                       'duration': 0.0, 'error': ''}
-        self._convert = {'running': False, 'session': '', 'format': '', 'token': '',
+        self._convert = {'running': False, 'session': '', 'sessions': [],
+                         'format': '', 'token': '',
                          'log': [], 'error': '', 'done': False, 'bytes': 0,
                          'progress': 0.0}
         self._render = {'running': False, 'session': '', 'label': '',
@@ -241,7 +242,8 @@ class DataManager(Node):
         with self._lock:
             if self.state['playing'] and self.state['session'] == session_id:
                 raise RuntimeError('这次采集正在回放，先停止')
-            if self._convert['running'] and self._convert['session'] == session_id:
+            if (self._convert['running']
+                    and session_id in self._convert.get('sessions', [])):
                 raise RuntimeError('这次采集正在转换，先等它跑完')
             if self._render['running'] and self._render['session'] == session_id:
                 raise RuntimeError('这次采集正在渲染校验视频，先取消')
@@ -371,8 +373,11 @@ class DataManager(Node):
         return {'id': session_id, 'path': relative, 'bytes': size,
                 'text': text, 'truncated': size > len(blob), 'binary': binary}
 
-    def start_convert(self, session_id: str, fmt: str) -> dict:
+    def start_convert(self, session_ids: list, fmt: str) -> dict:
         """现转现下：转到临时目录，下完就删，盘上不留产物。
+
+        勾中的几次合并成**一份** dataset（文件序号跨 session 连续，只有一份 meta 与
+        索引），而不是各转各的 —— 交付单位是数据集，不是某一次采集。
 
         为什么不做成「一个请求从头等到尾」：转换是 0.13x 实时，一小时素材要 8 分钟，
         浏览器等首字节必然超时。所以拆成「触发 + 轮询进度 + 取件」三步。
@@ -380,13 +385,20 @@ class DataManager(Node):
         走子进程而不是 import：转换脚本在 ``tools/`` 里，那边禁止 import rclpy
         （导出机没有 ROS），而且它崩了不该把节点一起带走。
         """
-        session = self._dir(session_id)
+        session_ids = list(dict.fromkeys(session_ids))
+        if not session_ids:
+            raise ValueError('没有勾选要转换的采集')
+        sessions = [self._dir(sid) for sid in session_ids]
         converter = converters.get(fmt)
-        if not (session / 'DONE').is_file():
-            raise RuntimeError(f'{session_id} 没有 DONE，还在录或异常中断，不能转换')
+        for sid, session in zip(session_ids, sessions):
+            if not (session / 'DONE').is_file():
+                raise RuntimeError(f'{sid} 没有 DONE，还在录或异常中断，不能转换')
         missing = converter.missing()
         if missing:
             raise RuntimeError(f'跑不了 {fmt}：缺 {"、".join(missing)}')
+        # 横幅上只能放一行，41 个 id 全列出来会糊成一片
+        label = (session_ids[0] if len(session_ids) == 1
+                 else f'{session_ids[0]} 等 {len(session_ids)} 次')
         with self._lock:
             if self._convert['running']:
                 raise RuntimeError(f'{self._convert["session"]} 正在转换，一次只能跑一个')
@@ -394,26 +406,27 @@ class DataManager(Node):
                 raise RuntimeError('正在渲染校验视频，先取消或等它跑完')
             if self.state['playing']:
                 raise RuntimeError('正在回放，先停止')
-            token = f'{session_id}.{fmt}.{int(time.time())}'
-            self._convert = {'running': True, 'session': session_id, 'format': fmt,
+            token = f'{session_ids[0]}+{len(session_ids)}.{fmt}.{int(time.time())}'
+            self._convert = {'running': True, 'session': label,
+                             'sessions': session_ids, 'format': fmt,
                              'token': token, 'log': [], 'error': '',
                              'done': False, 'bytes': 0, 'progress': 0.0}
         self._sweep_bundles()
         thread = threading.Thread(target=self._run_convert,
-                                  args=(session, converter, token), daemon=True)
+                                  args=(sessions, converter, token), daemon=True)
         thread.start()
-        return {'session': session_id, 'format': fmt, 'token': token}
+        return {'sessions': session_ids, 'format': fmt, 'token': token}
 
     def convert_state(self) -> dict:
         with self._lock:
             return dict(self._convert, log=list(self._convert['log'])[-40:])
 
-    def _run_convert(self, session: Path, converter, token: str) -> None:
+    def _run_convert(self, sessions: list, converter, token: str) -> None:
         out = self._bundles / token
         values = {'urdf': self.urdf, 'calibration': self.calibration,
                   'video_height': self.video_height}
         try:
-            command = converter.command(sys.executable, session, out, values,
+            command = converter.command(sys.executable, sessions, out, values,
                                         progress=True)
         except ValueError as exc:
             error = str(exc)

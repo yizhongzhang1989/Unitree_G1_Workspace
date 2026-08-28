@@ -194,3 +194,33 @@ def test_delete_episode_refuses_while_it_is_playing(tmp_path):
     s.state = {'playing': True, 'session': 's3', 'label': 'r0e0'}
     with pytest.raises(RuntimeError, match='正在回放'):
         s.delete_episode('s3', 'r0e0')
+
+
+def _converter_stub(tmp_path: Path):
+    from record.data_node import DataManager
+    s = _stub(tmp_path)
+    (s.root / 's1' / 'DONE').write_text('')
+    (s.root / 's2' / 'DONE').write_text('')
+    s.state = {'playing': False}
+    s._render = {'running': False}
+    s._convert = {'running': False, 'session': '', 'sessions': [], 'token': ''}
+    for name in ('start_convert', '_sweep_bundles'):
+        setattr(_Stub, name, getattr(DataManager, name))
+    s.bundle_ttl_s = 1800.0
+    return s
+
+
+def test_start_convert_rejects_an_empty_selection(tmp_path):
+    """勾都没勾就点，别让它拿空清单去起子进程。"""
+    s = _converter_stub(tmp_path)
+    with pytest.raises(ValueError, match='没有勾选'):
+        s.start_convert([], 'yb')
+
+
+def test_start_convert_refuses_unsealed_sessions(tmp_path):
+    """一批里只要有一个没封口就整批不转 —— 半份 dataset 比不转更难查。"""
+    s = _converter_stub(tmp_path)
+    (s.root / 's2' / 'DONE').unlink()
+    with pytest.raises(RuntimeError, match='DONE'):
+        s.start_convert(['s1', 's2'], 'yb')
+    assert not s._convert['running']
