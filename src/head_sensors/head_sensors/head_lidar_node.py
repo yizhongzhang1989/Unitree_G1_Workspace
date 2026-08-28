@@ -22,6 +22,8 @@
   `time` 做运动去畸变，瘦身布局喂不了它。
 
 两路都只在有订阅者时才打包，没人订就只走统计。
+
+IMU 转发默认关（`forward_imu`，理由见该参数处）。
 """
 
 import math
@@ -29,7 +31,7 @@ import math
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, PointCloud2
@@ -58,6 +60,11 @@ class HeadLidarNode(Node):
         out_full = p('output_full_cloud_topic', '/head/lidar/points_full').value
         out_imu = p('output_imu_topic', '/head/lidar/imu').value
         publish_full = bool(p('publish_full_cloud', True).value)
+        # 200 Hz 的 IMU 转发实测吃 30~40% 单核，而回调体本身只占 3% —— 其余全是 rclpy
+        # 每条消息的订阅反序列化与发布序列化。消费者只有 Point-LIO，让它直接订原始话题
+        # 就能整条省掉（配置里 acc_norm 从 9.81 改回 1.0、satu_acc 从 29.42 改回 3.0）。
+        # 注意光靠 `get_subscription_count()==0` 短路救不了：钱花在订阅端，不在发布端。
+        forward_imu = bool(p('forward_imu', True).value)
 
         self._lidar_frame = p('lidar_frame', 'livox_frame').value
         self._mount_frame = p('mount_frame', 'mid360_link').value
@@ -76,14 +83,16 @@ class HeadLidarNode(Node):
         self._cloud_pub = self.create_publisher(PointCloud2, out_cloud, qos)
         self._full_pub = (self.create_publisher(PointCloud2, out_full, qos)
                           if publish_full else None)
-        self._imu_pub = self.create_publisher(Imu, out_imu, qos)
-        # 点云与 IMU 必须分到不同的回调组，再配 MultiThreadedExecutor：一帧 2 万点的
-        # 过滤加打包要几十毫秒，同组的话 200 Hz 的 IMU 会被整段饿死。实测挤在一起时
-        # IMU 从 200 Hz 掉到 164 Hz，而下游的激光惯性里程计正靠这路 IMU。
+        self._imu_pub = self.create_publisher(Imu, out_imu, qos) if forward_imu else None
+        # 点云与 IMU 各占一个互斥组：早期 make_xyzi_cloud 有个 30 ms/帧的打包 bug，
+        # 同组会把 200 Hz 的 IMU 饿到 164 Hz。bug 修掉后一帧只要 2.5 ms，多线程反而是
+        # 净开销（实测 MultiThreadedExecutor 比 SingleThreadedExecutor 贵 13.6% 单核），
+        # 所以分组保留、executor 换成单线程。
         self.create_subscription(PointCloud2, self._in_cloud, self._on_cloud, qos,
                                  callback_group=MutuallyExclusiveCallbackGroup())
-        self.create_subscription(Imu, self._in_imu, self._on_imu, qos,
-                                 callback_group=MutuallyExclusiveCallbackGroup())
+        if forward_imu:
+            self.create_subscription(Imu, self._in_imu, self._on_imu, qos,
+                                     callback_group=MutuallyExclusiveCallbackGroup())
 
         if publish_static_tf:
             self._static_tf = StaticTransformBroadcaster(self)
@@ -92,6 +101,8 @@ class HeadLidarNode(Node):
         self._clouds = 0
         self._kept = 0
         self._imus = 0
+        self._nominal: tuple[float, float] | None = None
+        self._rate_ok = True
         self._last_cloud_wall = None
         self._timeout_warned = False
         self.create_timer(self._stats_period, self._on_stats)
@@ -103,6 +114,8 @@ class HeadLidarNode(Node):
                self._min_range, self._max_range))
         if self._full_pub is not None:
             self.get_logger().info('完整字段点云（含 ring/time，供激光惯性里程计用）：%s' % out_full)
+        if self._imu_pub is None:
+            self.get_logger().info('IMU 不转发（forward_imu=false），下游直接订 %s' % self._in_imu)
 
     def _identity_tf(self) -> TransformStamped:
         tf = TransformStamped()
@@ -136,7 +149,8 @@ class HeadLidarNode(Node):
 
     def _on_imu(self, msg: Imu) -> None:
         self._imus += 1
-        if self._imu_pub.get_subscription_count() == 0:
+        pub = self._imu_pub
+        if pub is None or pub.get_subscription_count() == 0:
             return
         out = Imu()
         out.header = msg.header
@@ -176,18 +190,35 @@ class HeadLidarNode(Node):
         if self._clouds == 0:
             return
         hz = self._clouds / self._stats_period
-        self.get_logger().info(
-            '点云 %.1f Hz，平均有效点 %d；IMU %.0f Hz'
-            % (hz, self._kept // self._clouds, self._imus / self._stats_period))
+        kept = self._kept // self._clouds
+        imu_hz = self._imus / self._stats_period
         self._clouds = 0
         self._kept = 0
         self._imus = 0
+
+        line = '点云 %.1f Hz，平均有效点 %d' % (hz, kept)
+        if self._imu_pub is not None:
+            line += '；IMU %.0f Hz' % imu_hz
+        if self._nominal is None:
+            self._nominal = (hz, imu_hz)
+            self.get_logger().info(line + '（后续只在掉速时再报）')
+            return
+        # 稳态每 5 s 刷一条会把别的日志淹掉。标称取历次最大值，启动瞬态偏低不会把基准压下去。
+        ref_hz, ref_imu = self._nominal = (max(self._nominal[0], hz),
+                                           max(self._nominal[1], imu_hz))
+        ok = (hz >= 0.85 * ref_hz
+              and (self._imu_pub is None or imu_hz >= 0.85 * ref_imu))
+        if not ok:
+            self.get_logger().warn('掉速：' + line)
+        elif not self._rate_ok:
+            self.get_logger().info('已恢复：' + line)
+        self._rate_ok = ok
 
 
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = HeadLidarNode()
-    executor = MultiThreadedExecutor()
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()

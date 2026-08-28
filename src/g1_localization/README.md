@@ -117,6 +117,7 @@ publisher 抢同一个 child，**而 tf2 不保证取哪一个，且完全静默
 ## 验收
 
 ```bash
+scripts/apply_patches.sh          # 见下面「上游补丁」，重新 clone submodule 后要跑
 colcon build --symlink-install --packages-select g1_localization
 python3 -m pycodestyle --max-line-length=120 src/g1_localization/
 ```
@@ -130,3 +131,16 @@ python3 -m pycodestyle --max-line-length=120 src/g1_localization/
 5. `lookup_transform('world','torso_link')` 与 `~/torso_pose` 一致（p50 应为 0）
 6. 手臂大幅摆动时，`~/torso_pose` 的姿态变化应与 `/secondary_imu` 高度相关 ——
    **不相关就说明里程计被手臂拖着走了**，回去查 `blind` 和自体点云
+
+## 上游补丁
+
+`point_lio` 是钉在上游某个 commit 上的 submodule，本仓库不 fork 它，改动一律走
+`patches/point_lio_ros2/*.patch`，由 `scripts/apply_patches.sh` 打上（幂等，
+`--check` 只报告状态、`--revert` 还原）。**重新 clone 或 `git submodule update`
+之后要跑一次**，否则编出来的是上游原版。
+
+现有一个补丁：主循环原本是 `rclcpp::Rate rate(5000)` 空转轮询，且每次迭代都新建
+executor 再 `add_node`。真正有活干的只有 10 Hz 一帧点云，其余全花在重建 wait set
+上 —— 整机实测本进程被调度 **9683 次/秒，全栈最高、占总调度事件的 19%**，把 50 Hz
+的控制环挤得掉拍。改成 executor 提到循环外 + 降到 1000 Hz（IMU 200 Hz 仍有 5 倍
+余量），静止漂移实测 0.12 mm/s、姿态 0.113°，与原版同一水平。

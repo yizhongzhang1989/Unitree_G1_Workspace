@@ -30,6 +30,11 @@ def generate_launch_description() -> LaunchDescription:
         executable='pointlio_mapping',
         name='point_lio',
         output='screen',
+        # 主循环是 `rclcpp::Rate rate(5000)` 的空转轮询：实测被调度 **9683 次/秒**
+        # （全栈最高，占总调度事件的 19%），而它真正有活干的只有 10 Hz 一帧点云。
+        # 降权重不减少唤醒次数，但让这些空转抢不过 50 Hz 的控制环。每帧有 100 ms
+        # 预算而只用 50 ms，让一让不会掉频。上游自己的 mapping_*.launch.py 同样写法。
+        prefix='nice -n 10',
         parameters=[LaunchConfiguration('config')],
         remappings=[('/tf', '/point_lio/tf_unused')],
         arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
