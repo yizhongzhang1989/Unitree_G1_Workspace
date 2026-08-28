@@ -22,6 +22,29 @@ local = quat_apply(quat_inv(yaw_quat(robot_anchor_quat)), rel)
 > 不需要绝对定位。`rel` 是两个世界位置之差，对原点平移不变，所以只要
 > **参考和机器人处在同一坐标系**即可——这靠 `~/start` 时刻的一次对齐建立。
 
+## 三个量分属两个刚体，别搞混
+
+`pelvis` 和 `torso_link` 只差 4.4 cm 平移加腰三轴转角，很容易被"顺手统一"，但取错**不会报错**，只会让策略完全失效：
+
+| 观测 | 刚体 | 真机来源 |
+|---|---|---|
+| `projected_gravity` | **pelvis** | IMU 四元数直接投影，**不要做腰部 FK** |
+| `base_ang_vel` | **pelvis** | IMU 角速度直接用 |
+| key body 局部化 / 倾角保护 | **torso_link** | IMU + 腰三轴 FK |
+| 里程计位置 | **torso_link** | `/dog_odom` 给盆骨，需 FK；雷达直接给躯干 |
+
+依据在 `mjlab/entity/data.py:586`：
+
+```python
+def projected_gravity_b(self):
+    return quat_apply_inverse(self.root_link_quat_w, self.gravity_vec_w)
+```
+
+`root_link` 是自由关节所在的 body，也就是 `pelvis`。另外 `gravity_vec_w` 在
+`entity.py:809` 写死为**归一化**的 `[0, 0, -1]`，不是 $-9.81$——用重力加速度实际值会差 9.81 倍。
+
+`test_projected_gravity_uses_base_not_anchor` 把这两条都钉死了。
+
 ## 里程计
 
 两路来源，`odometry_mode` 三选一：

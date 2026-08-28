@@ -14,8 +14,9 @@
 左边那项是 odom 的**累积漂移本身**，属于慢变量，可以滤得很狠也不引入动态滞后——
 全部动态都由 500 Hz 的快通道承担。这就是"高频 + 有界漂移"的来源。
 
-姿态不参与融合：roll/pitch 由 IMU 直接给，比任何里程计都准；这里只估计 yaw 偏置，
-因为 odom 的偏航同样会漂，而 key body 局部化要用 anchor 的 yaw。
+姿态不参与融合，这个模块也**只输出位置**：roll/pitch 由 IMU 直接给，比任何里程计都准，
+anchor 姿态由盆骨 IMU 加腰三轴 FK 算得。内部仍估计 yaw 偏置，因为 odom 的偏航同样会漂，
+而它会通过修正量影响位置。
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .rotations import quat_apply, quat_conj, quat_mul, quat_normalize, yaw_quat
+from .rotations import quat_apply, quat_normalize
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,11 @@ class PoseSample:
 def _yaw_of(q: np.ndarray) -> float:
     w, x, y, z = q
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _yaw_quat(yaw: float) -> np.ndarray:
+    half = 0.5 * yaw
+    return np.array([math.cos(half), 0.0, 0.0, math.sin(half)])
 
 
 def _wrap(angle: float) -> float:
@@ -130,8 +136,7 @@ class OdometryFuser:
 
         # T_world_odom = T_world_torso(雷达) @ inv(T_odom_torso)，只取 yaw 与平移
         yaw = _wrap(_yaw_of(quat) - _yaw_of(paired.quat))
-        q_yaw = yaw_quat(np.array([math.cos(0.5 * yaw), 0.0, 0.0, math.sin(0.5 * yaw)]))
-        target_pos = pos - quat_apply(q_yaw, paired.pos)
+        target_pos = pos - quat_apply(_yaw_quat(yaw), paired.pos)
 
         if not self._corr_ready:
             self._corr_pos = target_pos
@@ -163,19 +168,18 @@ class OdometryFuser:
             return None
         return self._odom[best]
 
-    def torso_pose(self) -> tuple[np.ndarray, np.ndarray] | None:
-        """最新的躯干世界位姿。``lidar_only`` 下就是雷达原值（10 Hz，仅供对照）。"""
+    def torso_position(self) -> np.ndarray | None:
+        """最新的躯干世界位置。返回 None 表示尚未就绪。
+
+        只给位置：anchor 姿态请用 IMU + 腰三轴 FK，那条路径比里程计准得多。
+        """
         if not self._corr_ready:
             return None
         if self._mode == 'lidar_only':
-            half = 0.5 * self._corr_yaw
-            return self._corr_pos.copy(), np.array([math.cos(half), 0.0, 0.0, math.sin(half)])
+            return self._corr_pos.copy()
         if self._last_odom is None:
             return None
-        half = 0.5 * self._corr_yaw
-        q_corr = np.array([math.cos(half), 0.0, 0.0, math.sin(half)])
-        pos = self._corr_pos + quat_apply(q_corr, self._last_odom.pos)
-        return pos, quat_mul(q_corr, self._last_odom.quat)
+        return self._corr_pos + quat_apply(_yaw_quat(self._corr_yaw), self._last_odom.pos)
 
     def stale(self, now: float) -> str | None:
         """返回超时原因，None 表示健康。看门狗按它急停。"""
@@ -191,10 +195,3 @@ class OdometryFuser:
             if gap > self._lidar_timeout:
                 return f'雷达定位超时 {gap:.2f}s'
         return None
-
-
-def relative_pose(anchor_pos: np.ndarray, anchor_quat: np.ndarray,
-                  pos: np.ndarray, quat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """把 ``pos/quat`` 表达到 ``anchor`` 的 yaw 局部系。只锁偏航，俯仰横滚是动作内容。"""
-    inv = quat_conj(yaw_quat(anchor_quat))
-    return quat_apply(inv, np.asarray(pos) - np.asarray(anchor_pos)), quat_mul(inv, quat)

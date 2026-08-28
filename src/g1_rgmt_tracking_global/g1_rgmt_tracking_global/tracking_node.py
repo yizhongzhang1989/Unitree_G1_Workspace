@@ -317,7 +317,7 @@ class RgmtTrackingNode(Node):
             if self._measured is None or self._imu_quat is None:
                 response.success, response.message = False, '还没收到关节或 IMU 数据'
                 return response
-            pose = self._odom.torso_pose()
+            pose = self._odom.torso_position()
             if pose is None:
                 response.success, response.message = False, '里程计尚未就绪，无法对齐参考'
                 return response
@@ -325,7 +325,7 @@ class RgmtTrackingNode(Node):
             self._stand_start = self._now()
             self._policy.reset()
             # 同时锁偏航与平移。中途重算等于把已产生的跟踪误差抹掉，那 15 维就永远读作零。
-            self._clip.align(pose[0], self._torso_quat_locked())
+            self._clip.align(pose, self._torso_quat_locked())
             self._state = State.STAND
         response.success = True
         response.message = f'STAND 中，{self._stand_s:.1f}s 后开始放 {self._clip.name}'
@@ -389,7 +389,7 @@ class RgmtTrackingNode(Node):
                 omega = self._imu_omega.copy()
                 base_quat = self._imu_quat.copy()
                 torso_quat = self._torso_quat_locked()
-                pose = self._odom.torso_pose()
+                torso_pos = self._odom.torso_position()
                 state = self._state
                 stand_from = None if self._stand_from is None else self._stand_from.copy()
                 stand_elapsed = self._now() - self._stand_start
@@ -397,7 +397,7 @@ class RgmtTrackingNode(Node):
         if stale:
             self._estop(stale)
             return
-        if pose is None:
+        if torso_pos is None:
             self._estop('里程计无输出')
             return
 
@@ -425,9 +425,11 @@ class RgmtTrackingNode(Node):
                     joint_pos=measured[self._obs_slots],
                     joint_vel=measured_vel[self._obs_slots],
                     ang_vel=omega,
+                    # 两个刚体不能混：投影重力与角速度挂 pelvis（IMU 直给），
+                    # key body 局部化挂 anchor=torso（需 FK）。
                     base_quat=base_quat,
                     clip=clip,
-                    robot_anchor_pos=pose[0],
+                    robot_anchor_pos=torso_pos,
                     robot_anchor_quat=torso_quat,
                 )
             except (ValueError, RuntimeError) as exc:
@@ -461,11 +463,11 @@ class RgmtTrackingNode(Node):
             frame = self._policy.frame
             clamped = self._policy.anchor_clamped
             corr_pos, _ = self._odom.correction
-            pose = self._odom.torso_pose()
+            torso_pos = self._odom.torso_position()
             offset = ''
-            if pose is not None and clip.aligned:
+            if torso_pos is not None and clip.aligned:
                 ref_pos, _ = clip.anchor_pose_world(frame)
-                offset = f' offset={float(np.linalg.norm(ref_pos - pose[0])):.3f}'
+                offset = f' offset={float(np.linalg.norm(ref_pos - torso_pos)):.3f}'
         message = String()
         # offset 是参考锚点与机器人躯干的距离，也就是策略读到的漂移量；
         # drift 是里程计自身被雷达修正的累积量。两者一起看才能分清是谁在漂。

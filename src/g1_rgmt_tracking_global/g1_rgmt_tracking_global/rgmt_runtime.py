@@ -149,7 +149,8 @@ def load_spec(session: onnxruntime.InferenceSession) -> RgmtSpec:
         if actual[name] != want:
             raise ValueError(f'输入 {name} 维度 {actual[name]} != 按契约算出的 {want}')
     if len(spec.default_joint_pos) != n_obs:
-        raise ValueError(f'default_joint_pos 长度 {len(spec.default_joint_pos)} != 观测关节数 {n_obs}')
+        raise ValueError(
+            f'default_joint_pos 长度 {len(spec.default_joint_pos)} != 观测关节数 {n_obs}')
     if len(spec.action_scale) != n_act:
         raise ValueError(f'action_scale 长度 {len(spec.action_scale)} != 动作关节数 {n_act}')
     return spec
@@ -262,8 +263,16 @@ class RgmtPolicy:
              robot_anchor_quat: np.ndarray) -> np.ndarray:
         """跑一拍，返回 29 维关节位置目标。
 
-        ``base_quat`` 是盆骨姿态（IMU 直给）；``robot_anchor_*`` 是躯干的世界位姿，
-        由里程计融合而来。两者不能混用：投影重力挂在 base，key body 局部化挂在 anchor。
+        **两个刚体绝不能混**：
+
+        * ``base_quat`` / ``ang_vel`` 挂 **pelvis**。训练侧 ``projected_gravity_b`` 算的是
+          ``quat_apply_inverse(root_link_quat_w, gravity_vec_w)``，``root_link`` 就是自由
+          关节所在的 pelvis，而真机 IMU 正好装在盆骨——这一路直通，**不要做腰部 FK**。
+        * ``robot_anchor_*`` 挂 **torso_link**（anchor），用于 key body 局部化。
+
+        两者只差 4.4 cm 平移和腰三轴转角，很容易被“顺手统一”，而取错不报错、只是全废。
+
+        重力向量是**归一化**的 ``[0,0,-1]``（mjlab entity.py 里写死），不是 -9.81。
         """
         spec = self._spec
         rel_pos = np.asarray(joint_pos, dtype=np.float64) - spec.default_joint_pos

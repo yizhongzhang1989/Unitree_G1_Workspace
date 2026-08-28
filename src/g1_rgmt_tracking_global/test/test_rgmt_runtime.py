@@ -158,8 +158,7 @@ def test_torso_fk_matches_model_geometry():
 def test_odom_only_passes_through():
     fuser = OdometryFuser(mode='odom_only')
     fuser.push_odom(1.0, [1.0, 2.0, 0.8], [1.0, 0.0, 0.0, 0.0])
-    pos, _ = fuser.torso_pose()
-    assert np.allclose(pos, [1.0, 2.0, 0.8])
+    assert np.allclose(fuser.torso_position(), [1.0, 2.0, 0.8])
     assert fuser.stale(1.05) is None
     assert fuser.stale(2.0) is not None
 
@@ -170,8 +169,7 @@ def test_fused_first_lidar_frame_snaps_to_lidar():
     assert fuser.stale(0.0) is not None  # 没有里程计就该判超时
     fuser.push_odom(1.0, [0.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
     fuser.push_lidar(1.0, [5.0, 3.0, 0.8], [1.0, 0.0, 0.0, 0.0])
-    pos, _ = fuser.torso_pose()
-    assert np.allclose(pos, [5.0, 3.0, 0.8], atol=1e-9)
+    assert np.allclose(fuser.torso_position(), [5.0, 3.0, 0.8], atol=1e-9)
 
 
 def test_fused_pairs_lidar_with_matching_odom_stamp():
@@ -185,8 +183,7 @@ def test_fused_pairs_lidar_with_matching_odom_stamp():
     corr, _ = fuser.correction
     assert np.allclose(corr, 0.0, atol=1e-9)
     # 若错误地和最新 odom(x=0.038) 配对，修正量会是 -0.028
-    pos, _ = fuser.torso_pose()
-    assert np.allclose(pos[0], 0.038, atol=1e-9)
+    assert np.allclose(fuser.torso_position()[0], 0.038, atol=1e-9)
 
 
 def test_fused_rejects_unpairable_lidar():
@@ -199,8 +196,7 @@ def test_odom_stamp_regression_clears_buffer():
     fuser = OdometryFuser(mode='odom_only')
     fuser.push_odom(10.0, [1.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
     fuser.push_odom(1.0, [0.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
-    pos, _ = fuser.torso_pose()
-    assert np.allclose(pos, [0.0, 0.0, 0.8])
+    assert np.allclose(fuser.torso_position(), [0.0, 0.0, 0.8])
 
 
 def _policy(max_offset: float = 0.3):
@@ -277,3 +273,27 @@ def test_spec_matches_rejects_swapped_joints():
                      list(spec.reference_key_bodies))
     with pytest.raises(ValueError, match='key body'):
         spec_matches(spec, list(spec.obs_joint_names), good, ['pelvis'])
+
+
+def test_projected_gravity_uses_base_not_anchor():
+    """投影重力挂 pelvis，key body 局部化挂 anchor，两个刚体不能混。
+
+    训练侧 ``projected_gravity_b = quat_apply_inverse(root_link_quat_w, gravity_vec_w)``，
+    ``root_link`` 是自由关节所在的 pelvis；且 ``gravity_vec_w`` 是归一化的 [0,0,-1]。
+    取错刚体或用 -9.81 都不会报错，只会让策略完全失效。
+    """
+    policy = _policy()
+    clip, data = _aligned_clip()
+    n_obs = len(policy.spec.obs_joint_names)
+    # 盆骨前倾 30 度，anchor 保持直立
+    half = np.deg2rad(30.0) / 2.0
+    tilted = np.array([np.cos(half), 0.0, np.sin(half), 0.0])
+    policy.step(joint_pos=policy.spec.default_joint_pos, joint_vel=np.zeros(n_obs),
+                ang_vel=np.zeros(3), base_quat=tilted, clip=clip,
+                robot_anchor_pos=data['anchor_pos'][0],
+                robot_anchor_quat=np.array([1.0, 0.0, 0.0, 0.0]))
+    got = policy._hist['rg_projected_gravity'][-1]
+    assert np.isclose(np.linalg.norm(got), 1.0, atol=1e-9), '重力向量必须归一化'
+    # 绕 y 轴前倾 theta 后，局部系重力应为 [sin(theta), 0, -cos(theta)]
+    want = np.array([np.sin(np.deg2rad(30.0)), 0.0, -np.cos(np.deg2rad(30.0))])
+    assert np.allclose(got, want, atol=1e-6)

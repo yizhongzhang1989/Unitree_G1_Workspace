@@ -24,15 +24,14 @@ NPZ 字段（瘦身格式，由 ``scripts/slim_motion.py`` 生成）::
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 
 from .rotations import (
     quat_apply,
     quat_conj,
-    quat_from_axis,
     quat_mul,
     quat_normalize,
     rotate_inverse,
