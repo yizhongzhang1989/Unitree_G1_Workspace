@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>g1_rgmt_tracking_global</name>
+  <version>0.1.0</version>
+  <description>
+    G1 全身动作跟踪层（RGMT + 全局位置）。位于 forward_position_controller 之上：
+    读一段参考动作 NPZ，在 50 Hz 定时器里算出 29 轴关节位置目标（12 腿 + 3 腰 + 14 臂），
+    两个夹爪偏心轴透传。
+
+    与 g1_gmt_tracking 的根本差异：RGMT 的参考窗口里有 15 维是「参考 key body 相对
+    机器人躯干」的位移，其中头 3 维就是漂移量本身，因此**必须接里程计**并在启动时把
+    参考动作按偏航与平移对齐到机器人当前位姿。包名的 _global 即指此。
+  </description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <!-- /dog_odom 与 g1_localization/torso_pose 都是 nav_msgs/Odometry。
+       前者由固件直接发布，不依赖任何 unitree 消息包。 -->
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <!-- onnxruntime 没有 rosdep key，由 .devcontainer/Dockerfile 的 pip3 install 提供。 -->
+
+  <exec_depend>unitree_g1_ros2_control</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

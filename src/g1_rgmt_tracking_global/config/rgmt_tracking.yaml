@@ -1,0 +1,158 @@
+/rgmt_tracking:
+  ros__parameters:
+    # `joints`（FPC 的 31 轴顺序）由 launch 从
+    # unitree_g1_ros2_control/config/forward_position_controller.yaml 读取后注入，
+    # 不在这里抄第二份——两份不同步就是左右腿指令互换级别的事故。
+
+    # 策略权重。关节顺序、默认位姿、动作缩放、前瞻步长全部从它的 metadata 里读，
+    # 和下面的 obs_joints / action_joints 对不上会直接拒绝启动。
+    policy_path: package://g1_rgmt_tracking_global/config/policy.onnx
+
+    # 参考动作目录。**换动作不需要换策略、也不需要重新导出**：策略吃的是偏航/平移
+    # 不变的前瞻特征，任何一段同格式 NPZ 都能直接放。往这个目录里丢文件即可，
+    # 运行时用 `ros2 topic pub ~/select_motion` 切换。
+    motion_dir: package://g1_rgmt_tracking_global/config/motions
+    # 随包附的三段都截到 15 s。首次上机务必用短片段：里程计漂移随时长累积，
+    # 而参考窗口里那 3 维漂移量是直接喂给策略的。
+    motion: walk1_subject1
+    # 放完是回 IDLE 还是从头再放一遍。首次上机建议 false。
+    loop: false
+
+    # 观测里 joint_pos / joint_vel 覆盖的 31 轴，顺序必须与 ONNX metadata 一致。
+    # **注意两个 eccentric（夹爪）轴夹在中间，不在末尾**——它们进观测但不由策略驱动，
+    # 真机上夹爪编码器的读数必须照喂，缺了观测就整体错位。
+    obs_joints:
+      - left_hip_pitch_joint
+      - left_hip_roll_joint
+      - left_hip_yaw_joint
+      - left_knee_joint
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+      - right_hip_pitch_joint
+      - right_hip_roll_joint
+      - right_hip_yaw_joint
+      - right_knee_joint
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+      - waist_yaw_joint
+      - waist_roll_joint
+      - waist_pitch_joint
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - left_eccentric_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+      - right_eccentric_joint
+
+    # 策略驱动的 29 轴，顺序即动作向量的顺序（12 腿 + 3 腰 + 7 左臂 + 7 右臂）。
+    action_joints:
+      - left_hip_pitch_joint
+      - left_hip_roll_joint
+      - left_hip_yaw_joint
+      - left_knee_joint
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+      - right_hip_pitch_joint
+      - right_hip_roll_joint
+      - right_hip_yaw_joint
+      - right_knee_joint
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+      - waist_yaw_joint
+      - waist_roll_joint
+      - waist_pitch_joint
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+
+    # 策略不管的 2 轴，透传下面的目标值。
+    gripper_joints: [left_eccentric_joint, right_eccentric_joint]
+    gripper_targets: [0.0, 0.0]
+
+    # 失控保护边界 = 训练模型里 MuJoCo 算的 ctrlrange（jnt_range ± effort_limit/stiffness）。
+    #
+    # **故意不是关节行程限位。** 底层是 PD：tau = kp*(q_target - q) - kd*dq，关节靠到
+    # 行程边上还想要力，就只能把目标顶到行程之外。mjlab 建 <position> 执行器时显式设了
+    # ctrllimited=False + inheritrange=0，就是为了这个。越过下面这组边界力矩已经饱和，
+    # 再大的目标也换不来额外的力，所以裁在这儿物理上是空操作，纯粹用来拦真正跑飞的输出。
+    #
+    # 前 15 项与 g1_motion_control/config/motion_control.yaml 逐位相同（同一套模型算的）。
+    target_lower_limits: [-4.721, -1.926, -4.948, -1.490, -2.627, -2.016,
+                          -4.721, -4.370, -4.948, -1.490, -2.627, -2.016,
+                          -4.808, -2.274, -2.274,
+                          -4.844, -3.343, -4.372, -2.802, -3.727, -1.912, -1.912,
+                          -4.844, -4.006, -4.372, -2.802, -3.727, -1.912, -1.912]
+    target_upper_limits: [+5.070, +4.370, +4.948, +4.282, +2.278, +2.016,
+                          +5.070, +1.926, +4.948, +4.282, +2.278, +2.016,
+                          +4.808, +2.274, +2.274,
+                          +4.425, +4.006, +4.372, +3.849, +3.727, +1.912, +1.912,
+                          +4.425, +3.343, +4.372, +3.849, +3.727, +1.912, +1.912]
+
+    # 训练是 sim dt 0.005 × decimation 4 = 50 Hz，实机必须一致：这个频率同时决定参考
+    # 动作的播放速度。和 ONNX 契约里的 control_dt 对不上会拒绝启动。
+    control_rate_hz: 50.0
+
+    # STAND 阶段把 31 轴从实测位形插值到参考动作第 0 帧，插完才开始放。
+    # 比 g1_motion_control 的 2.5 s 略长：这里手臂也要一起走到位。
+    stand_s: 3.0
+
+    # 躯干倾角超过它就急停。与站立任务的终止条件同值。
+    tilt_limit_rad: 0.8
+
+    # 状态数据超时。/joint_states 与 IMU 都按 100 Hz 发。
+    state_timeout_s: 0.2
+
+    # 参考窗口里给出笛卡尔位置的刚体，顺序必须与 ONNX metadata 一致，对不上拒绝启动。
+    # 第一个是 anchor 自己，它那 3 维就是机器人相对参考的漂移量。
+    reference_key_bodies:
+      - torso_link
+      - left_wrist_yaw_link
+      - right_wrist_yaw_link
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+
+    # 里程计。本策略的观测含「参考相对机器人」的位移，所以必须知道躯干的世界位置——
+    # 这是本包与 g1_gmt_tracking 的根本差异，也是包名带 _global 的原因。
+    #
+    #   fused      雷达(10 Hz，有绝对参照) x /dog_odom(500 Hz，短时准) —— 推荐
+    #   odom_only  只用 /dog_odom。零依赖、可离线，但随行走距离无界漂移，只适合短动作
+    #   lidar_only 只用雷达。10 Hz 会让 50 Hz 控制环每 5 拍才更新一次，仅供对照
+    odometry_mode: fused
+    odom_topic: /dog_odom
+    lidar_pose_topic: /g1_localization/torso_pose
+    odom_timeout_s: 0.2
+    # 雷达 10 Hz，给到 1 s 容得下几帧丢失；超时即急停。
+    lidar_timeout_s: 1.0
+    # 慢通道时间常数。修正量是 odom 的累积漂移，本身缓变，滤狠一点也不引入动态滞后。
+    lidar_correction_tau_s: 2.0
+
+    # 参考锚点相对机器人的偏移上限。里程计失效时那 3 维会无界增长，而失效模式是正反馈
+    # （以为自己漂了 -> 往回纠 -> 真的走偏）。钳住之后最坏退化成开环，不会主动推倒机器人。
+    # 取值参考训练侧实测：交付模型 250 s 的全局漂移是 0.29 m。
+    max_anchor_offset_m: 0.3
+
+    imu_topic: /pelvis_imu_broadcaster/imu
+    target_topic: /forward_position_controller/commands
+    controller_manager: /controller_manager
+    controller_name: forward_position_controller
