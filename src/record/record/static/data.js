@@ -284,6 +284,30 @@ function renderBox(d, e) {
   return box;
 }
 
+/** 删掉一条 episode。素材是整段连续录的，剪不开 —— 删的是「这一条算数」这件事：
+ *  回放、校验、导出从此都看不到它。整段那张卡片没有这个按钮（删了就什么都不剩）。 */
+function dropEpisodeBtn(d, e) {
+  const b = document.createElement('button');
+  b.className = 'danger';
+  b.dataset.act = 'drop';
+  b.textContent = '删除';
+  b.disabled = PLAYING || RENDER.running || !d.sealed;
+  b.title = d.sealed ? '把这一条从交付清单里去掉' : '没封口的不给改';
+  if (!d.sealed) b.dataset.locked = '1';        // 轮询里的 syncDetail 别把它又启用了
+  b.onclick = async () => {
+    if (!confirm(`删除 ${e.label}？\n\n${e.instruction || '（未标注指令）'}\n\n`
+                 + '这一条不再计入交付，回放和导出都会跳过它；'
+                 + '整段视频是连续录的，删不掉那几秒素材。删了不可恢复。')) return;
+    try {
+      const r = await post('/api/episode/delete', { session: d.id, label: e.label });
+      banner(`已删除 ${r.result.label}`);
+      loadDetail();
+      refresh();
+    } catch (err) { banner('删不掉：' + err.message, 'bad'); }
+  };
+  return b;
+}
+
 /** 只改按钮可用性与高亮。不能重跑 renderDetail —— 那会重拉 6 张预览帧，每张一个 ffmpeg */
 function syncDetail() {
   for (const el of document.querySelectorAll('#detail .card')) {
@@ -292,6 +316,7 @@ function syncDetail() {
     const busy = RENDER.running && !(RENDER.session === PICKED
                                      && RENDER.label === el.dataset.label);
     for (const b of el.querySelectorAll('.top button')) {
+      if (b.dataset.locked) continue;
       b.disabled = PLAYING || (b.dataset.act === 'verify' ? busy : RENDER.running);
     }
   }
@@ -477,7 +502,7 @@ function renderDetail(d) {
   for (const e of d.episodes) {
     list.appendChild(epCard(d, {
       label: e.label, kind: e.outcome, duration: e.duration, extra: '',
-      instruction: e.instruction, t0: e.t0, t1: e.t1,
+      instruction: e.instruction, t0: e.t0, t1: e.t1, drop: true,
       // 取 episode 中点那一帧：开头往往手还没进画面
       at: (e.t0 + e.t1) / 2 - d.whole.t0,
     }));
@@ -511,6 +536,7 @@ function epCard(d, e) {
   dur.className = 'dur';
   dur.textContent = [`${e.duration}s`, state.mark, e.extra].filter(Boolean).join(' · ');
   top.append(who, dur, verifyBtn(d, e), playBtn(e.label, d.id, e.t0, e.t1));
+  if (e.drop) top.appendChild(dropEpisodeBtn(d, e));
 
   const say = document.createElement('div');
   say.className = 'say';

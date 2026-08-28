@@ -22,6 +22,8 @@ def panel(rec, port: int = 8220, host: str = '0.0.0.0') -> Panel:
         '/api/episode/start': lambda b: rec.start_episode(int(b['index'])),
         '/api/episode/end': lambda b: rec.end_episode(
             b.get('outcome', 'success'), b.get('note', '')),
+        '/api/episode/relabel': lambda b: rec.relabel_take(
+            int(b['slot']), int(b['take']), b['outcome']),
     }
 
     def route(h, u):

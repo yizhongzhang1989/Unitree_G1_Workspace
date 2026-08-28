@@ -170,7 +170,16 @@ def main() -> int:
         time.sleep(args.hold)
         call('/api/episode/end', {'outcome': 'discard'})
         st = call('/api/state')['status']
-        assert st['slot_takes'].get('0') == ['fail', 'discard'], st['slot_takes']
+        takes = st['slot_takes'].get('0')
+        assert [t['outcome'] for t in takes] == ['fail', 'discard'], takes
+
+        # 当场标的结论事后能改：面板上点那排小方块走「成功→失败→丢弃」
+        st = call('/api/episode/relabel',
+                  {'slot': 0, 'take': 0, 'outcome': 'success'})['result']
+        assert st['slot_takes']['0'][0]['outcome'] == 'success', st['slot_takes']
+        assert st['counts']['fail'] == 0 and st['counts']['success'] == 3, st['counts']
+        _rejected('/api/episode/relabel', {'slot': 0, 'take': 9, 'outcome': 'fail'},
+                  '改了不存在的那一次录制')
         call('/api/round/end', {})
 
         # 「结束本轮」把这一轮退回预览：桌子还照它摆着，再开一轮不该逼人重摆一次

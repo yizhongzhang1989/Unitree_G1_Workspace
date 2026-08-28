@@ -140,9 +140,10 @@ class Recorder(Node):
         # 正在录的是指令表里的第几条。和 session.episode_index（本轮第几次录）
         # 只在「一条一次、按顺序走」时碰巧相等，重录一次就永久分家
         self._episode_slot = -1
-        # slot -> 已录各次的 outcome。同一条指令可以录很多遍，每遍都是独立的一条
-        # episode，旧的不会被覆盖；面板拿它显示「重录」和已录次数
-        self._slot_takes: dict[int, list[str]] = {}
+        # slot -> 已录各次 ``{'episode': 本轮第几次录, 'outcome': 结论}``。同一条指令可以录
+        # 很多遍，每遍都是独立的一条 episode，旧的不会被覆盖；面板拿它把每次尝试列出来。
+        # 存 episode 序号是为了事后能改其中某一次的标注（当场判的成功常常回头看是失败）
+        self._slot_takes: dict[int, list[dict]] = {}
 
         # 常驻订阅：不录也要在面板上显示各路的实时频率，操作者才能在开录前发现问题
         self._attach_monitors()
@@ -469,9 +470,28 @@ class Recorder(Node):
             session = self._require(State.EPISODE)
             session.end_episode(outcome, note)
             if self._episode_slot >= 0:
-                self._slot_takes.setdefault(self._episode_slot, []).append(outcome)
+                self._slot_takes.setdefault(self._episode_slot, []).append(
+                    {'episode': session.episode_index, 'outcome': outcome})
             if outcome == 'success' and self.library and self._round_obj:
                 self._bump_usage()
+            return self.status()
+
+    def relabel_take(self, slot: int, take: int, outcome: str) -> dict:
+        """改本轮里某一条指令第 ``take`` 次录制的结论。
+
+        录完下一条才发现上一条其实没成是常事，所以正在录（EPISODE）时也允许改。
+        ``_slot_takes`` 随轮清空，所以能改的就只有当前这一轮 ——
+        封口后的 session 去数据管理面板改。
+        """
+        with self._lock:
+            session = self.session
+            if session is None or session.state not in (State.ROUND, State.EPISODE):
+                raise RuntimeError('本轮已结束，改不了标注')
+            takes = self._slot_takes.get(slot) or []
+            if not 0 <= take < len(takes):
+                raise RuntimeError(f'第 {slot} 条指令没有第 {take + 1} 次录制')
+            session.relabel_episode(takes[take]['episode'], outcome)
+            takes[take]['outcome'] = outcome
             return self.status()
 
     def _bump_usage(self) -> None:

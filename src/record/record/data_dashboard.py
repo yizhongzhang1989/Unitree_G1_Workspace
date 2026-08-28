@@ -26,6 +26,8 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
             float(b.get('speed', 1.0)), b.get('label', '')),
         '/api/replay/stop': lambda b: rec.stop(),
         '/api/session/delete': lambda b: rec.delete(b['session'], b.get('confirm', '')),
+        '/api/episode/delete': lambda b: rec.delete_episode(
+            b['session'], b.get('label', '')),
         '/api/convert/start': lambda b: rec.start_convert(b['session'], b['format']),
         '/api/render/start': lambda b: rec.start_render(
             b['session'], float(b['t0']), float(b['t1']), b.get('label', '')),

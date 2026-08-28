@@ -145,6 +145,7 @@ tr.off { opacity: .45; }
 /* 别叫 `preview`：数据页的 `.preview` 是 `display:flex; height:100%`，跨页撞名会把
    每条指令撑成整栏高，只看得见一条 —— 两个页共用一份 app.css。 */
 .ep.ep-preview { border-left-style: dashed; }
+.ep .ep-tags { display: flex; align-items: center; flex-wrap: wrap; }
 .ep .acts { display: flex; gap: .35rem; margin-top: .25rem; }
 .ep .acts button { padding: .2rem .55rem; font-size: .78rem; }
 /* 指令是操作者真要读的那行字，比周围的元信息大一号 */
@@ -153,7 +154,19 @@ tr.off { opacity: .45; }
 .tag { font-size: .72rem; padding: .05rem .4rem; border-radius: 4px;
        background: #e2e8f0; color: #475569; margin-right: .3rem; }
 .tag.pass { background: #ffedd5; color: #9a3412; }
-.tag.take { background: #dbeafe; color: #1d4ed8; }
+/* 每录一遍一个小方块，数字是第几次、底色就是结论。点一下轮换成功→失败→丢弃，
+   所以「当时以为成了、回看发现没成」不用等到导出前才发现改不动 */
+.takes { display: flex; gap: .2rem; }
+.take { min-width: 1.5rem; padding: .1rem .35rem; border-radius: 4px;
+        border: 1px solid transparent; font-size: .74rem; text-align: center;
+        font-variant-numeric: tabular-nums; cursor: pointer; user-select: none; }
+.take:hover { border-color: var(--accent); }
+.take.success { background: #dcfce7; color: #15803d; }
+.take.fail { background: #fee2e2; color: #b91c1c; }
+/* 虚线框而不是删除线：一位数字上压一条横线基本认不出来了 */
+.take.discard { background: #e2e8f0; color: #64748b; border-style: dashed;
+                border-color: #b6c2d1; }
+.take.busy { opacity: .45; cursor: progress; }
 
 .hint.warn { color: var(--bad); font-weight: 600; }
 .bar { height: .35rem; border-radius: 999px; background: #e2e8f0;

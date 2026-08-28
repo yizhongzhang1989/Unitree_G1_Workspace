@@ -118,6 +118,44 @@ def test_episode_index_counts_takes_not_slots(session):
     assert session.episode_index == 2         # 指令表只有 2 条，下标不可能是 2
 
 
+def test_relabel_appends_instead_of_rewriting(session):
+    """改标注只往事件线追加，原来那行 `episode_end` 原样留着。"""
+    session.start_round({'seed': 1, 'items': [], 'episodes': [{}]})
+    session.start_episode({})
+    session.end_episode('success')
+    assert session.relabel_episode(0, 'fail') == 'success'
+    events = read_events(session.paths.events)
+    assert [e['type'] for e in events][-2:] == ['episode_end', 'episode_relabel']
+    assert events[-2]['outcome'] == 'success'
+    assert events[-1]['outcome'] == 'fail' and events[-1]['was'] == 'success'
+
+
+def test_relabel_moves_the_counts(session):
+    """进出「丢弃」那一档要连总数一起改 —— discard 不算交付的 episode。"""
+    session.start_round({'seed': 1, 'items': [], 'episodes': [{}]})
+    session.start_episode({})
+    session.end_episode('success')
+    session.relabel_episode(0, 'discard')
+    assert session.counts == {'rounds': 1, 'episodes': 0, 'success': 0,
+                              'fail': 0, 'discard': 1}
+    session.relabel_episode(0, 'fail')
+    assert session.counts == {'rounds': 1, 'episodes': 1, 'success': 0,
+                              'fail': 1, 'discard': 0}
+    # 改成一样的不该再写一行，否则点两下就多一条假记录
+    session.relabel_episode(0, 'fail')
+    assert sum(e['type'] == 'episode_relabel'
+               for e in read_events(session.paths.events)) == 2
+
+
+def test_relabel_rejects_unknown_episode(session):
+    session.start_round({'seed': 1, 'items': [], 'episodes': [{}]})
+    session.start_episode({})
+    with pytest.raises(SessionError, match='改不了标注'):
+        session.relabel_episode(0, 'fail')          # 还没录完
+    with pytest.raises(SessionError, match='改不了标注'):
+        session.relabel_episode(7, 'fail')
+
+
 def test_finish_closes_dangling_episode(session):
     session.start_round({'seed': 1, 'items': [], 'episodes': [{}]})
     session.start_episode({})

@@ -45,6 +45,16 @@ def open_session(path):
     return _load('session_reader').Session(path)
 
 
+def episode_label(round_index: int, episode_index: int) -> str:
+    """episode 的标签由读侧定义 —— 校验视频文件名和删除记录都拿它当键，分叉了就对不上。"""
+    return _load('session_reader').episode_label(round_index, episode_index)
+
+
+def edits_path(root) -> Path:
+    """封口后的人工修订文件。写在这边，读在 ``session_reader``，名字只定义一次。"""
+    return Path(root) / _load('session_reader').EDITS_FILE
+
+
 def describe(path) -> dict:
     """给面板用的 session 概要：整段范围 + 每条 episode 的时间窗。"""
     sess = open_session(path)
@@ -62,7 +72,7 @@ def describe(path) -> dict:
         if t1 <= t0:
             continue
         eps.append({
-            'label': f'r{e["round"]}e{e["episode"]}',
+            'label': e['label'],
             'outcome': e.get('outcome', ''),
             'instruction': e.get('instruction_en', ''),
             'duration': round(t1 - t0, 1),

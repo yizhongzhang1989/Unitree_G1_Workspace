@@ -5,6 +5,7 @@
 
 import importlib.util
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -131,6 +132,35 @@ def test_episodes_carry_instruction_and_span(built, reader_module):
 def test_discarded_episode_available_on_request(built, reader_module):
     r = reader_module.Session(built.paths.root)
     assert len(r.episodes(include_discarded=True)) == 3
+
+
+def test_reader_reports_the_relabelled_outcome(tmp_path, reader_module):
+    """当场标的结论事后改过，下游拿到的必须是改过的那个。"""
+    s = Session.create(tmp_path / 'sessions', {'joint_states': True})
+    w = TableWriter(s.paths.signals / 'joint_states.bin', ['t_recv', 't_header', 'a'])
+    w.append([time.time(), float('nan'), 1.0])
+    s.start_round({'seed': 1, 'items': [], 'episodes': [{'instruction_en': 'a'}]})
+    s.start_episode({'instruction_en': 'a'})
+    s.end_episode('success')
+    s.relabel_episode(0, 'fail')
+    s.end_round()
+    w.close()
+    s.finish({'joint_states': w.schema()})
+    eps = reader_module.Session(s.paths.root).episodes(include_discarded=True)
+    assert [(e['label'], e['outcome']) for e in eps] == [('r0e0', 'fail')]
+
+
+def test_deleting_an_episode_keeps_the_seal_intact(built, reader_module, tmp_path):
+    """删一条 episode 绝不能去改 `events.jsonl` —— 它的 sha256 写在 `DONE` 里，
+    改一个字节整次采集就校验不过了。所以它记在旁挂的 `edits.json` 里。
+    """
+    root = Path(shutil.copytree(built.paths.root, tmp_path / 'copy'))
+    (root / 'edits.json').write_text(json.dumps({'deleted': ['r0e1']}),
+                                     encoding='utf-8')
+    r = reader_module.Session(root)
+    assert r.verify() == []
+    assert [e['label'] for e in r.episodes(include_discarded=True)] == ['r0e0', 'r0e2']
+    assert len(r.episodes(include_discarded=True, include_deleted=True)) == 3
 
 
 def test_slicing_lines_up_signals_and_frames(built, reader_module):

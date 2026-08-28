@@ -29,6 +29,16 @@ import numpy as np
 #: 头部为 0：D435i 给的就是硬件曝光时刻，不需要再减。
 CAMERA_DELAY_S = {'wrist_left': 0.110, 'wrist_right': 0.110, 'head': 0.0}
 
+#: 封口后的人工修订（目前只有「删掉哪几条 episode」）。单独一个文件而不是回头改
+#: ``events.jsonl``：后者的 sha256 写进了 ``DONE``，改一个字节整次采集就校验不过，
+#: 而 ``DONE`` 只核对它自己列出的那些文件，多一个旁挂文件不影响它。
+EDITS_FILE = 'edits.json'
+
+
+def episode_label(round_index: int, episode_index: int) -> str:
+    """一条 episode 的稳定标签。回放、校验视频、删除都拿它当键。"""
+    return f'r{round_index}e{episode_index}'
+
 
 class Session:
     def __init__(self, root: str | Path) -> None:
@@ -40,6 +50,7 @@ class Session:
         self.meta = _json(self.root / 'meta.json') if (self.root / 'meta.json').is_file() else {}
         self.events = _events(self.root / 'events.jsonl')
         self._nominal: dict | None = None
+        self._edits: dict | None = None
 
     # ------------------------------------------------------------------ 完整性
 
@@ -141,19 +152,44 @@ class Session:
     def rounds(self) -> list[dict]:
         return [_json(p) for p in sorted((self.root / 'rounds').glob('round_*.json'))]
 
-    def episodes(self, include_discarded: bool = False) -> list[dict]:
-        """按事件线切出每条 episode 的时间区间与指令。这是交付单位。"""
+    def edits(self) -> dict:
+        """封口后的人工修订，没改过就是空字典。旧 session 没这个文件。"""
+        if self._edits is None:
+            path = self.root / EDITS_FILE
+            self._edits = _json(path) if path.is_file() else {}
+        return self._edits
+
+    def deleted(self) -> set:
+        """被删掉的 episode 标签。素材还在盘上（视频是整段连续录的，剪不开），
+        但交付口径里没它 —— ``episodes()`` 不返回，导出与回放也就看不到。"""
+        return set(self.edits().get('deleted') or [])
+
+    def episodes(self, include_discarded: bool = False,
+                 include_deleted: bool = False) -> list[dict]:
+        """按事件线切出每条 episode 的时间区间与指令。这是交付单位。
+
+        结论可以事后改（``episode_relabel``）、整条可以事后删（``edits.json``）。
+        两样都在这里应用，下游拿到的就是最终结论。
+        """
+        final = {(e['round'], e['episode']): e['outcome'] for e in self.events
+                 if e['type'] == 'episode_relabel'}
+        dropped = self.deleted()
         out, open_ep = [], None
         for e in self.events:
             if e['type'] == 'episode_start':
                 open_ep = e
             elif e['type'] == 'episode_end' and open_ep is not None:
-                if include_discarded or e['outcome'] != 'discard':
+                key = (e['round'], e['episode'])
+                outcome = final.get(key, e['outcome'])
+                label = episode_label(*key)
+                if ((include_discarded or outcome != 'discard')
+                        and (include_deleted or label not in dropped)):
                     out.append({
+                        'label': label,
                         'round': e['round'], 'episode': e['episode'],
                         't0': open_ep['t'], 't1': e['t'],
                         'duration': e.get('duration', e['t'] - open_ep['t']),
-                        'outcome': e['outcome'], 'note': e.get('note', ''),
+                        'outcome': outcome, 'note': e.get('note', ''),
                         **open_ep.get('instruction', {}),
                     })
                 open_ep = None
