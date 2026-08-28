@@ -148,6 +148,8 @@ class DataManager(Node):
         #: 已封口 session 的概要。面板 1 Hz 轮询 sessions()，而一次概要要递归 stat 整个
         #: 目录、逐行解 events.jsonl（能到几 MB）；封口后这些数字不会再变，算一次就够。
         self._summary: dict[str, dict] = {}
+        #: 转换格式与依赖齐不齐，同样被 1 Hz 轮询，见 `formats()`
+        self._formats: list[dict] | None = None
         # 上一轮没取走的临时产物在盘上，而 token 随进程没了，再也取不走
         self._sweep_bundles(ttl=0.0)
         self.get_logger().info(f'数据管理节点就绪，session 根目录 {self.root}')
@@ -291,8 +293,15 @@ class DataManager(Node):
     # ------------------------------------------------------------------ 转换
 
     def formats(self) -> list[dict]:
-        """面板下拉框的选项。缺依赖的那项带着 missing 一起报出去，好置灰。"""
-        return converters.describe()
+        """面板下拉框的选项。缺依赖的那项带着 missing 一起报出去，好置灰。
+
+        算一次就存着：``describe()`` 会对每个依赖跑 ``find_spec`` + ``which``，
+        实测 1.88 ms，而它是被 1 Hz 轮询的 —— 占了这个端点全部 CPU 的四成。
+        装没装依赖不会在节点跑着的时候变，真装了重启一下节点。
+        """
+        if self._formats is None:
+            self._formats = converters.describe()
+        return self._formats
 
     def tools_bundle(self) -> list:
         """B 上要的全套：`tools/` 整个 + 两个不在 session 里的配置文件。
@@ -429,7 +438,10 @@ class DataManager(Node):
         try:
             # PYTHONUNBUFFERED：子进程的 stdout 接的是管道，默认块缓冲，
             # 不加这个就要等它整个跑完才吐字，面板上的进度条等于没有
-            proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+            # nice：转换/渲染都是 CPU-bound 的后台长任务（渲染实测 65% 单核/路），
+            # 而它们经常与采集同时跑。晚几秒出结果无所谓，拖慢控制环不行。
+            proc = subprocess.Popen(['nice', '-n', '10', *command],
+                                    stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True,
                                     stdin=subprocess.DEVNULL,
                                     env={**os.environ, 'PYTHONUNBUFFERED': '1'})

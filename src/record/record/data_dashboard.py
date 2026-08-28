@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-from urllib.parse import parse_qs
-
 from record.webui import Panel, make_handler, tree_entries
 
 
@@ -37,52 +35,43 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
         '/api/control/estop': lambda b: rec.trigger('estop'),
     }
 
-    def route(h, u):
-        q = parse_qs(u.query)
-        arg = (lambda k: (q.get(k) or [''])[0])
-        if u.path in ('/', '/index.html'):
-            return h.send_static('data.html')
-        if u.path in ('/app.css', '/data.js', '/common.js'):
-            return h.send_static(u.path.lstrip('/'))
-        if u.path == '/api/state':
-            return h.send_json({'status': rec.status(), 'sessions': rec.sessions(),
-                                'convert': rec.convert_state(),
-                                'render': rec.render_state(),
-                                'formats': rec.formats()})
-        if u.path == '/api/session':
-            return h.send_json(rec.detail(arg('id')))
-        if u.path == '/api/raw':
-            return h.send_json(rec.raw_files(arg('id')))
-        if u.path == '/api/preview':
-            return h.send_json(rec.preview(arg('id'), arg('file')))
-        if u.path == '/raw':
-            path = rec.raw_path(arg('id'), arg('file'))
-            return h.send_file(path, path.name)
-        if u.path == '/raw.zip':
-            root = rec.raw_dir(arg('id'), arg('dir'))
-            name = arg('dir').replace('/', '_') or arg('id')
-            return h.send_zip(f'{name}.zip', tree_entries(root))
-        if u.path == '/tools.zip':
-            # B 一次拿全：tools/ + final.urdf + calibration.yaml
-            return h.send_zip('record-tools.zip', rec.tools_bundle())
-        if u.path == '/verify.mp4':
-            # 内联放而不是下载：这东西是拿来在页上来回拖着看的
-            return h.send_file(rec.render_video(arg('id'), arg('label')),
-                               ctype='video/mp4')
-        if u.path == '/bundle.zip':
-            token = arg('token')
-            root = rec.bundle(token)
-            # 取件即销毁：产物只为这一次下载而生，留着就是白占盘
-            try:
-                return h.send_zip(f'{token}.zip', tree_entries(root))
-            finally:
-                rec.drop_bundle(token)
-        if u.path == '/api/frame':
-            return h.send_bytes(200, rec.frame(arg('id'), arg('stream'),
-                                               float(arg('t') or 0.0)),
-                                'image/jpeg')
-        if u.path in actions:
-            return h.send_json({'error': f'{u.path} 只接受 POST'}, 405)
-        return h.send_json({'error': 'not found'}, 404)
+    def raw_file(h, arg):
+        path = rec.raw_path(arg('id'), arg('file'))
+        return h.send_file(path, path.name)
 
-    return Panel(rec, make_handler(rec, actions, route), port, '数据管理面板', host)
+    def raw_zip(h, arg):
+        root = rec.raw_dir(arg('id'), arg('dir'))
+        name = arg('dir').replace('/', '_') or arg('id')
+        return h.send_zip(f'{name}.zip', tree_entries(root))
+
+    def bundle_zip(h, arg):
+        token = arg('token')
+        root = rec.bundle(token)
+        # 取件即销毁：产物只为这一次下载而生，留着就是白占盘
+        try:
+            return h.send_zip(f'{token}.zip', tree_entries(root))
+        finally:
+            rec.drop_bundle(token)
+
+    gets = {
+        '/api/state': lambda h, arg: h.send_json(
+            {'status': rec.status(), 'sessions': rec.sessions(),
+             'convert': rec.convert_state(), 'render': rec.render_state(),
+             'formats': rec.formats()}),
+        '/api/session': lambda h, arg: h.send_json(rec.detail(arg('id'))),
+        '/api/raw': lambda h, arg: h.send_json(rec.raw_files(arg('id'))),
+        '/api/preview': lambda h, arg: h.send_json(rec.preview(arg('id'), arg('file'))),
+        '/api/frame': lambda h, arg: h.send_bytes(
+            200, rec.frame(arg('id'), arg('stream'), float(arg('t') or 0.0)),
+            'image/jpeg'),
+        '/raw': raw_file,
+        '/raw.zip': raw_zip,
+        # B 一次拿全：tools/ + final.urdf + calibration.yaml
+        '/tools.zip': lambda h, arg: h.send_zip('record-tools.zip', rec.tools_bundle()),
+        # 内联放而不是下载：这东西是拿来在页上来回拖着看的
+        '/verify.mp4': lambda h, arg: h.send_file(
+            rec.render_video(arg('id'), arg('label')), ctype='video/mp4'),
+        '/bundle.zip': bundle_zip,
+    }
+    return Panel(rec, make_handler(rec, actions, gets, 'data.html'),
+                 port, '数据管理面板', host)

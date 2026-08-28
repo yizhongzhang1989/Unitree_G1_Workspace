@@ -44,7 +44,7 @@ class _Fake:
 
 @pytest.fixture
 def handler_class():
-    return make_handler(_Node(), {}, lambda h, u: None)
+    return make_handler(_Node(), {}, {})
 
 
 @pytest.fixture
