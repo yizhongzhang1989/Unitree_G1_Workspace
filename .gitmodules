@@ -16,3 +16,8 @@
 [submodule "src/point_lio_ros2"]
 	path = src/point_lio_ros2
 	url = https://github.com/dfloreaa/point_lio_ros2.git
+	# 本仓库不 fork 它，改动走 patches/point_lio_ros2/*.patch，由
+	# scripts/apply_patches.sh 打在工作树上。补丁打上后工作树必然是脏的，
+	# 这是设计如此 —— ignore=dirty 让 git status 不再为此刷噪声，但 commit
+	# 指针变了照样会报，不影响真正的 submodule 升级。
+	ignore = dirty
