@@ -19,6 +19,8 @@ from enum import Enum
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+#: 一条 episode 的三种结论。改标注和收尾都按它校验。
+OUTCOMES = ('success', 'fail', 'discard')
 
 
 class State(str, Enum):
@@ -92,6 +94,8 @@ class Session:
     counts: dict = field(default_factory=lambda: {'rounds': 0, 'episodes': 0,
                                                   'success': 0, 'fail': 0,
                                                   'discard': 0})
+    #: (round, episode) -> 当前结论。改标注要按它把旧的那一笔计数退回来
+    outcomes: dict = field(default_factory=dict)
 
     @classmethod
     def create(cls, root: str | os.PathLike, streams: dict, meta: dict | None = None,
@@ -164,15 +168,43 @@ class Session:
     def end_episode(self, outcome: str, note: str = '') -> None:
         if self.state is not State.EPISODE:
             raise SessionError('没有正在录的 episode')
-        if outcome not in ('success', 'fail', 'discard'):
+        if outcome not in OUTCOMES:
             raise SessionError(f'未知标注 {outcome}')
         self.log.emit('episode_end', round=self.round_index,
                       episode=self.episode_index, outcome=outcome, note=note,
                       duration=time.time() - self.episode_started)
+        self.outcomes[(self.round_index, self.episode_index)] = outcome
         self.counts[outcome] += 1
         if outcome != 'discard':
             self.counts['episodes'] += 1
         self.state = State.ROUND
+
+    def relabel_episode(self, episode: int, outcome: str,
+                        round_index: int | None = None) -> str:
+        """改一条已录完 episode 的结论，返回改之前是什么。
+
+        当场标的「成功」事后回看常常是失败的，所以这条路必须有。**事件线只追加**，
+        原来那行 ``episode_end`` 原样留着 —— 读侧按最后一条 ``episode_relabel`` 为准。
+        """
+        if outcome not in OUTCOMES:
+            raise SessionError(f'未知标注 {outcome}')
+        rnd = self.round_index if round_index is None else round_index
+        was = self.outcomes.get((rnd, episode))
+        if was is None:
+            raise SessionError(f'r{rnd}e{episode} 没有录完的记录，改不了标注')
+        if was == outcome:
+            return was
+        self.counts[was] -= 1
+        self.counts[outcome] += 1
+        # 「丢弃」不算交付的 episode，进出这一档要同时改总数
+        if was == 'discard':
+            self.counts['episodes'] += 1
+        elif outcome == 'discard':
+            self.counts['episodes'] -= 1
+        self.outcomes[(rnd, episode)] = outcome
+        self.log.emit('episode_relabel', round=rnd, episode=episode,
+                      outcome=outcome, was=was)
+        return was
 
     def warn(self, code: str, **detail) -> None:
         """Spec §1.5：运行时只记录警告，绝不阻塞落盘。"""

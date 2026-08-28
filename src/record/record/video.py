@@ -30,7 +30,15 @@ ENCODE = ('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
           '-tune', 'zerolatency', '-pix_fmt', 'yuv420p', '-g', '60')
 
 #: ffmpeg 在脚本里必须加 -nostdin，否则它吞掉 stdin 直接卡死（表现为超时无输出）。
-BASE = ('ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'warning')
+#:
+#: `nice -n 10`：头部软编是 **CPU-bound** 的（720p30 ultrafast crf26 实测 75.8% 单核），
+#: 而 CPU-bound 进程会把时间片跑满才让出，比高频唤醒的订阅更能拖延 50 Hz 的控制环。
+#: 编码器自带缓冲、不在乎晚几毫秒，控制环在乎。`nice` 走 execvp，PID 不变，
+#: 所以 terminate()/send_signal() 照旧送得到。
+#: 判据：开了之后录制的丢帧率（events.jsonl 里的 head_queue_drop、nominal.json 的实收
+#: 帧率）必须不变；变差就把 nice 去掉。
+BASE = ('nice', '-n', '10',
+        'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'warning')
 
 
 @dataclass

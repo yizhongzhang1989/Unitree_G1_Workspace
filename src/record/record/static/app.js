@@ -3,6 +3,7 @@
 let STATE = null;          // 最近一次 /api/state
 let PICKED = null;         // 开录前的勾选；开录后由后端的 recording 字段接管
 let SCENE_KEY = '';        // 当前画的是哪一轮，变了才重拉 SVG
+let EP_SIG = '';           // 上次渲染的指令表指纹，没变就不动 DOM
 let FOLDED = false;
 let WAS_LOCKED = null;
 
@@ -58,34 +59,57 @@ function renderStreams(streams, locked) {
   sum.className = 'hint' + (locked && dead ? ' warn' : '');
 }
 
-const OUTCOME_ZH = { success: '成', fail: '败', discard: '弃' };
+const OUTCOME_ZH = { success: '成功', fail: '失败', discard: '丢弃' };
+//: 点一下走到下一档。转一圈回到成功，所以点错了不用找「撤销」
+const NEXT_OUTCOME = { success: 'fail', fail: 'discard', discard: 'success' };
 
-// 已录次数由后端给（刷页不丢）。每录一遍就是独立的一条 episode，旧的不会被覆盖
-function takesTag(takes) {
-  const n = {};
-  for (const o of takes) n[o] = (n[o] || 0) + 1;
-  const parts = Object.keys(OUTCOME_ZH).filter((k) => n[k]).map((k) => OUTCOME_ZH[k] + n[k]);
-  return `<span class="tag take" title="每次重录都另存一条，不覆盖旧的；不想要的标「丢弃」">`
-    + `已录 ${takes.length} · ${parts.join(' ')}</span>`;
+// 已录次数由后端给（刷页不丢）。每录一遍就是独立的一条 episode，旧的不会被覆盖；
+// 这里把每一次单独摆出来 —— 只报「成 2 败 1」的话，事后发现某一次其实没成就改不动了
+function takesRow(slot, takes) {
+  const box = document.createElement('div');
+  box.className = 'takes';
+  takes.forEach((t, k) => {
+    const chip = document.createElement('div');
+    chip.className = 'take ' + t.outcome;
+    chip.textContent = String(k + 1);
+    chip.title = `第 ${k + 1} 次录制：${OUTCOME_ZH[t.outcome] || t.outcome}`
+      + `（点一下改成「${OUTCOME_ZH[NEXT_OUTCOME[t.outcome]]}」）`;
+    chip.onclick = async () => {
+      chip.classList.add('busy');
+      try {
+        await post('/api/episode/relabel',
+                   { slot, take: k, outcome: NEXT_OUTCOME[t.outcome] });
+      } catch (err) { banner('改标注失败：' + err.message, 'bad'); }
+      refresh();
+    };
+    box.appendChild(chip);
+  });
+  return box;
 }
 
 function renderEpisodes(status) {
   const box = $('episodes');
   const committed = status.round_detail;
   const detail = committed || status.pending_round;
+  const preview = !committed;
+  const inEpisode = status.state === 'episode';
+  const slotTakes = status.slot_takes || {};
+  // 1 Hz 轮询无条件重建 DOM 会把点击吃掉：mousedown 和 mouseup 落在两个不同的节点上，
+  // click 压根不触发。那排「第几次」的小方块正是要反复点的，所以内容没变就别动
+  const sig = JSON.stringify([status.state, status.episode_slot, slotTakes,
+                              preview, detail && detail.episodes]);
+  if (sig === EP_SIG) return;
+  EP_SIG = sig;
   if (!detail) {
     box.innerHTML = '<p class="hint">还没有摆放样例。点「生成任务 / 重 roll」。</p>';
     return;
   }
-  const preview = !committed;
-  const inEpisode = status.state === 'episode';
-  const slotTakes = status.slot_takes || {};
   box.innerHTML = '';
   detail.episodes.forEach((ep, i) => {
     const div = document.createElement('div');
     const active = inEpisode && status.episode_slot === i;
     const takes = (committed && slotTakes[i]) || [];
-    const ok = takes.filter((o) => o === 'success').length;
+    const ok = takes.filter((t) => t.outcome === 'success').length;
     // 正在录的这条不淡出：重录旧的成功记录还在，但眼下要读的就是它
     div.className = 'ep' + (preview ? ' ep-preview' : '')
       + (active ? ' active' : (ok ? ' done' : (takes.length ? ' tried' : '')));
@@ -93,13 +117,13 @@ function renderEpisodes(status) {
     const warn = (ep.lint_warnings || []).length
       ? `<span class="tag">lint ${ep.lint_warnings.length}</span>` : '';
     div.innerHTML = `
-      <div><span class="tag">${i + 1}/${detail.episodes.length}</span>
+      <div class="ep-tags"><span class="tag">${i + 1}/${detail.episodes.length}</span>
            <span class="tag">${ep.verb}</span>
-           <span class="tag">${ep.arm}</span>${pass}${warn}`
-      + `${takes.length ? takesTag(takes) : ''}</div>
+           <span class="tag">${ep.arm}</span>${pass}${warn}</div>
       <div class="en">${ep.instruction_en}</div>
       <div class="zh">${ep.instruction_zh}</div>
       <div class="acts"></div>`;
+    if (takes.length) div.querySelector('.ep-tags').appendChild(takesRow(i, takes));
     const acts = div.querySelector('.acts');
     if (active) {
       for (const [outcome, label, cls] of [
@@ -136,6 +160,39 @@ async function loadScene() {
   $('scene').innerHTML = svg || '<p class="hint">还没有摆放样例</p>';
 }
 
+const TABLE_FIELDS = [['tbl-width', 'width_mm'], ['tbl-depth', 'depth_mm'],
+                      ['tbl-near', 'near_mm']];
+
+// 可达域是 IK 算出来的「手够得着哪」，与桌子多大无关；这三个数把它裁到真实桌面那块
+function renderTable(status) {
+  const t = status.table;
+  const locked = !!status.table_locked;
+  for (const [id, key] of TABLE_FIELDS) {
+    const el = $(id);
+    el.disabled = locked || !t;
+    // 正在改的那个框不能被 1 Hz 轮询覆盖，否则输一半就被打回去
+    if (t && (locked || document.activeElement !== el)) el.value = t[key];
+  }
+  $('tbl-hint').textContent = !t ? '物品库不可用'
+    : `可放 ${t.cells} 格 · ${locked ? '本轮固化用的' : `容器 ${t.containers} 件`}`;
+}
+
+async function applyTable() {
+  const body = {};
+  for (const [id, key] of TABLE_FIELDS) body[key] = Number($(id).value);
+  const had = STATE && STATE.status.pending_round;
+  try {
+    await post('/api/table', body);
+    await refresh();                                 // 预览被清掉了，整页都得跟着变
+    banner(`桌面 ${body.width_mm} x ${body.depth_mm} mm`
+      + (had ? ' · 旧预览已清掉，请重新生成任务' : ''));
+  } catch (err) {
+    banner('桌面尺寸不可用：' + err.message, 'bad');
+    if (STATE) renderTable(STATE.status);            // 退回后端认可的那组
+  }
+}
+for (const [id] of TABLE_FIELDS) $(id).onchange = applyTable;
+
 function renderControls(status) {
   const live = status.state !== 'idle';
   const inRound = status.state === 'round' || status.state === 'episode';
@@ -169,11 +226,12 @@ function renderControls(status) {
   const c = status.counts || {};
   if (!live) {
     banner(status.library_error ? '物品库异常：' + status.library_error : '待命',
-           status.library_error ? 'bad' : '');
+           status.library_error ? 'bad' : '', true);
   } else {
     banner(`录制中 · ${status.session} · round ${status.round} · `
       + `episode ${c.episodes || 0}（成 ${c.success || 0} / 败 ${c.fail || 0}）· `
-      + `${(status.bytes / 1e6).toFixed(1)} MB · 盘余 ${status.disk_free_gb} GB`, 'live');
+      + `${(status.bytes / 1e6).toFixed(1)} MB · 盘余 ${status.disk_free_gb} GB`,
+           'live', true);
   }
 }
 
@@ -200,6 +258,7 @@ async function refresh() {
   renderStreams(data.streams, locked);
   renderControls(data.status);
   renderEpisodes(data.status);
+  renderTable(data.status);
   renderCams(data.streams
     .filter((s) => s.kind === 'video' && s.key !== 'head_depth')
     .map((s) => s.key)

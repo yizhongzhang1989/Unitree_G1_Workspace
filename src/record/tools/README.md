@@ -227,6 +227,11 @@ for ep in s.episodes():                       # 默认不含 discard 掉的
     frames = s.slice_frames('head', ep['t0'], ep['t1'])
 ```
 
+`outcome` 是**最终结论**：当场标的那个事后可以在面板上改（事件线里多一条
+`episode_relabel`，原来那行原样留着）。整条被删掉的记在 `edits.json` 里，
+`episodes()` 直接跳过 —— 视频是整段连续录的剪不开，所以删的是「这一条算不算数」。
+`edits.json` 刻意不进 `DONE`，改它不会让 sha256 校验不过。
+
 ---
 
 ## 4. 转成目标格式

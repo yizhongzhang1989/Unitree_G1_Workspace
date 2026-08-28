@@ -33,6 +33,7 @@ from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 from record.replay import Playback, load_commands, pose_from_status, ramp
+from record.replay_source import describe, edits_path, episode_label, open_session
 from record.webui import tree_entries
 
 # 转换器注册表在 tools/ 里 —— 那个目录整个拷到导出机就能用。面板不另写一份，
@@ -52,6 +53,17 @@ _STREAMS = ('wrist_left', 'wrist_right', 'head')
 
 def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+
+
+def _deleted_labels(session: Path) -> set:
+    """这次采集里被删掉的 episode。读不出就当没删过 —— 多显示一条比整页列不出来好。"""
+    path = edits_path(session)
+    if not path.is_file():
+        return set()
+    try:
+        return set(json.loads(path.read_text(encoding='utf-8')).get('deleted') or [])
+    except (OSError, ValueError):
+        return set()
 
 
 def _child(parent: Path, name: str, what: str) -> Path:
@@ -136,6 +148,8 @@ class DataManager(Node):
         #: 已封口 session 的概要。面板 1 Hz 轮询 sessions()，而一次概要要递归 stat 整个
         #: 目录、逐行解 events.jsonl（能到几 MB）；封口后这些数字不会再变，算一次就够。
         self._summary: dict[str, dict] = {}
+        #: 转换格式与依赖齐不齐，同样被 1 Hz 轮询，见 `formats()`
+        self._formats: list[dict] | None = None
         # 上一轮没取走的临时产物在盘上，而 token 随进程没了，再也取不走
         self._sweep_bundles(ttl=0.0)
         self.get_logger().info(f'数据管理节点就绪，session 根目录 {self.root}')
@@ -172,19 +186,25 @@ class DataManager(Node):
         except (OSError, ValueError):
             pass
         try:
+            # 标注可以事后改、整条可以事后删，所以不能边扫边计数：先收敛成最终结论
+            outcomes: dict[tuple, str] = {}
             for line in (d / 'events.jsonl').read_text(encoding='utf-8').splitlines():
                 e = json.loads(line)
-                if e['type'] == 'episode_end':
-                    item['episodes'] += 1
-                    item['success'] += e.get('outcome') == 'success'
+                if e['type'] in ('episode_end', 'episode_relabel'):
+                    outcomes[(e['round'], e['episode'])] = e.get('outcome', '')
                 elif e['type'] == 'warning':
                     item['warnings'] += 1
         except (OSError, ValueError):
-            pass
+            return item
+        dropped = _deleted_labels(d)
+        for (rnd, ep), outcome in outcomes.items():
+            if episode_label(rnd, ep) in dropped:
+                continue
+            item['episodes'] += 1
+            item['success'] += outcome == 'success'
         return item
 
     def detail(self, session_id: str) -> dict:
-        from record.replay_source import describe
         d = self._dir(session_id)
         info = describe(d)
         info['sealed'] = (d / 'DONE').is_file()
@@ -231,11 +251,57 @@ class DataManager(Node):
         self.get_logger().warning(f'已删除 {session_id}（{size / 1e6:.1f} MB）')
         return {'id': session_id, 'bytes': size}
 
+    def delete_episode(self, session_id: str, label: str) -> dict:
+        """删掉一条 episode。
+
+        视频和信号表全程连续写，一条 episode 只是事件线上的一对时间戳 —— 真去剪那段
+        素材得把整份视频重编码一遍，而 ``DONE`` 的 sha256 当场就对不上了。所以删除记在
+        ``edits.json`` 这个旁挂文件里（``DONE`` 只核对它列出的那些文件），
+        ``session_reader.episodes()`` 会跳过它：回放、校验、导出都再也看不到这一条。
+        """
+        d = self._dir(session_id)
+        if not (d / 'DONE').is_file():
+            raise RuntimeError(f'{session_id} 没有 DONE，可能还在录，不改')
+        with self._lock:
+            playing = self.state['playing'] and self.state['session'] == session_id
+            if playing and self.state['label'] == label:
+                raise RuntimeError('这一段正在回放，先停止')
+            if (self._render['running'] and self._render['session'] == session_id
+                    and self._render['label'] == label):
+                raise RuntimeError('这一段正在渲染校验视频，先取消')
+        known = {e['label'] for e in open_session(d).episodes(
+            include_discarded=True, include_deleted=True)}
+        if label not in known:
+            raise ValueError(f'{session_id} 里没有 {label}')
+        path = edits_path(d)
+        edits = {}
+        if path.is_file():
+            try:
+                edits = json.loads(path.read_text(encoding='utf-8'))
+            except ValueError:
+                edits = {}
+        edits['deleted'] = list(dict.fromkeys([*(edits.get('deleted') or []), label]))
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(edits, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(tmp, path)
+        self._summary.pop(session_id, None)
+        # 校验视频是这一条的产物，留着就成了无主文件
+        self.drop_render(session_id, label)
+        self.get_logger().warning(f'{session_id} 删除 episode {label}')
+        return {'id': session_id, 'label': label, 'deleted': edits['deleted']}
+
     # ------------------------------------------------------------------ 转换
 
     def formats(self) -> list[dict]:
-        """面板下拉框的选项。缺依赖的那项带着 missing 一起报出去，好置灰。"""
-        return converters.describe()
+        """面板下拉框的选项。缺依赖的那项带着 missing 一起报出去，好置灰。
+
+        算一次就存着：``describe()`` 会对每个依赖跑 ``find_spec`` + ``which``，
+        实测 1.88 ms，而它是被 1 Hz 轮询的 —— 占了这个端点全部 CPU 的四成。
+        装没装依赖不会在节点跑着的时候变，真装了重启一下节点。
+        """
+        if self._formats is None:
+            self._formats = converters.describe()
+        return self._formats
 
     def tools_bundle(self) -> list:
         """B 上要的全套：`tools/` 整个 + 两个不在 session 里的配置文件。
@@ -372,7 +438,10 @@ class DataManager(Node):
         try:
             # PYTHONUNBUFFERED：子进程的 stdout 接的是管道，默认块缓冲，
             # 不加这个就要等它整个跑完才吐字，面板上的进度条等于没有
-            proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+            # nice：转换/渲染都是 CPU-bound 的后台长任务（渲染实测 65% 单核/路），
+            # 而它们经常与采集同时跑。晚几秒出结果无所谓，拖慢控制环不行。
+            proc = subprocess.Popen(['nice', '-n', '10', *command],
+                                    stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True,
                                     stdin=subprocess.DEVNULL,
                                     env={**os.environ, 'PYTHONUNBUFFERED': '1'})
@@ -604,7 +673,6 @@ class DataManager(Node):
             d = self._dir(session_id)
             if not (d / 'DONE').is_file():
                 raise RuntimeError(f'{session_id} 没封口，不回放')
-            from record.replay_source import open_session
             t, arm, grip = load_commands(open_session(d))
             play = Playback(t, arm, grip, t0, t1, speed)
             start_pose = self._require_ready()

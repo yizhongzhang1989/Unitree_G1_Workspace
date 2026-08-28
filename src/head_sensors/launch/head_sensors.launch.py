@@ -30,6 +30,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('camera', default_value='true'),
         DeclareLaunchArgument('min_range', default_value='0.1'),
         DeclareLaunchArgument('max_range', default_value='70.0'),
+        # 默认不转发：唯一的消费者 Point-LIO 已改成直接订原始话题。
+        # 代价见 head_lidar_node.py 里 `forward_imu` 参数处的注释。
+        DeclareLaunchArgument('forward_imu', default_value='false'),
         DeclareLaunchArgument('align_depth', default_value='false'),
         DeclareLaunchArgument('pointcloud', default_value='false'),
         # 默认值与 head_camera.launch.py 一致，转发只是让这一条命令也能改档 ——
@@ -45,6 +48,8 @@ def generate_launch_description() -> LaunchDescription:
             parameters=[{
                 'min_range': _f('min_range'),
                 'max_range': _f('max_range'),
+                'forward_imu': ParameterValue(
+                    LaunchConfiguration('forward_imu'), value_type=bool),
             }],
         ),
         IncludeLaunchDescription(

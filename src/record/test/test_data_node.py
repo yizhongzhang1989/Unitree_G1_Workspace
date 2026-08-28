@@ -36,6 +36,9 @@ class _Stub:
             def error(self, msg):
                 stub.errors.append(msg)
 
+            def warning(self, msg):
+                pass
+
             def info(self, msg):
                 pass
         return _Log()
@@ -133,3 +136,61 @@ def test_drop_bundle_keeps_other_tokens_state(tmp_path):
     s._convert = {'done': True, 'token': 'tok'}
     s.drop_bundle('stale')
     assert s._convert == {'done': True, 'token': 'tok'}
+
+
+def _recorded(root: Path):
+    """一次封好口的采集，两条 episode。不写信号表 —— 这几条只碰事件线。"""
+    from record.session import Session
+    s = Session.create(root, {'joint_states': True}, session_id='s3')
+    s.start_round({'seed': 1, 'items': [], 'episodes': [{}, {}]})
+    for outcome in ('success', 'fail'):
+        s.start_episode({'instruction_en': 'x'})
+        s.end_episode(outcome)
+    s.end_round()
+    s.finish({})
+    return s.paths.root
+
+
+def _editor(tmp_path: Path):
+    from record.data_node import DataManager
+    s = _stub(tmp_path)
+    s.state = {'playing': False, 'session': '', 'label': ''}
+    s._render = {'running': False, 'session': '', 'label': '',
+                 'done': False, 'bytes': 0, 'error': ''}
+    s._summary = {}
+    for name in ('delete_episode', 'drop_render'):
+        setattr(_Stub, name, getattr(DataManager, name))
+    # 这两个是 staticmethod，`getattr` 会退化成普通函数，绑上去就多吃一个 self
+    for name in ('_render_path', '_scan'):
+        setattr(_Stub, name, staticmethod(getattr(DataManager, name)))
+    _recorded(s.root)
+    return s
+
+
+def test_delete_episode_leaves_the_sealed_files_untouched(tmp_path):
+    """删的是「这一条算数」这件事。events.jsonl 的 sha256 写在 DONE 里，碰不得。"""
+    s = _editor(tmp_path)
+    before = (s.root / 's3' / 'events.jsonl').read_bytes()
+    got = s.delete_episode('s3', 'r0e1')
+    assert got['deleted'] == ['r0e1']
+    assert (s.root / 's3' / 'events.jsonl').read_bytes() == before
+
+    from record.replay_source import open_session
+    left = open_session(s.root / 's3').episodes(include_discarded=True)
+    assert [e['label'] for e in left] == ['r0e0']
+    # 概要跟着变，否则面板上的条数一直是删之前那个（它按 session 缓存）
+    assert _Stub._scan(s.root / 's3')['episodes'] == 1
+
+
+def test_delete_episode_rejects_unknown_label(tmp_path):
+    s = _editor(tmp_path)
+    with pytest.raises(ValueError, match='没有'):
+        s.delete_episode('s3', 'r9e9')
+    assert not (s.root / 's3' / 'edits.json').exists()
+
+
+def test_delete_episode_refuses_while_it_is_playing(tmp_path):
+    s = _editor(tmp_path)
+    s.state = {'playing': True, 'session': 's3', 'label': 'r0e0'}
+    with pytest.raises(RuntimeError, match='正在回放'):
+        s.delete_episode('s3', 'r0e0')

@@ -240,6 +240,10 @@ class MotionControlNode(Node):
         # 热启动陷进坏解支时的逃生阈值（m）。理由见 config 里那段注释。
         self._rescue_err = float(
             p('ik_rescue_err', 0.01).get_parameter_value().double_value)
+        # 逃生解连续白跑这么多帧就停手，直到残差回到可达区。见 _control 里那段。
+        self._rescue_giveup = int(
+            p('ik_rescue_giveup', 3).get_parameter_value().integer_value)
+        self._rescue_miss = 0
 
         n = len(policy_joints)
         lower = np.asarray(p('target_lower_limits', [0.0] * n)
@@ -852,12 +856,20 @@ class MotionControlNode(Node):
                     # shoulder_roll 顶死限位，之后连原位都够不着）。残差大到不像"只是够不着"
                     # 时，拿站立位形当种子再解一次——那个种子从不落进陷阱。只有明显更好才采纳，
                     # 所以正常跟随根本不会触发（实测 ±3cm 轨迹 0.00%），代价也只有那一次求解。
-                    if pos_err > self._rescue_err:
+                    # 但 VR 是绝对映射，手伸出可达域是常态，那时换种子也救不了（实测残差
+                    # 改善 0.00 mm），却让每帧的求解成本翻倍（3.98 -> 7.95 ms）。所以连续白跑
+                    # 几帧就停手；真碰上解支陷阱时第一帧就会成功，永远不会被停掉。
+                    if pos_err <= self._rescue_err:
+                        self._rescue_miss = 0
+                    elif self._rescue_miss < self._rescue_giveup:
                         alt, alt_pos, alt_ori, alt_iters = self._ik.solve(
                             self._stand_pose[self._arm_slots], poses)
+                        iters += alt_iters
                         if alt_pos < pos_err - self._rescue_err:
                             solved, pos_err, ori_err = alt, alt_pos, alt_ori
-                            iters += alt_iters
+                            self._rescue_miss = 0
+                        else:
+                            self._rescue_miss += 1
                 # 归位直接写关节目标，但仍走出口的 arm_rate_limit（插值本就比它慢很多）。
                 for side, values in home.items():
                     solved[self._side_slots[side]] = values

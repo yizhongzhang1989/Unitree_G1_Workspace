@@ -232,14 +232,21 @@ q_left_arm = f['state/joint_space/position'][:, left]
 
 | 数据集 | 形状 | 说明 |
 | --- | --- | --- |
-| `state/actuator_space/value` | (N, 2) | 实际开合 |
-| `action/actuator_space/value` | (N, 2) | 目标开合 |
+| `state/actuator_space/value` | (N, 2) | 实际开合（CAN 实测角） |
+| `action/actuator_space/value` | (N, 2) | 目标开合（遥操作扳机） |
+| `*/actuator_space/valid_mask` | (N,) | 见 §6 |
 
 **连续值，范围 [0, 1]，`0 = 完全张开`，`1 = 完全夹紧`**。不是二值开关。
 （`meta.json → robot.gripper.normalized` 里也写着这句。）
+中间那一维 `0` = 左、`1` = 右，见 `meta/actuator_space/names`。
 
-原始量是偏心关节角 0…2.7638 rad，方向相反，导出时已经取补并归一化。
+原始量是偏心关节角 0…2.7638 rad，方向相反，导出时取补归一化成
+`clip(1 - rad / 2.7638, 0, 1)`；两列同公式同常量，可以直接相减。
 原始定义留在 `meta.json → robot.gripper.stored_raw`。
+
+**两列的差就是「夹住了」**：堵转时 `state` 停在中间而 `action` 已经到 1.0，
+空夹时两者收敛。别把 `state` 当成 `action` 的延迟版本。实测偶尔超出行程
+（量到过 2.889 rad）会被裁到 0，所以 `state` 的 0 不是精确的机械零位。
 
 ### 4.4 `camera_space` — 相机
 

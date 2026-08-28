@@ -3,7 +3,11 @@
     common:
       # 点云必须走 points_full：/head/lidar/points 是 16 字节瘦身布局，没有逐点 time。
       lid_topic: "/head/lidar/points_full"
-      imu_topic: "/head/lidar/imu"
+      # IMU 直接吃原始话题，不经 head_lidar_node 转发 —— 那一跳只做 g -> m/s² 的
+      # 单位换算，而换算在这里用 acc_norm 表达就行，一分钱不花（代价见
+      # head_lidar_node.py 的 forward_imu 参数）。**改回转发版的话，acc_norm 要同步
+      # 写 9.81、satu_acc 写 29.42**，下面两处都有标注。
+      imu_topic: "/utlidar/imu_livox_mid360"
       con_frame: false
       con_frame_num: 1
       cut_frame: false
@@ -44,16 +48,15 @@
       extrinsic_est_en: false
       imu_time_inte: 0.005
       # 饱和判定用的是**归一化前**的原始读数（Estimator.cpp 里 acc_avr 先判饱和、
-      # 再乘 G_m_s2/acc_norm），所以必须按消息里的数值填。我们喂的是 /head/lidar/imu，
-      # head_lidar_node 已把 Livox 的 g 换算成 m/s²，于是 3 g -> 3 × 9.80665 = 29.42。
-      # 照抄上游的 3.0 会让静止时的 9.81 就超过 0.99×3.0，开机即误判 IMU 饱和。
-      satu_acc: 29.42
+      # 再乘 G_m_s2/acc_norm），所以必须按消息里的数值填。原始话题的线加速度单位是 g，
+      # 内置 IMU 量程 ±3 g，所以填 3.0。喂 m/s² 的话这里填 3.0 会让静止的 9.81
+      # 就超过 0.99×3.0，开机即误判 IMU 饱和。
+      satu_acc: 3.0
       # rad/s，两侧单位一致不用换算。35 rad/s ≈ 2005 °/s，对应内置 IMU 的 ±2000°/s 量程。
       # 实测静止时陀螺模长最大 0.017 rad/s。
       satu_gyro: 35.0
-      # 9.81 = 加速度以 m/s² 为单位。若改喂原始 /utlidar/imu_livox_mid360 则要回到 1.0，
-      # 且 satu_acc 要同步改回 3.0。
-      acc_norm: 9.81
+      # 1.0 = 加速度以 g 为单位（Estimator 里统一乘 G_m_s2/acc_norm 换成 m/s²）。
+      acc_norm: 1.0
       lidar_meas_cov: 0.01
       acc_cov_output: 500.0
       gyr_cov_output: 1000.0
@@ -90,8 +93,11 @@
       publish_odometry_without_downsample: false
 
     publish:
+      # 这三路（/path、/cloud_registered、/cloud_registered_body）实测**零订阅者**，
+      # 本机也不跑 rviz。开着就是每帧白构造点云 + pcl::toROSMsg 序列化 + 灌 DDS。
+      # 要在 rviz 里看建图效果时临时改回 true 即可。
       path_en: false
-      scan_publish_en: true
+      scan_publish_en: false
       scan_bodyframe_pub_en: false
 
     pcd_save:

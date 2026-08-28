@@ -130,14 +130,20 @@ class Recorder(Node):
         self._head_kept = 0.0
 
         self.library, self.geometry, self.library_error = self._load_library()
+        # 真实桌面那块矩形。恒等于「现有这一轮实际用的桌面」——改尺寸会丢掉旧预览
+        self._table: dict | None = None
+        self._table_geo = None            # self.geometry 裁到桌面那块之后的副本
+        if self.geometry is not None:
+            self._use_table(*self.geometry.extent)
         self.current_round: dict | None = None
         self._round_obj = None
         # 正在录的是指令表里的第几条。和 session.episode_index（本轮第几次录）
         # 只在「一条一次、按顺序走」时碰巧相等，重录一次就永久分家
         self._episode_slot = -1
-        # slot -> 已录各次的 outcome。同一条指令可以录很多遍，每遍都是独立的一条
-        # episode，旧的不会被覆盖；面板拿它显示「重录」和已录次数
-        self._slot_takes: dict[int, list[str]] = {}
+        # slot -> 已录各次 ``{'episode': 本轮第几次录, 'outcome': 结论}``。同一条指令可以录
+        # 很多遍，每遍都是独立的一条 episode，旧的不会被覆盖；面板拿它把每次尝试列出来。
+        # 存 episode 序号是为了事后能改其中某一次的标注（当场判的成功常常回头看是失败）
+        self._slot_takes: dict[int, list[dict]] = {}
 
         # 常驻订阅：不录也要在面板上显示各路的实时频率，操作者才能在开录前发现问题
         self._attach_monitors()
@@ -171,6 +177,51 @@ class Recorder(Node):
             return lib, load_geometry(), ''
         except Exception as exc:                       # noqa: BLE001
             return None, None, f'{type(exc).__name__}: {exc}'
+
+    def set_table(self, depth: float, width: float, near: float) -> dict:
+        """限定物品只摆在真实桌面那块矩形里（米）。
+
+        会丢掉还没固化的预览：那一轮是照旧桌面摆的，跟着它摆真桌子会摆到桌沿外面。
+        丢掉之后 ``self._table`` 就恒等于「现有这一轮实际用的桌面」，面板直接显示它。
+        """
+        with self._lock:
+            if self._round_is_live():
+                raise RuntimeError('本轮已固化，桌子也照它摆好了，改尺寸要先「结束本轮」')
+            self._use_table(depth, width, near)
+            self.pending_round, self._pending_obj = None, None
+            return self.status()
+
+    def _use_table(self, depth: float, width: float, near: float) -> None:
+        """可达掩码是离线跑 IK 得到的「手够得着哪」，与桌子多大无关 —— 桌子比它小时
+        照原样摆会把物品摆到桌沿外面。``library.usable`` 要 20 ms，所以只在这里算一次。
+
+        验收条件照抄 ``choose_group`` 要的那两条。只查「有物品放得下」不够：可达域纵深
+        只有 250 mm，浅桌子先饿死的是容器（实测 200x500 还剩 75 件普通物品、容器 0），
+        放过去的话点「生成任务」才报错，操作者看不出是桌子设小了。
+        """
+        if self.library is None:
+            raise RuntimeError(f'物品库不可用: {self.library_error}')
+        if not (depth > 0 and width > 0):
+            raise RuntimeError('桌面尺寸必须为正')
+        geo = self.geometry.clip(depth, width, near)
+        pool = self.library.usable(geo)
+        containers = sum(1 for i in pool if i.is_container)
+        ordinary = sum(1 for i in pool if i.role == 'ordinary')
+        cells = int(geo.reachable.sum())
+        if not containers or ordinary < self.n_items - 1:
+            raise RuntimeError(
+                f'这块桌面摆不出一轮任务：可放格心 {cells}，容器 {containers} 件、'
+                f'普通物品 {ordinary} 件（至少要 1 + {self.n_items - 1}）')
+        with self._lock:
+            self._table_geo = geo
+            self._table = {'depth_mm': round(depth * 1000), 'width_mm': round(width * 1000),
+                           'near_mm': round(near * 1000), 'cells': cells,
+                           'containers': containers}
+
+    def _round_is_live(self) -> bool:
+        """本轮已固化：桌子已经照它摆好了，摆放、指令、桌面尺寸都不能再动。"""
+        return (self.session is not None
+                and self.session.state in (State.ROUND, State.EPISODE))
 
     # -------------------------------------------------------------- 订阅与落盘
 
@@ -291,6 +342,7 @@ class Recorder(Node):
                 'head_camera_info': self._head_info,
                 'head_stream': dict(self._head_seen),
                 'table_geometry': self.geometry.meta if self.geometry else None,
+                'table': self._table,
                 'joint_order': list(sig.CANONICAL_JOINTS),
             }
             session = Session.create(self.root, streams, meta=meta)
@@ -340,7 +392,7 @@ class Recorder(Node):
         if self.library is None:
             raise RuntimeError(f'物品库不可用: {self.library_error}')
         from record.instruction.builder import build_round
-        return build_round(self.library, self.geometry, index=index, seed=seed,
+        return build_round(self.library, self._table_geo, index=index, seed=seed,
                            n_items=self.n_items, n_moves=self.n_moves, items=items)
 
     def _retitle(self, rnd, index: int):
@@ -348,7 +400,7 @@ class Recorder(Node):
         from dataclasses import replace
         from record.instruction.scene_svg import render_scene
         return replace(rnd, index=index,
-                       svg=render_scene(rnd.placements, self.geometry,
+                       svg=render_scene(rnd.placements, self._table_geo,
                                         title=f'Round {index}'))
 
     def preview_round(self, seed: int | None = None, keep_items: bool = False) -> dict:
@@ -361,7 +413,7 @@ class Recorder(Node):
         只挪位置在手边就能做完，两件事的代价差一个数量级。
         """
         with self._lock:
-            if self.session is not None and self.session.state in (State.ROUND, State.EPISODE):
+            if self._round_is_live():
                 raise RuntimeError('本轮还没结束，不能重 roll')
             items = None
             if keep_items:
@@ -418,9 +470,28 @@ class Recorder(Node):
             session = self._require(State.EPISODE)
             session.end_episode(outcome, note)
             if self._episode_slot >= 0:
-                self._slot_takes.setdefault(self._episode_slot, []).append(outcome)
+                self._slot_takes.setdefault(self._episode_slot, []).append(
+                    {'episode': session.episode_index, 'outcome': outcome})
             if outcome == 'success' and self.library and self._round_obj:
                 self._bump_usage()
+            return self.status()
+
+    def relabel_take(self, slot: int, take: int, outcome: str) -> dict:
+        """改本轮里某一条指令第 ``take`` 次录制的结论。
+
+        录完下一条才发现上一条其实没成是常事，所以正在录（EPISODE）时也允许改。
+        ``_slot_takes`` 随轮清空，所以能改的就只有当前这一轮 ——
+        封口后的 session 去数据管理面板改。
+        """
+        with self._lock:
+            session = self.session
+            if session is None or session.state not in (State.ROUND, State.EPISODE):
+                raise RuntimeError('本轮已结束，改不了标注')
+            takes = self._slot_takes.get(slot) or []
+            if not 0 <= take < len(takes):
+                raise RuntimeError(f'第 {slot} 条指令没有第 {take + 1} 次录制')
+            session.relabel_episode(takes[take]['episode'], outcome)
+            takes[take]['outcome'] = outcome
             return self.status()
 
     def _bump_usage(self) -> None:
@@ -566,6 +637,8 @@ class Recorder(Node):
             'bytes': sum(w.bytes_written for w in self.writers.values()),
             'disk_free_gb': round(disk / 1e9, 1),
             'library_error': self.library_error,
+            'table': self._table,
+            'table_locked': self._round_is_live(),
             'round_detail': self.current_round,
             'pending_round': self.pending_round,
             # JSON 的键只能是字符串，前端按 takes[i] 取（JS 会自动转成 "i"）

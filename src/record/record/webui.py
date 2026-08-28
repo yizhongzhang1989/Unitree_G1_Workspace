@@ -3,7 +3,8 @@
 **面板只是观察者 + 命令入口。** 逻辑都在各自的节点里，HTTP 线程崩了、没人开页面，
 节点照常跑。页面靠 1 Hz 轮询，不用 WebSocket —— 刷新率要求低，多一个协议不值。
 
-每个面板只需要给出：POST 动作表，和一个负责 GET 分发的 ``route(handler, url)``。
+每个面板只需要给出两张路由表：POST 动作表和 GET 表，以及首页用哪个 html。
+静态资源、404/405、query 解析都在这里做，两边不各写一份。
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 _STATIC = Path(__file__).with_name('static')
 _MAX_BODY = 1 << 20
@@ -60,7 +61,10 @@ def tree_entries(root: Path, prefix: str = '') -> list:
             if p.is_file() and '__pycache__' not in p.parts]
 
 
-def make_handler(node, actions: dict, route):
+def make_handler(node, actions: dict, gets: dict, index: str = 'index.html'):
+    """``actions``: POST 路径 -> ``fn(body)``；``gets``: GET 路径 -> ``fn(handler, arg)``，
+    ``arg(key)`` 取 query 里的第一个值。
+    """
     log = node.get_logger()
 
     class Handler(BaseHTTPRequestHandler):
@@ -182,7 +186,18 @@ def make_handler(node, actions: dict, route):
         def do_GET(self) -> None:                  # noqa: N802
             # 包一层：GET 里冒出未预料的异常会打死连接，浏览器只看到空响应
             try:
-                return route(self, urlparse(self.path))
+                u = urlparse(self.path)
+                if u.path in ('/', '/index.html'):
+                    return self.send_static(index)
+                fn = gets.get(u.path)
+                if fn is not None:
+                    q = parse_qs(u.query)
+                    return fn(self, lambda k: (q.get(k) or [''])[0])
+                if u.path in actions:
+                    # 前端漏传 body 就会变成 GET，一律 404 的话看不出来是方法错了
+                    return self.send_json({'error': f'{u.path} 只接受 POST'}, 405)
+                # 剩下的当静态资源：``send_static`` 自己挡路径穿越，不存在就 404
+                return self.send_static(u.path.lstrip('/'))
             except Exception as exc:               # noqa: BLE001
                 return self._fail(exc)
 

@@ -63,7 +63,11 @@ class GloriaGripperNode(Node):
     """一台 Gloria-M 夹爪的 ROS2 设备节点"""
 
     def __init__(self) -> None:
-        super().__init__("gloria_gripper")
+        # 关掉 rclpy 自动建的 6 个参数服务：wait set 每收一条消息就要把全部实体重新
+        # 注册一遍，实体越多越贵（430 Hz 输入下实测省 5% CPU）。本节点的参数只在启动
+        # 时读，没有 on_set_parameters 回调，也没人对它调 set_parameters。
+        # 代价：`ros2 param list/get/set /grip_arm0` 不再可用。
+        super().__init__("gloria_gripper", start_parameter_services=False)
         # 服务会同步等待 CAN 应答，因此必须允许订阅回调在另一执行器线程中运行
         self._cb_group = ReentrantCallbackGroup()  # 允许服务和定时器回调并发执行
         self._rx_cb_group = MutuallyExclusiveCallbackGroup()  # 按接收顺序串行处理 CAN 反馈帧

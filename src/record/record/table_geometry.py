@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -58,6 +58,27 @@ class TableGeometry:
     def hand_of(self, y: float) -> str:
         """哪只手负责这个位置。中线两侧硬分，没有模糊带。"""
         return 'left' if y >= 0.0 else 'right'
+
+    @property
+    def extent(self) -> tuple[float, float, float]:
+        """可达格心的 ``(纵深, 横向宽, 近边 x)``，恰好是 ``clip`` 的恒等参数。"""
+        rows = np.where(self.reachable.any(axis=1))[0]
+        cols = np.where(self.reachable.any(axis=0))[0]
+        near = float(self.xs[rows[0]])
+        return (float(self.xs[rows[-1]]) - near,
+                2 * max(abs(float(self.ys[cols[0]])), abs(float(self.ys[cols[-1]]))),
+                near)
+
+    def clip(self, depth: float, width: float, near: float) -> 'TableGeometry':
+        """只留真实桌面那块矩形：纵深 ``[near, near+depth]``，横向以机器人中线居中。
+
+        可达掩码算的是「手够得着哪」，与桌子多大无关；桌子比可达域小的时候，
+        照原样摆会把物品摆到桌沿外面去。
+        """
+        eps = self.cell * 1e-3
+        keep = (((self.xs >= near - eps) & (self.xs <= near + depth + eps))[:, None]
+                & (np.abs(self.ys) <= width / 2 + eps)[None, :])
+        return replace(self, left=self.left & keep, right=self.right & keep)
 
     def footprint_fits(self, cx: float, cy: float, w: float, d: float,
                        rotation: float = 0.0,

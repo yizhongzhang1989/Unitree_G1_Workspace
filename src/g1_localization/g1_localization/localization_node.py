@@ -162,6 +162,11 @@ class LocalizationNode(Node):
     # -- 主链路 ----------------------------------------------------------------
 
     def _on_odom(self, msg: Odometry) -> None:
+        # 计数放在最前面：它回答的是「里程计有没有在来」。放到外参查成功之后的话，
+        # robot_state_publisher 没起时看门狗会报「没有里程计输入，确认 point_lio 在跑」，
+        # 而真因是查不到 TF —— 把排查引向完全错误的方向（已踩过）。
+        with self._lock:
+            self._odom_count += 1
         t_imu_base = self._base_from_imu()
         if t_imu_base is None:
             return
@@ -184,7 +189,6 @@ class LocalizationNode(Node):
 
         with self._lock:
             self._last = (msg, t_odom_base)
-            self._odom_count += 1
             t_world_odom = self._t_world_odom
 
         valid = t_world_odom is not None
