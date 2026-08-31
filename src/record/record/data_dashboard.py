@@ -26,7 +26,9 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
         '/api/session/delete': lambda b: rec.delete(b['session'], b.get('confirm', '')),
         '/api/episode/delete': lambda b: rec.delete_episode(
             b['session'], b.get('label', '')),
-        '/api/convert/start': lambda b: rec.start_convert(b['session'], b['format']),
+        # 勾了哪几次由前端给；缺键或空清单都落到 start_convert 那句人话上
+        '/api/convert/start': lambda b: rec.start_convert(
+            b.get('sessions') or [], b['format']),
         '/api/render/start': lambda b: rec.start_render(
             b['session'], float(b['t0']), float(b['t1']), b.get('label', '')),
         '/api/render/stop': lambda b: rec.stop_render(),

@@ -6,6 +6,7 @@ let PLAYING = false;
 let NOW = { session: '', label: '' };   // 正在放哪一段，用于列表高亮
 let SIG = '';           // 上一次渲染的列表指纹，没变就不重建 DOM
 let CSIG = '';          // 同上，转换与校验渲染进度的指纹
+let VSIG = '';          // 同上，顶上那条转换栏
 let CONVERT = { running: false, session: '', format: '', token: '', log: [],
                 error: '', done: false, bytes: 0, progress: 0 };
 let RENDER = { running: false, session: '', label: '', log: [],
@@ -13,7 +14,8 @@ let RENDER = { running: false, session: '', label: '', log: [],
 let FORMATS = [];       // 转换格式，来自 tools/converters.py，A/B 同一张表
 const RAW = {};         // session id -> 文件清单，展开过的才拉
 const OPEN = new Set(); // 展开着的树节点，key 是 `${id}/${目录相对路径}`
-let CHOICE = '';        // 详情里选中的转换格式
+const PICKS = new Set();// 勾上要导出的那几次采集，一起合并成一份 dataset
+let CHOICE = '';        // 选中的转换格式
 let FILE = null;        // 正在预览的文件 {id, path}；不为空时右边是预览而不是详情
 
 //: 能直接看的。没后缀的也试一下（`DONE` 就是），真不是文本由后端说
@@ -109,9 +111,13 @@ function renderSessions(list) {
   const box = $('sessions');
   const total = list.reduce((a, s) => a + s.bytes, 0);
   $('count').textContent = `${list.length} 次 · 共 ${mb(total)}`;
+  // 删掉的采集不能还占着勾选，否则转换会拿不存在的 id 去请求
+  const live = new Set(list.filter((s) => s.sealed).map((s) => s.id));
+  for (const id of [...PICKS]) if (!live.has(id)) PICKS.delete(id);
   // 每秒重建会把滚动位置、悬停和展开状态都打断，内容没变就别动
   const sig = JSON.stringify(list) + '|' + PICKED + '|' + [...OPEN].sort().join()
-            + '|' + Object.keys(RAW).sort().join() + '|' + NOW.session + PLAYING;
+            + '|' + Object.keys(RAW).sort().join() + '|' + NOW.session + PLAYING
+            + '|' + [...PICKS].sort().join();
   if (sig === SIG) return;
   SIG = sig;
   if (!list.length) { box.innerHTML = '<p class="hint">还没有采集数据。</p>'; return; }
@@ -125,6 +131,7 @@ function renderSessions(list) {
     const meta = `${s.episodes} 条 · ${mb(s.bytes)}` + (s.sealed ? '' : ' · 未封口');
     const row = treeRow(cls, 0, s.id, meta,
                         zipURL(s.id, ''), `打包下载整次采集（${mb(s.bytes)}）`);
+    row.insertBefore(pickBox(s), row.firstChild);
     const kids = document.createElement('div');
     kids.className = 'kids' + (open ? ' open' : '');
     if (RAW[s.id]) kids.appendChild(subtree(s.id, buildTree(RAW[s.id].files), '', 1));
@@ -134,7 +141,7 @@ function renderSessions(list) {
     row.onclick = () => {
       const wasFile = FILE !== null;
       FILE = null;
-      if (PICKED !== s.id) { PICKED = s.id; DETAIL = null; CHOICE = ''; loadDetail(); }
+      if (PICKED !== s.id) { PICKED = s.id; DETAIL = null; loadDetail(); }
       else if (wasFile) loadDetail();   // 从文件预览切回来才重拉，否则每次折叠都重取 6 张预览帧
       OPEN.has(key) ? OPEN.delete(key) : OPEN.add(key);
       if (!RAW[s.id]) loadRaw(s.id);
@@ -145,6 +152,34 @@ function renderSessions(list) {
   }
 }
 
+/** 勾选框。选中的那些会被合并导出成同一份 dataset，所以它挂在树上而不是详情里。 */
+function pickBox(s) {
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.className = 'pick';
+  cb.dataset.id = s.id;
+  cb.checked = PICKS.has(s.id);
+  cb.disabled = !s.sealed;
+  cb.title = s.sealed ? '勾上一起导出' : '没封口的不能导出';
+  cb.onclick = (e) => e.stopPropagation();   // 别顺手把这一行也选中/展开了
+  cb.onchange = () => {
+    cb.checked ? PICKS.add(s.id) : PICKS.delete(s.id);
+    SIG = '';                                // 勾选进了指纹，不清就等下一次内容变化才重画
+    renderConvert();
+  };
+  return cb;
+}
+
+function pickAll(on) {
+  PICKS.clear();
+  for (const cb of document.querySelectorAll('#sessions .pick')) {
+    if (cb.disabled) continue;
+    cb.checked = on;
+    if (on) PICKS.add(cb.dataset.id);
+  }
+  SIG = '';
+  renderConvert();
+}
 
 function frameImg(sid, stream, t) {
   const img = document.createElement('img');
@@ -322,13 +357,18 @@ function syncDetail() {
   }
 }
 
-/** 转换区。原始文件在左边的树里下，这里只管「转成别的格式再下」。 */
-function convertBox(d) {
-  const box = document.createElement('div');
-  box.className = 'export';
+/** 顶上的转换区。原始文件在左边的树里下，这里只管「把勾选的那些合并转成别的格式再下」。
+ *  它对的是一批采集而不是某一次，所以钉在页顶，不进任何一次采集的详情。 */
+function renderConvert() {
+  const box = $('convert');
   const usable = FORMATS.filter((f) => !f.missing.length);
   if (!CHOICE) CHOICE = (usable[0] || FORMATS[0] || {}).id || '';
-  if (!FORMATS.length) return box;
+  if (!FORMATS.length) return;
+  // 下拉框每秒重建的话，展开着选格式的人会被弹回去
+  const sig = JSON.stringify([CHOICE, FORMATS.length, [...PICKS].sort(), CONVERT]);
+  if (sig === VSIG) return;
+  VSIG = sig;
+  box.innerHTML = '';
 
   const label = document.createElement('span');
   label.className = 'hint';
@@ -343,24 +383,22 @@ function convertBox(d) {
     pick.appendChild(o);
   }
   pick.value = CHOICE;
-  pick.onchange = () => { CHOICE = pick.value; renderDetail(d); };
+  pick.onchange = () => { CHOICE = pick.value; renderConvert(); };
   box.append(label, pick);
 
+  const picked = [...PICKS];
   const busy = CONVERT.running;
-  const mine = CONVERT.session === d.id;
   const b = document.createElement('button');
   b.className = 'primary';
-  // 一次只跑一个（转换要抢 3.8 个核），所以别的采集在转时这里也得锁上，
-  // 但文案要说清是「别人占着」而不是「你点的这个在跑」
-  b.textContent = !busy ? '开始转换' : (mine ? '转换中…' : '有别的在转');
-  b.disabled = !d.sealed || busy || !CHOICE;
-  b.title = !d.sealed ? '没封口的不给转'
-    : (busy && !mine ? `${CONVERT.session} 正在转，一次只能跑一个`
-                     : '在服务器上转好，然后下载');
+  // 一次只跑一个（转换要抢 3.8 个核）
+  b.textContent = busy ? '转换中…' : `开始转换${picked.length ? `（${picked.length} 次）` : ''}`;
+  b.disabled = busy || !CHOICE || !picked.length;
+  b.title = !picked.length ? '先在左边勾选要导出的采集'
+    : (busy ? '一次只能跑一个' : '选中的几次合并成一份 dataset，转好后下载');
   b.onclick = async () => {
     try {
-      await post('/api/convert/start', { session: d.id, format: CHOICE });
-      banner(`${d.id} 开始转换`);
+      await post('/api/convert/start', { sessions: picked, format: CHOICE });
+      banner(`${picked.length} 次采集开始合并转换`);
       refresh();
     } catch (err) {
       banner('转换起不来：' + err.message, 'bad');
@@ -368,38 +406,39 @@ function convertBox(d) {
   };
   box.appendChild(b);
 
-  if (busy && mine) {
+  const tip = document.createElement('span');
+  tip.className = 'hint';
+  tip.textContent = busy ? `${CONVERT.session} · 在服务器上跑，关掉这页也不会停`
+    : '勾中的几次合并成一份 dataset，不是每次一个文件夹';
+  box.appendChild(tip);
+
+  if (busy) {
     const pct = document.createElement('span');
     pct.className = 'pct';
     pct.textContent = `${Math.round((CONVERT.progress || 0) * 100)}%`;
-    const tip = document.createElement('span');
-    tip.className = 'hint';
-    tip.textContent = '在服务器上跑，关掉这页也不会停';
     const bar = document.createElement('div');
     bar.className = 'bar';
     bar.innerHTML = `<div style="width:${((CONVERT.progress || 0) * 100).toFixed(1)}%"></div>`;
     const pre = document.createElement('pre');
     pre.className = 'log';
     pre.textContent = CONVERT.log.slice(-6).join('\n') || '启动中…';
-    box.append(pct, tip, bar, pre);
+    box.append(pct, bar, pre);
   }
-  if (mine && CONVERT.error) {
+  if (CONVERT.error) {
     const p = document.createElement('p');
     p.className = 'hint warn';
     p.textContent = CONVERT.error;
     box.appendChild(p);
   }
-  if (mine && CONVERT.done && CONVERT.token) {
+  if (CONVERT.done && CONVERT.token) {
     const a = document.createElement('a');
     a.className = 'btn';
     a.href = `/bundle.zip?token=${encodeURIComponent(CONVERT.token)}`;
     a.textContent = `下载 ${size(CONVERT.bytes || 0)}`;
-    const tip = document.createElement('span');
-    tip.className = 'hint';
-    tip.textContent = '转换结果不留在服务器上，这个链接下完即失效，要再拿就再转一次';
-    box.append(a, tip);
-  }
-  return box;
+    const note = document.createElement('span');
+    note.className = 'hint';
+    note.textContent = '转换结果不留在服务器上，这个链接下完即失效，要再拿就再转一次';
+    box.append(a, note);  }
 }
 
 function deleteBtn(d) {
@@ -478,7 +517,6 @@ function renderDetail(d) {
   kill.classList.add('spacer');           // 破坏性操作推到最右，手滑点不到
   head.append(title, note, kill);
   box.appendChild(head);
-  box.appendChild(convertBox(d));
 
   // 读不出的那一次恰恰最该能删掉，所以错误提示放在删除按钮之后而不是取而代之
   if (d.error) {
@@ -605,6 +643,7 @@ async function refresh() {
   RENDER = data.render || RENDER;
   FORMATS = data.formats || FORMATS;
   renderSessions(data.sessions);
+  renderConvert();
   transport(st);
   syncDetail();
   peerLink(st.peer_port, st.peer_alive);
@@ -645,6 +684,9 @@ $('btn-stop').onclick = async () => {
   try { await post('/api/replay/stop'); banner('已停止，手臂保持在原地'); refresh(); }
   catch (err) { banner(err.message, 'bad'); }
 };
+
+$('pick-all').onclick = () => pickAll(true);
+$('pick-none').onclick = () => pickAll(false);
 
 $('btn-arm').onclick = async () => {
   if (LIVE) {

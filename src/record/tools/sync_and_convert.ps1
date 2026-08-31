@@ -17,7 +17,8 @@
     两趟 rsync 会各问一次；配了公钥免密就一次都不问
     （注意 A 的 ~/.ssh 不是挂载出来的，容器重建会丢，见 README §2）。
 
-    可以反复跑：已经转换过的 session 会自动跳过，要重转加 -Force。
+    所有选中的 session 会合并成 $OutRoot 下的一份 dataset。可以反复跑：已有产物时
+    自动跳过，要按当前 session 集合重转加 -Force。
 
 .PARAMETER SyncOnly
     只同步和校验，不转换。
@@ -26,7 +27,7 @@
     跳过同步，直接对本地已有的 session 做校验和转换。
 
 .PARAMETER Force
-    已经转换过的 session 也重新转一遍。
+    已有 dataset 时按当前选中的全部 session 重新转换。
 
 .EXAMPLE
     .\sync_and_convert.ps1
@@ -263,25 +264,23 @@ if ($SyncOnly) {
 
 Write-Step '4. 转成 YB（README §4）'
 
-$produced = @()
-foreach ($s in $sealed) {
-    $outDir = Join-Path $OutRoot $s.Name
-    if ((Test-Path (Join-Path $outDir 'episodes_all.json')) -and -not $Force) {
-        Write-Host "  跳过 $($s.Name)：已经转换过（要重转加 -Force）" -ForegroundColor Yellow
-        $produced += $outDir
-        continue
-    }
-
+$produced = @($OutRoot)
+$outDir = $OutRoot
+if ((Test-Path (Join-Path $outDir 'episodes_all.json')) -and -not $Force) {
+    Write-Host "  跳过：dataset 已存在（要按当前 session 集合重转加 -Force）" -ForegroundColor Yellow
+} else {
     Write-Host ''
-    Write-Host "--- $($s.Name) -> $outDir ---" -ForegroundColor White
-    $r = Invoke-Native $py @(
-        (Join-Path $toolsDir 'convert.py'), $s.FullName,
+    Write-Host "--- $($sealed.Count) 个 session -> $outDir ---" -ForegroundColor White
+    $convertArgs = @((Join-Path $toolsDir 'convert.py'))
+    $convertArgs += @($sealed | ForEach-Object { $_.FullName })
+    $convertArgs += @(
         '--to', 'yb', '-o', $outDir,
         '--urdf', $urdf, '--calibration', $calib,
         '--video-height', "$VideoHeight", '--hz', "$Hz"
     )
+    $r = Invoke-Native $py $convertArgs
     if ($r.ExitCode -ne 0) {
-        Stop-With "转换失败：$($s.Name)（code $($r.ExitCode)）" `
+        Stop-With "合并转换失败（code $($r.ExitCode)）" `
                   '缺依赖看 README §5 那张表。别为了绕过报错去掉 --calibration —— 腕相机的 link 就在那份文件里'
     }
 
@@ -293,7 +292,6 @@ foreach ($s in $sealed) {
                       '那一路整段没录上，别拿这份数据训练（README §5）。回 A 侧查话题发布者'
         }
     }
-    $produced += $outDir
 }
 
 # -------------------------------------------------------------- 5. 产物自检

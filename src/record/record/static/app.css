@@ -3,8 +3,9 @@
   --fg: #1f2937; --muted: #64748b;
   --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --accent: #0369a1;
   --sunken: #f1f5f9;
-  /* header 高度 + 底部播放条给 body 留的 padding，数据操作区拿它算撑满高度 */
-  --chrome: 7rem;
+  /* header 高度 + 顶部转换栏 + 底部播放条给 body 留的 padding，
+     数据操作区拿它算撑满高度 */
+  --chrome: 10rem;
 }
 * { box-sizing: border-box; }
 /* 作者样式里的 display 会盖掉 UA 的 [hidden]{display:none}，.confirm 就是这样藏不住的 */
@@ -202,6 +203,8 @@ button.icon { font-size: .8rem; line-height: 1; padding: .45rem .7rem; }
 
 /* h2 是 flex，float 在里面不算数，靠 margin 推到右边 */
 .fold { margin-left: auto; padding: .1rem .5rem; font-size: .8rem; line-height: 1.2; }
+/* 同一行里第二个 fold 紧挨着前一个，别再各自推一次 */
+.pick-none { margin-left: 0; }
 .folded #streams-body { display: none; }
 /* 让宽表在卡片内部滚，否则它把整页撑宽/撑长，折叠按钮会被挤到屏幕外 */
 #streams-body { overflow: auto; min-height: 0; }
@@ -222,6 +225,8 @@ a.btn { font-size: .85rem; text-decoration: none; color: #fff; background: var(-
 a.btn:hover { background: #075985; }
 .export .bar { flex: 1 1 100%; margin: 0; }
 .export .pct { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .8rem; }
+/* 转换是对「勾了哪些采集」的操作，不属于任何一次采集，所以钉在顶上而不是详情里 */
+.convert-bar { margin: 0; padding: .5rem .9rem; border-bottom: 1px solid var(--line); }
 
 /* 数据操作区撑满视口：上面左树右详情，下面固定的播放条。
    两侧各自滚动，滚左边的文件树不会把右边的预览带跑。 */
@@ -248,6 +253,7 @@ a.btn:hover { background: #075985; }
 .tree .node.active { background: #e0f2fe; }
 .tree .node.root { font-family: ui-monospace, monospace; }
 .tree .node.root.playing { background: #dcfce7; }
+.tree .pick { flex: none; margin: 0; cursor: pointer; }
 /* VSCode 的 chevron：两条边框转 45°，不是实心三角。占位固定，文件行也要对齐 */
 .tree .twist { width: .8rem; height: .8rem; flex: none; position: relative; }
 .tree .node.dir > .twist::before, .tree .node.root > .twist::before {

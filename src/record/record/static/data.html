@@ -15,9 +15,14 @@
   <div id="banner" class="banner">连接中…</div>
 </header>
 
+<div id="convert" class="export convert-bar"></div>
+
 <main class="workarea">
   <section class="panel tree-pane">
-    <h2>已录制 <span class="hint" id="count"></span></h2>
+    <h2>已录制 <span class="hint" id="count"></span>
+      <button id="pick-all" class="fold">全选</button>
+      <button id="pick-none" class="fold pick-none">全不选</button>
+    </h2>
     <div id="sessions" class="tree"></div>
   </section>
 

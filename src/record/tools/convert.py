@@ -23,7 +23,7 @@ import converters                                          # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('session', nargs='?')
+    ap.add_argument('sessions', nargs='*')
     ap.add_argument('--list', action='store_true', help='列出支持的格式与依赖状态')
     ap.add_argument('--to', default='dataset_format')
     ap.add_argument('-o', '--out')
@@ -41,15 +41,16 @@ def main() -> int:
             print(f'{"":16} 必填: {", ".join(item["inputs"]) or "无"}')
         return 0
 
-    if not args.session or not args.out:
-        ap.error('要给 session 目录和 -o 输出目录（或者用 --list）')
+    if not args.sessions or not args.out:
+        ap.error('要给一个或多个 session 目录和 -o 输出目录（或者用 --list）')
     converter = converters.get(args.to)
     missing = converter.missing()
     if missing:
         print(f'跑不了 {converter.id}：缺 {"、".join(missing)}', file=sys.stderr)
         return 2
     values = {k: v for k, v in vars(args).items() if v is not None}
-    command = converter.command(sys.executable, Path(args.session).expanduser(),
+    sessions = [Path(path).expanduser() for path in args.sessions]
+    command = converter.command(sys.executable, sessions,
                                 Path(args.out).expanduser(), values)
     print('$', ' '.join(command))
     return subprocess.call(command)

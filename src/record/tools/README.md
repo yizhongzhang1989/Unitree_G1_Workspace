@@ -46,12 +46,14 @@ tools/
 （h5 行数 == mp4 帧数、有效率里没有 `0%`、腕相机外参不变量）。
 **任何一步不过就停下来报错**，不会把半成品往下传。可以反复跑，已经转过的会自动跳过。
 
+**选中的全部 session 合并成 `datasets/yb` 这一份 dataset**，不是一次采集一个文件夹。
+
 | 开关 | |
 | --- | --- |
 | `-SyncOnly` | 只拉数据和校验，先不转 |
 | `-NoSync` | 不联网，只处理本地已有的 session |
-| `-Force` | 已经转过的也重转一遍 |
-| `-Session 20260826_050938` | 只处理指定的那一条 |
+| `-Force` | 已有 dataset 时，按当前选中的全部 session 重转一遍 |
+| `-Session 20260826_050938` | 只处理指定的那几条（可给多个） |
 | `-RobotHost <IP>` | 换一台机器人 |
 
 密码不在脚本里，也不写进任何文件 —— ssh 自己弹提示，由你手输（两趟 rsync 各问一次）。
@@ -245,9 +247,13 @@ python3 convert.py --list
 缺什么它会直接说（比如「缺 python 模块 h5py」「缺 命令 ffmpeg」），别等跑到一半才发现。
 
 ```bash
-python3 convert.py <session 目录> --to yb -o <输出目录> \
+python3 convert.py <session 目录> [更多 session 目录...] --to yb -o <输出目录> \
         --urdf final.urdf --calibration calibration.yaml
 ```
+
+给多个 session 时会合并成**一份大 dataset**：文件序号跨 session 连续，根目录只有
+一份 `meta.json`、`episodes_all.json` 和 `episodes_all.h5`。一键 PowerShell 脚本也会把
+本次选中的全部 session 统一写进 `datasets/yb`，不再为每个 session 建子目录。
 
 可选参数：`--video-height`（默认 360，给 0 保持源分辨率）、`--hz`（默认 30）、
 `--keep-idle`（默认 1.0）、`--no-trim`。

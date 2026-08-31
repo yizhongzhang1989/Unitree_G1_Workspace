@@ -48,13 +48,17 @@ class Converter:
                   if importlib.util.find_spec(m) is None]
         return absent + [f'命令 {b}' for b in self.binaries if not shutil.which(b)]
 
-    def command(self, python: str, session, out, values: dict,
+    def command(self, python: str, sessions, out, values: dict,
                 progress: bool = False) -> list:
-        """拼出真正要跑的那条命令。缺必填输入就抛，不给半条命令。"""
+        """拼出真正要跑的那条命令。缺必填输入就抛，不给半条命令。
+
+        `sessions` 是一份清单：多个会合并导成同一份 dataset。
+        """
         missing = [name for name in self.inputs if not values.get(name)]
         if missing:
             raise ValueError(f'{self.id} 还缺参数: {", ".join(missing)}')
-        command = [python, str(HERE / self.script), str(session), '-o', str(out)]
+        command = [python, str(HERE / self.script),
+                   *(str(item) for item in sessions), '-o', str(out)]
         for name in self.inputs:
             command += [f'--{name.replace("_", "-")}', str(values[name])]
         for name, default in self.options.items():

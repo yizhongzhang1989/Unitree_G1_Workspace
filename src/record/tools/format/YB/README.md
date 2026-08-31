@@ -1,10 +1,19 @@
 # YB 数据集格式 v0.1
 
-上肢双臂遥操作的模仿学习数据集。一次采集导出成一份 YB，里面是若干条 episode，
+上肢双臂遥操作的模仿学习数据集。**一份 YB 就是一个 dataset**，里面是若干条 episode，
 每条 = **一个 h5 + 三路相机各一个 mp4**。
 
-导出工具就在旁边：`export.py`；统一入口是 `tools/convert.py --to yb`，
-也可以在机器人的数据管理面板上点「开始转换」。
+**一份 dataset 通常由多次采集（session）合并而成**，不是一次采集一份 —— 交付单位是
+数据集，不是某一天的采集。合并后 `meta.json` 与 `episodes_all.*` 全局各只有一份，
+episode 文件序号跨采集连续（§3）。
+
+导出工具就在旁边：`export.py`；统一入口是 `tools/convert.py --to yb`，它的第一个位置
+参数可以给多个 session 目录：
+
+```bash
+python3 convert.py <session A> <session B> <session C> --to yb -o <输出目录> \
+        --urdf final.urdf --calibration calibration.yaml
+```
 
 ---
 
@@ -27,6 +36,7 @@
 | **缺数据** | `state` 侧填 `NaN` 并置 `valid_mask=0`，**绝不填 0** |
 | **episode 边界** | 已掉掉首尾的无动作空转，各留 1 s（§1.1） |
 | **收录范围** | **只有采集时标注为成功的 episode**，fail / discard 一律不导（§1.2） |
+| **数据集组成** | 一份 dataset = 若干次采集合并，共用一份 `meta.json` 与 `episodes_all.*`（§3） |
 
 ---
 
@@ -107,7 +117,7 @@ YB：     30 Hz       ├────┼────┼────┼───�
 失败轨迹对模仿学习是负样本，混在里面等于教模型把东西碰倒。丢掉几条会在导出日志
 第一行打出来。被丢掉的 episode **在原始采集里一样不动**，要的话可以自己改脚本重导。
 
-> 文件名里的序号在一次导出内连续，而 `round0_episode2` 这段是采集时的原始编号 ——
+> 文件名里的序号在整份 dataset 内连续，而 `round0_episode2` 这段是采集时的原始编号 ——
 > 中间跳号就是那几条没做成。
 
 ---
@@ -149,6 +159,10 @@ video_leftcam/<name>.mp4                 左腕相机
 video_rightcam/<name>.mp4                右腕相机
 ```
 
+**上面这四个顶层文件/目录整个 dataset 各只有一份**，合并了多少次采集都一样：
+`meta.json` 和 `episodes_all.*` 覆盖全部 episode，`data/` 与三个 `video_*/` 是平铺的，
+**不按采集分子目录**。哪一条来自哪次采集看文件名里的采集批次（见下）。
+
 **相机的名字用对面样例的词**（`headcam`/`leftcam`/`rightcam`），不是采集端的流名。
 对面还有一路 `frontcam`（机器人前方的外部相机），我们没有，所以是三路不是四路 ——
 顺序一律读 `meta/camera_space/names`，别按位置硬编。
@@ -161,7 +175,10 @@ video_rightcam/<name>.mp4                右腕相机
   序号      采集批次      机器人  第几轮   该轮第几条
 ```
 
-序号在一次导出内从 1 开始连续；跨批次不保证唯一，要全局唯一请用整个文件名。
+**序号在整个 dataset 内从 1 开始连续**，跨采集批次一起编下去（前一次采集导完接着往下排），
+所以它就是这份 dataset 里的唯一编号。**采集批次在一份 dataset 里会有多个值** ——
+合并了几次采集就有几种，按它就能把 episode 归回原始采集。跨 dataset 不保证唯一，
+要全局唯一请用整个文件名。
 
 ---
 
@@ -459,12 +476,13 @@ if np.isnan(f['action/joint_space/position'][:]).all():
 | 字段 | 说明 |
 | --- | --- |
 | `format` / `format_version` | `"YB"` / `"0.1"`，认这个而不是靠目录结构猜 |
+| `dataset_name` | 单次采集就是那个采集批次；合并多次时是 `首--尾 (N sessions)` |
 | `sampling.hz` | 30，h5 和视频同一个值 |
 | `world_frame` | §5.1 那套，附实测值 |
 | `camera_space.extrinsic_formula` | §5.2 那一行公式 |
 | `ee_convention` | §5.3 的 `R_fix`，逐臂给 |
 | `robot.gripper` | 归一化前后的对应关系 |
-| `scale` | episode 条数与总时长（小时），**是掐完的时长** |
+| `scale` | episode 条数与总时长（小时），**是掐完的时长**，合并的话是全部采集之和 |
 
 h5 里 `meta/end_space/fk_provenance` 记着算末端位姿用的 URDF 与标定文件的 sha256。
 两次导出结果对不上时先比这个。
@@ -486,3 +504,6 @@ h5 的 `meta` attrs 只有三个：`version`、`gripper_unified="v1"`（夹爪�
   左右腕相机的 z 相差 15 mm，尽管两侧安装件相同。要求更高的话得重标。
 - 相机管线延迟按固定值 110 ms 补偿（腕）、0 ms（头）。这个值是靠运动相关性标的，
   与 OSD 时间戳法测出的 234 ms 有约 80 ms 的分歧，尚未定论。
+- **合并多次采集时，`meta.json` 里的内参出处只报第一次采集的**（h5 逐条用的仍是各自
+  采集当时那份）。几次采集之间重标过相机的话，以 h5 里 `meta/camera_space/intrinsic`
+  为准。`head_optical` 不一致时导出直接拒绝，不会悄悄按第一次的算。

@@ -129,7 +129,7 @@ def test_get_rejects_unknown():
 
 def test_command_carries_inputs_and_options():
     conv = converters.get('yb')
-    cmd = conv.command('/usr/bin/python3', Path('/s'), Path('/o'),
+    cmd = conv.command('/usr/bin/python3', [Path('/s')], Path('/o'),
                        {'urdf': '/u.urdf', 'calibration': '/c.yaml',
                         'video_height': 360})
     assert cmd[0] == '/usr/bin/python3'
@@ -143,23 +143,31 @@ def test_command_carries_inputs_and_options():
 def test_command_skips_empty_options():
     """没标定就用 URDF 名义值，不能传个空串下去让 export 去开空文件。"""
     conv = converters.get('yb')
-    cmd = conv.command('py', Path('/s'), Path('/o'),
+    cmd = conv.command('py', [Path('/s')], Path('/o'),
                        {'urdf': '/u.urdf', 'calibration': ''})
     assert '--calibration' not in cmd
+
+
+def test_command_carries_multiple_sessions_in_order():
+    conv = converters.get('yb')
+    cmd = conv.command('py', [Path('/s1'), Path('/s2')], Path('/o'),
+                       {'urdf': '/u.urdf'})
+    assert cmd[2:4] == ['/s1', '/s2']
+    assert cmd[4:6] == ['-o', '/o']
 
 
 def test_command_requires_declared_inputs():
     conv = converters.get('yb')
     with pytest.raises(ValueError, match='urdf'):
-        conv.command('py', Path('/s'), Path('/o'), {'urdf': ''})
+        conv.command('py', [Path('/s')], Path('/o'), {'urdf': ''})
 
 
 def test_progress_flag_is_opt_in():
     """面板要进度条，命令行不要 —— 那一秒好几条会把报告刷没。"""
     conv = converters.get('yb')
     values = {'urdf': '/u.urdf'}
-    assert '--progress' not in conv.command('py', Path('/s'), Path('/o'), values)
-    assert '--progress' in conv.command('py', Path('/s'), Path('/o'), values,
+    assert '--progress' not in conv.command('py', [Path('/s')], Path('/o'), values)
+    assert '--progress' in conv.command('py', [Path('/s')], Path('/o'), values,
                                         progress=True)
 
 
