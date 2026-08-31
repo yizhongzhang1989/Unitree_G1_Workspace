@@ -90,12 +90,20 @@ class G1Kinematics:
         # 按名字建映射而不是假定顺序一致：URDF 换一版顺序变了也不会静默错位。
         self._q_index = np.array([available[n] - 1 for n in joint_names], dtype=np.intp)
         self._names = tuple(joint_names)
+        # getFrameId 是对 model.frames 的线性字符串搜索，而重定向每帧要查七次。
+        self._frame_id: dict[str, int] = {}
         self._q = pin.neutral(self._model)
         self._fk(np.zeros(len(joint_names)))
 
     @property
     def joint_names(self) -> tuple[str, ...]:
         return self._names
+
+    def _frame(self, name: str):
+        index = self._frame_id.get(name)
+        if index is None:
+            index = self._frame_id[name] = self._model.getFrameId(name)
+        return self._data.oMf[index]
 
     def _fk(self, q29: np.ndarray) -> None:
         self._q[self._q_index] = np.asarray(q29, dtype=np.float64)
@@ -104,10 +112,10 @@ class G1Kinematics:
 
     def frame_pos(self, name: str) -> np.ndarray:
         """link 原点在 pelvis 系下的位置（模型的根就是 pelvis）。"""
-        return np.array(self._data.oMf[self._model.getFrameId(name)].translation)
+        return np.array(self._frame(name).translation)
 
     def frame_rot(self, name: str) -> np.ndarray:
-        return np.array(self._data.oMf[self._model.getFrameId(name)].rotation)
+        return np.array(self._frame(name).rotation)
 
     def key_body_pos(self, q29: np.ndarray, names: Sequence[str]) -> np.ndarray:
         """(K, 3) key body 位置，pelvis 系。"""
@@ -122,10 +130,6 @@ class G1Kinematics:
     ##
     # 零位标定：以下几个量全部现算，不写死
     ##
-
-    def segment(self, proximal: str, distal: str, q29: np.ndarray | None = None) -> np.ndarray:
-        self._fk(np.zeros(len(self._names)) if q29 is None else q29)
-        return self.frame_pos(distal) - self.frame_pos(proximal)
 
     def _bend(self, a: str, b: str, c: str) -> float:
         u = self.frame_pos(b) - self.frame_pos(a)

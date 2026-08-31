@@ -1,10 +1,7 @@
-"""只起可视化面板，不碰机器人。
+"""只起可视化面板，不碰机器人。面板怎么看见 ``dashboard_node`` 的模块注释。
 
     ros2 launch g1_mocap dashboard.launch.py
-    # 浏览器打开 http://<机器人IP>:8080
-
-头显在 PicoBridge 面板里填 `<机器人IP>:8000`。上真机之前用它看：人摆一个姿势，
-G1 会变成什么样。
+    # 浏览器打开 http://<机器人IP>:18080，头显那边填 <机器人IP>:18000
 
 **这个节点、``mocap_node``、``g1_rgmt_tracking_global`` 的跟踪层三选一**：
 头显同一时刻只连一个上行地址。

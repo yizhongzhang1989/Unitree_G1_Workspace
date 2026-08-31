@@ -14,7 +14,21 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import quote
 
-MOVABLE = ('revolute', 'continuous', 'prismatic')
+DEFAULT_URDF = ('package://unitree_g1_description/model/g1_description/'
+                'g1_29dof_mode_15.urdf')
+
+
+def resolve_package_path(path: str) -> str:
+    """``package://pkg/rest`` -> 绝对路径；其余原样返回。
+
+    ament 延迟导入，本模块在没有 ROS 的环境里也能导。
+    """
+    prefix = 'package://'
+    if not path.startswith(prefix):
+        return path
+    from ament_index_python.packages import get_package_share_directory
+    package, _, rest = path[len(prefix):].partition('/')
+    return f'{get_package_share_directory(package)}/{rest}'
 
 
 def _floats(text: str | None, fallback: tuple) -> list:

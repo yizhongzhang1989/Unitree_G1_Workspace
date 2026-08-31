@@ -19,6 +19,7 @@ import hmac
 import json
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -38,6 +39,9 @@ from .skeleton import (
 # 一帧全身数据约 6.5 KB；给到 1 MB 已经是 150 倍余量，再大就是异常报文。
 MAX_MESSAGE_BYTES = 1 << 20
 
+# 原始骨架的留存帧数（90 Hz 下约 2.7 秒），校准和诊断用。
+RAW_FRAMES = 240
+
 
 @dataclass(frozen=True)
 class SampleBatch:
@@ -53,11 +57,6 @@ class SampleBatch:
     anchor_pos: np.ndarray
     anchor_quat: np.ndarray
     key_pos: np.ndarray
-
-    def at(self, index) -> SampleBatch:
-        return SampleBatch(*(np.asarray(v)[index] for v in
-                             (self.t, self.joint_pos, self.root_pos, self.root_quat,
-                              self.anchor_pos, self.anchor_quat, self.key_pos)))
 
 
 @dataclass
@@ -175,7 +174,7 @@ class MocapStream:
         self._buffer = _RingBuffer(self._capacity, len(retargeter.joint_names),
                                    len(retargeter.key_bodies))
         self._calibration: RetargetCalibration | None = None
-        self._raw: list[BodyFrame] = []
+        self._raw: deque[BodyFrame] = deque(maxlen=RAW_FRAMES)
         self._raw_lock = threading.Lock()
         self._stats = StreamStats()
         self._stats_lock = threading.Lock()
@@ -221,10 +220,6 @@ class MocapStream:
     def calibrated(self) -> bool:
         return self._calibration is not None
 
-    @property
-    def calibration(self) -> RetargetCalibration | None:
-        return self._calibration
-
     def stats(self) -> StreamStats:
         with self._stats_lock:
             return StreamStats(**vars(self._stats))
@@ -233,6 +228,14 @@ class MocapStream:
         """最近几秒的**原始**骨架（未重定向、未缩放）。给校准和诊断用。"""
         with self._raw_lock:
             return list(self._raw)
+
+    def latest_frame(self) -> BodyFrame | None:
+        """只要最新一帧时走这里：面板 30 Hz 轮询，没必要每次拷两百多帧。"""
+        with self._raw_lock:
+            return self._raw[-1] if self._raw else None
+
+    def frame_count(self) -> int:
+        return len(self._raw)
 
     def span(self) -> tuple[float, float] | None:
         return self._buffer.span()
@@ -252,8 +255,7 @@ class MocapStream:
                                    len(self._retarget.key_bodies))
         self._log(f'动捕校准完成: 缩放 {calibration.scale:.3f}, '
                   f'站立高度 {calibration.stand_height:.3f} m, '
-                  f'踝俯仰零点 {calibration.ankle_pitch_bias[0]:+.3f}/'
-                  f'{calibration.ankle_pitch_bias[1]:+.3f} rad')
+                  f'站姿零位最大偏置 {np.abs(calibration.joint_bias).max():.3f} rad')
         return calibration
 
     ##
@@ -325,8 +327,6 @@ class MocapStream:
 
         with self._raw_lock:
             self._raw.append(frame)
-            if len(self._raw) > 240:
-                del self._raw[:-240]
 
         calibration = self._calibration
         if calibration is None:

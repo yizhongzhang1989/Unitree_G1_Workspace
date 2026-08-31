@@ -12,8 +12,7 @@
 2. 球窝三轴由两个约束定死：近端段方向对上，铰链转轴方向对上。
    转轴取 ``cross(近端段, 远端段)``，肢体伸直时这个叉乘退化，改用躯干的侧向轴兜底。
 
-人机比例差异只做两件事，**其余一概不改**：按腿长等比缩放全局位移，按校准帧
-把站立高度锚到 G1 自己的站立高度。多做的每一步都是在篡改参考。
+人机差异全部收在 :class:`RetargetCalibration` 里，只标一次，看那里的注释。
 """
 
 from __future__ import annotations
@@ -111,11 +110,31 @@ WAIST_JOINTS = ('waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint')
 ANKLE_LINKS = ('left_ankle_roll_link', 'right_ankle_roll_link')
 
 
+# 下面这几个都只吃 3 维向量。numpy 的通用版本要走广播分派（np.cross 会 moveaxis、
+# np.clip 标量要过 nan 检查），实测分别是 33 us / 13.6 us，而 solve() 每帧要调几十次。
+def _norm(v: np.ndarray) -> float:
+    return math.hypot(*v)
+
+
+def _cross(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    return np.array([u[1] * v[2] - u[2] * v[1],
+                     u[2] * v[0] - u[0] * v[2],
+                     u[0] * v[1] - u[1] * v[0]])
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return low if value < low else (high if value > high else value)
+
+
 def _unit(v: np.ndarray) -> np.ndarray:
-    n = float(np.linalg.norm(v))
+    n = _norm(v)
     if n < _EPS:
         raise ValueError('零向量无法定方向')
-    return np.asarray(v, dtype=np.float64) / n
+    return v / n
+
+
+def _columns(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
+    return np.array((x, y, z)).T
 
 
 def _frame_zy(z_hint: np.ndarray, y_hint: np.ndarray) -> np.ndarray:
@@ -125,15 +144,15 @@ def _frame_zy(z_hint: np.ndarray, y_hint: np.ndarray) -> np.ndarray:
     ``z_hint`` 只用来定平面。
     """
     y = _unit(y_hint)
-    z = _unit(np.asarray(z_hint, dtype=np.float64) - float(z_hint @ y) * y)
-    return np.column_stack([np.cross(y, z), y, z])
+    z = _unit(z_hint - float(z_hint @ y) * y)
+    return _columns(_cross(y, z), y, z)
 
 
 def _frame_along(primary: np.ndarray, secondary: np.ndarray) -> np.ndarray:
     """列为 [l|m|n] 的右手系：``n`` 就是 ``primary``，``m`` 由 ``secondary`` 正交化而来。"""
     n = _unit(primary)
-    m = _unit(np.asarray(secondary, dtype=np.float64) - float(secondary @ n) * n)
-    return np.column_stack([np.cross(m, n), m, n])
+    m = _unit(secondary - float(secondary @ n) * n)
+    return _columns(_cross(m, n), m, n)
 
 
 def _rotation_between(from_primary: np.ndarray, from_secondary: np.ndarray,
@@ -145,7 +164,7 @@ def _rotation_between(from_primary: np.ndarray, from_secondary: np.ndarray,
 
 def _decompose_zxy(mat: np.ndarray) -> tuple[float, float, float]:
     """``R = Rz(yaw) Rx(roll) Ry(pitch)`` -> (yaw, roll, pitch)。腰三轴就是这个顺序。"""
-    roll = math.asin(float(np.clip(mat[2, 1], -1.0, 1.0)))
+    roll = math.asin(_clamp(float(mat[2, 1]), -1.0, 1.0))
     pitch = math.atan2(-mat[2, 0], mat[2, 2])
     yaw = math.atan2(-mat[0, 1], mat[1, 1])
     return yaw, roll, pitch
@@ -153,7 +172,7 @@ def _decompose_zxy(mat: np.ndarray) -> tuple[float, float, float]:
 
 def _decompose_yxz(mat: np.ndarray) -> tuple[float, float, float]:
     """``R = Ry(pitch) Rx(roll) Rz(yaw)`` -> (pitch, roll, yaw)。髋和肩都是这个顺序。"""
-    roll = math.asin(float(np.clip(-mat[1, 2], -1.0, 1.0)))
+    roll = math.asin(_clamp(float(-mat[1, 2]), -1.0, 1.0))
     yaw = math.atan2(mat[1, 0], mat[1, 1])
     pitch = math.atan2(mat[0, 2], mat[2, 2])
     return pitch, roll, yaw
@@ -183,11 +202,11 @@ def _fallback_hinge_axis(rot_root: np.ndarray, limb: np.ndarray) -> np.ndarray:
 
 
 def _angle_between(u: np.ndarray, v: np.ndarray) -> float:
-    return math.acos(float(np.clip(_unit(u) @ _unit(v), -1.0, 1.0)))
+    return math.acos(_clamp(float(_unit(u) @ _unit(v)), -1.0, 1.0))
 
 
 def _smoothstep(value: float, low: float, high: float) -> float:
-    t = float(np.clip((value - low) / max(high - low, _EPS), 0.0, 1.0))
+    t = _clamp((value - low) / max(high - low, _EPS), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
 
 
@@ -333,7 +352,7 @@ class Retargeter:
             joint_bias=np.zeros(len(self._names)),
             joint_target=np.zeros(len(self._names)))
 
-        pelvis, torso = self._body_frames(sample, rough)
+        pelvis, torso = self._body_frames(positions)
         posed = replace(rough,
                         pelvis_fix=pelvis.T @ _yaw_only(pelvis),
                         torso_fix=torso.T @ _yaw_only(torso))
@@ -344,18 +363,15 @@ class Retargeter:
     # 单帧求解
     ##
 
-    def _body_frames(self, frame: BodyFrame,
-                     calib: RetargetCalibration) -> tuple[np.ndarray, np.ndarray]:
-        positions = frame.positions * calib.scale
-
+    def _body_frames(self, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         def point(name: str) -> np.ndarray:
             return positions[JOINT_INDEX[name]]
 
         # 竖直方向只用来定平面，侧向那根（左右成对的连线）才是精确保留的那一路。
         return (_frame_zy(point('SPINE1') - point('PELVIS'),
-                          point('LEFT_HIP') - point('RIGHT_HIP')) @ calib.pelvis_fix,
+                          point('LEFT_HIP') - point('RIGHT_HIP')),
                 _frame_zy(point('NECK') - point('SPINE3'),
-                          point('LEFT_SHOULDER') - point('RIGHT_SHOULDER')) @ calib.torso_fix)
+                          point('LEFT_SHOULDER') - point('RIGHT_SHOULDER')))
 
     def solve(self, frame: BodyFrame, calib: RetargetCalibration) -> RetargetResult:
         positions = frame.positions * calib.scale
@@ -363,7 +379,9 @@ class Retargeter:
         def point(name: str) -> np.ndarray:
             return positions[JOINT_INDEX[name]]
 
-        rot_pelvis, rot_torso = self._body_frames(frame, calib)
+        rot_pelvis, rot_torso = self._body_frames(positions)
+        rot_pelvis = rot_pelvis @ calib.pelvis_fix
+        rot_torso = rot_torso @ calib.torso_fix
 
         angles = np.zeros(len(self._names))
         yaw, roll, pitch = _decompose_zxy(rot_pelvis.T @ rot_torso)
@@ -379,8 +397,9 @@ class Retargeter:
         angles = np.clip(angles - calib.joint_bias + calib.joint_target,
                          self._lower, self._upper)
 
-        root_pos = np.array([point('PELVIS')[0], point('PELVIS')[1],
-                             point('PELVIS')[2] - calib.pelvis_ref_z + calib.stand_height])
+        pelvis = point('PELVIS')
+        root_pos = np.array([pelvis[0], pelvis[1],
+                             pelvis[2] - calib.pelvis_ref_z + calib.stand_height])
         key_local = self._kin.key_body_pos(angles, self._key_bodies)
         anchor_local = self._kin.frame_pos(self._anchor)
         anchor_rot = self._kin.frame_rot(self._anchor)
@@ -423,7 +442,8 @@ class Retargeter:
         else:
             # Rx(roll) Ry(pitch) Rz(yaw) @ x 与 roll 无关，剩下两轴可解：
             #   local = (cos(pitch)cos(yaw), sin(yaw), -sin(pitch)cos(yaw))
-            angles[self._slot[spec.tip_joints[2]]] = math.asin(float(np.clip(local[1], -1.0, 1.0)))
+            angles[self._slot[spec.tip_joints[2]]] = math.asin(
+                _clamp(float(local[1]), -1.0, 1.0))
             angles[self._slot[spec.tip_joints[1]]] = math.atan2(-local[2], local[0])
 
     @staticmethod
@@ -438,8 +458,8 @@ class Retargeter:
         if spec.tip_defines_hinge:
             return lateral
         bent = _rot_y(turned) @ geom.distal_dir
-        cross = geom.hinge.axis_sign * np.cross(geom.proximal_dir, bent)
-        return _unit(cross) if float(np.linalg.norm(cross)) > 1e-4 else lateral
+        cross = geom.hinge.axis_sign * _cross(geom.proximal_dir, bent)
+        return _unit(cross) if _norm(cross) > 1e-4 else lateral
 
     @staticmethod
     def _hinge_axis(spec: LimbSpec, geom: LimbGeometry, upper: np.ndarray,
@@ -451,18 +471,18 @@ class Retargeter:
         它在伸直时最准，只在膝弯超过 90 度后会翻号，而那正是膝弯叉乘最可信的区间。
         两者按弯曲程度平滑过渡，不做硬切换：硬切换会在切换点上让参考抖一下。
         """
-        scale = float(np.linalg.norm(upper) * np.linalg.norm(lower))
-        bend_cross = geom.hinge.axis_sign * np.cross(upper, lower)
-        bend_norm = float(np.linalg.norm(bend_cross)) / max(scale, _EPS)
+        scale = _norm(upper) * _norm(lower)
+        bend_cross = geom.hinge.axis_sign * _cross(upper, lower)
+        bend_norm = _norm(bend_cross) / max(scale, _EPS)
         if not spec.tip_defines_hinge:
             return (bend_cross / (bend_norm * scale)) if bend_norm > 0.05 \
                 else _fallback_hinge_axis(rot_root, upper)
 
-        tip_cross = np.cross(tip_dir, upper)
-        if float(np.linalg.norm(tip_cross)) < 1e-6:
+        tip_cross = _cross(tip_dir, upper)
+        if _norm(tip_cross) < 1e-6:
             return (bend_cross / (bend_norm * scale)) if bend_norm > 1e-6 \
                 else _fallback_hinge_axis(rot_root, upper)
         weight = _smoothstep(bend_norm, math.sin(0.10), math.sin(0.40))
         blended = weight * (bend_cross / max(bend_norm * scale, _EPS)) \
             + (1.0 - weight) * _unit(tip_cross)
-        return _unit(blended) if float(np.linalg.norm(blended)) > 1e-6 else _unit(tip_cross)
+        return _unit(blended) if _norm(blended) > 1e-6 else _unit(tip_cross)

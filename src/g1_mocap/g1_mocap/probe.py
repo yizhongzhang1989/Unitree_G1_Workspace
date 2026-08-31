@@ -27,37 +27,17 @@ from __future__ import annotations
 
 import argparse
 import math
-import sys
 import time
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 from .kinematics import G1Kinematics
 from .retarget import ARMS, LEGS, Retargeter
 from .skeleton import JOINT_INDEX
 from .stream import MocapStream
-
-DEFAULT_URDF = ('package://unitree_g1_description/model/g1_description/'
-                'g1_29dof_mode_15.urdf')
-
-ACTION_JOINTS = (
-    'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
-    'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-    'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-    'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint',
-    'waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint',
-    'left_shoulder_pitch_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint',
-    'left_elbow_joint', 'left_wrist_roll_joint', 'left_wrist_pitch_joint',
-    'left_wrist_yaw_joint',
-    'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
-    'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint',
-    'right_wrist_yaw_joint',
-)
-KEY_BODIES = ('torso_link', 'left_wrist_yaw_link', 'right_wrist_yaw_link',
-              'left_ankle_roll_link', 'right_ankle_roll_link')
-DEFAULT_Q = np.array([-0.1, 0.0, 0.0, 0.3, -0.2, 0.0, -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
-                      0.0, 0.0, 0.0, 0.35, 0.25, 0.0, 0.87, 0.0, 0.0, 0.0,
-                      0.35, -0.25, 0.0, 0.87, 0.0, 0.0, 0.0])
+from .urdf import DEFAULT_URDF, resolve_package_path
 
 # 定朝向用的短向量。骨盆和躯干的姿态全靠它们，短了就撑不住噪声。
 ORIENTATION_VECTORS = (
@@ -68,19 +48,17 @@ ORIENTATION_VECTORS = (
 )
 
 
-def resolve(path: str) -> str:
-    prefix = 'package://'
-    if not path.startswith(prefix):
-        return path
-    from ament_index_python.packages import get_package_share_directory
-    package, _, rest = path[len(prefix):].partition('/')
-    return f'{get_package_share_directory(package)}/{rest}'
+def load_config() -> dict:
+    """从 ``config/mocap.yaml`` 读关节顺序等参数，别在这儿再抄一份。"""
+    share = resolve_package_path('package://g1_mocap/config/mocap.yaml')
+    document = yaml.safe_load(Path(share).read_text(encoding='utf-8'))
+    return next(iter(document.values()))['ros__parameters']
 
 
-def segment_table(frames, kin: G1Kinematics) -> str:
+def segment_table(frames, kin: G1Kinematics, joints) -> str:
     """人的骨骼段长 vs G1 的。比值整体应该一致，某一段跑偏就是关节点语义对不上。"""
     positions = np.mean([f.positions for f in frames], axis=0)
-    kin.key_body_pos(np.zeros(len(ACTION_JOINTS)), ('pelvis',))
+    kin.key_body_pos(np.zeros(len(joints)), ('pelvis',))
     rows = ['  段                        人(m)   G1(m)   比值']
     for group in (LEGS, ARMS):
         for side, spec in group.items():
@@ -114,10 +92,10 @@ def orientation_table(frames) -> str:
     return '\n'.join(rows)
 
 
-def joint_table(angles: np.ndarray, jitter: np.ndarray) -> str:
+def joint_table(joints, angles: np.ndarray, jitter: np.ndarray) -> str:
     """当前关节角 + 帧间抖动。人静止站直时，角度该接近 0，抖动该接近 0。"""
     rows = ['  关节                            角度(deg)  抖动p95(deg/帧)']
-    for i, name in enumerate(ACTION_JOINTS):
+    for i, name in enumerate(joints):
         flag = '   <<<' if jitter[i] > 1.0 else ''
         rows.append(f'  {name:30s} {math.degrees(angles[i]):8.2f}  '
                     f'{math.degrees(jitter[i]):12.3f}{flag}')
@@ -136,9 +114,12 @@ def main() -> None:
                         help='等头显的秒数，0 表示一直等（Ctrl-C 退出）')
     args = parser.parse_args()
 
-    kin = G1Kinematics(resolve(args.urdf), ACTION_JOINTS)
-    retargeter = Retargeter(kin, key_bodies=KEY_BODIES, anchor_body='torso_link',
-                            default_joint_pos=DEFAULT_Q)
+    config = load_config()
+    joints = list(config['joints'])
+    kin = G1Kinematics(resolve_package_path(args.urdf), joints)
+    retargeter = Retargeter(kin, key_bodies=list(config['key_bodies']),
+                            anchor_body=config['anchor_body'],
+                            default_joint_pos=np.asarray(config['default_joint_pos']))
     stream = MocapStream(retargeter, host=args.host, port=args.port,
                          token=args.token, log=print)
     stream.start()
@@ -148,7 +129,7 @@ def main() -> None:
     try:
         deadline = time.monotonic() + args.wait if args.wait > 0 else float('inf')
         reported = 0.0
-        while len(stream.recent_frames()) < 40:
+        while stream.frame_count() < 40:
             if time.monotonic() > deadline:
                 print('等超时了。检查头显是否连上、body.status 是否 VALID')
                 return
@@ -158,7 +139,7 @@ def main() -> None:
                 stats = stream.stats()
                 # 分清两件事：链路没通，还是通了但 body 数据不可用（没戴好 / 没校准）。
                 print(f'  [{time.strftime("%H:%M:%S")}] {stream.describe_status()}'
-                      f' 可用帧={len(stream.recent_frames())}'
+                      f' 可用帧={stream.frame_count()}'
                       + ('' if stats.connected else '   <<< 头显还没连进来'))
             time.sleep(0.2)
 
@@ -170,20 +151,20 @@ def main() -> None:
             return
 
         print('\n=== 段长：人 vs G1 ===')
-        print(segment_table(frames, kin))
+        print(segment_table(frames, kin, joints))
         print('\n=== 定朝向的短向量（最脆的一环）===')
         print(orientation_table(frames))
 
         calibration = retargeter.calibrate(frames)
         print(f'\n=== 校准 ===\n  缩放 {calibration.scale:.4f}   '
               f'站立高度 {calibration.stand_height:.4f} m   '
-              f'踝俯仰零点 {math.degrees(calibration.ankle_pitch_bias[0]):+.2f}/'
-              f'{math.degrees(calibration.ankle_pitch_bias[1]):+.2f} deg')
+              f'站姿零位最大偏置 '
+              f'{math.degrees(np.abs(calibration.joint_bias).max()):.2f} deg')
 
         solved = np.stack([retargeter.solve(f, calibration).joint_pos for f in frames])
         jitter = np.percentile(np.abs(np.diff(solved, axis=0)), 95, axis=0)
         print('\n=== 关节角（人站直时应整体接近 0，G1 零位就是直立）===')
-        print(joint_table(solved[-1], jitter))
+        print(joint_table(joints, solved[-1], jitter))
 
         roots = np.stack([retargeter.solve(f, calibration).root_pos for f in frames])
         speed = np.linalg.norm(np.diff(roots, axis=0), axis=-1) / 0.02
@@ -197,4 +178,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()

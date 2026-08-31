@@ -12,7 +12,7 @@ import numpy as np
 
 
 def quat_normalize(q: np.ndarray) -> np.ndarray:
-    n = float(np.linalg.norm(q))
+    n = math.hypot(*q)
     if not math.isfinite(n) or n < 1e-9:
         raise ValueError(f'四元数非法: {q}')
     return np.asarray(q, dtype=np.float64) / n

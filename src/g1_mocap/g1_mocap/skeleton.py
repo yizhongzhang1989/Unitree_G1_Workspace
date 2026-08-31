@@ -2,11 +2,8 @@
 
 **坐标系**：PicoBridge 走 OpenXR 右手系（X 右、Y 上、−Z 前），机器人这边是
 X 前、Y 左、Z 上。换算就是 ``(x, y, z) -> (-z, -x, y)``，写成矩阵即 :data:`XR_TO_ROBOT`。
-只在这一层换一次，往后全是机器人坐标系。
-
-**只用位置，不用关节朝向**。PICO 没有公开各 ``XrBodyJointBD`` 的局部系定义，拿朝向
-去凑 G1 的关节轴是在赌一个没写进文档的约定；而三点位置定一个刚体朝向是确定的几何。
-代价是绕肢体自身轴的自转（前臂 roll、脚的内外翻）解不出来，那两轴按 0 处理。
+只在这一层换一次，往后全是机器人坐标系。报文里的关节朝向一律不取，原因见
+:mod:`~g1_mocap.retarget`。
 
 **时钟**：帧里的 ``t`` 是头显的 ``predictedDisplayTime``，抖动远小于 WiFi 到达时刻。
 用它做帧间相对时间、用首帧的本地时刻做锚点，可以把网络抖动挡在参考窗口之外；
@@ -84,18 +81,20 @@ def parse_body(payload: dict) -> BodyFrame | None:
     if not isinstance(joints, dict):
         return None
 
-    positions = np.empty((len(SMPL_JOINTS), 3), dtype=np.float64)
-    for i, name in enumerate(SMPL_JOINTS):
+    rows = []
+    for name in SMPL_JOINTS:
         joint = joints.get(name)
         if not isinstance(joint, dict) or not joint.get('position_valid', True):
             return None
         position = joint.get('position')
         if not isinstance(position, (list, tuple)) or len(position) != 3:
             return None
-        try:
-            positions[i] = [float(v) for v in position]
-        except (TypeError, ValueError):
-            return None
+        rows.append(position)
+    try:
+        # 一次性建数组；逐行写进预分配的 (24, 3) 要走 24 次 numpy setitem，慢一倍。
+        positions = np.array(rows, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
     if not np.all(np.isfinite(positions)):
         return None
 

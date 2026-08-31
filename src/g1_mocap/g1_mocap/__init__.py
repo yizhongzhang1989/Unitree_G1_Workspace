@@ -2,12 +2,7 @@
 
 链路全程 WiFi（不用 adb）：头显上的 PicoBridge APK 把 24 关节 SMPL 骨架推过来，
 本包把它重定向成 G1 的 29 轴关节角，并用 G1 自己的 URDF 做正运动学补出各刚体位姿。
-
-::
-
-    PICO 4 Ultra + 5x Motion Tracker
-        --ws--> mocap_node 内建的 /ws/device          (source=device，默认)
-        --ws--> PicoBridge 的 server.py --ws--> 本包  (source=bridge)
+接入方式和精度数据见 ``README.md``。
 
 四个模块：
 

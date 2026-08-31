@@ -16,27 +16,15 @@ from __future__ import annotations
 
 import numpy as np
 import rclpy
-from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
-
 from .kinematics import G1Kinematics
 from .retarget import Retargeter
 from .stream import MocapStream
-
-DEFAULT_URDF = ('package://unitree_g1_description/model/g1_description/'
-                'g1_29dof_mode_15.urdf')
-
-
-def resolve_package_path(path: str) -> str:
-    prefix = 'package://'
-    if not path.startswith(prefix):
-        return path
-    package, _, rest = path[len(prefix):].partition('/')
-    return f'{get_package_share_directory(package)}/{rest}'
+from .urdf import DEFAULT_URDF, resolve_package_path
 
 
 class MocapNode(Node):

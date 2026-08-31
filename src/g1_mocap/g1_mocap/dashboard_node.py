@@ -4,9 +4,7 @@
 右边是重定向 + G1 正运动学之后的位形，两边同一个视角、同一个尺度。
 
     ros2 launch g1_mocap dashboard.launch.py
-    # 浏览器打开 http://<机器人IP>:8080
-
-头显在 PicoBridge 面板里填 `<机器人IP>:8000`（和 mocap_node 一样的上行端口）。
+    # 浏览器打开 http://<机器人IP>:18080，头显那边填 <机器人IP>:18000
 
 > 这个节点、``mocap_node``、``g1_rgmt_tracking_global`` 的跟踪层**三选一**：
 > 头显同一时刻只连一个上行地址。
@@ -36,10 +34,10 @@ from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
 from .kinematics import G1Kinematics
-from .mocap_node import DEFAULT_URDF, resolve_package_path
 from .retarget import Retargeter
 from .skeleton import SMPL_JOINTS, STATUS_MESSAGES
 from .stream import MocapStream
+from .urdf import DEFAULT_URDF, resolve_package_path
 from .urdf import parse as parse_urdf
 from .urdf import under
 
@@ -142,7 +140,7 @@ class DashboardNode(Node):
             default_joint_pos=default_pos,
             foot_ground_clearance_m=float(
                 p('foot_ground_clearance_m', 0.03).get_parameter_value().double_value))
-        uplink_port = int(p('port', 8000).get_parameter_value().integer_value)
+        uplink_port = int(p('port', 18000).get_parameter_value().integer_value)
         self._stream = MocapStream(
             self._retarget,
             host=p('host', '0.0.0.0').get_parameter_value().string_value,
@@ -231,9 +229,9 @@ class DashboardNode(Node):
             'body_message': STATUS_MESSAGES.get(stats.message, str(stats.message)),
             'error': stats.last_error,
         }
-        raw = self._stream.recent_frames()
-        if raw:
-            base['human'] = np.round(raw[-1].positions, 4).tolist()
+        raw = self._stream.latest_frame()
+        if raw is not None:
+            base['human'] = np.round(raw.positions, 4).tolist()
         if not self._stream.calibrated:
             return base
 

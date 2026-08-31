@@ -5,12 +5,10 @@
 
     ros2 launch g1_mocap mocap.launch.py
     ros2 topic echo /mocap/status
-    ros2 topic echo /mocap/joint_states --field position
 
-头显那边在配置面板里填**本机的局域网 IP** 加 ``:8000``，点连接。全程 WiFi，不用 adb。
+头显那边在配置面板里填**本机的局域网 IP** 加 ``:18000``，点连接。全程 WiFi，不用 adb。
 
-**这个节点和跟踪层不要同时起**：头显同一时刻只连一个上行地址，跟踪层是自己在进程内
-建连接的（走话题会把 72/90 Hz 的时间分辨率先降到 50 Hz，参考窗口的速度差分就毁了）。
+**这个节点和跟踪层不要同时起**：头显同一时刻只连一个上行地址。
 """
 
 from pathlib import Path

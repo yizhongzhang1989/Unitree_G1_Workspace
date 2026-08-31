@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from g1_mocap.kinematics import G1Kinematics
 from g1_mocap.retarget import (
@@ -27,29 +28,20 @@ from g1_mocap.retarget import (
     Retargeter,
 )
 from g1_mocap.rotations import quat_from_mat, quat_to_mat
-from g1_mocap.skeleton import JOINT_INDEX, SMPL_JOINTS, BodyFrame
+from g1_mocap.skeleton import JOINT_INDEX, SMPL_JOINTS, XR_TO_ROBOT, BodyFrame
+from g1_mocap.stream import MocapStream
 
 URDF = str(Path(__file__).resolve().parents[2] / 'unitree_g1_description' / 'model'
            / 'g1_description' / 'g1_29dof_mode_15.urdf')
 
-ACTION_JOINTS = (
-    'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
-    'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-    'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-    'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint',
-    'waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint',
-    'left_shoulder_pitch_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint',
-    'left_elbow_joint', 'left_wrist_roll_joint', 'left_wrist_pitch_joint',
-    'left_wrist_yaw_joint',
-    'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint',
-    'right_elbow_joint', 'right_wrist_roll_joint', 'right_wrist_pitch_joint',
-    'right_wrist_yaw_joint',
-)
-KEY_BODIES = ('torso_link', 'left_wrist_yaw_link', 'right_wrist_yaw_link',
-              'left_ankle_roll_link', 'right_ankle_roll_link')
-DEFAULT_Q = np.array([-0.1, 0.0, 0.0, 0.3, -0.2, 0.0, -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
-                      0.0, 0.0, 0.0, 0.35, 0.25, 0.0, 0.87, 0.0, 0.0, 0.0,
-                      0.35, -0.25, 0.0, 0.87, 0.0, 0.0, 0.0])
+# 关节顺序、key body、default 位形都以 config/mocap.yaml 为准，别在这儿抄第二份：
+# 抄一份就多一处会悄悄漂掉的真值，而这几个测试同时也是在校验那份配置本身。
+_CONFIG = next(iter(yaml.safe_load(
+    (Path(__file__).resolve().parents[1] / 'config' / 'mocap.yaml')
+    .read_text(encoding='utf-8')).values()))['ros__parameters']
+ACTION_JOINTS = tuple(_CONFIG['joints'])
+KEY_BODIES = tuple(_CONFIG['key_bodies'])
+DEFAULT_Q = np.array(_CONFIG['default_joint_pos'])
 SLOT = {name: i for i, name in enumerate(ACTION_JOINTS)}
 # 绕肢体自身轴的自转从单个方向向量里解不出来，这四轴恒为 0，闭环里也别去转它们。
 UNOBSERVABLE = ('left_ankle_roll_joint', 'right_ankle_roll_joint',
@@ -312,6 +304,32 @@ def test_calibration_rejects_a_collapsed_skeleton(retargeter):
     frames = [BodyFrame(t=0.0, seq=0, positions=positions, status=1, message=0)] * 30
     with pytest.raises(ValueError, match='站立姿态'):
         retargeter.calibrate(frames)
+
+
+def test_stream_calibration_reports_its_result(kin, retargeter):
+    """走完整的 ``_ingest -> calibrate`` 路径。
+
+    成功之后那句日志一度引用了早已从 ``RetargetCalibration`` 删掉的字段，抛
+    ``AttributeError``；而两个调用点都只捕 ``RuntimeError`` / ``ValueError``，
+    异常会一路穿到收帧循环里，表现是「校准一次就断流」。
+    """
+    positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
+                                   pelvis_rot=np.eye(3))
+    xr = positions @ XR_TO_ROBOT  # parse_body 会再换回机器人系
+    payload = {'t': 0.0, 'seq': 0, 'body': {
+        'status': 1, 'message': 0,
+        'joints': {name: {'position': list(xr[i]), 'position_valid': True}
+                   for i, name in enumerate(SMPL_JOINTS)}}}
+
+    logs = []
+    stream = MocapStream(retargeter, log=logs.append)  # 不 start()，不碰网络
+    for _ in range(30):
+        stream._ingest(payload)
+
+    calibration = stream.calibrate()
+    assert stream.calibrated
+    assert calibration.scale == pytest.approx(1.0, abs=0.02)
+    assert logs and '校准完成' in logs[-1]
 
 
 def test_ankle_bias_cancels_a_toe_down_skeleton(kin, retargeter):
