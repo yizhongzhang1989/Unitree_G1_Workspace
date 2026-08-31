@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>g1_mocap</name>
+  <version>0.1.0</version>
+  <description>
+    PICO 4 Ultra 全身动捕（5 个 Motion Tracker，24 关节 SMPL 骨架）到 G1 29 轴关节角的
+    重定向。数据经 WiFi 从头显上的 PicoBridge APK 直连过来，本包可以自己当上行服务端，
+    也可以去连一个已经在跑的 PicoBridge server。
+
+    重定向只吃关节**位置**，不吃厂商给的关节朝向——PICO 没公开 XrBodyJointBD 的局部系
+    定义。零位几何（肘的零位弯角 82 度、髋 roll 轴前倾 10 度、肩 roll 轴外倾 16 度……）
+    全部从 URDF 现算，换一版模型不用改代码。
+
+    本包不含任何策略逻辑，输出就是关节角加各刚体位姿。
+  </description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-aiohttp</exec_depend>
+  <!-- pinocchio 提供正运动学。系统装的是 ros-humble-pinocchio。 -->
+  <exec_depend>pinocchio</exec_depend>
+
+  <!-- G1 的 URDF。29 轴模型足够：5 个 key body 和全部球窝/铰链都在里面。 -->
+  <exec_depend>unitree_g1_description</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

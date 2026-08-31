@@ -1,0 +1,115 @@
+"""URDF 解析与手柄触发的校准快捷键。不需要头显，也不需要网络。"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import pytest
+
+from g1_mocap.skeleton import both_thumbsticks_pressed
+from g1_mocap.urdf import mesh_url, parse, rpy_to_quat, under
+
+URDF_PATH = (Path(__file__).resolve().parents[2] / 'unitree_g1_description' / 'model'
+             / 'g1_description' / 'g1_29dof_mode_15.urdf')
+
+
+@pytest.fixture(scope='module')
+def model() -> dict:
+    return parse(URDF_PATH.read_text(encoding='utf-8'), 'pelvis')
+
+
+def test_joints_come_out_parent_before_child(model):
+    """前端按这个顺序往 Object3D 树上挂，父节点必须先出现，否则整段肢体挂不上。"""
+    seen = {model['base']}
+    for joint in model['joints']:
+        assert joint['parent'] in seen, joint['name']
+        seen.add(joint['child'])
+    assert len(model['joints']) >= 29
+
+
+def test_every_link_with_a_visual_has_a_resolvable_mesh(model):
+    """G1 的 URDF 用的是裸相对路径，不是 package://。只认后者会一个 mesh 都出不来。"""
+    assert len(model['links']) >= 25
+    for link in model['links']:
+        for visual in link['visuals']:
+            assert visual['url'].startswith('/mesh?path=')
+            assert len(visual['xyz']) == 3 and len(visual['quat']) == 4
+            assert len(visual['scale']) == 3
+
+
+def test_mesh_url_rejects_traversal():
+    """/mesh 的参数来自网络而面板默认听 0.0.0.0，放开任意路径就是任意文件读。"""
+    assert mesh_url('g1_description/meshes/pelvis.STL') == \
+        '/mesh?path=g1_description/meshes/pelvis.STL'
+    assert mesh_url('package://unitree_g1_description/model/a.STL') == '/mesh?path=model/a.STL'
+    assert mesh_url('/etc/passwd') == ''
+    assert mesh_url('../../../etc/passwd') == ''
+    assert mesh_url('a/../../b.STL') == ''
+    assert mesh_url('') == ''
+
+
+def test_under_rejects_traversal():
+    base = Path('/tmp/base')
+    assert under(base, 'a/b.STL') == base / 'a' / 'b.STL'
+    assert under(base, '/etc/passwd') is None
+    assert under(base, '../escape') is None
+    assert under(base, 'a/../../escape') is None
+    assert under(base, '') is None
+
+
+def test_rpy_is_fixed_axis_not_intrinsic():
+    """URDF 的 rpy 是固定轴外旋 X->Y->Z，而 three.js 的 Euler 默认内旋，正好反过来。
+
+    单轴关节看不出差别，三个分量都非零的 visual 会整个歪掉——所以这一步放在后端，
+    好被这条测试钉住。
+    """
+    x, y, z, w = rpy_to_quat('0 0 1.5707963')
+    assert (x, y) == (0.0, 0.0)
+    assert z == pytest.approx(math.sin(0.5707963 / 2 + 0.5), abs=0.01)
+
+    # R = Rz(y)Ry(p)Rx(r)：绕 x 转 90 度再绕 z 转 90 度，等价于绕 (1,1,1)/sqrt(3) 转 120 度
+    quat = rpy_to_quat('1.5707963 0 1.5707963')
+    expected = 0.5
+    assert quat[0] == pytest.approx(expected, abs=1e-6)
+    assert quat[1] == pytest.approx(expected, abs=1e-6)
+    assert quat[2] == pytest.approx(expected, abs=1e-6)
+    assert quat[3] == pytest.approx(expected, abs=1e-6)
+
+
+def test_missing_base_is_rejected():
+    with pytest.raises(ValueError, match='没有子关节'):
+        parse(URDF_PATH.read_text(encoding='utf-8'), 'no_such_link')
+
+
+##
+# 手柄快捷键
+##
+
+def controllers(left: bool, right: bool, connected: bool = True) -> dict:
+    return {hand: {'connected': connected,
+                   'buttons': {'thumbstick_pressed': pressed}}
+            for hand, pressed in (('left', left), ('right', right))}
+
+
+def test_both_thumbsticks_needed():
+    assert both_thumbsticks_pressed(controllers(True, True)) is True
+    assert both_thumbsticks_pressed(controllers(True, False)) is False
+    assert both_thumbsticks_pressed(controllers(False, True)) is False
+    assert both_thumbsticks_pressed(controllers(False, False)) is False
+
+
+def test_disconnected_controller_does_not_trigger():
+    """手柄没连的时候 buttons 里的值不可信，不能当成按下。"""
+    assert both_thumbsticks_pressed(controllers(True, True, connected=False)) is False
+
+
+@pytest.mark.parametrize('payload', [
+    {}, {'left': None, 'right': None},
+    {'left': {'connected': True}, 'right': {'connected': True}},
+    {'left': {'connected': True, 'buttons': []},
+     'right': {'connected': True, 'buttons': []}},
+])
+def test_malformed_controller_payloads_are_safe(payload):
+    """报文来自网络。缺字段、类型不对都只能是「没按下」，不能抛。"""
+    assert both_thumbsticks_pressed(payload) is False

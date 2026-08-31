@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>G1 动捕重定向</title>
+<style>
+  /* [hidden] 会被作者样式里的 display 盖掉，全局补一条 */
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #12151a; color: #d8dee9; font-size: 13px;
+    font-family: -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+  }
+  #md-bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 8px 14px; background: #1b1f27; border-bottom: 1px solid #2b313c;
+  }
+  .md-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 11px; background: #232935; white-space: nowrap;
+  }
+  .md-dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; }
+  .md-dot.md-ok { background: #4ade80; }
+  .md-dot.md-bad { background: #f87171; }
+  .md-dot.md-warn { background: #fbbf24; }
+  button {
+    padding: 5px 14px; border: 1px solid #3b4351; border-radius: 5px;
+    background: #2b3240; color: #d8dee9; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #364054; }
+  #md-note { margin-left: auto; color: #9aa5b8; }
+  #md-note.md-err { color: #f87171; }
+  #md-note.md-good { color: #4ade80; }
+
+  #md-main { display: flex; height: calc(100vh - 43px); }
+  #md-view { flex: 1 1 auto; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #md-hint { position: absolute; left: 12px; bottom: 10px; color: #6b7280; pointer-events: none; }
+  #md-side {
+    flex: 0 0 320px; overflow-y: auto; padding: 10px 12px;
+    background: #171b22; border-left: 1px solid #2b313c;
+  }
+  #md-side h2 { margin: 4px 0 10px; font-size: 12px; color: #9aa5b8; font-weight: 600; }
+  /* 列表容器高度是撑出来的，flex 子项默认 shrink 会被压得比内容矮 */
+  .md-row { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-bottom: 3px; }
+  .md-row .md-name { flex: 0 0 128px; color: #b6c0d0; font-size: 11px; }
+  .md-row .md-val { flex: 0 0 44px; text-align: right; font-variant-numeric: tabular-nums; }
+  .md-track { flex: 1 1 auto; position: relative; height: 12px; border-radius: 3px; background: #232935; }
+  /* 灰带 = 策略见过的大致范围。条跑到它外面就是分布外 */
+  .md-band { position: absolute; top: 0; bottom: 0; background: #333c4d; }
+  .md-tick { position: absolute; top: -1px; bottom: -1px; width: 2px; background: #7dd3fc; }
+  .md-tick.md-out { background: #f87171; width: 3px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three.module.js", "three/addons/": "/vendor/addons/" } }
+</script>
+</head>
+<body>
+<div id="md-bar">
+  <span class="md-pill"><span class="md-dot" id="md-link"></span><span id="md-link-t">链路</span></span>
+  <span class="md-pill"><span class="md-dot" id="md-body"></span><span id="md-body-t">body</span></span>
+  <span class="md-pill"><span class="md-dot" id="md-cal"></span><span id="md-cal-t">未校准</span></span>
+  <button id="md-do-cal">校准（人站直）</button>
+  <label class="md-pill"><input type="checkbox" id="md-show-human" checked> 人骨架</label>
+  <label class="md-pill"><input type="checkbox" id="md-show-robot" checked> G1</label>
+  <span id="md-note"></span>
+</div>
+<div id="md-main">
+  <div id="md-view">
+    <canvas id="md-canvas"></canvas>
+    <div id="md-hint">左键旋转 · 右键平移 · 滚轮缩放</div>
+  </div>
+  <div id="md-side">
+    <h2>关节角（蓝=当前，灰带=训练分布，红=越界）</h2>
+    <div id="md-joints"></div>
+  </div>
+</div>
+<script type="module">
+import * as viewer from "/viewer.js";
+
+const note = document.getElementById("md-note");
+let layout = null, jointNames = [], noteHold = 0;
+
+function say(text, kind) {
+  // 30 Hz 轮询会在一瞬间把提示冲掉，要紧的消息给一个保留期
+  const now = performance.now();
+  if (kind === "idle" && now < noteHold) return;
+  if (kind !== "idle") noteHold = now + 4000;
+  note.textContent = text;
+  note.className = kind === "err" ? "md-err" : (kind === "good" ? "md-good" : "");
+}
+
+function buildJoints() {
+  const host = document.getElementById("md-joints");
+  host.textContent = "";
+  for (const joint of layout.joints) {
+    const row = document.createElement("div");
+    row.className = "md-row";
+    row.innerHTML =
+      '<span class="md-name"></span><span class="md-track">' +
+      '<span class="md-band"></span><span class="md-tick"></span></span>' +
+      '<span class="md-val"></span>';
+    row.querySelector(".md-name").textContent = joint.name.replace(/_joint$/, "");
+    const span = joint.upper - joint.lower;
+    // 灰带取 default 两侧各 20% 行程，作为「策略见过的范围」的粗略标记
+    joint._low = Math.max(joint.lower, joint.default - 0.2 * span);
+    joint._high = Math.min(joint.upper, joint.default + 0.2 * span);
+    const band = row.querySelector(".md-band");
+    band.style.left = ((joint._low - joint.lower) / span * 100) + "%";
+    band.style.width = ((joint._high - joint._low) / span * 100) + "%";
+    host.appendChild(row);
+    joint._tick = row.querySelector(".md-tick");
+    joint._val = row.querySelector(".md-val");
+  }
+  jointNames = layout.joints.map((j) => j.name);
+}
+
+function updateJoints(angles) {
+  layout.joints.forEach((joint, i) => {
+    const value = angles[i];
+    const span = joint.upper - joint.lower;
+    joint._tick.style.left =
+      Math.min(100, Math.max(0, (value - joint.lower) / span * 100)) + "%";
+    joint._tick.classList.toggle("md-out", value < joint._low || value > joint._high);
+    joint._val.textContent = (value * 57.2958).toFixed(1);
+  });
+}
+
+function setDot(id, textId, cls, text) {
+  document.getElementById(id).className = "md-dot " + cls;
+  document.getElementById(textId).textContent = text;
+}
+
+async function poll() {
+  try {
+    const state = await (await fetch("/state", { cache: "no-store" })).json();
+    setDot("md-link", "md-link-t", state.connected ? "md-ok" : "md-bad",
+           state.connected ? ("已连接 " + state.frames + " 帧") : "头显未连接");
+    setDot("md-body", "md-body-t",
+           state.body_status === 1 ? "md-ok" : (state.body_status === 2 ? "md-warn" : "md-bad"),
+           "body " + state.body_status + " · " + (state.body_message || ""));
+    setDot("md-cal", "md-cal-t", state.calibrated ? "md-ok" : "md-warn",
+           state.calibrated ? "已校准" : "未校准");
+    if (state.human) viewer.applyHuman(state.human);
+    if (state.angles) {
+      updateJoints(state.angles);
+      viewer.applyAngles(jointNames, state.angles);
+    }
+    if (state.root_quat) viewer.applyRootQuat(state.root_quat);
+    say(state.error || "", state.error ? "err" : "idle");
+  } catch (err) {
+    say("后端连不上：" + err.message, "err");
+  }
+  setTimeout(poll, 33);
+}
+
+document.getElementById("md-do-cal").addEventListener("click", async () => {
+  say("校准中…", "good");
+  try {
+    const result = await (await fetch("/calibrate", { method: "POST" })).json();
+    say(result.message || (result.ok ? "完成" : "失败"), result.ok ? "good" : "err");
+  } catch (err) {
+    say("校准请求失败：" + err.message, "err");
+  }
+});
+for (const which of ["human", "robot"]) {
+  document.getElementById("md-show-" + which).addEventListener("change", (e) => {
+    viewer.setVisible(which, e.target.checked);
+  });
+}
+window.addEventListener("resize", viewer.resize);
+
+(async () => {
+  const model = await (await fetch("/model")).json();
+  layout = await (await fetch("/layout")).json();
+  buildJoints();
+  viewer.buildRobot(model);
+  viewer.buildHuman(layout.human_parents);
+  viewer.start();
+  poll();
+})();
+</script>
+</body>
+</html>
