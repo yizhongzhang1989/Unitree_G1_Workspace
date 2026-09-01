@@ -177,9 +177,6 @@ class MocapStream:
         self._stop = threading.Event()
         self._device: web.WebSocketResponse | None = None
         self._sticks_were_down = False
-        self.calibration_gate: Callable[[], bool] | None = None
-        """返回 False 就拒绝手柄触发的校准。跟踪层在跑着的时候拿它卡住——
-        校准会清空缓冲区、换掉坐标尺度，中途做一次等于把参考抽掉。"""
         self.on_frame: Callable[[float, BodyFrame, RetargetResult], None] | None = None
         """每重定向完一帧就回调一次，参数是（对齐后的时刻, 原始骨架, 重定向结果）。
 
@@ -284,14 +281,15 @@ class MocapStream:
                 setattr(self._stats, key, value)
 
     def _check_calibration_shortcut(self, payload: dict) -> None:
-        """双摇杆同时按下 -> 原地校准。**边沿触发**，按住不会反复标。"""
+        """双摇杆同时按下 -> 原地校准。**边沿触发**，按住不会反复标。
+
+        校准会清空缓冲、换掉坐标尺度，所以下游在跟动作的时候误按，那边会因为
+        缓冲空了而断流急停——安全，但会打断操作。这里不做跨节点的状态判断：
+        本包不知道下游在干什么，也不应该知道。
+        """
         down = both_thumbsticks_pressed(payload)
         pressed, self._sticks_were_down = down and not self._sticks_were_down, down
         if not pressed:
-            return
-        if self.calibration_gate is not None and not self.calibration_gate():
-            self._log('手柄请求校准，但当前状态不允许')
-            self.haptic('left', 0.3, 60)
             return
         try:
             self.calibrate()
