@@ -28,13 +28,7 @@ import numpy as np
 from aiohttp import web
 
 from .retarget import RetargetCalibration, Retargeter, RetargetResult
-from .skeleton import (
-    STATUS_MESSAGES,
-    BodyFrame,
-    ClockAligner,
-    both_thumbsticks_pressed,
-    parse_body,
-)
+from .skeleton import BodyFrame, ClockAligner, both_thumbsticks_pressed, parse_body
 
 # 一帧全身数据约 6.5 KB；给到 1 MB 已经是 150 倍余量，再大就是异常报文。
 MAX_MESSAGE_BYTES = 1 << 20
@@ -186,6 +180,11 @@ class MocapStream:
         self.calibration_gate: Callable[[], bool] | None = None
         """返回 False 就拒绝手柄触发的校准。跟踪层在跑着的时候拿它卡住——
         校准会清空缓冲区、换掉坐标尺度，中途做一次等于把参考抽掉。"""
+        self.on_frame: Callable[[float, BodyFrame, RetargetResult], None] | None = None
+        """每重定向完一帧就回调一次，参数是（对齐后的时刻, 原始骨架, 重定向结果）。
+
+        跑在**收帧线程**里，所以里面不能阻塞。存在的意义是让发布跟随头显的
+        72/90 Hz：换成定时器取最新样本会同时丢帧和引入拖油拖尾的拖延。"""
 
     ##
     # 生命周期
@@ -219,6 +218,11 @@ class MocapStream:
     @property
     def calibrated(self) -> bool:
         return self._calibration is not None
+
+    @property
+    def calibration(self) -> RetargetCalibration | None:
+        """当前的人机标定，没标过时为 None。"""
+        return self._calibration
 
     def stats(self) -> StreamStats:
         with self._stats_lock:
@@ -340,7 +344,15 @@ class MocapStream:
                 self._stats.dropped += 1
                 self._stats.last_error = str(exc)
             return
-        self._buffer.push(stamped, result)
+        if not self._buffer.push(stamped, result):
+            return
+        if self.on_frame is not None:
+            try:
+                self.on_frame(stamped, frame, result)
+            except Exception as exc:  # noqa: BLE001
+                # 下游的发布出问题不能把收帧线程带死，否则整条链路一起停。
+                with self._stats_lock:
+                    self._stats.last_error = f'on_frame: {type(exc).__name__}: {exc}'
 
     async def _serve_device(self) -> None:
         app = web.Application()
@@ -394,10 +406,3 @@ class MocapStream:
             self._note(connected=False)
             self._log('头显断开')
         return ws
-
-    def describe_status(self) -> str:
-        stats = self.stats()
-        note = STATUS_MESSAGES.get(stats.message, str(stats.message))
-        return (f'frames={stats.frames} dropped={stats.dropped} '
-                f'link={"up" if stats.connected else "down"} '
-                f'body_status={stats.status} ({note})')

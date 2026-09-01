@@ -29,7 +29,6 @@ setup(
     entry_points={
         'console_scripts': [
             'mocap_node = g1_mocap.mocap_node:main',
-            'mocap_probe = g1_mocap.probe:main',
             'dashboard_node = g1_mocap.dashboard_node:main',
         ],
     },

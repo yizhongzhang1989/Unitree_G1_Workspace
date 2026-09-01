@@ -320,6 +320,10 @@ class Retargeter:
     def key_bodies(self) -> tuple[str, ...]:
         return self._key_bodies
 
+    @property
+    def limits(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._lower, self._upper
+
     ##
     # 校准
     ##

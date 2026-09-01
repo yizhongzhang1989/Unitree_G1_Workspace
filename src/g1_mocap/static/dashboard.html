@@ -79,7 +79,7 @@
 import * as viewer from "/viewer.js";
 
 const note = document.getElementById("md-note");
-let layout = null, jointNames = [], noteHold = 0;
+let layout = null, byName = null, noteHold = 0;
 
 function say(text, kind) {
   // 30 Hz 轮询会在一瞬间把提示冲掉，要紧的消息给一个保留期
@@ -112,18 +112,24 @@ function buildJoints() {
     joint._tick = row.querySelector(".md-tick");
     joint._val = row.querySelector(".md-val");
   }
-  jointNames = layout.joints.map((j) => j.name);
 }
 
-function updateJoints(angles) {
-  layout.joints.forEach((joint, i) => {
-    const value = angles[i];
+function updateJoints(names, values) {
+  // 按**名字**取，不按下标：layout 的顺序来自 URDF，消息的顺序来自策略名单，
+  // 两者没有理由一致，按下标读就是静默错位。
+  if (!byName || byName.length !== names.length) {
+    byName = names;
+    for (const joint of layout.joints) joint._index = names.indexOf(joint.name);
+  }
+  for (const joint of layout.joints) {
+    if (joint._index < 0) continue;
+    const value = values[joint._index];
     const span = joint.upper - joint.lower;
     joint._tick.style.left =
       Math.min(100, Math.max(0, (value - joint.lower) / span * 100)) + "%";
     joint._tick.classList.toggle("md-out", value < joint._low || value > joint._high);
     joint._val.textContent = (value * 57.2958).toFixed(1);
-  });
+  }
 }
 
 function setDot(id, textId, cls, text) {
@@ -135,7 +141,7 @@ async function poll() {
   try {
     const state = await (await fetch("/state", { cache: "no-store" })).json();
     setDot("md-link", "md-link-t", state.connected ? "md-ok" : "md-bad",
-           state.connected ? ("已连接 " + state.frames + " 帧") : "头显未连接");
+           state.connected ? ("头显已连 " + state.frames + " 帧") : "头显未连接");
     setDot("md-body", "md-body-t",
            state.body_status === 1 ? "md-ok" : (state.body_status === 2 ? "md-warn" : "md-bad"),
            "body " + state.body_status + " · " + (state.body_message || ""));
@@ -143,8 +149,8 @@ async function poll() {
            state.calibrated ? "已校准" : "未校准");
     if (state.human) viewer.applyHuman(state.human);
     if (state.angles) {
-      updateJoints(state.angles);
-      viewer.applyAngles(jointNames, state.angles);
+      updateJoints(state.joint_names, state.angles);
+      viewer.applyAngles(state.joint_names, state.angles);
     }
     if (state.root_quat) viewer.applyRootQuat(state.root_quat);
     say(state.error || "", state.error ? "err" : "idle");

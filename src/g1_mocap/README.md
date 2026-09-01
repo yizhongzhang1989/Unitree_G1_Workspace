@@ -10,37 +10,45 @@ PICO 4 Ultra 全身动捕（5 个 Motion Tracker，24 关节 SMPL 骨架）到 G
 ## 数据从哪来
 
 ```
-PICO 4 Ultra + 5x Motion Tracker
-    ──ws──> mocap_node 内建的 /ws/device            source=device（默认）
-    ──ws──> PicoBridge 的 server.py ──ws──> 本包    source=bridge
+PICO 4 Ultra + 5x Motion Tracker ──ws──> 本包的 /ws/device
 ```
 
-`device` 少一跳转发，也不用另起 `server.py`；头显的配置面板里填**本机局域网 IP** 加 `:18000`，
-点连接就行。想同时用 PicoBridge 的 `/monitor` 面板看骨架时才用 `bridge`。
+头显上的 APK **直连**本包，中间不过 PicoBridge 的 `server.py`——少一跳转发、少一个要守的
+进程。头显的配置面板里填**本机局域网 IP** 加 `:18000`，点连接就行。全程 WiFi，不用 adb。
+
+## 对外的 topic
+
+| Topic | 类型 | 频率 | 内容 |
+|---|---|---|---|
+| `~/frame` | `g1_mocap_msgs/MocapFrame` | **跟随头显 72/90 Hz** | 一帧的全部产物：关节角、根/锚位姿、key body 位置、人的原始骨架 |
+| `~/joint_states` | `sensor_msgs/JointState` | 同上 | 只有关节角。喂 `robot_state_publisher` / rqt / plotjuggler |
+| `~/status` | `g1_mocap_msgs/MocapStatus` | 1 Hz | 结构化链路状态，可直接作看门狗判据 |
+| `~/calibrate` | `std_srvs/Trigger` 服务 | — | 标人机差异 |
+
+`MocapFrame` 里的字段全部出自**同一帧**骨架。拆成多个 topic 发会引入时间同步问题，
+而配错了不报错、只是姿态悄悄不对——所以打成一个原子消息。
+
+> ⚠️ **不要先降采样再插值。** 下游要靠帧间差分求速度（参考窗口就是这么用的），先降到
+> 50 Hz 会把原始时间分辨率丢掉，速度噪声直接放大。要 50 Hz 就订原始帧率、自己按
+> `header.stamp` 插值。`header.stamp` 已从头显时钟平移到 ROS 时钟，**只平移不改帧间隔**。
 
 ## 用法
 
 ```bash
-ros2 launch g1_mocap mocap.launch.py
-ros2 topic echo /mocap/status
-ros2 topic echo /mocap/joint_states --field position
+ros2 launch g1_mocap mocap.launch.py       # 发 topic
+ros2 launch g1_mocap dashboard.launch.py   # 带 mesh 的可视化面板，http://<本机IP>:18080
 ```
 
-`status` 长这样，`body_status=1` 才是正常：
+**人站直，然后校准**——三选一：
 
-```
-frames=8421 dropped=3 link=up body_status=1 (正常) calibrated=True
-```
+- 戴着头显**双手摇杆同时按下**（成功会双手各震一下当回执）
+- 面板上点「校准」
+- `ros2 service call /mocap/calibrate std_srvs/srv/Trigger`
 
-**启动时人要站直**：节点攒够帧会自动标一次人机比例。站得不对就重标：
+没校准之前 `~/frame` 不会发任何数据。
 
-```bash
-ros2 service call /mocap/calibrate std_srvs/srv/Trigger
-```
-
-> `mocap_node` 和 `g1_rgmt_tracking_global` 的跟踪层**不要同时起**——头显同一时刻只连一个
-> 上行地址。跟踪层是在自己进程里建连接的，不走话题（走话题会把 72/90 Hz 的原始时间分辨率
-> 先降到 50 Hz，参考窗口的速度差分就毁了）。
+> `mocap_node`、`dashboard_node`、`g1_rgmt_tracking_global` 的跟踪层**三选一**：
+> 头显同一时刻只连一个上行地址。
 
 ## 重定向怎么做的
 

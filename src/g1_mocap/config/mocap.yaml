@@ -17,11 +17,13 @@
     # 踝原点离地的高度，用来把「G1 骨盆比踝高多少」换算成「骨盆离地多少」。
     foot_ground_clearance_m: 0.03
 
-    publish_rate_hz: 50.0
-
-    # 只有 dashboard_node 用：网页端口。动捕上行还是走上面的 port。
+    # 只有 dashboard_node 用。它是 /mocap/frame 的纯消费者，不连头显，
+    # 所以可以和 mocap_node 同时跑。
     dashboard_host: 0.0.0.0
     dashboard_port: 18080
+    frame_topic: /mocap/frame
+    status_topic: /mocap/status
+    calibrate_service: /mocap/calibrate
 
     urdf_path: package://unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf
     anchor_body: torso_link

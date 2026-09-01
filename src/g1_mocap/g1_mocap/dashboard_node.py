@@ -1,21 +1,24 @@
-"""动捕重定向的可视化面板。**不控制任何硬件**，只连头显、算 FK、渲染姿态。
+"""动捕重定向的可视化面板。**不控制硬件，也不自己连头显。**
 
-上真机之前用它看：人摆一个姿势，G1 会变成什么样。左边是人的 24 关节骨架，
-右边是重定向 + G1 正运动学之后的位形，两边同一个视角、同一个尺度。
+纯消费者：订 ``mocap_node`` 发的 ``/mocap/frame``，在浏览器里用 three.js 搭 URDF
+关节树、贴 STL，把重定向结果画出来。上真机之前用它看：人摆一个姿势，G1 会变成什么样。
 
-    ros2 launch g1_mocap dashboard.launch.py
-    # 浏览器打开 http://<机器人IP>:18080，头显那边填 <机器人IP>:18000
+    ros2 launch g1_mocap mocap.launch.py        # 先起数据源
+    ros2 launch g1_mocap dashboard.launch.py    # 再起面板
+    # 浏览器打开 http://<机器人IP>:18080
 
-> 这个节点、``mocap_node``、``g1_rgmt_tracking_global`` 的跟踪层**三选一**：
-> 头显同一时刻只连一个上行地址。
+因为不碰头显，它和 ``mocap_node`` **可以同时跑**——头显始终只连 ``mocap_node`` 一个地址。
 
 面板上要盯的两处：
 
 ``关节角条``
-    条超出灰色的训练分布区间就是危险信号——策略在分布外，输出什么都不奇怪。
+    条超出灰色区间就是危险信号——参考落在策略训练分布之外，输出什么都不奇怪。
     人站直时所有条都应该落在各自的 default 刻度上（校准把站立位形映射到了那里）。
 ``骨架叠加``
     人和 G1 的差异一眼可见。腿明显外撇、大腿后摆，说明校准没做或者做的时候人没站直。
+
+正运动学**在浏览器里算**：three.js 的 ``Object3D`` 嵌套每帧本来就要合成矩阵，
+后端再算一遍纯属白花钱。所以本节点只解析一次 URDF，运行时转发关节角。
 """
 
 from __future__ import annotations
@@ -23,20 +26,19 @@ from __future__ import annotations
 import json
 import mimetypes
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import numpy as np
 import rclpy
 from ament_index_python.packages import get_package_share_directory
+from g1_mocap_msgs.msg import MocapFrame, MocapStatus
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
-from .kinematics import G1Kinematics
-from .retarget import Retargeter
-from .skeleton import SMPL_JOINTS, STATUS_MESSAGES
-from .stream import MocapStream
+from .skeleton import SMPL_JOINTS
 from .urdf import DEFAULT_URDF, resolve_package_path
 from .urdf import parse as parse_urdf
 from .urdf import under
@@ -55,6 +57,10 @@ class _Handler(BaseHTTPRequestHandler):
         # 未捕获的异常会打死连接，浏览器只看到 ERR_EMPTY_RESPONSE，页面上一点线索都没有。
         try:
             self._route()
+        except (BrokenPipeError, ConnectionResetError):
+            # 浏览器刷新/关页时会把正在下的 mesh 取消。这时再发 500 只会再炸一次，
+            # 并且把一堆无意义的 traceback 刷进节点日志。
+            pass
         except Exception as exc:  # noqa: BLE001
             self._send(500, 'application/json',
                        json.dumps({'error': f'{type(exc).__name__}: {exc}'}).encode())
@@ -66,6 +72,8 @@ class _Handler(BaseHTTPRequestHandler):
                            json.dumps(self.server.dashboard.calibrate()).encode())
             else:
                 self._send(404, 'text/plain', b'not found')
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception as exc:  # noqa: BLE001
             self._send(500, 'application/json',
                        json.dumps({'error': f'{type(exc).__name__}: {exc}'}).encode())
@@ -122,75 +130,106 @@ class DashboardNode(Node):
 
         joints = list(p('joints', Parameter.Type.STRING_ARRAY)
                       .get_parameter_value().string_array_value)
-        if not joints:
-            raise RuntimeError('参数 joints 为空：应由 launch 注入 29 轴动作关节顺序')
-        key_bodies = list(p('key_bodies', Parameter.Type.STRING_ARRAY)
-                          .get_parameter_value().string_array_value)
-        default_pos = np.asarray(
-            p('default_joint_pos', Parameter.Type.DOUBLE_ARRAY)
-            .get_parameter_value().double_array_value, dtype=np.float64)
+        default_pos = list(p('default_joint_pos', Parameter.Type.DOUBLE_ARRAY)
+                           .get_parameter_value().double_array_value)
+        # 只用来标关节角条上的「策略见过的范围」，按名字对齐，顺序无所谓。
+        self._defaults = dict(zip(joints, default_pos))
 
         urdf = resolve_package_path(
             p('urdf_path', DEFAULT_URDF).get_parameter_value().string_value)
-        # 渲染用的 FK 单独一份：pinocchio 的 data 不可重入，收帧线程那份不能借。
-        self._kin = G1Kinematics(urdf, joints)
-        self._retarget = Retargeter(
-            G1Kinematics(urdf, joints), key_bodies=key_bodies,
-            anchor_body=p('anchor_body', 'torso_link').get_parameter_value().string_value,
-            default_joint_pos=default_pos,
-            foot_ground_clearance_m=float(
-                p('foot_ground_clearance_m', 0.03).get_parameter_value().double_value))
-        uplink_port = int(p('port', 18000).get_parameter_value().integer_value)
-        self._stream = MocapStream(
-            self._retarget,
-            host=p('host', '0.0.0.0').get_parameter_value().string_value,
-            port=uplink_port,
-            token=p('token', '').get_parameter_value().string_value,
-            buffer_s=float(p('buffer_s', 2.0).get_parameter_value().double_value),
-            log=self.get_logger().info)
-
-        self._joints = joints
-        self._default = default_pos
-        lower, upper = self._kin.limits()
-        self._limits = (lower, upper)
-        self._lock = threading.Lock()
+        self.model = parse_urdf(Path(urdf).read_text(encoding='utf-8'), 'pelvis')
         self._share = Path(get_package_share_directory('g1_mocap')) / 'static'
         # mesh 全部从描述包的 model/ 下取，路径参数只允许落在这棵子树里。
         self._mesh_root = Path(get_package_share_directory(
             p('mesh_package', 'unitree_g1_description').get_parameter_value().string_value
         )) / p('mesh_root', 'model').get_parameter_value().string_value
-        self.model = parse_urdf(Path(urdf).read_text(encoding='utf-8'), 'pelvis')
+
+        self._lock = threading.Lock()
+        self._frame: MocapFrame | None = None
+        self._status: MocapStatus | None = None
+
+        # 必须和发布端一致：RELIABLE 订阅收不到 BEST_EFFORT 发布者，而且只在发现的
+        # 那一刻打一次 incompatible QoS 警告，表现就是「话题在、自己收不到」。
+        stream_qos = QoSProfile(depth=5, history=HistoryPolicy.KEEP_LAST,
+                                reliability=ReliabilityPolicy.BEST_EFFORT)
+        frame_topic = p('frame_topic', '/mocap/frame').get_parameter_value().string_value
+        status_topic = p('status_topic', '/mocap/status').get_parameter_value().string_value
+        self.create_subscription(MocapFrame, frame_topic, self._on_frame, stream_qos)
+        self.create_subscription(MocapStatus, status_topic, self._on_status, 10)
+        self._calibrate = self.create_client(
+            Trigger, p('calibrate_service', '/mocap/calibrate')
+            .get_parameter_value().string_value)
 
         http_port = int(p('dashboard_port', 18080).get_parameter_value().integer_value)
         self._http = _Server((p('dashboard_host', '0.0.0.0')
                               .get_parameter_value().string_value, http_port), _Handler)
         self._http.dashboard = self
         threading.Thread(target=self._http.serve_forever, daemon=True).start()
-
-        self.create_service(Trigger, '~/calibrate', self._on_calibrate)
-        self._stream.start()
         self.get_logger().info(
-            f'面板已就绪: http://<本机IP>:{http_port}   动捕上行端口 {uplink_port}')
+            f'面板已就绪: http://<本机IP>:{http_port}   数据源 {frame_topic}')
 
     def destroy_node(self) -> bool:
         self._http.shutdown()
-        self._stream.stop()
         return super().destroy_node()
 
+    def _on_frame(self, message: MocapFrame) -> None:
+        with self._lock:
+            self._frame = message
+
+    def _on_status(self, message: MocapStatus) -> None:
+        with self._lock:
+            self._status = message
+
     ##
-    # 给 HTTP 用（跑在 HTTP 线程里，FK 必须加锁）
+    # 给 HTTP 线程用
     ##
 
     def layout(self) -> dict:
-        """静态部分，前端只取一次。"""
-        lower, upper = self._limits
-        return {
-            'joints': [{'name': n, 'lower': float(lower[i]), 'upper': float(upper[i]),
-                        'default': float(self._default[i])}
-                       for i, n in enumerate(self._joints)],
-            'human_joints': list(SMPL_JOINTS),
-            'human_parents': list(SMPL_PARENTS),
+        """静态部分，前端只取一次。限位直接从 URDF 来，不需要运动学库。"""
+        joints = [{'name': joint['name'],
+                   'lower': joint['limit'][0], 'upper': joint['limit'][1],
+                   'default': self._defaults.get(joint['name'], 0.0)}
+                  for joint in self.model['joints']
+                  if joint['type'] != 'fixed' and 'limit' in joint]
+        return {'joints': joints,
+                'human_joints': list(SMPL_JOINTS),
+                'human_parents': list(SMPL_PARENTS)}
+
+    def calibrate(self) -> dict:
+        """转发到数据源节点的校准服务。面板自己不持有标定。"""
+        if not self._calibrate.wait_for_service(timeout_sec=2.0):
+            return {'ok': False, 'message': f'{self._calibrate.srv_name} 不可用，'
+                                            f'mocap_node 起来了吗？'}
+        future = self._calibrate.call_async(Trigger.Request())
+        # 跑在 HTTP 线程里，只能等，不能 spin：spin 会把节点从执行器里摘走。
+        deadline = time.monotonic() + 5.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            return {'ok': False, 'message': '校准服务超时'}
+        result = future.result()
+        return {'ok': bool(result.success), 'message': result.message}
+
+    def state(self) -> dict:
+        with self._lock:
+            frame, status = self._frame, self._status
+        base = {
+            'connected': bool(status.connected) if status else False,
+            'calibrated': bool(status.calibrated) if status else False,
+            'frames': int(status.frames) if status else 0,
+            'dropped': int(status.dropped) if status else 0,
+            'body_status': int(status.body_status) if status else 0,
+            'body_message': status.body_message_text if status else '',
+            'error': status.last_error if status else ('' if frame else '等 /mocap/frame'),
         }
+        if frame is None:
+            return base
+        base['joint_names'] = list(frame.joint_names)
+        base['angles'] = list(frame.joint_positions)
+        quat = frame.root.orientation
+        base['root_quat'] = [quat.w, quat.x, quat.y, quat.z]
+        base['human'] = [[p.x, p.y, p.z] for p in frame.human_joints]
+        return base
 
     def read_static(self, relative: str) -> tuple[bytes, str] | None:
         path = under(self._share, relative)
@@ -208,48 +247,6 @@ class DashboardNode(Node):
             return path.read_bytes()
         except OSError:
             return None
-
-    def calibrate(self) -> dict:
-        try:
-            calibration = self._stream.calibrate()
-        except (RuntimeError, ValueError) as exc:
-            return {'ok': False, 'message': str(exc)}
-        return {'ok': True,
-                'message': f'缩放 {calibration.scale:.3f}，'
-                           f'站立高度 {calibration.stand_height:.3f} m'}
-
-    def state(self) -> dict:
-        stats = self._stream.stats()
-        base = {
-            'connected': stats.connected,
-            'calibrated': self._stream.calibrated,
-            'frames': stats.frames,
-            'dropped': stats.dropped,
-            'body_status': stats.status,
-            'body_message': STATUS_MESSAGES.get(stats.message, str(stats.message)),
-            'error': stats.last_error,
-        }
-        raw = self._stream.latest_frame()
-        if raw is not None:
-            base['human'] = np.round(raw.positions, 4).tolist()
-        if not self._stream.calibrated:
-            return base
-
-        span = self._stream.span()
-        if span is None:
-            return base
-        batch = self._stream.sample(np.array([span[1]]))
-        if batch is None:
-            return base
-        base['angles'] = np.round(batch.joint_pos[0], 5).tolist()
-        # 根位置不发：机器人固定画在原点，只有姿态才看得出人的前倾/侧倾。
-        base['root_quat'] = np.round(batch.root_quat[0], 5).tolist()
-        return base
-
-    def _on_calibrate(self, _request, response):
-        result = self.calibrate()
-        response.success, response.message = result['ok'], result['message']
-        return response
 
 
 def main() -> None:

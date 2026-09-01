@@ -96,7 +96,8 @@ def parse(urdf: str, base: str) -> dict:
             continue
         origin = element.find('origin')
         axis = element.find('axis')
-        children.setdefault(parent.get('link'), []).append({
+        limit = element.find('limit')
+        item = {
             'name': element.get('name'),
             'type': element.get('type', 'fixed'),
             'parent': parent.get('link'),
@@ -104,7 +105,10 @@ def parse(urdf: str, base: str) -> dict:
             'xyz': _floats(origin.get('xyz') if origin is not None else None, (0, 0, 0)),
             'quat': rpy_to_quat(origin.get('rpy') if origin is not None else None),
             'axis': _floats(axis.get('xyz') if axis is not None else None, (1, 0, 0)),
-        })
+        }
+        if limit is not None and limit.get('lower') and limit.get('upper'):
+            item['limit'] = [float(limit.get('lower')), float(limit.get('upper'))]
+        children.setdefault(parent.get('link'), []).append(item)
     if base not in children:
         raise ValueError(f'URDF 里 {base} 没有子关节，base 写错了？')
 
