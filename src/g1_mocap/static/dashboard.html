@@ -153,6 +153,8 @@ async function poll() {
       viewer.applyAngles(state.joint_names, state.angles);
     }
     if (state.root_quat) viewer.applyRootQuat(state.root_quat);
+    if (typeof state.root_z === "number") viewer.applyRootHeight(state.root_z);
+    viewer.frameOnce();
     say(state.error || "", state.error ? "err" : "idle");
   } catch (err) {
     say("后端连不上：" + err.message, "err");

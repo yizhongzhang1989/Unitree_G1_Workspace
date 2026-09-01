@@ -70,6 +70,31 @@ def mesh_url(filename: str) -> str:
     return f'/mesh?path={quote(relative)}'
 
 
+def _shape(geometry: ET.Element) -> dict | None:
+    """``<geometry>`` -> 前端能直接建的描述。认不出来的形状返回 None。
+
+    G1 本体全是 mesh，但挂上去的末端（KWR57B 的腕）用的是图元——只认 mesh 的话
+    那一截在画面上就是凭空消失，而且不报错。
+    """
+    mesh = geometry.find('mesh')
+    if mesh is not None:
+        url = mesh_url(mesh.get('filename') or '')
+        # scale 的负号是 URDF 里镜像用的，照原样传给前端。
+        return {'kind': 'mesh', 'url': url,
+                'scale': _floats(mesh.get('scale'), (1, 1, 1))} if url else None
+    box = geometry.find('box')
+    if box is not None:
+        return {'kind': 'box', 'size': _floats(box.get('size'), (0.1, 0.1, 0.1))}
+    cylinder = geometry.find('cylinder')
+    if cylinder is not None:
+        return {'kind': 'cylinder', 'radius': float(cylinder.get('radius') or 0.05),
+                'length': float(cylinder.get('length') or 0.1)}
+    sphere = geometry.find('sphere')
+    if sphere is not None:
+        return {'kind': 'sphere', 'radius': float(sphere.get('radius') or 0.05)}
+    return None
+
+
 def under(base: Path, relative: str) -> Path | None:
     """把 ``relative`` 接到 ``base`` 下，越界就返回 None。
 
@@ -128,22 +153,19 @@ def parse(urdf: str, base: str) -> dict:
             continue
         visuals = []
         for visual in element.findall('visual'):
-            mesh = visual.find('geometry/mesh')
-            if mesh is None:
-                continue
-            url = mesh_url(mesh.get('filename') or '')
-            if not url:
+            geometry = visual.find('geometry')
+            shape = _shape(geometry) if geometry is not None else None
+            if shape is None:
                 continue
             origin = visual.find('origin')
             # visual 自己的 origin 很容易被漏掉，漏了整个零件就错位。
             visuals.append({
-                'url': url,
+                **shape,
                 'xyz': _floats(origin.get('xyz') if origin is not None else None, (0, 0, 0)),
                 'quat': rpy_to_quat(origin.get('rpy') if origin is not None else None),
-                'scale': _floats(mesh.get('scale'), (1, 1, 1)),
             })
         if visuals:
             links.append({'name': name, 'visuals': visuals})
     if not links:
-        raise ValueError(f'{base} 之下一个 mesh 都解析不了，检查 URDF 里的 filename 写法')
+        raise ValueError(f'{base} 之下一个可见几何都解析不了，检查 URDF 里的 filename 写法')
     return {'base': base, 'joints': joints, 'links': links}

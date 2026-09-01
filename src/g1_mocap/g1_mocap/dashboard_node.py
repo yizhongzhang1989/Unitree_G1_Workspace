@@ -50,6 +50,12 @@ SMPL_PARENTS = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17
 
 class _Handler(BaseHTTPRequestHandler):
 
+    # 默认是 HTTP/1.0，每个 mesh 都要新开一条连接：一个模型四十多个零件，握手开销
+    # 比传输还大，而且并发一多就有请求被截在半路（浏览器报 CONTENT_LENGTH_MISMATCH，
+    # STLLoader 那边只是静默少一个零件）。keep-alive 要求每个响应都带准确的
+    # Content-Length，_send 里是强制加的。
+    protocol_version = 'HTTP/1.1'
+
     def log_message(self, *_args) -> None:
         """默认实现往 stderr 刷每一条请求，30 Hz 轮询会把节点日志淹掉。"""
 
@@ -60,8 +66,10 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             # 浏览器刷新/关页时会把正在下的 mesh 取消。这时再发 500 只会再炸一次，
             # 并且把一堆无意义的 traceback 刷进节点日志。
-            pass
+            self.close_connection = True
         except Exception as exc:  # noqa: BLE001
+            # body 可能已经写出去一半，这条连接的分帧就废了，不能再拿去接下一个请求。
+            self.close_connection = True
             self._send(500, 'application/json',
                        json.dumps({'error': f'{type(exc).__name__}: {exc}'}).encode())
 
@@ -73,8 +81,9 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send(404, 'text/plain', b'not found')
         except (BrokenPipeError, ConnectionResetError):
-            pass
+            self.close_connection = True
         except Exception as exc:  # noqa: BLE001
+            self.close_connection = True
             self._send(500, 'application/json',
                        json.dumps({'error': f'{type(exc).__name__}: {exc}'}).encode())
 
@@ -102,7 +111,10 @@ class _Handler(BaseHTTPRequestHandler):
             if found is None:
                 self._send(404, 'text/plain', b'not found')
             else:
-                cache = 'no-store' if path == '/' else 'public, max-age=86400'
+                # 只有 vendor/ 下的第三方库是定版的。自己的 js/css 一缓存，改了代码
+                # 刷新也不生效，还查不出来——ES module 连强刷都未必重取。
+                cache = ('public, max-age=86400'
+                         if path.startswith('/vendor/') else 'no-store')
                 self._send(200, found[1], found[0], cache=cache)
 
     def _send(self, code: int, content_type: str, body: bytes,
@@ -134,9 +146,11 @@ class DashboardNode(Node):
                            .get_parameter_value().double_array_value)
         # 只用来标关节角条上的「策略见过的范围」，按名字对齐，顺序无所谓。
         self._defaults = dict(zip(joints, default_pos))
+        self._action_joints = set(joints)
 
         urdf = resolve_package_path(
-            p('urdf_path', DEFAULT_URDF).get_parameter_value().string_value)
+            p('dashboard_urdf_path', '').get_parameter_value().string_value
+            or p('urdf_path', DEFAULT_URDF).get_parameter_value().string_value)
         self.model = parse_urdf(Path(urdf).read_text(encoding='utf-8'), 'pelvis')
         self._share = Path(get_package_share_directory('g1_mocap')) / 'static'
         # mesh 全部从描述包的 model/ 下取，路径参数只允许落在这棵子树里。
@@ -185,12 +199,17 @@ class DashboardNode(Node):
     ##
 
     def layout(self) -> dict:
-        """静态部分，前端只取一次。限位直接从 URDF 来，不需要运动学库。"""
+        """静态部分，前端只取一次。限位直接从 URDF 来，不需要运动学库。
+
+        只列动作关节：面板的 URDF 是实机构型，夹爪那 80 个内部连杆也是可动关节，
+        全列出来会把真正要看的 29 条淹掉，而且它们压根没有数据。
+        """
         joints = [{'name': joint['name'],
                    'lower': joint['limit'][0], 'upper': joint['limit'][1],
                    'default': self._defaults.get(joint['name'], 0.0)}
                   for joint in self.model['joints']
-                  if joint['type'] != 'fixed' and 'limit' in joint]
+                  if joint['type'] != 'fixed' and 'limit' in joint
+                  and joint['name'] in self._action_joints]
         return {'joints': joints,
                 'human_joints': list(SMPL_JOINTS),
                 'human_parents': list(SMPL_PARENTS)}
@@ -228,6 +247,8 @@ class DashboardNode(Node):
         base['angles'] = list(frame.joint_positions)
         quat = frame.root.orientation
         base['root_quat'] = [quat.w, quat.x, quat.y, quat.z]
+        # 只给高度：x/y 是动捕坐标系里会漂的绝对位置，画面里钉在原地才看得清姿态。
+        base['root_z'] = float(frame.root.position.z)
         base['human'] = [[p.x, p.y, p.z] for p in frame.human_joints]
         return base
 

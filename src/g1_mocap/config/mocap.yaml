@@ -26,6 +26,11 @@
     calibrate_service: /mocap/calibrate
 
     urdf_path: package://unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf
+
+    # 只有面板用。实机构型：G1 + KWR57B 腕 + Gloria-M 夹爪。这些末端都是 fixed
+    # 挂在 wrist_yaw_link 上，不进运动学链，所以只影响画面。重定向仍走上面的 29 轴
+    # 本体 URDF：pinocchio 每帧都要 FK，多拖 80 个夹爪内部连杆白花算力。
+    dashboard_urdf_path: package://unitree_g1_description/model/final.urdf
     anchor_body: torso_link
 
     # 要算笛卡尔位置的刚体。默认这一组与 RGMT 策略契约的 reference_key_bodies 一致，

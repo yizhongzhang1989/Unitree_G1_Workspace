@@ -33,9 +33,33 @@ def test_every_link_with_a_visual_has_a_resolvable_mesh(model):
     assert len(model['links']) >= 25
     for link in model['links']:
         for visual in link['visuals']:
-            assert visual['url'].startswith('/mesh?path=')
             assert len(visual['xyz']) == 3 and len(visual['quat']) == 4
-            assert len(visual['scale']) == 3
+            if visual['kind'] == 'mesh':
+                assert visual['url'].startswith('/mesh?path=')
+                assert len(visual['scale']) == 3
+
+
+def test_primitives_survive_parsing():
+    """挂在腕上的 KWR57B 是圆柱不是 mesh。只认 mesh 的话那一截会凭空消失且不报错。"""
+    urdf = """<robot name="t">
+      <link name="pelvis"/>
+      <link name="tip">
+        <visual><origin xyz="0 0 0.1"/><geometry>
+          <cylinder radius="0.03" length="0.08"/></geometry></visual>
+      </link>
+      <link name="b"><visual><geometry><box size="0.1 0.2 0.3"/></geometry></visual></link>
+      <link name="s"><visual><geometry><sphere radius="0.05"/></geometry></visual></link>
+      <joint name="j" type="fixed">
+        <parent link="pelvis"/><child link="tip"/></joint>
+      <joint name="j2" type="fixed"><parent link="tip"/><child link="b"/></joint>
+      <joint name="j3" type="fixed"><parent link="b"/><child link="s"/></joint>
+    </robot>"""
+    shapes = {link['name']: link['visuals'][0] for link in parse(urdf, 'pelvis')['links']}
+    assert shapes['tip']['kind'] == 'cylinder'
+    assert (shapes['tip']['radius'], shapes['tip']['length']) == (0.03, 0.08)
+    assert shapes['tip']['xyz'] == [0.0, 0.0, 0.1]
+    assert shapes['b']['kind'] == 'box' and shapes['b']['size'] == [0.1, 0.2, 0.3]
+    assert shapes['s']['kind'] == 'sphere' and shapes['s']['radius'] == 0.05
 
 
 def test_mesh_url_rejects_traversal():

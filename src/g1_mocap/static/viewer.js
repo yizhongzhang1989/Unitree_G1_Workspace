@@ -93,18 +93,49 @@ export function buildRobot(model) {
     const host = links[link.name];
     if (!host) continue;
     for (const visual of link.visuals) {
-      pendingMeshes++;
-      stlLoader.load(visual.url, (geometry) => {
-        const mesh = new THREE.Mesh(geometry, meshMaterial);
-        mesh.position.set(visual.xyz[0], visual.xyz[1], visual.xyz[2]);
-        mesh.quaternion.set(visual.quat[0], visual.quat[1], visual.quat[2], visual.quat[3]);
-        // scale 的负号不是笔误，是 URDF 里镜像用的，照抄别动
-        mesh.scale.set(visual.scale[0], visual.scale[1], visual.scale[2]);
+      if (visual.kind === "mesh") {
+        pendingMeshes++;
+        stlLoader.load(visual.url, (geometry) => {
+          const mesh = new THREE.Mesh(geometry, meshMaterial);
+          place(mesh, visual);
+          // scale 的负号不是笔误，是 URDF 里镜像用的，照抄别动
+          mesh.scale.set(visual.scale[0], visual.scale[1], visual.scale[2]);
+          host.add(mesh);
+          pendingMeshes--;
+        }, undefined, () => { pendingMeshes--; });
+      } else {
+        const mesh = primitive(visual);
+        if (!mesh) continue;
+        place(mesh, visual);
+        if (visual.kind === "cylinder") {
+          // URDF 的圆柱沿 z，three.js 的沿 y，不补这一下末端会横躺着。
+          mesh.quaternion.multiply(
+            new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2));
+        }
         host.add(mesh);
-        pendingMeshes--;
-      }, undefined, () => { pendingMeshes--; });
+      }
     }
   }
+}
+
+function place(mesh, visual) {
+  mesh.position.set(visual.xyz[0], visual.xyz[1], visual.xyz[2]);
+  mesh.quaternion.set(visual.quat[0], visual.quat[1], visual.quat[2], visual.quat[3]);
+}
+
+function primitive(visual) {
+  if (visual.kind === "box") {
+    return new THREE.Mesh(
+      new THREE.BoxGeometry(visual.size[0], visual.size[1], visual.size[2]), meshMaterial);
+  }
+  if (visual.kind === "cylinder") {
+    return new THREE.Mesh(
+      new THREE.CylinderGeometry(visual.radius, visual.radius, visual.length, 24), meshMaterial);
+  }
+  if (visual.kind === "sphere") {
+    return new THREE.Mesh(new THREE.SphereGeometry(visual.radius, 20, 14), meshMaterial);
+  }
+  return null;
 }
 
 export function buildHuman(parents) {
@@ -134,10 +165,16 @@ export function applyRootQuat(wxyz) {
   robotRoot.quaternion.set(wxyz[1], wxyz[2], wxyz[3], wxyz[0]);
 }
 
+export function applyRootHeight(z) {
+  // URDF 的根是骨盆，不抬起来整个机器人就埋在地面下面。
+  robotRoot.position.z = z;
+}
+
 export function applyHuman(points) {
   if (!humanLine || !points) return;
   const array = humanLine.geometry.attributes.position.array;
-  // 人和 G1 的绝对位置不同源，按骨盆对齐才好比姿态
+  // 人和 G1 的绝对位置不同源，水平方向按骨盆对齐；**高度保留原值**，
+  // 连 z 一起减掉的话人就被压成骨盆贴地，脚全穿到网格下面去了。
   const root = points[0];
   let k = 0;
   for (let i = 1; i < humanParents.length; i++) {
@@ -145,16 +182,41 @@ export function applyHuman(points) {
     if (parent < 0) continue;
     array[k++] = points[parent][0] - root[0];
     array[k++] = points[parent][1] - root[1];
-    array[k++] = points[parent][2] - root[2];
+    array[k++] = points[parent][2];
     array[k++] = points[i][0] - root[0];
     array[k++] = points[i][1] - root[1];
-    array[k++] = points[i][2] - root[2];
+    array[k++] = points[i][2];
   }
   humanLine.geometry.attributes.position.needsUpdate = true;
 }
 
 export function setVisible(which, on) {
   (which === "human" ? humanRoot : robotRoot).visible = on;
+}
+
+let framed = false;
+
+export function frameOnce() {
+  // 等 mesh 全落地、姿态也来了再取景。早了包围盒还是空的，会把相机怼到原点。
+  if (framed || !isReady() || !humanLine) return;
+  framed = true;
+  humanLine.geometry.computeBoundingBox();   // 顶点是每帧改的，缓存的盒子不作数
+  const box = new THREE.Box3().setFromObject(robotRoot).union(
+    new THREE.Box3().setFromObject(humanRoot));
+  if (box.isEmpty()) { framed = false; return; }
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  // 用外接球配垂直视场角，横过来也不会切掉。1.3 是留白。
+  const radius = 0.5 * Math.max(size.x, size.y, size.z);
+  const distance = 1.3 * radius / Math.tan(0.5 * THREE.MathUtils.degToRad(camera.fov));
+  controls.target.copy(center);
+  // 人和 G1 是沿 y 并排的，所以必须从 +x（机器人正面）看过去：视线一旦顺着这条
+  // 排列方向，近的那个会被透视放大一大截，两边根本没法比姿态。
+  camera.position.set(center.x + 0.94 * distance,
+                      center.y - 0.12 * distance,
+                      center.z + 0.32 * distance);
+  camera.lookAt(center);
+  controls.update();
 }
 
 export function resize() {
