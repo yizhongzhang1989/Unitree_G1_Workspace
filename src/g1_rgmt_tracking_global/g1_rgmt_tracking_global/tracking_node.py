@@ -15,6 +15,17 @@
 **与旧 g1_gmt_tracking 的关键差异**：本策略的参考窗口里有 15 维是"参考 key body 相对
 机器人躯干"的位移，其中头 3 维就是漂移量本身。所以必须接里程计，并在 ``~/start``
 那一刻把参考动作**同时**按偏航和平移对齐到机器人当前位姿。旧包只锁偏航。
+**两种参考源**，``reference_source`` 二选一：
+
+``motion``（默认）
+    从 ``motion_dir`` 读一段录好的 NPZ，放完回 IDLE。
+``mocap``
+    订 ``g1_mocap`` 的 ``/mocap/frame``，机器人实时跟着人走。参考没有终点，
+    只能靠 estop 停。代价是 **0.34 s 的端到端延迟**：策略要 0.3 s 的前瞻，
+    而实时流没有未来，只能把播放头往后挪。
+
+    本节点**不碰头显**——收头显、跑重定向、做校准全在 ``mocap_node`` 那边，
+    所以要先起它。这样三个节点（跟踪层 / mocap_node / dashboard）能同时跑。
 """
 
 from __future__ import annotations
@@ -27,6 +38,7 @@ from enum import Enum
 import numpy as np
 import rclpy
 from controller_manager_msgs.srv import SwitchController
+from g1_mocap_msgs.msg import MocapFrame, MocapStatus
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -98,15 +110,23 @@ class RgmtTrackingNode(Node):
 
         names = list(spec.all_body_names)
         # 训练侧前瞻特征取 body_names[0] 作根位姿，这里保持同一约定。
-        self._motions = MotionLibrary(
-            resolve_policy_path(p('motion_dir', '').get_parameter_value().string_value),
-            anchor_index=names.index(spec.anchor_body_name),
-            root_index=0,
-            key_indexes=[names.index(n) for n in spec.reference_key_bodies],
-            policy_joint_ids=self._policy.action_slots(),
-        )
-        default_motion = p('motion', '').get_parameter_value().string_value
-        self._clip = self._motions.get(default_motion or self._motions.names[0])
+        self._source = p('reference_source', 'motion').get_parameter_value().string_value
+        if self._source not in ('motion', 'mocap'):
+            raise RuntimeError(f"reference_source 只能是 motion 或 mocap，收到 {self._source!r}")
+        self._mocap = None
+        if self._source == 'mocap':
+            self._motions = None
+            self._clip = self._build_mocap_clip(spec, action_joints)
+        else:
+            self._motions = MotionLibrary(
+                resolve_policy_path(p('motion_dir', '').get_parameter_value().string_value),
+                anchor_index=names.index(spec.anchor_body_name),
+                root_index=0,
+                key_indexes=[names.index(n) for n in spec.reference_key_bodies],
+                policy_joint_ids=self._policy.action_slots(),
+            )
+            default_motion = p('motion', '').get_parameter_value().string_value
+            self._clip = self._motions.get(default_motion or self._motions.names[0])
         self._loop = bool(p('loop', False).get_parameter_value().bool_value)
 
         self._rate = float(p('control_rate_hz', 50.0).get_parameter_value().double_value)
@@ -151,8 +171,12 @@ class RgmtTrackingNode(Node):
         self._stand_start = 0.0
         self._name_to_index: dict[str, int] = {}
 
+        # 必须 BEST_EFFORT：RELIABLE 订阅收不到 BEST_EFFORT 发布者（反过来可以），
+        # 而 g1_localization 的 ~/torso_pose 正是 BEST_EFFORT，写成 RELIABLE 时
+        # 一条都收不到，只在发现的那一刻打一次 incompatible QoS 警告。
+        # FPC 那侧的 ~/commands 也是 BEST_EFFORT depth=1。
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
-                            reliability=ReliabilityPolicy.RELIABLE)
+                            reliability=ReliabilityPolicy.BEST_EFFORT)
         self._message = Float64MultiArray()
         self._publisher = self.create_publisher(
             Float64MultiArray,
@@ -193,11 +217,77 @@ class RgmtTrackingNode(Node):
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
 
+        source = (f'实时动捕 {self._mocap_topic}' if self._mocap is not None
+                  else f'动作库 {len(self._motions.names)} 段, 当前 {self._clip.name}'
+                       f' ({self._clip.duration_s:.1f}s)')
         self.get_logger().info(
             f'RGMT 跟踪就绪: 历史 H={spec.history_len}, 参考窗口 '
             f'{len(spec.window_offsets)}x{spec.token_dim}; 里程计 {self._odom.mode}; '
-            f'动作 {len(self._motions.names)} 段, 当前 {self._clip.name} '
-            f'({self._clip.duration_s:.1f}s)')
+            f'参考源 {source}')
+
+    def _build_mocap_clip(self, spec, action_joints: list[str]):
+        """接实时动捕。数据来自 ``g1_mocap`` 的 ``/mocap/frame``，本节点不碰头显。
+
+        动捕那边的 29 轴顺序未必和策略一致，所以每帧都拿 ``joint_names`` 校一遍：
+        对不上就丢帧，而不是静默地把左右腿接反。
+        """
+        from g1_mocap.consumer import FrameBuffer
+
+        from .mocap_clip import MocapClip, lead_frames_for
+
+        p = self.declare_parameter
+        self._mocap_joints = list(action_joints)
+        self._mocap_key_bodies = list(spec.reference_key_bodies)
+        self._mocap = FrameBuffer(
+            n_joints=len(action_joints), n_keys=len(spec.reference_key_bodies),
+            buffer_s=float(p('mocap_buffer_s', 2.0).get_parameter_value().double_value))
+
+        self._mocap_topic = p('mocap_frame_topic', '/mocap/frame') \
+            .get_parameter_value().string_value
+        status_topic = p('mocap_status_topic', '/mocap/status') \
+            .get_parameter_value().string_value
+        # 单独一个互斥组：动捕是 90 Hz，和 500 Hz 的 odom 挤同一组会互相饿。
+        mocap_group = MutuallyExclusiveCallbackGroup()
+        # QoS 必须和发布端一致：RELIABLE 订阅收不到 BEST_EFFORT 发布者，而且只在发现
+        # 那一刻打一次警告，表现就是「话题在、自己收不到」。
+        stream = QoSProfile(depth=10, history=HistoryPolicy.KEEP_LAST,
+                            reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(MocapFrame, self._mocap_topic, self._on_mocap_frame,
+                                 stream, callback_group=mocap_group)
+        self.create_subscription(MocapStatus, status_topic,
+                                 lambda m: self._mocap.push_status(m), 10,
+                                 callback_group=mocap_group)
+
+        margin = int(p('mocap_lead_margin_frames', 2)
+                     .get_parameter_value().integer_value)
+        lead = lead_frames_for(spec.window_offsets, margin=margin)
+        self.get_logger().warn(
+            f'实时动捕参考：端到端延迟 {lead * spec.control_dt:.2f}s（{lead} 拍）。'
+            f'这是策略要未来 {int(max(spec.window_offsets))} 帧带来的下界，砍不掉。')
+        return MocapClip(
+            self._mocap, control_dt=spec.control_dt, lead_frames=lead,
+            stale_timeout_s=float(p('mocap_stale_timeout_s', 0.3)
+                                  .get_parameter_value().double_value))
+
+    def _on_mocap_frame(self, message: MocapFrame) -> None:
+        """每帧核对两份名单。两者都是**顺序敏感**且错了不报错的。
+
+        关节名单错位 = 左右腿指令互换；key body 名单错位 = 参考窗口后 30 维整段
+        对不上号，策略照跑但完全无意义。宁可丢帧。
+        """
+        if list(message.joint_names) != self._mocap_joints:
+            self.get_logger().error(
+                f'{self._mocap_topic} 的关节名单和策略对不上，丢帧。'
+                f'动捕端的 joints 参数得和策略的 action_joints 同一份。',
+                throttle_duration_sec=5.0)
+            return
+        if list(message.key_body_names) != self._mocap_key_bodies:
+            self.get_logger().error(
+                f'{self._mocap_topic} 的 key body 名单和策略契约对不上，丢帧。'
+                f'期望 {self._mocap_key_bodies}，收到 {list(message.key_body_names)}。',
+                throttle_duration_sec=5.0)
+            return
+        self._mocap.push_frame(message)
 
     def _slots(self, names: list[str]) -> np.ndarray:
         try:
@@ -281,6 +371,9 @@ class RgmtTrackingNode(Node):
 
     def _on_select(self, message: String) -> None:
         name = message.data.strip()
+        if self._motions is None:
+            self.get_logger().warn('参考源是实时动捕，没有动作可选')
+            return
         with self._lock:
             if self._state is State.RUNNING:
                 self.get_logger().warn('RUNNING 中不允许换动作，先 estop')
@@ -320,6 +413,14 @@ class RgmtTrackingNode(Node):
             pose = self._odom.torso_position()
             if pose is None:
                 response.success, response.message = False, '里程计尚未就绪，无法对齐参考'
+                return response
+            if self._mocap is not None and not self._mocap.calibrated:
+                response.success, response.message = False, \
+                    '动捕还没校准：让人站直，按双摇杆或调 /mocap/calibrate'
+                return response
+            stale = self._stale()
+            if stale:
+                response.success, response.message = False, stale
                 return response
             self._stand_from = self._measured.copy()
             self._stand_start = self._now()
@@ -437,7 +538,9 @@ class RgmtTrackingNode(Node):
                 return
             targets[self._action_slots] = action_targets
 
-            if self._policy.frame >= clip.num_frames:
+            # 实时动捕没有终点，只能靠 estop 停。
+            if not getattr(clip, 'streaming', False) \
+                    and self._policy.frame >= clip.num_frames:
                 if self._loop:
                     self._policy.frame = 0
                 else:
@@ -455,6 +558,13 @@ class RgmtTrackingNode(Node):
             return '/joint_states 超时'
         if self._imu_quat is None or now - self._imu_stamp > self._timeout:
             return 'IMU 超时'
+        if self._mocap is not None:
+            # 断流后参考会被钳在最后一帧，机器人保持最后姿势继续站着，看起来毫无异样，
+            # 实际上已经完全失去操作。必须当成急停条件。
+            # 缓冲里的时间轴是消息的 header.stamp，所以比较基准用 ROS 时钟。
+            mocap = self._clip.stale(now)
+            if mocap:
+                return mocap
         return self._odom.stale(now) or ''
 
     def _publish_status(self) -> None:
@@ -469,12 +579,14 @@ class RgmtTrackingNode(Node):
                 ref_pos, _ = clip.anchor_pose_world(frame)
                 offset = f' offset={float(np.linalg.norm(ref_pos - torso_pos)):.3f}'
         message = String()
+        total = 'live' if getattr(clip, 'streaming', False) else str(clip.num_frames)
         # offset 是参考锚点与机器人躯干的距离，也就是策略读到的漂移量；
         # drift 是里程计自身被雷达修正的累积量。两者一起看才能分清是谁在漂。
         message.data = (
-            f'state={state.value} motion={clip.name} frame={frame}/{clip.num_frames}'
+            f'state={state.value} motion={clip.name} frame={frame}/{total}'
             f'{offset} drift={float(np.linalg.norm(corr_pos)):.3f}'
             + (' CLAMPED' if clamped else '')
+            + (f' mocap[{clip.describe()}]' if self._mocap is not None else '')
             + (f' reason={reason}' if reason else ''))
         self._status_publisher.publish(message)
 

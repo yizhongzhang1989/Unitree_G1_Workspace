@@ -56,6 +56,33 @@ def quat_to_mat(q: np.ndarray) -> np.ndarray:
     return mat
 
 
+def quat_from_mat(mat: np.ndarray) -> np.ndarray:
+    """3x3 旋转矩阵 -> (w, x, y, z)。
+
+    按迹分四支，永远从**最大**的那个分量开出平方根：只用 ``w`` 那一支时，
+    旋转接近 180 度会让 ``w -> 0``，除以它就把数值噪声放大成几度的姿态误差。
+    """
+    m = np.asarray(mat, dtype=np.float64)
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        q = np.array([0.25 * s, (m[2, 1] - m[1, 2]) / s,
+                      (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s])
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+        q = np.array([(m[2, 1] - m[1, 2]) / s, 0.25 * s,
+                      (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s])
+    elif m[1, 1] > m[2, 2]:
+        s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+        q = np.array([(m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s,
+                      0.25 * s, (m[1, 2] + m[2, 1]) / s])
+    else:
+        s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+        q = np.array([(m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s,
+                      (m[1, 2] + m[2, 1]) / s, 0.25 * s])
+    return quat_normalize(q)
+
+
 def rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
     """把世界系向量转到 q 所定义的局部系，即 ``R(q)^T @ v``。支持批量。"""
     return np.einsum('...ji,...j->...i', quat_to_mat(q), v)

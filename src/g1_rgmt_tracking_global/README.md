@@ -1,7 +1,14 @@
 # g1_rgmt_tracking_global
 
-G1 全身动作跟踪层：读一段参考动作 NPZ，50 Hz 输出 31 轴关节位置目标。
+G1 全身动作跟踪层：50 Hz 输出 31 轴关节位置目标。
 29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动，2 个夹爪偏心轴透传。
+
+参考动作二选一，`reference_source`：
+
+| 值 | 参考从哪来 | 有没有终点 |
+|---|---|---|
+| `motion`（默认） | `config/motions` 下录好的 NPZ | 放完回 IDLE |
+| `mocap` | PICO 全身动捕实时流（[`g1_mocap`](../g1_mocap/README.md)） | 没有，只能 estop |
 
 **不要和 `g1_motion_control` 或 `g1_gmt_tracking` 同时启动**——三者都往
 `/forward_position_controller/commands` 写，同时跑就是多个策略抢同一组电机。
@@ -84,19 +91,60 @@ T_world_torso(t) = T_world_odom(t_k) @ T_odom_torso(t)
 
 ## 用法
 
+本 launch **只起 tracking_node 一个节点**。默认 `odometry_mode: fused` 依赖一条四级链路，
+每一级都得自己先起：
+
+```
+/utlidar/cloud_livox_mid360 -> head_lidar_node -> /head/lidar/points_full
+    -> point_lio -> /aft_mapped_to_init -> localization_node -> ~/torso_pose
+```
+
+按顺序起，前四步各占一个终端：
+
 ```bash
-# 控制栈（会把 FPC 加载成 inactive）
+# 1. 控制栈。把 FPC 加载成 inactive，同时提供 /joint_states 与 TF
+#    （定位层要拿腰角把 lio 结果推到 torso_link，所以它得在第 3 步之前）
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
-# 本层
+# 1b. 关掉 FPC 的手臂自适应刚度：策略训练时是纯 PD，YAML 默认的 2.0 会把手臂
+#     零误差处的 kp 抬到 3 倍。all_data.launch.py 没有对应的 launch 参数，
+#     只能起完再设；FPC 此时还是 inactive，engage 之前设完即可
+ros2 param set /forward_position_controller adaptive_stiffness_scale 0.0
+
+# 2. 头部传感器。**它不在控制栈里，漏了就没有 /head/lidar/points_full**，
+#    表现是 localization_node 刷「没有里程计输入」
+ros2 launch head_sensors head_sensors.launch.py camera:=false
+
+# 3. 雷达定位栈（Point-LIO + 接口层）。起完必须钉原点，否则位姿协方差恒为 -1
+ros2 launch g1_localization localization.launch.py
+ros2 service call /g1_localization/set_origin std_srvs/srv/Trigger
+
+# 4. 本层
 ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py
 
-# 没有雷达定位栈时
-ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py odometry_mode:=odom_only
-
-# 操作台（终端是唯一停机入口，退出时自动 estop）
+# 5. 操作台（终端是唯一停机入口，退出时自动 estop）
 ros2 run g1_rgmt_tracking_global teleop_keyboard
 ```
+
+只想跑一下、不想起雷达的话，第 2/3 步可以整个省掉，但**必须换模式**，
+否则 `lidar_timeout_s` 到点就急停：
+
+```bash
+ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py odometry_mode:=odom_only
+```
+
+调试时也可以让定位栈代起一个雷达节点（代替第 2 步，但不出相机）：
+`ros2 launch g1_localization localization.launch.py with_lidar:=true`。
+
+链路断了就逐级往上查，哪一条没频率就是断在那一级：
+
+| 话题 | 应有频率 | 没有则缺 |
+|---|---|---|
+| `/utlidar/cloud_livox_mid360` | 10 Hz | 雷达或机器人自带驱动 |
+| `/head/lidar/points_full` | 10 Hz | 第 2 步 head_sensors |
+| `/aft_mapped_to_init` | 10 Hz | 第 3 步 point_lio |
+| `/g1_localization/torso_pose` | 10 Hz | 第 3 步 localization_node |
+| `/dog_odom` | 500 Hz | 机器人自带里程计 |
 
 状态机与 `g1_motion_control` 一致：
 
@@ -137,6 +185,58 @@ python scripts/slim_motion.py --input-dir <训练NPZ目录> \
 
 运行时切换：`ros2 topic pub --once ~/select_motion std_msgs/String "data: walk2_subject1"`。RUNNING 中拒绝切换。
 
+## 用实时动捕当参考
+
+把 NPZ 换成人：戴 PICO 4 Ultra + 5 个 Motion Tracker，机器人实时跟着走。收头显、跑重定向、
+做校准全在 [`g1_mocap`](../g1_mocap/README.md)，本层只订它的 `/mocap/frame`，把那条流装配成
+68 维的参考窗口。**本层不碰头显**，所以三个节点可以同时跑。
+
+```bash
+# 前四步同上（控制栈 / head_sensors / 定位栈 / 钉原点），然后：
+
+# a. 动捕数据源。头显在配置面板里填「机器人IP:18000」，全程 WiFi，不用 adb
+ros2 launch g1_mocap mocap.launch.py
+
+# b. 人站直，校准人机比例。三选一：戴着头显按双摇杆（会震动回执）／面板上点／服务
+ros2 service call /mocap/calibrate std_srvs/srv/Trigger
+
+# c. 可选但建议：先在面板上看一遍重定向出来的姿态对不对
+ros2 launch g1_mocap dashboard.launch.py     # http://<机器人IP>:18080
+
+# d. 本层
+ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py reference_source:=mocap
+
+# e. 操作台：G = engage，Enter = start，空格 = estop
+ros2 run g1_rgmt_tracking_global teleop_keyboard
+```
+
+`~/status` 里会多出 `mocap[...]`，`link=up` 且 `body_status=1` 才算通。
+`body_status=2` 配 `message=7` 是头显没被正常佩戴/站好，站直走两步通常能回到 VALID。
+
+### 三件必须知道的事
+
+**一、有 0.34 s 的端到端延迟，砍不掉。** 参考窗口的 `lookahead_steps` 最大 +15，也就是
+要 0.3 s 之后的参考。实时动捕没有未来，唯一诚实的做法是让播放头**落后**最新帧
+`15 + mocap_lead_margin_frames` 拍。把 `mocap_lead_margin_frames` 调小并不会让延迟消失，
+只会让 `+15` 那个 token 被钳成当前帧——**前瞻静默失效**，策略突然没有了未来信息。
+
+**二、`~/start` 之前必须先校准，而且要人站直。** 校准归 `mocap_node`，本层只检查
+「标过没有」，没标过直接拒绝 `~/start`。标的是人机比例：按腿长比缩放位移，把站立高度
+锚到 G1 自己的高度，再把整个站立位形映射到 `default_joint_pos`。
+
+**RUNNING 中人误按双摇杆会触发重标**，校准会清空动捕缓冲，本层随即因断流急停——
+安全，但会打断操作。跟人说清楚别乱按。
+
+**三、STAND 那几秒人别乱动。** `stand_joint_pos()` 取的是人**此刻**的位形而不是 `~/start`
+那一刻的快照——插完就直接进 RUNNING，两边取同一个姿态才不会在切换那一拍跳一下。
+代价就是这 3 秒里人动、机器人的插值目标就跟着改。按 Enter 前先摆成接近机器人当前站姿的
+自然站立。
+
+### 断流会怎样
+
+断流后参考被钳在最后一帧，机器人保持最后的姿势继续站着，**看起来毫无异常**。所以
+`mocap_stale_timeout_s`（默认 0.3 s）到点直接急停，不要调大。
+
 ## 关节名单
 
 | 名单 | 数量 | 说明 |
@@ -146,4 +246,4 @@ python scripts/slim_motion.py --input-dir <训练NPZ目录> \
 | 策略动作 | 29 | 不含夹爪 |
 
 两套 31 轴顺序**不同**，所以全部按名字查槽位，绝不切片。`joints` 由 launch 从
-`unitree_g1_ros2_control/config/forward_position_controller.yaml` 注入，不在本包抄第二份。
+`unitree_g1_ros2_control/config/default_31dof_param.yaml` 注入，不在本包抄第二份。

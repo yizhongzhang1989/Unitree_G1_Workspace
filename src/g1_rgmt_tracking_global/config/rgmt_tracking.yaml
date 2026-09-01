@@ -1,12 +1,17 @@
 /rgmt_tracking:
   ros__parameters:
     # `joints`（FPC 的 31 轴顺序）由 launch 从
-    # unitree_g1_ros2_control/config/forward_position_controller.yaml 读取后注入，
+    # unitree_g1_ros2_control/config/default_31dof_param.yaml 读取后注入，
     # 不在这里抄第二份——两份不同步就是左右腿指令互换级别的事故。
 
     # 策略权重。关节顺序、默认位姿、动作缩放、前瞻步长全部从它的 metadata 里读，
     # 和下面的 obs_joints / action_joints 对不上会直接拒绝启动。
     policy_path: package://g1_rgmt_tracking_global/config/policy.onnx
+
+    # 参考动作从哪来：
+    #   motion  从 motion_dir 读一段录好的 NPZ，放完回 IDLE
+    #   mocap   接 PICO 全身动捕（g1_mocap），机器人实时跟着人走，没有终点
+    reference_source: motion
 
     # 参考动作目录。**换动作不需要换策略、也不需要重新导出**：策略吃的是偏航/平移
     # 不变的前瞻特征，任何一段同格式 NPZ 都能直接放。往这个目录里丢文件即可，
@@ -156,3 +161,19 @@
     target_topic: /forward_position_controller/commands
     controller_manager: /controller_manager
     controller_name: forward_position_controller
+
+    # 以下只在 reference_source: mocap 时生效。
+    # 数据从 g1_mocap 的 mocap_node 订过来，本节点**不碰头显**，所以要先起：
+    #     ros2 launch g1_mocap mocap.launch.py
+    # 头显配置面板里填「机器人IP:18000」（那是 mocap_node 的端口）。
+    # 校准也归 mocap_node：人站直后按双摇杆，或调 /mocap/calibrate。
+    mocap_frame_topic: /mocap/frame
+    mocap_status_topic: /mocap/status
+    # 缓冲时长。要盖住参考窗口的整个跨度加上重同步余量。
+    mocap_buffer_s: 2.0
+    # 播放头在「最新帧减去前瞻跨度」之外还要再退几拍。策略要 +15 帧的未来，实时流
+    # 没有未来，只能拿延迟换——总延迟 = (15 + 这个值) * 0.02 s，默认 0.34 s。
+    # 调小会让 +15 那个 token 被钳成当前帧，前瞻**静默失效**；调大只是更迟钝。
+    mocap_lead_margin_frames: 2
+    # 多久没有新帧就急停。断流后参考会钳在最后一帧，机器人保持姿势站着看不出异常。
+    mocap_stale_timeout_s: 0.3

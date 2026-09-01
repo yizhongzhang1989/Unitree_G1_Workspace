@@ -7,6 +7,14 @@
 那条 launch 会把 forward_position_controller 加载成 inactive；本层在 ``~/engage``
 的时候才去激活它，急停时再反激活。
 
+``odometry_mode`` 默认 fused，只**订阅** ``/g1_localization/torso_pose``，不会把雷达栈
+拉起来。要么先把下面两层都起全（head_sensors 不在控制栈里，漏了就没有
+``/head/lidar/points_full``，Point-LIO 无输入），要么换成 odom_only：
+
+    ros2 launch head_sensors head_sensors.launch.py camera:=false
+    ros2 launch g1_localization localization.launch.py
+    ros2 service call /g1_localization/set_origin std_srvs/srv/Trigger
+
 **不要和 g1_motion_control 同时启动**：两者都往
 ``/forward_position_controller/commands`` 写，同时跑就是两个策略抢同一组电机。
 """
@@ -34,13 +42,14 @@ _SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
 def _nodes(context):
     share = Path(get_package_share_directory('g1_rgmt_tracking_global'))
     config = share / 'config' / 'rgmt_tracking.yaml'
-    # 31 轴的顺序只能有一个来源，就是控制器自己的参数文件。
-    controller = _parameters(
+    # 31 轴的顺序只能有一个来源，就是控制栈的公共参数文件。
+    common = _parameters(
         Path(get_package_share_directory('unitree_g1_ros2_control')) /
-        'config' / 'forward_position_controller.yaml')
-    overrides = {'joints': controller['joints']}
+        'config' / 'default_31dof_param.yaml')
+    overrides = {'joints': common['joints']}
 
-    for name in ('policy_path', 'motion_dir', 'motion', 'odometry_mode'):
+    for name in ('policy_path', 'motion_dir', 'motion', 'odometry_mode',
+                 'reference_source', 'mocap_frame_topic'):
         value = LaunchConfiguration(name).perform(context)
         if value:
             overrides[name] = value
@@ -70,5 +79,11 @@ def generate_launch_description() -> LaunchDescription:
         # fused / odom_only / lidar_only。没起雷达定位栈时用 odom_only，
         # 但只适合短动作：/dog_odom 随行走距离无界漂移。
         DeclareLaunchArgument('odometry_mode', default_value=''),
+        # motion = 放录好的 NPZ；mocap = 接 g1_mocap 的 /mocap/frame 实时跟人。
+        # 用 mocap 时先起 `ros2 launch g1_mocap mocap.launch.py`，
+        # 并拿 `ros2 launch g1_mocap dashboard.launch.py` 看一遍重定向结果。
+        DeclareLaunchArgument('reference_source', default_value=''),
+        DeclareLaunchArgument('mocap_frame_topic', default_value='',
+                              description='动捕数据源，默认 /mocap/frame'),
         OpaqueFunction(function=_nodes),
     ])

@@ -30,6 +30,11 @@
   <!-- onnxruntime 没有 rosdep key，由 .devcontainer/Dockerfile 的 pip3 install 提供。 -->
 
   <exec_depend>unitree_g1_ros2_control</exec_depend>
+  <!-- reference_source: mocap 时才用到。用录好的 NPZ 跑不需要装它。 -->
+  <!-- reference_source: mocap 时才用到。用录好的 NPZ 跑不需要装它们。
+       g1_mocap 只用其中的 FrameBuffer（消费者侧缓冲），不拉起 pinocchio。 -->
+  <exec_depend>g1_mocap</exec_depend>
+  <exec_depend>g1_mocap_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
