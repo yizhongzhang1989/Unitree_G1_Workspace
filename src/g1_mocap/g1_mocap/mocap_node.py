@@ -149,8 +149,6 @@ class MocapNode(Node):
         message.seq = raw.seq & 0xFFFFFFFF
         message.body_status = raw.status
         message.body_message = raw.message
-        # on_frame 只在校准之后才会被调用，走到这里必然已经标过。
-        message.calibrated = True
         message.joint_names = self._joints
         message.joint_positions = result.joint_pos.tolist()
         fill_pose(message.root, result.root_pos, result.root_quat)

@@ -8,7 +8,8 @@
 
 头显那边在配置面板里填**本机的局域网 IP** 加 ``:18000``，点连接。全程 WiFi，不用 adb。
 
-**这个节点和跟踪层不要同时起**：头显同一时刻只连一个上行地址。
+这个节点是**唯一**接头显的：dashboard 和 ``g1_rgmt_tracking_global`` 都只订
+``/mocap/frame``，三者可以同时起。
 """
 
 from pathlib import Path
