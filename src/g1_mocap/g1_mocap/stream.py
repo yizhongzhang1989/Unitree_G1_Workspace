@@ -52,6 +52,12 @@ class SampleBatch:
     anchor_quat: np.ndarray
     key_pos: np.ndarray
 
+    def at(self, index) -> SampleBatch:
+        """按首维取子集。下游一次取两批时刻（当前 + 前一拍）再劈开做差分。"""
+        return SampleBatch(*(np.asarray(v)[index] for v in
+                             (self.t, self.joint_pos, self.root_pos, self.root_quat,
+                              self.anchor_pos, self.anchor_quat, self.key_pos)))
+
 
 @dataclass
 class StreamStats:
