@@ -12,7 +12,7 @@ episode 文件序号跨采集连续（§3）。
 
 ```bash
 python3 convert.py <session A> <session B> <session C> --to yb -o <输出目录> \
-        --urdf final.urdf --calibration calibration.yaml
+        --urdf final.urdf
 ```
 
 ---
@@ -484,8 +484,10 @@ if np.isnan(f['action/joint_space/position'][:]).all():
 | `robot.gripper` | 归一化前后的对应关系 |
 | `scale` | episode 条数与总时长（小时），**是掐完的时长**，合并的话是全部采集之和 |
 
-h5 里 `meta/end_space/fk_provenance` 记着算末端位姿用的 URDF 与标定文件的 sha256。
-两次导出结果对不上时先比这个。
+h5 里 `meta/end_space/fk_provenance` 记着算末端位姿用的 URDF 的 sha256，以及这次采集
+自带的 `camera_params.yaml` 的 sha256。
+两次导出结果对不上时先比这个。**合并多次采集时每条 episode 记的是自己那份** ——
+相机被碰过的前后两批可以合成一份 dataset，各用各的外参。
 
 h5 的 `meta` attrs 只有三个：`version`、`gripper_unified="v1"`（夹爪归一化约定的版号，
 就是 §0 那条 0=张开 1=夹紧）、`patches`（对面用来记「这份数据事后打过哪些补丁」，
@@ -498,8 +500,8 @@ h5 的 `meta` attrs 只有三个：`version`、`gripper_unified="v1"`（夹爪�
 - **`action/joint_space` 是 NaN**（见 §4.1）。
 - **图像不在 h5 里**，只有 mp4 + `frame_index`。对齐关系已经钉死，
   以后要塞进 h5 只是补取像素这一步。
-- **腕相机内参是 1920×1080 档，而录制流的实际分辨率没记进 session**，
-  取的是标定表第一档。头部相机是出厂值，不是现场标的。
+- **腕相机内参是 1920×1080 档**，取自这次采集自带的 `camera_params.yaml`（里面只留
+  当时实际录制的那一档）。头部相机是出厂值，不是现场标的。
 - **标定精度**：640×360 重投影 RMS 1.74 / 1.57 px，外参残差 5.85 / 6.87 mm；
   左右腕相机的 z 相差 15 mm，尽管两侧安装件相同。要求更高的话得重标。
 - 相机管线延迟按固定值 110 ms 补偿（腕）、0 ms（头）。这个值是靠运动相关性标的，

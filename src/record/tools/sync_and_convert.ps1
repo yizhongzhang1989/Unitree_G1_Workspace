@@ -8,7 +8,7 @@
       1. rsync -av --partial --exclude=DONE --exclude='*.ts.txt'    增量拉取（§2）
       2. rsync -av --checksum                                       收尾那一趟，补齐 DONE（§2）
       3. inspect_session.py --verify                                必须输出「全部一致」（§2）
-      4. convert.py --to yb --urdf ... --calibration ...            转换（§4）
+      4. convert.py --to yb --urdf ...                              转换（§4）
       5. 产物自检：h5 行数 == mp4 帧数；有效率无 0%；腕相机外参不变量（YB 规范 §5.2）
 
     不加 --append、不加 --delete，原因见 README §2。
@@ -141,11 +141,8 @@ foreach ($f in 'convert.py', 'inspect_session.py', 'converters.py', 'session_rea
 }
 
 $urdf  = Join-Path $rootDir 'final.urdf'
-$calib = Join-Path $rootDir 'calibration.yaml'
-foreach ($f in $urdf, $calib) {
-    if (-not (Test-Path $f)) {
-        Stop-With "缺 $(Split-Path $f -Leaf)" '它随导出工具包一起给，就在 tools/ 旁边（README §4）'
-    }
+if (-not (Test-Path $urdf)) {
+    Stop-With '缺 final.urdf' '它随导出工具包一起给，就在 tools/ 旁边（README §4）'
 }
 
 $py = Join-Path $rootDir '.venv\Scripts\python.exe'
@@ -275,13 +272,13 @@ if ((Test-Path (Join-Path $outDir 'episodes_all.json')) -and -not $Force) {
     $convertArgs += @($sealed | ForEach-Object { $_.FullName })
     $convertArgs += @(
         '--to', 'yb', '-o', $outDir,
-        '--urdf', $urdf, '--calibration', $calib,
+        '--urdf', $urdf,
         '--video-height', "$VideoHeight", '--hz', "$Hz"
     )
     $r = Invoke-Native $py $convertArgs
     if ($r.ExitCode -ne 0) {
         Stop-With "合并转换失败（code $($r.ExitCode)）" `
-                  '缺依赖看 README §5 那张表。别为了绕过报错去掉 --calibration —— 腕相机的 link 就在那份文件里'
+                  '缺依赖看 README §5 那张表。报「没有 camera_params.yaml」是这次采集早于该机制，回 A 侧补'
     }
 
     # 有效率那行：某一路整段没录上时形状完全正常、内容全是 NaN，只有这行看得出来。

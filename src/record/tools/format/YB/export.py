@@ -6,8 +6,7 @@
 
 在导出机上跑，除 numpy 外只多 h5py 和 PyYAML（导视频还要 ffmpeg）::
 
-    python export.py <session 目录> -o <输出目录> \\
-        --urdf final.urdf --calibration calibration.yaml
+    python export.py <session 目录> -o <输出目录> --urdf final.urdf
 
 `--dry-run` 不写文件，只把每条 episode 会写出什么形状印出来，用来核对口径。
 
@@ -26,15 +25,16 @@
 **h5 的行数就是 mp4 的帧数**，第 k 帧就是第 k 行那一刻看到的画面。
 全部统一到 30 Hz，连带视频一起重采样（见 `tools/resample_video.py`）。
 
-## 为什么要 URDF 和 calibration.yaml
+## 相机参数来自 session 自己，URDF 来自 `--urdf`
 
 `end_space` 的末端位姿、腕相机的外参都得靠 FK 从关节角推，而机器人当时用的 URDF
-是「final.urdf 叠上 calibration.yaml 的 urdf_overrides」——
+是「final.urdf 叠上相机外参」——
 `unitree_g1_ros2_control/launch/control.launch.py` 就是这么拼的，这里必须一致。
-两个文件都不在 session 里，得跟着 `tools/` 一起拷到导出机。
 
-> 后续应当在开录时把展开后的 `robot_description` 快照进 session。那样导出不依赖
-> 外部文件，也不会因为事后重标定而算出与当时不符的外参。
+外参那部分**只认每个 session 自带的 `camera_params.yaml`**，不接受从外面传一份标定：
+相机会被碰（2026-08-31 头部偏了 13.7°），一份全局标定没法同时解释两批采集，而错了
+不报错、导出的数据看着全是正常的。多个 session 合并导出时每个 session 各用自己那份，
+缺了直接拒绝导出。
 
 ## extrinsic 的方向
 
@@ -135,7 +135,7 @@ class CameraSpec:
     name: str          # 导出用的名字，也是 video_<name>/ 目录名。**用对面的词**
     source: str        # session 里这一路的流名（video/<source>.mkv）
     frame: str         # URDF 里的叶子 link
-    calib: str         # calibration.yaml 的 intrinsics 键；空 = 用 meta.json
+    calib: str         # camera_params.yaml 的 intrinsics 键；空 = 用 meta.json
     static: bool       # 外参在一条 episode 里是否恒定
 
 
@@ -236,12 +236,12 @@ def frame_index(pts: np.ndarray, grid: np.ndarray, max_age: float) -> np.ndarray
 # ------------------------------------------------------------------------- 模型
 
 
-def load_model(urdf: Path, calibration: Path | None) -> tuple:
-    """URDF 叠标定，再补上 URDF 里没有的头部光心那一段。"""
+def load_model(urdf, calibration: dict) -> tuple:
+    """URDF 叠相机外参。`urdf` 收路径或已读好的 XML 文本（合并导出时每个 session
+    一个模型，别为此重复读盘）。"""
     model = urdf_fk.RobotModel.from_urdf(urdf)
-    calib = _yaml(calibration) if calibration else {}
-    applied = model.apply_overrides(calib.get('urdf_overrides'))
-    return model, calib, applied
+    applied = model.apply_overrides(calibration.get('urdf_overrides'))
+    return model, applied
 
 
 def add_head_optical(model, optical: dict) -> None:
@@ -510,11 +510,11 @@ def collect_intrinsics(session: Session, calibration: dict) -> dict:
         for entry in table.get(camera.calib) or []:
             if size and (entry['width'], entry['height']) != size:
                 continue
-            note = '' if size else '（session 没记这路的分辨率，取标定表第一档）'
+            note = '' if size else '（按快照里唯一那一档）'
             out[camera.name] = {
                 'k': list(entry['camera_matrix']), 'd': list(entry['distortion_coefficients']),
                 'width': entry['width'], 'height': entry['height'],
-                'source': (f'calibration.yaml {camera.calib} '
+                'source': (f'camera_params.yaml {camera.calib} '
                            f'{entry["width"]}x{entry["height"]}{note}'),
             }
             break
@@ -522,7 +522,8 @@ def collect_intrinsics(session: Session, calibration: dict) -> dict:
 
 
 def _video_size(session: Session, name: str) -> tuple | None:
-    """录制时的分辨率。腕部现在没记，返回 None 表示「按标定表里唯一/第一档算」。"""
+    """录制时的分辨率。腕部的不在 `meta.json` 里，返回 None；但快照生成时已经按
+    `video/nominal.json` 里探到的分辨率裁过，每路就剩录制那一档，取不错。"""
     stream = session.meta.get(f'{name}_stream') or {}
     if stream.get('width') and stream.get('height'):
         return int(stream['width']), int(stream['height'])
@@ -724,8 +725,7 @@ def dataset_meta(sessions: list[Session], episodes: list, args, intrinsics: dict
     }
 
 
-def fk_provenance(model, urdf: Path, calibration: Path | None,
-                  applied: list) -> dict:
+def fk_provenance(urdf: Path, session: Session, applied: list) -> dict:
     return {
         'method': 'forward kinematics of state joint positions',
         'engine': 'urdf_fk.py (float64 numpy), verified against pinocchio to 5.6e-16',
@@ -733,8 +733,8 @@ def fk_provenance(model, urdf: Path, calibration: Path | None,
         'ee_link': [END_LINKS[side] for side in ARMS],
         'urdf': str(urdf),
         'urdf_sha256': _sha256(urdf),
-        'calibration': str(calibration) if calibration else '',
-        'calibration_sha256': _sha256(calibration) if calibration else '',
+        'camera_params': session.camera_params_path.name,
+        'camera_params_sha256': _sha256(session.camera_params_path),
         'calibrated_joints': applied,
         'head_optical_joint': 'd435_link -> camera_color_optical_frame '
                               '(realsense-ros TF, 不在 URDF 里)',
@@ -749,13 +749,49 @@ def _sha256(path) -> str:
     return digest.hexdigest()
 
 
+def build_rigs(sessions: list, session_ids: list, urdf: Path, urdf_text: str,
+               head_optical: dict) -> list | None:
+    """每个 session 一套「模型 + 内参 + 溯源」，出错返回 None。
+
+    **不共用一个模型**：相机被碰过之后两批采集的外参本来就不是同一份，共用会把
+    其中一批算错而且不报错（2026-08-31 头部偏了 13.7°）。
+    """
+    rigs = []
+    for session, session_id in zip(sessions, session_ids):
+        params = session.camera_params()
+        if params is None:
+            print(f'！{session_id} 里没有 {session.camera_params_path.name} —— 相机内外参'
+                  '只能来自这次采集自带的那一份，没有就导不了',
+                  file=sys.stderr)
+            return None
+        model, applied = load_model(urdf_text, params)
+        add_head_optical(model, head_optical)
+        intrinsics = collect_intrinsics(session, params)
+        print(f'相机参数  {session_id}  外参叠加 '
+              f'{", ".join(applied) or "无 —— 会退回 URDF 名义值"}')
+        for camera in CAMERAS:
+            entry = intrinsics.get(camera.name)
+            print(f'  内参 {camera.name:<12} '
+                  f'{entry["source"] if entry else "缺 —— 该路写 NaN"}')
+            try:
+                model.chain(ORIGIN, camera.frame)
+            except (KeyError, ValueError):
+                # 腕相机那两个 link 是 urdf_overrides 用 create 现建的，裸 URDF 里没有
+                print(f'！{camera.frame} 不在模型里 —— 它由 camera_params.yaml 的 '
+                      f'urdf_overrides 现建，{session_id} 的那份里缺了这一条',
+                      file=sys.stderr)
+                return None
+        rigs.append({'model': model, 'intrinsics': intrinsics,
+                     'provenance': fk_provenance(urdf, session, applied)})
+    return rigs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('sessions', nargs='+', help='一个或多个 session，合并进同一 dataset')
     ap.add_argument('-o', '--out', help='输出目录，--dry-run 时可省')
     ap.add_argument('--urdf', required=True)
-    ap.add_argument('--calibration')
     ap.add_argument('--hz', type=float, default=DEFAULT_HZ,
                     help='统一时间栅格，视频也按它重采样')
     ap.add_argument('--max-age', type=float, default=DEFAULT_MAX_AGE_S,
@@ -788,33 +824,25 @@ def main() -> int:
             print(f'！{session.manifest["session_id"]} 这个 session 没有 DONE，未正常收尾，'
                   '数据可能不完整', file=sys.stderr)
     urdf = Path(args.urdf)
-    calibration_path = Path(args.calibration) if args.calibration else None
-    model, calibration, applied = load_model(urdf, calibration_path)
+    urdf_text = urdf.read_text(encoding='utf-8')
     head_optical = sessions[0].meta.get('head_optical') or HEAD_OPTICAL
     if any((s.meta.get('head_optical') or HEAD_OPTICAL) != head_optical
            for s in sessions[1:]):
         print('！多个 session 的 head_optical 不一致，不能共用同一份几何元数据',
               file=sys.stderr)
         return 2
-    add_head_optical(model, head_optical)
-    all_intrinsics = [collect_intrinsics(session, calibration) for session in sessions]
-    intrinsics = all_intrinsics[0]
-    provenance = fk_provenance(model, urdf, calibration_path, applied)
 
     print(f'session   {len(sessions)} 个：{", ".join(session_ids)}')
-    print(f'标定叠加  {", ".join(applied) or "无 —— 外参会是 URDF 名义值"}')
     print(f'外参方向  {args.extrinsic}（{EXTRINSIC_FORMULA[args.extrinsic]}）')
     print(f'参考系    {ORIGIN}')
-    for camera in CAMERAS:
-        entry = intrinsics.get(camera.name)
-        print(f'内参 {camera.name:<12} {entry["source"] if entry else "缺 —— 该路写 NaN"}')
-        try:
-            model.chain(ORIGIN, camera.frame)
-        except (KeyError, ValueError):
-            # 腕相机那两个 link 是 calibration.yaml 用 create 现建的，裸 URDF 里没有
-            print(f'！{camera.frame} 不在模型里 —— 它由 calibration.yaml 的 '
-                  'urdf_overrides 创建，本机必须传 --calibration', file=sys.stderr)
-            return 2
+    rigs = build_rigs(sessions, session_ids, urdf, urdf_text, head_optical)
+    if rigs is None:
+        return 2
+    intrinsics = rigs[0]['intrinsics']
+    if any(rig['intrinsics'] != intrinsics for rig in rigs[1:]):
+        # h5 里每条 episode 带的是自己那一份，这里只影响 meta.json 那份概览
+        print('！各 session 的内参不完全相同，meta.json 里取第一个 session 的',
+              file=sys.stderr)
 
     # 只导 success。fail/discard 是采集现场判的「这一条没做成」，导出了就是拿失败轨迹去模仿
     graded = [session.episodes(include_discarded=True) for session in sessions]
@@ -841,8 +869,9 @@ def main() -> int:
             if not args.no_trim:
                 trim_episode(session, episode, args.keep_idle)
             grid = build_grid(episode['t0'], episode['t1'], args.hz)
-            spaces = build_spaces(session, model, grid, args,
-                                  all_intrinsics[order], provenance)
+            spaces = build_spaces(session, rigs[order]['model'], grid, args,
+                                  rigs[order]['intrinsics'],
+                                  rigs[order]['provenance'])
             name = episode_name(serial, session_id, episode)
             cut = episode.get('trim')
             cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'
@@ -996,11 +1025,6 @@ def _report(spaces: dict, verbose: bool) -> list[str]:
                 if shapes:
                     lines.append(f'{section}/{key}_space  {shapes}')
     return lines
-
-
-def _yaml(path: Path) -> dict:
-    import yaml
-    return yaml.safe_load(Path(path).read_text(encoding='utf-8')) or {}
 
 
 if __name__ == '__main__':

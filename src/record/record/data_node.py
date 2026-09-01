@@ -105,8 +105,6 @@ class DataManager(Node):
         self.bundle_ttl_s = float(p('bundle_ttl_s', 1800.0).value)
         self.urdf = str(p('urdf', '').value) or _share(
             'unitree_g1_description', 'model', 'final.urdf')
-        self.calibration = str(p('calibration', '').value) or _share(
-            'camera_calibration', 'config', 'calibration.yaml')
         self.video_height = int(p('convert_video_height', 360).value)
         self.render_fps = float(p('render_fps', 10.0).value)
         self.render_width = int(p('render_width', 640).value)
@@ -306,20 +304,19 @@ class DataManager(Node):
         return self._formats
 
     def tools_bundle(self) -> list:
-        """B 上要的全套：`tools/` 整个 + 两个不在 session 里的配置文件。
+        """B 上要的全套：`tools/` 整个 + 一份 URDF。
 
-        URDF 和标定必须一起给：末端位姿和腕相机外参都要靠 FK 现算，而它俩既不在
-        session 里也不在 tools/ 里。**标定尤其不能漏** —— 腕相机的 `camera_left` /
-        `camera_right` 两个 link 是它用 `create` 现建的，裸 URDF 里根本没有，
-        少了它导出直接报错。缺文件时当场警告，别让人拿着残包到 B 上才发现。
+        URDF 必须一起给：末端位姿和腕相机外参都要靠 FK 现算，而它既不在 session 里
+        也不在 `tools/` 里。相机内外参不在这一包里 —— 它跟着每次采集走
+        （session 里的 `camera_params.yaml`），因为相机被碰过之后一份全局标定
+        没法同时解释两批数据。缺文件时当场警告，别让人拿着残包到 B 上才发现。
         """
         entries = tree_entries(TOOLS_DIR, 'tools/')
-        for path in (self.urdf, self.calibration):
-            if path and Path(path).is_file():
-                entries.append((Path(path).name, Path(path)))
-            else:
-                self.get_logger().warn(f'导出工具包里没有 {path or "（未配置）"}，'
-                                       'B 上跑转换会缺文件')
+        if self.urdf and Path(self.urdf).is_file():
+            entries.append((Path(self.urdf).name, Path(self.urdf)))
+        else:
+            self.get_logger().warn(f'导出工具包里没有 {self.urdf or "（未配置）"}，'
+                                   'B 上跑转换会缺文件')
         return entries
 
     def raw_files(self, session_id: str) -> dict:
@@ -423,8 +420,7 @@ class DataManager(Node):
 
     def _run_convert(self, sessions: list, converter, token: str) -> None:
         out = self._bundles / token
-        values = {'urdf': self.urdf, 'calibration': self.calibration,
-                  'video_height': self.video_height}
+        values = {'urdf': self.urdf, 'video_height': self.video_height}
         try:
             command = converter.command(sys.executable, sessions, out, values,
                                         progress=True)
@@ -574,9 +570,8 @@ class DataManager(Node):
                    '--t0', f'{t0:.6f}', '--t1', f'{t1:.6f}', '--label', label,
                    '--fps', str(self.render_fps), '--width', str(self.render_width),
                    '--out', str(staged), '--progress']
-        for flag, value in (('--urdf', self.urdf), ('--calibration', self.calibration)):
-            if value:
-                command += [flag, value]
+        if self.urdf:
+            command += ['--urdf', self.urdf]
         self.get_logger().info(f'渲染 {session.name}/{label}: {" ".join(command)}')
         error = self._pump(command, self._render)
         if not error and not staged.is_file():

@@ -243,6 +243,7 @@ def test_unify_pose_keeps_translation_and_swaps_xy():
 
 G1_URDF = Path('/workspace/src/unitree_g1_description/model/final.urdf')
 G1_CALIBRATION = Path('/workspace/src/camera_calibration/config/calibration.yaml')
+EXPORT_SOURCE = (Path(ex.__file__)).read_text(encoding='utf-8')
 
 
 @pytest.mark.skipif(not (G1_URDF.is_file() and G1_CALIBRATION.is_file()),
@@ -276,11 +277,10 @@ def test_head_extrinsic_is_constant():
 @pytest.mark.skipif(not (G1_URDF.is_file() and G1_CALIBRATION.is_file()),
                     reason='工作区里没有 G1 的 URDF 或标定')
 def test_wrist_camera_links_only_exist_after_calibration():
-    """`--calibration` 对本机是**必填**，不是“不给就退成名义值”。
+    """腕相机的两个 link 是标定用 `create` 现建的，裸 URDF 里根本没有。
 
-    腕相机的两个 link 是标定文件用 `create` 现建的，裸 URDF 里根本没有 ——
-    不给就报「torso_link 不是 camera_left 的祖先」，一点看不出要补什么。
-    文档一度写着“不给也能跑”，这条把它钉住。
+    不叠就报「torso_link 不是 camera_left 的祖先」，一点看不出要补什么。
+    导出时这份 override 来自 session 自带的 `camera_params.yaml`。
     """
     import yaml
     bare = urdf_fk.RobotModel.from_urdf(G1_URDF)
@@ -294,6 +294,43 @@ def test_wrist_camera_links_only_exist_after_calibration():
         yaml.safe_load(G1_CALIBRATION.read_text(encoding='utf-8'))['urdf_overrides'])
     for frame in wrist:
         assert bare.chain(ex.ORIGIN, frame)
+
+
+@pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')
+def test_export_refuses_a_session_without_camera_params(tmp_path, monkeypatch, capsys):
+    """相机内外参只认 session 自带的那一份，缺了就停，不拿别处的顶替。
+
+    顶替的后果是静默算错：2026-08-31 头部相机偏了 13.7°，拿 8/25 那版标定去导
+    那天的数据，导出来的每一个字段形状都对、值全是错的。
+    """
+    root = tmp_path / '20260101_000000'
+    root.mkdir()
+    (root / 'manifest.json').write_text('{"session_id": "20260101_000000"}',
+                                        encoding='utf-8')
+    (root / 'schema.json').write_text('{"tables": {}}', encoding='utf-8')
+    monkeypatch.setattr(sys, 'argv', ['export.py', str(root), '--urdf',
+                                      str(G1_URDF), '--dry-run'])
+    assert ex.main() == 2
+    assert 'camera_params.yaml' in capsys.readouterr().err
+
+
+def test_export_takes_no_calibration_flag():
+    """别把「从外面传一份标定」加回来 —— 一份全局标定没法解释多批采集。"""
+    assert '--calibration' not in EXPORT_SOURCE
+
+
+@pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')
+def test_each_session_keeps_its_own_head_extrinsic():
+    """两批采集的头部外参不同时，各算各的 —— 共用一个模型会把其中一批算错。"""
+    urdf_text = G1_URDF.read_text(encoding='utf-8')
+    poses = []
+    for pitch in (0.8440717, 1.0747681):
+        model, applied = ex.load_model(urdf_text, {'urdf_overrides': {'d435_joint': {
+            'parent': 'torso_link', 'child': 'd435_link',
+            'xyz': [0.07, 0.01, 0.42], 'rpy': [0.02, pitch, 0.02]}}})
+        assert applied == ['d435_joint']
+        poses.append(model.poses(ex.ORIGIN, 'd435_link', {}))
+    assert not np.allclose(poses[0], poses[1])
 
 
 @pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')

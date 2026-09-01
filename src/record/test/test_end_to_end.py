@@ -37,9 +37,10 @@ def test_reader_has_no_ros_dependency():
         assert not banned.search(src), f'{name} 引入了 ROS 依赖'
 
 
-def _build_session(root: Path) -> Session:
+def _build_session(root: Path, calibration: dict) -> Session:
     streams = {'joint_states': True, 'head': True, 'head_depth': False}
-    s = Session.create(root, streams, meta={'note': '端到端'})
+    s = Session.create(root, streams, meta={'note': '端到端'},
+                       calibration=calibration)
     cols = ['t_recv', 't_header', 'pos.a', 'pos.b']
     w = TableWriter(s.paths.signals / 'joint_states.bin', cols)
 
@@ -84,8 +85,8 @@ def _build_session(root: Path) -> Session:
 
 
 @pytest.fixture(scope='module')
-def built(tmp_path_factory):
-    return _build_session(tmp_path_factory.mktemp('sessions'))
+def built(tmp_path_factory, calibration):
+    return _build_session(tmp_path_factory.mktemp('sessions'), calibration)
 
 
 def test_session_is_sealed_and_verifies(built, reader_module):

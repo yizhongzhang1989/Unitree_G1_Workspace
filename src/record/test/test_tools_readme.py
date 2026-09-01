@@ -62,7 +62,7 @@ def test_setup_py_ships_every_tools_file():
 
 
 @pytest.mark.parametrize('flag', ['--verify', '--align', '--list', '--to',
-                                  '--urdf', '--calibration', '--video-height', '--hz'])
+                                  '--urdf', '--video-height', '--hz'])
 def test_documented_flags_exist(flag):
     """文档里写的开关，argparse 里必须真的有。"""
     assert f"'{flag}'" in SOURCE, f'README 让人用 {flag}，代码里没这个开关'
@@ -111,10 +111,10 @@ def test_says_to_copy_the_whole_folder():
     assert 'record-tools.zip' in DOC, '得告诉 B 这一包从哪儿下'
 
 
-def test_warns_about_the_two_files_not_in_the_session():
-    """URDF 和标定不在 session 里，忘了拷就只能得到名义外参。"""
-    for name in ('final.urdf', 'calibration.yaml'):
-        assert name in DOC
+def test_warns_about_what_is_not_in_the_session():
+    """URDF 不在 session 里，忘了拷就跑不了；相机参数反过来 —— 只认 session 自带的。"""
+    assert 'final.urdf' in DOC
+    assert 'camera_params.yaml' in DOC
     assert 'urdf_overrides' in DOC
 
 

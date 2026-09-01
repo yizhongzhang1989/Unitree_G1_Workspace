@@ -5,11 +5,14 @@
 
 ```
 tools/              你正在看的这一套
-calibration.yaml    转换要用（见 §4）
-final.urdf          同上
+final.urdf          转换要用（见 §4）
 ```
 
-后两个文件不在 session 里也不在 `tools/` 里，以前要另外拷 —— 现在随包一起给了。
+`final.urdf` 不在 session 里也不在 `tools/` 里，以前要另外拷 —— 现在随包一起给了。
+
+**相机内外参不在这一包里**，它跟着每次采集走（session 里的 `camera_params.yaml`）。
+相机会被碰（2026-08-31 头部相机偏了 13.7°），一份全局标定没法同时解释两批采集，
+而拿错了不报错 —— 导出的数据每一个字段形状都对、值全是错的。
 
 **不要只拷其中几个文件**，各脚本之间按相对路径互相引用，
 `format/YB/export.py` 会去上一级找 `session_reader.py`。
@@ -248,7 +251,7 @@ python3 convert.py --list
 
 ```bash
 python3 convert.py <session 目录> [更多 session 目录...] --to yb -o <输出目录> \
-        --urdf final.urdf --calibration calibration.yaml
+        --urdf final.urdf
 ```
 
 给多个 session 时会合并成**一份大 dataset**：文件序号跨 session 连续，根目录只有
@@ -267,20 +270,19 @@ python3 convert.py <session 目录> [更多 session 目录...] --to yb -o <输�
 **只导标注为 success 的 episode**，`fail` / `discard` 一律跳过，丢掉几条会在
 日志第一行报出来。失败轨迹对模仿学习是负样本，混进去等于教模型把东西碰倒。
 
-**`--urdf` 是必填的。** 这两个文件不在 session 里，但已经随「导出工具」包一起给你了
-（就在 `tools/` 旁边）。它们在 A 上的出处：
+**`--urdf` 是必填的。** 它不在 session 里，但已经随「导出工具」包一起给你了
+（就在 `tools/` 旁边）。它在 A 上的出处：`src/unitree_g1_description/model/final.urdf`。
 
-| 文件 | A 上的位置 |
-| --- | --- |
-| `final.urdf` | `src/unitree_g1_description/model/final.urdf` |
-| `calibration.yaml` | `src/camera_calibration/config/calibration.yaml` |
+为什么要它：`end_space` 的末端位姿、腕相机的外参在原始数据里都没有，得靠正运动学
+从关节角现算，而机器人当时用的 URDF 是「`final.urdf` 叠上相机外参」。
 
-为什么要它们：`end_space` 的末端位姿、腕相机的外参在原始数据里都没有，得靠正运动学
-从关节角现算，而机器人当时用的 URDF 是「`final.urdf` 叠上 `calibration.yaml` 里的
-`urdf_overrides`」。**`--calibration` 对本机是必填** —— 腕相机的 `camera_left` /
-`camera_right` 两个 link 是标定文件用 `create` 现建的，裸 URDF 里根本没有，不给就直接
-报错退出（头部则是静默退回 URDF 名义值，和实际装配差几毫米）。两个文件的 sha256 会写进
-`meta/end_space/fk_provenance`，两次导出结果对不上时先比这个。
+**外参那一半只认 session 自带的 `camera_params.yaml`**，没有命令行开关能从外面传一份
+标定进来。缺了就直接报错退出 —— 腕相机的 `camera_left` / `camera_right` 两个 link 就是
+它的 `urdf_overrides` 用 `create` 现建的，裸 URDF 里根本没有。URDF 和这份快照的 sha256
+都会写进 `meta/end_space/fk_provenance`，两次导出结果对不上时先比这个。
+
+多个 session 合并导出时，**每个 session 各用自己那份**，所以相机被碰过的前后两批
+可以放心地合成一份 dataset。
 
 **转换会打一行有效率，别跳过它。** 某一路整段没数据时，输出的形状完全正常、内容全是
 NaN，不看这一行发现不了 —— `fpc_commands` 就这么整整丢过两个 session。
@@ -306,7 +308,7 @@ NaN，不看这一行发现不了 —— `fpc_commands` 就这么整整丢过两
 | `！session 没有 DONE，未正常收尾` | session 还没封口，或者你 rsync 时漏了收尾那一趟 |
 | `！找不到 ffmpeg/ffprobe，跳过视频` | 没进 PATH。`ffprobe -version` 自己试一下 |
 | `跑不了 yb：缺 python 模块 h5py` | `pip install h5py`，或 WSL 里 `apt install python3-h5py` |
-| `跑不了 yb：缺 python 模块 yaml` | `pip install pyyaml`，或 `apt install python3-yaml`。**别改成不带 `--calibration` 绕过去** —— 腕相机的 link 就在那份文件里，不给直接报错 |
+| `跑不了 yb：缺 python 模块 yaml` | `pip install pyyaml`，或 `apt install python3-yaml`。读 session 自带的 `camera_params.yaml` 靠它，缺了一条都导不出来 |
 | `跑不了 yb：缺 命令 ffmpeg` | 同上，ffmpeg 没进 PATH |
 | 有效率那行出现 `0%` | 那一路整段没录上，别拿这份数据训练 |
 | `--verify` 报不一致 | 传输没搞完，重跑一趟 `--checksum` |

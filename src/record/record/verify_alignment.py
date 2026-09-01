@@ -4,7 +4,7 @@
 判据全在图上：
 
 * **URDF 轮廓（左绿 / 右红）压不上真实手臂** —— 关节角与视频的时间对不齐，
-  或者头部相机的挂载外参不对（`calibration.yaml` 的 `d435_joint`）。
+  或者头部相机的挂载外参不对（session 自带 `camera_params.yaml` 里的 `d435_joint`）。
 * **目标点（深色空心圆）离实际末端（亮色实心点）很远且方向乱飘** —— 指令表与关节表
   不在同一时间基准上，或者位姿根本不是 `torso_link` 系的。
   正常情况是目标稳定地领先实际一小段（控制跟随滞后），两者的接近方向射线大致同向。
@@ -57,20 +57,16 @@ APPROACH_M = 0.06
 # --------------------------------------------------------------------- 模型
 
 
-def build_renderer(urdf: Path, calibration: Path | None) -> tuple:
+def build_renderer(urdf: Path, overrides: dict) -> tuple:
     """加载 URDF 并叠上标定的关节 origin，返回 `(渲染器, 模型, 生效的覆盖)`。
 
-    必须叠 `calibration.yaml` —— 控制栈是在 launch 里把它打进内存 URDF 的
-    （见 `unitree_g1_ros2_control/launch/control.launch.py`），磁盘上那份 submodule
-    里的 `d435_joint` 还是名义值。不叠就是拿另一个相机位姿去对，轮廓必然偏。
+    `overrides` 取自这次采集自带的 `camera_params.yaml` —— 控制栈是在 launch 里把它
+    打进内存 URDF 的（见 `unitree_g1_ros2_control/launch/control.launch.py`），
+    磁盘上那份 submodule 里的 `d435_joint` 还是名义值。不叠就是拿另一个相机位姿去对，
+    轮廓必然偏。
     """
     root = ElementTree.fromstring(urdf.read_text(encoding='utf-8'))
-    overrides = {}
-    if calibration is not None and calibration.is_file():
-        import yaml
-        overrides = (yaml.safe_load(calibration.read_text(encoding='utf-8'))
-                     or {}).get('urdf_overrides') or {}
-    applied = _apply_origins(root, overrides)
+    applied = _apply_origins(root, overrides or {})
 
     # pinocchio 只吃文件。写临时 URDF 时 mesh 仍按原目录解析，所以 mesh_dir 给源目录。
     with tempfile.NamedTemporaryFile('w', suffix='.urdf', delete=False) as fp:
@@ -370,7 +366,6 @@ def main(argv=None) -> int:
     parser.add_argument('--width', type=int, default=640, help='输出宽度，内参跟着等比缩')
     parser.add_argument('--out', default='', help='输出 mp4，默认写到 session 同级')
     parser.add_argument('--urdf', default='')
-    parser.add_argument('--calibration', default='')
     parser.add_argument('--progress', action='store_true',
                         help='往 stdout 打 `@progress 0.42`，给面板画进度条用')
     args = parser.parse_args(argv)
@@ -386,10 +381,13 @@ def run(args) -> int:
     session = Session(root if root.is_dir() else Path(args.root) / args.session)
     urdf = Path(args.urdf) if args.urdf else _share(
         'unitree_g1_description', 'model', 'final.urdf')
-    calibration = Path(args.calibration) if args.calibration else _share(
-        'camera_calibration', 'config', 'calibration.yaml')
     if urdf is None or not urdf.is_file():
         print('找不到 URDF，用 --urdf 指一个', file=sys.stderr)
+        return 1
+    params = session.camera_params()
+    if params is None:
+        print(f'{session.root.name} 里没有 {session.camera_params_path.name}，'
+              '头部外参只能来自这次采集自带的那一份', file=sys.stderr)
         return 1
 
     t0, t1, title = pick_window(session, args)
@@ -403,7 +401,7 @@ def run(args) -> int:
     when = pts[pick]
 
     camera = head_camera(session.meta, args.width)
-    renderer, model, applied = build_renderer(urdf, calibration)
+    renderer, model, applied = build_renderer(urdf, params.get('urdf_overrides'))
     extrinsic = optical_extrinsic(session.meta)
 
     columns = session.columns('joint_states')
@@ -419,7 +417,8 @@ def run(args) -> int:
     out = Path(args.out) if args.out else (
         session.root.parent / f'{session.root.name}_verify.mp4')
     calibrated = ('、'.join(applied) + ' 已叠加' if applied else
-                  f'没叠上（{calibration}）—— 头部外参退回 URDF 名义值，'
+                  f'没叠上（{session.camera_params_path.name} 里没有 urdf_overrides）'
+                  ' —— 头部外参退回 URDF 名义值，'
                   '轮廓会整体偏十来个像素，别据此判对齐')
     report = [f'采集 : {session.root.name}  {title}',
               f'模型 : {urdf}',

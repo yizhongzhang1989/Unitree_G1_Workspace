@@ -18,6 +18,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from record import camera_params
+
+_CAMERA_PARAMS_FILE = camera_params.FILENAME
+
 SCHEMA_VERSION = 1
 #: 一条 episode 的三种结论。改标注和收尾都按它校验。
 OUTCOMES = ('success', 'fail', 'discard')
@@ -47,6 +51,7 @@ class SessionPaths:
     manifest = property(lambda s: s.root / 'manifest.json')
     schema = property(lambda s: s.root / 'schema.json')
     meta = property(lambda s: s.root / 'meta.json')
+    camera_params = property(lambda s: s.root / _CAMERA_PARAMS_FILE)
     done = property(lambda s: s.root / 'DONE')
 
     def make(self) -> None:
@@ -96,10 +101,14 @@ class Session:
                                                   'discard': 0})
     #: (round, episode) -> 当前结论。改标注要按它把旧的那一笔计数退回来
     outcomes: dict = field(default_factory=dict)
+    #: 开录那一刻生效的标定（已解析的 ``calibration.yaml``），封口时裁成
+    #: ``camera_params.yaml``。为 None 就不写 —— 导出侧会明确报缺，不会静默降级。
+    calibration: dict | None = None
 
     @classmethod
     def create(cls, root: str | os.PathLike, streams: dict, meta: dict | None = None,
-               session_id: str | None = None) -> 'Session':
+               session_id: str | None = None,
+               calibration: dict | None = None) -> 'Session':
         session_id = session_id or time.strftime('%Y%m%d_%H%M%S')
         paths = SessionPaths(Path(root) / session_id)
         if paths.root.exists() and any(paths.root.iterdir()):
@@ -120,7 +129,7 @@ class Session:
             paths.meta.write_text(
                 json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
         self = cls(paths=paths, manifest=manifest, log=EventLog(paths.events),
-                   session_id=session_id)
+                   session_id=session_id, calibration=calibration)
         self.state = State.SESSION
         self.log.emit('session_start', session_id=session_id,
                       streams=manifest['streams'])
@@ -212,6 +221,20 @@ class Session:
 
     # ------------------------------------------------------------------- 封口
 
+    def _write_camera_params(self) -> None:
+        """把这次采集用的相机参数裁进 session，导出时不必再猜配哪一版标定。
+
+        放在封口前而不是开录时：腕相机的分辨率要等后台 ffprobe 探完写进
+        ``video/nominal.json``。标定内容取的是开录那一刻的，中途改文件不影响。
+        """
+        if self.calibration is None:
+            self.warn('camera_params_missing', reason='开录时没拿到标定文件')
+            return
+        try:
+            camera_params.write(self.paths.root, self.calibration)
+        except (OSError, ValueError) as exc:
+            self.warn('camera_params_failed', error=str(exc))
+
     def finish(self, schema: dict) -> dict:
         if self.state is State.EPISODE:
             self.end_episode('discard', note='session 结束时仍在录')
@@ -220,6 +243,7 @@ class Session:
         self.paths.schema.write_text(
             json.dumps({'schema_version': SCHEMA_VERSION, 'tables': schema},
                        ensure_ascii=False, indent=1), encoding='utf-8')
+        self._write_camera_params()
         self.log.emit('session_end', counts=dict(self.counts))
         self.log.close()
         digest = write_done(self.paths)

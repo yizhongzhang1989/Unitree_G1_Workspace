@@ -97,9 +97,8 @@ def _third_party_imports(entry: Path) -> set:
 def test_declared_modules_cover_every_import(conv):
     """转换脚本真正 import 的第三方包，一个都不能漏在 `modules` 外面。
 
-    漏了的后果不是「少装一个包」：预检说可用，跑到一半抛原始 traceback，
-    而最省事的绕法（去掉 `--calibration`）会静默把外参降级成 URDF 名义值。
-    yaml 就这么漏过一次。
+    漏了的后果不是「少装一个包」：预检说可用，跑到一半抛原始 traceback。
+    yaml 就这么漏过一次（它是 session_reader 读 `camera_params.yaml` 用的）。
     """
     used = _third_party_imports(TOOLS / conv.script)
     assert used <= set(conv.modules), \
@@ -130,22 +129,32 @@ def test_get_rejects_unknown():
 def test_command_carries_inputs_and_options():
     conv = converters.get('yb')
     cmd = conv.command('/usr/bin/python3', [Path('/s')], Path('/o'),
-                       {'urdf': '/u.urdf', 'calibration': '/c.yaml',
-                        'video_height': 360})
+                       {'urdf': '/u.urdf', 'video_height': 360})
     assert cmd[0] == '/usr/bin/python3'
     assert cmd[1].endswith('export.py')
     assert '/s' in cmd and '/o' in cmd
-    for flag, value in (('--urdf', '/u.urdf'), ('--calibration', '/c.yaml'),
-                        ('--video-height', '360')):
+    for flag, value in (('--urdf', '/u.urdf'), ('--video-height', '360')):
         assert cmd[cmd.index(flag) + 1] == value
 
 
 def test_command_skips_empty_options():
-    """没标定就用 URDF 名义值，不能传个空串下去让 export 去开空文件。"""
+    """空值不该变成一个带空串的开关传下去。"""
     conv = converters.get('yb')
     cmd = conv.command('py', [Path('/s')], Path('/o'),
-                       {'urdf': '/u.urdf', 'calibration': ''})
-    assert '--calibration' not in cmd
+                       {'urdf': '/u.urdf', 'video_height': ''})
+    assert '--video-height' not in cmd
+
+
+def test_no_converter_takes_a_calibration_file():
+    """相机内外参只能来自每次采集自带的 `camera_params.yaml`。
+
+    从外面传一份全局标定就会把历史数据算错而不报错 —— 2026-08-31 头部相机
+    偏了 13.7°，同一份标定没法同时解释 8/28 和 8/31 两批采集。
+    """
+    for conv in converters.CONVERTERS.values():
+        assert 'calibration' not in conv.inputs
+        assert 'calibration' not in conv.options
+        assert '--calibration' not in (TOOLS / conv.script).read_text(encoding='utf-8')
 
 
 def test_command_carries_multiple_sessions_in_order():
