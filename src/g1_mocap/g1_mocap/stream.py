@@ -29,7 +29,8 @@ import numpy as np
 from aiohttp import web
 
 from .retarget import RetargetCalibration, Retargeter, RetargetResult
-from .skeleton import BodyFrame, ClockAligner, both_thumbsticks_pressed, parse_body
+from .skeleton import (STATUS_MESSAGES, STATUS_VALID, BodyFrame, ClockAligner,
+                       both_thumbsticks_pressed, parse_body)
 
 # 一帧全身数据约 6.5 KB；给到 1 MB 已经是 150 倍余量，再大就是异常报文。
 MAX_MESSAGE_BYTES = 1 << 20
@@ -183,6 +184,8 @@ class MocapStream:
         self._stop = threading.Event()
         self._device: web.WebSocketResponse | None = None
         self._sticks_were_down = False
+        self.last_calibration_warning = ''
+        """上一次校准的数据质量问题，没有则为空。给调用方回显用。"""
         self.on_frame: Callable[[float, BodyFrame, RetargetResult], None] | None = None
         """每重定向完一帧就回调一次，参数是（对齐后的时刻, 原始骨架, 重定向结果）。
 
@@ -237,15 +240,28 @@ class MocapStream:
             return list(self._raw)
 
     def calibrate(self, *, min_frames: int = 20) -> RetargetCalibration:
-        """用最近这批原始骨架标出人机比例。调用者要保证人当时**站直**。"""
+        """用最近这批原始骨架标出人机比例。调用者要保证人当时**站直**。
+
+        LIMITED 帧照收（挡住反而碍事），但会**如实报出来**：tracker 丢的时候髋位置
+        是 IK 猜的，实测两髋间距会从 11.5 cm 塌到 3.5 cm，标出的 hip_pitch 零点偏 9°，
+        正好压在训练分布上限（+10.3°）边上。而这一切事后毫无迹象——校准照样报成功。
+        """
         frames = self.recent_frames()
         if len(frames) < min_frames:
             raise RuntimeError(f'只攒到 {len(frames)} 帧动捕，不足 {min_frames} 帧，无法校准')
+        limited = sum(1 for f in frames if f.status != STATUS_VALID)
         calibration = self._retarget.calibrate(frames)
         self._calibration = calibration
+        self.last_calibration_warning = '' if not limited else (
+            f'{limited}/{len(frames)} 帧不是 VALID'
+            f'（{STATUS_MESSAGES.get(self._stats.message, self._stats.message)}），'
+            f'骨架可能是猜的，零点会偏')
         self._log(f'动捕校准完成: 缩放 {calibration.scale:.3f}, '
                   f'站立高度 {calibration.stand_height:.3f} m, '
                   f'站姿零位最大偏置 {np.abs(calibration.joint_bias).max():.3f} rad')
+        if limited:
+            self._log(f'⚠ 这次校准 {self.last_calibration_warning}，'
+                      f'建议 tracker 都露出来后重标。')
         return calibration
 
     ##

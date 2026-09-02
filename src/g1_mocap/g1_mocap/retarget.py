@@ -34,9 +34,9 @@ _EPS = 1e-9
 class LimbSpec:
     """一条肢体：SMPL 侧取哪四个点，G1 侧对哪五个关节、挂在哪个刚体上。
 
-    ``tip_defines_hinge`` 说的是**末端朝向能不能反推铰链轴**。腿可以：踝只有
-    pitch/roll，没有偏航，所以脚尖方向和大腿一起就把膝轴钉死了。臂不行：腕有三个
-    自由度，手的指向和肘轴之间没有固定关系。
+    ``straight_at_zero`` 说的是 G1 零位时这条肢体是不是直的。腿是：所以零位侧的铰链轴
+    算不出来（叉乘退化），只能取名义侧向轴。臂不是（肘零位就弯着 79.4 度），零位侧要和
+    实测侧用同一个公式算，两边的漂才相消。
 
     ``kin_links`` 的第三项是远端段的末端，必须停在**铰链链的末尾**而不是整条肢体的
     末端 link：G1 的腕是三轴串联，取到 ``wrist_yaw_link`` 会让"前臂长度"随腕角变，
@@ -51,7 +51,15 @@ class LimbSpec:
     tip_joints: tuple[str, ...]
     kin_links: tuple[str, str, str]
     tip_link: str
-    tip_defines_hinge: bool
+    straight_at_zero: bool
+    # 绕骨骼自转的那一路。位置定不了它（绕末端段自身转不改变末端指向），只能读厂商朝向。
+    # ``twist_axis`` 是 PICO 关节局部系里“沿骨骼指向远端”的轴，实测标出来的：
+    # 手臂是局部 x，**左右反号**（两只手的局部系差 180°）；腿是局部 -y，两边一致。
+    twist_joint: str = ''
+    twist_axis: tuple[int, float] = (0, 0.0)
+    # 铰链转轴在**近端关节**局部系里的轴（实测）。有它就不用叉乘了——叉乘在肢体
+    # 伸直时退化，而这根轴全程稳定。None 表示还没标，退回叉乘。
+    hinge_axis: tuple[int, float] | None = None
 
 
 LEGS = {
@@ -64,7 +72,10 @@ LEGS = {
         tip_joints=('left_ankle_pitch_joint', 'left_ankle_roll_joint'),
         kin_links=('left_hip_roll_link', 'left_knee_link', 'left_ankle_roll_link'),
         tip_link='left_ankle_roll_link',
-        tip_defines_hinge=True,
+        straight_at_zero=True,
+        twist_joint='left_ankle_roll_joint',
+        twist_axis=(1, -1.0),
+        hinge_axis=(0, -1.0),
     ),
     'right': LimbSpec(
         root_body='pelvis',
@@ -75,7 +86,10 @@ LEGS = {
         tip_joints=('right_ankle_pitch_joint', 'right_ankle_roll_joint'),
         kin_links=('right_hip_roll_link', 'right_knee_link', 'right_ankle_roll_link'),
         tip_link='right_ankle_roll_link',
-        tip_defines_hinge=True,
+        straight_at_zero=True,
+        twist_joint='right_ankle_roll_joint',
+        twist_axis=(1, -1.0),
+        hinge_axis=(0, -1.0),
     ),
 }
 
@@ -90,7 +104,9 @@ ARMS = {
         tip_joints=('left_wrist_roll_joint', 'left_wrist_pitch_joint', 'left_wrist_yaw_joint'),
         kin_links=('left_shoulder_roll_link', 'left_elbow_link', 'left_wrist_roll_link'),
         tip_link='left_wrist_yaw_link',
-        tip_defines_hinge=False,
+        straight_at_zero=False,
+        twist_joint='left_wrist_roll_joint',
+        twist_axis=(0, -1.0),
     ),
     'right': LimbSpec(
         root_body='torso_link',
@@ -102,7 +118,9 @@ ARMS = {
         tip_joints=('right_wrist_roll_joint', 'right_wrist_pitch_joint', 'right_wrist_yaw_joint'),
         kin_links=('right_shoulder_roll_link', 'right_elbow_link', 'right_wrist_roll_link'),
         tip_link='right_wrist_yaw_link',
-        tip_defines_hinge=False,
+        straight_at_zero=False,
+        twist_joint='right_wrist_roll_joint',
+        twist_axis=(0, +1.0),
     ),
 }
 
@@ -208,6 +226,40 @@ def _angle_between(u: np.ndarray, v: np.ndarray) -> float:
 def _smoothstep(value: float, low: float, high: float) -> float:
     t = _clamp((value - low) / max(high - low, _EPS), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
+
+
+def _twist_about(rel: np.ndarray, axis: np.ndarray) -> float:
+    """相对旋转 ``rel`` 里绕 ``axis`` 的那一路转角。
+
+    位置数据定不了这一路：绕末端段自身转不改变末端的指向。所以它只能来自厂商给的
+    关节朝向——这也是本文件里唯一吃朝向的地方。
+    """
+    cos = _clamp((float(np.trace(rel)) - 1.0) * 0.5, -1.0, 1.0)
+    angle = math.acos(cos)
+    sine = math.sin(angle)
+    if sine < 1e-6:
+        return 0.0
+    vector = np.array([rel[2, 1] - rel[1, 2],
+                       rel[0, 2] - rel[2, 0],
+                       rel[1, 0] - rel[0, 1]])
+    return angle * float(vector @ axis) / (2.0 * sine)
+
+
+def _average_rotations(frames) -> np.ndarray | None:
+    """一段帧的关节朝向取均值，再投回 SO(3)。有一帧缺朝向就整段不用。
+
+    旋转矩阵直接算术平均不再正交（尺度会缩），SVD 拿最近的正交矩阵。
+    """
+    stack = [f.rotations for f in frames]
+    if any(r is None for r in stack):
+        return None
+    u, _, vt = np.linalg.svd(np.mean(stack, axis=0))
+    out = u @ vt
+    flip = np.linalg.det(out) < 0.0
+    if np.any(flip):
+        u[flip, :, -1] *= -1.0
+        out = u @ vt
+    return out
 
 
 @dataclass(frozen=True)
@@ -346,7 +398,10 @@ class Retargeter:
         if human_leg < 0.2:
             raise ValueError(f'量出来的人腿长只有 {human_leg:.3f} m，这一段不是有效的站立姿态')
 
-        sample = BodyFrame(t=0.0, seq=0, positions=positions, status=1, message=0)
+        # 带上朝向：不然 twist 那几路的零点进不了 joint_bias，PICO 局部系的未知常量
+        # 就会原封不动地出现在输出里。
+        sample = BodyFrame(t=0.0, seq=0, positions=positions, status=1, message=0,
+                           rotations=_average_rotations(frames))
         rough = RetargetCalibration(
             scale=self._leg_length / human_leg,
             pelvis_ref_z=float(positions[JOINT_INDEX['PELVIS']][2])
@@ -393,9 +448,11 @@ class Retargeter:
             angles[self._slot[name]] = value
 
         for side, spec in LEGS.items():
-            self._solve_limb(angles, spec, self._legs[side], point, rot_pelvis)
+            self._solve_limb(angles, spec, self._legs[side], point, rot_pelvis,
+                             frame.rotations)
         for side, spec in ARMS.items():
-            self._solve_limb(angles, spec, self._arms[side], point, rot_torso)
+            self._solve_limb(angles, spec, self._arms[side], point, rot_torso,
+                             frame.rotations)
 
         # 站立零位映射：把校准帧的位形整体搬到 G1 的 default 上，之后按增量走。
         angles = np.clip(angles - calib.joint_bias + calib.joint_target,
@@ -418,7 +475,7 @@ class Retargeter:
         )
 
     def _solve_limb(self, angles: np.ndarray, spec: LimbSpec, geom: LimbGeometry,
-                    point, rot_root: np.ndarray) -> None:
+                    point, rot_root: np.ndarray, rotations: np.ndarray | None) -> None:
         proximal, mid, distal, tip = (point(n) for n in spec.smpl)
         upper = mid - proximal
         lower = distal - mid
@@ -429,7 +486,7 @@ class Retargeter:
         # 远端段实际转过的角还要带上铰链 origin 自己的那一段。
         turned = hinge + geom.hinge.placement_offset
 
-        axis = self._hinge_axis(spec, geom, upper, lower, tip_dir, rot_root)
+        axis = self._hinge_axis(spec, geom, upper, lower, tip_dir, rot_root, rotations)
         rot_ball = _rotation_between(geom.proximal_dir, self._rest_axis(spec, geom, turned),
                                      _unit(upper), axis)
         local = geom.ball.pre.T @ rot_root.T @ rot_ball
@@ -437,18 +494,38 @@ class Retargeter:
         for name, value in zip(spec.ball_joints, ball):
             angles[self._slot[name]] = value
 
-        # 末端段（脚 / 手）只有一个方向可用，能定的自由度就只有两个；
-        # 绕它自身的自转（踝内外翻、腕 roll）留 0。末端 link 的零位 x 轴就是脚尖 / 手尖方向，
-        # 所以 kin_links 的最后一项必须取到**末端** link，取中间那个会凭空多出一段偏移角。
+        # 末端段（脚 / 手）的**指向**只能定两个自由度：绕它自身的自转不改变指向。
+        # 末端 link 的零位 x 轴就是脚尖 / 手尖方向，所以 kin_links 的最后一项必须取到
+        # **末端** link，取中间那个会凭空多出一段偏移角。
         local = (rot_ball @ _rot_y(turned)).T @ tip_dir
         if len(spec.tip_joints) == 2:
             angles[self._slot[spec.tip_joints[0]]] = math.atan2(-local[2], local[0])
         else:
-            # Rx(roll) Ry(pitch) Rz(yaw) @ x 与 roll 无关，剩下两轴可解：
+            # 自转那一路单独解，剩下两个未知量：
             #   local = (cos(pitch)cos(yaw), sin(yaw), -sin(pitch)cos(yaw))
             angles[self._slot[spec.tip_joints[2]]] = math.asin(
                 _clamp(float(local[1]), -1.0, 1.0))
             angles[self._slot[spec.tip_joints[1]]] = math.atan2(-local[2], local[0])
+        if spec.twist_joint:
+            angles[self._slot[spec.twist_joint]] = self._twist(spec, rotations)
+
+    @staticmethod
+    def _twist(spec: LimbSpec, rotations: np.ndarray | None) -> float:
+        """自转那一路，来自厂商给的关节朝向。拿不到朝向就退回 0（原来的行为）。
+
+        零点不在这里对：解出来的是 PICO 自己那套局部系下的值，含一个未知常量。
+        校准帧会把它记进 ``joint_bias``，之后按增量走——和其余各轴同一个机制。
+
+        ``relative`` 与世界系无关（``(MA)ᵀ(MB) = AᵀB``），所以这里不受坐标约定影响，
+        只取决于 ``twist_axis`` 标得对不对。
+        """
+        index, sign = spec.twist_axis
+        if rotations is None:
+            return 0.0
+        mid, distal = (JOINT_INDEX[n] for n in spec.smpl[1:3])
+        bone = np.zeros(3)
+        bone[index] = sign
+        return _twist_about(rotations[mid].T @ rotations[distal], bone)
 
     @staticmethod
     def _rest_axis(spec: LimbSpec, geom: LimbGeometry, turned: float) -> np.ndarray:
@@ -459,7 +536,7 @@ class Retargeter:
         只能回到名义上的 y 轴。
         """
         lateral = np.array([0.0, 1.0, 0.0])
-        if spec.tip_defines_hinge:
+        if spec.straight_at_zero:
             return lateral
         bent = _rot_y(turned) @ geom.distal_dir
         cross = geom.hinge.axis_sign * _cross(geom.proximal_dir, bent)
@@ -467,18 +544,34 @@ class Retargeter:
 
     @staticmethod
     def _hinge_axis(spec: LimbSpec, geom: LimbGeometry, upper: np.ndarray,
-                    lower: np.ndarray, tip_dir: np.ndarray, rot_root: np.ndarray) -> np.ndarray:
-        """铰链转轴。它同时也是球窝那三轴里"自转"那一路的唯一约束，取错就是整条肢体拧着。
+                    lower: np.ndarray, tip_dir: np.ndarray, rot_root: np.ndarray,
+                    rotations: np.ndarray | None) -> np.ndarray:
+        """铰链转轴。它同时也是球窝那三轴里“自转”那一路的唯一约束，取错就是整条肢体拧着。
 
-        ``cross(近端, 远端)`` 在肢体伸直时退化：G1 的大腿本身有 0.4 度侧倾，伸直时这个叉乘
-        剩下的全是那点侧倾，方向直接横过来 90 度。腿上改用 ``cross(脚尖, 大腿)`` 兜住——
-        它在伸直时最准，只在膝弯超过 90 度后会翻号，而那正是膝弯叉乘最可信的区间。
-        两者按弯曲程度平滑过渡，不做硬切换：硬切换会在切换点上让参考抖一下。
+        **标过 ``hinge_axis`` 就直接读关节朝向**，全程稳定。下面两条都是拿不到朝向时的兜底：
+
+        ``cross(近端, 远端)`` 在肢体伸直时退化——G1 的大腿本身有 0.4 度侧倾，伸直时叉乘
+        剩下的全是那点侧倾，方向直接横过来 90 度。腿上改用 ``cross(脚尖, 大腿)``，它在伸直
+        时最准，只在膝弯超过 90 度后翻号，而那正是膝弯叉乘最可信的区间；两者按弯曲程度
+        平滑过渡，硬切换会让参考在切换点上抖一下。
+
+        .. warning::
+           脚尖那一路只对**没有外八的理想骨架**成立。真人站立时膝弯约 11.9 度，正落在过渡区
+           中间，约 70% 的轴由脚尖定，人的外八（实测 ±18~26 度）会整个转成髋偏航：hip_yaw
+           被拉到 [-35.9, +28.4] 度，而训练分布 p95 只有 ±14 度。所以真机上要保证拿得到
+           ``orientation``。
         """
+        if rotations is not None and spec.hinge_axis is not None:
+            index, sign = spec.hinge_axis
+            local = np.zeros(3)
+            local[index] = sign
+            axis = rotations[JOINT_INDEX[spec.smpl[1]]] @ local
+            if _norm(axis) > 1e-6:
+                return _unit(axis)
         scale = _norm(upper) * _norm(lower)
         bend_cross = geom.hinge.axis_sign * _cross(upper, lower)
         bend_norm = _norm(bend_cross) / max(scale, _EPS)
-        if not spec.tip_defines_hinge:
+        if not spec.straight_at_zero:
             return (bend_cross / (bend_norm * scale)) if bend_norm > 0.05 \
                 else _fallback_hinge_axis(rot_root, upper)
 

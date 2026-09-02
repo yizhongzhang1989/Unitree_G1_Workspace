@@ -127,6 +127,8 @@ class MocapNode(Node):
         response.success = True
         response.message = (f'缩放 {calibration.scale:.3f}, '
                             f'站立高度 {calibration.stand_height:.3f} m')
+        if self._stream.last_calibration_warning:
+            response.message += f'  ⚠ {self._stream.last_calibration_warning}'
         return response
 
     def _stamp(self, monotonic_t: float):

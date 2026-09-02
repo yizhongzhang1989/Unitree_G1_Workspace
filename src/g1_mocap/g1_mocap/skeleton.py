@@ -52,13 +52,18 @@ STATUS_MESSAGES = {
 
 @dataclass(frozen=True)
 class BodyFrame:
-    """一帧全身骨架。``positions`` 是 (24, 3)，机器人坐标系，米，未缩放。"""
+    """一帧全身骨架。``positions`` 是 (24, 3)，机器人坐标系，米，未缩放。
+
+    ``rotations`` 是 (24, 3, 3)，同一坐标系下每个关节的局部系。拿不到时为 ``None``，
+    重定向会退化成纯位置解法（绕骨骼自转的那一路就留 0）。
+    """
 
     t: float
     seq: int
     positions: np.ndarray
     status: int
     message: int
+    rotations: np.ndarray | None = None
 
     @property
     def usable(self) -> bool:
@@ -82,6 +87,7 @@ def parse_body(payload: dict) -> BodyFrame | None:
         return None
 
     rows = []
+    quats = []
     for name in SMPL_JOINTS:
         joint = joints.get(name)
         if not isinstance(joint, dict) or not joint.get('position_valid', True):
@@ -90,6 +96,12 @@ def parse_body(payload: dict) -> BodyFrame | None:
         if not isinstance(position, (list, tuple)) or len(position) != 3:
             return None
         rows.append(position)
+        orientation = joint.get('orientation')
+        if (joint.get('orientation_valid', True)
+                and isinstance(orientation, (list, tuple)) and len(orientation) == 4):
+            quats.append(orientation)
+        else:
+            quats.append(None)
     try:
         # 一次性建数组；逐行写进预分配的 (24, 3) 要走 24 次 numpy setitem，慢一倍。
         positions = np.array(rows, dtype=np.float64)
@@ -97,6 +109,7 @@ def parse_body(payload: dict) -> BodyFrame | None:
         return None
     if not np.all(np.isfinite(positions)):
         return None
+    rotations = _rotations(quats)
 
     try:
         t = float(payload.get('t', 0.0))
@@ -109,7 +122,37 @@ def parse_body(payload: dict) -> BodyFrame | None:
         return None
 
     return BodyFrame(t=t, seq=seq, positions=positions @ XR_TO_ROBOT.T,
-                     status=status, message=message)
+                     status=status, message=message, rotations=rotations)
+
+
+def _rotations(quats: list) -> np.ndarray | None:
+    """一批 OpenXR 的 xyzw 四元数 -> 机器人系下的 (24, 3, 3)。缺一个就整帧不用。
+
+    矩阵的列是**关节局部轴在世界系里的分量**，换世界系只需左乘：``M R``。
+    写成相似变换 ``M R Mᵀ`` 就把关节自己的局部系也一起转了，绕骨骼轴的分量会落到
+    另一根轴上去。
+
+    不用 :func:`~.rotations.quat_to_mat`：那个只吃单个四元数、而且非法时抛异常。
+    这里是收帧线程的热路径（每帧 24 个、最高 90 Hz），而且坏报文要返回 None 而不是断流。
+    """
+    if any(q is None for q in quats):
+        return None
+    try:
+        q = np.array(quats, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if q.shape != (len(SMPL_JOINTS), 4) or not np.all(np.isfinite(q)):
+        return None
+    norm = np.linalg.norm(q, axis=1, keepdims=True)
+    if np.any(norm < 1e-6):
+        return None
+    x, y, z, w = (q / norm).T
+    rot = np.stack([
+        np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)], -1),
+        np.stack([2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)], -1),
+        np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], -1),
+    ], -2)
+    return XR_TO_ROBOT @ rot
 
 
 def both_thumbsticks_pressed(payload: dict) -> bool:

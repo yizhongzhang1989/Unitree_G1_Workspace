@@ -29,7 +29,7 @@ from g1_mocap.retarget import (
 )
 from g1_mocap.rotations import quat_from_mat, quat_to_mat
 from g1_mocap.skeleton import JOINT_INDEX, SMPL_JOINTS, XR_TO_ROBOT, BodyFrame
-from g1_mocap.stream import MocapStream
+from g1_mocap.stream import RAW_FRAMES, MocapStream
 
 URDF = str(Path(__file__).resolve().parents[2] / 'unitree_g1_description' / 'model'
            / 'g1_description' / 'g1_29dof_mode_15.urdf')
@@ -330,6 +330,83 @@ def test_stream_calibration_reports_its_result(kin, retargeter):
     assert stream.calibrated
     assert calibration.scale == pytest.approx(1.0, abs=0.02)
     assert logs and '校准完成' in logs[-1]
+
+
+def test_calibration_reports_degraded_frames(kin, retargeter):
+    """LIMITED 帧不拦，但必须报出来。
+
+    tracker 丢了的时候髋位置是 IK 猜的，实测两髋间距会从 11.5 cm 塌到 3.5 cm，
+    标出来的 hip_pitch 零点偏 9°，正好压在训练分布上限边上。而这一切**事后毫无迹象**
+    ——校准照样报成功，只能靠这句提示。
+    """
+    positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
+                                   pelvis_rot=np.eye(3))
+    xr = positions @ XR_TO_ROBOT
+
+    def payload(status: int, message: int) -> dict:
+        return {'t': 0.0, 'seq': 0, 'body': {
+            'status': status, 'message': message,
+            'joints': {name: {'position': list(xr[i]), 'position_valid': True}
+                       for i, name in enumerate(SMPL_JOINTS)}}}
+
+    logs = []
+    stream = MocapStream(retargeter, log=logs.append)
+    for _ in range(30):
+        stream._ingest(payload(2, 4))          # LIMITED / tracker 长时间不可见
+    stream.calibrate()
+    assert stream.calibrated, '降级帧不该阻断校准'
+    assert 'VALID' in stream.last_calibration_warning
+    assert any('tracker' in line for line in logs)
+
+    # 校准吃的是最近 RAW_FRAMES 帧的滑窗，坏帧得先被挤出去，提示才会消失——
+    # 也就是说从 LIMITED 恢复后要等几秒再标，否则标的还是混着坏帧的那一批。
+    for _ in range(RAW_FRAMES + 5):
+        stream._ingest(payload(1, 0))
+    stream.calibrate()
+    assert stream.last_calibration_warning == ''
+
+
+def test_twist_comes_from_joint_orientations(kin, retargeter):
+    """绕骨骼轴的自转只能读朝向：位置怎么摆都定不了它。
+
+    左右手的局部系差 180°（实测：沿骨骼是局部 x，左负右正），符号标反的话两只手会
+    朝相反方向拧，而且位置解法完全看不出来。
+    """
+    pelvis_pos = np.array([0.0, 0.0, 0.78])
+    positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=pelvis_pos,
+                                   pelvis_rot=np.eye(3))
+    calib = identity_calibration(pelvis_pos[2])
+    angle = 0.4
+
+    def solve_with(joint: str, local: np.ndarray):
+        rotations = np.tile(np.eye(3), (len(SMPL_JOINTS), 1, 1))
+        rotations[JOINT_INDEX[joint]] = local
+        return retargeter.solve(
+            BodyFrame(t=0.0, seq=0, positions=positions, status=1, message=0,
+                      rotations=rotations), calib).joint_pos
+
+    # 近端朝向留单位阵，所以相对旋转就是远端自己这一下。
+    left = solve_with('LEFT_WRIST', rot('x', -angle))
+    assert left[SLOT['left_wrist_roll_joint']] == pytest.approx(angle, abs=1e-9)
+    right = solve_with('RIGHT_WRIST', rot('x', angle))
+    assert right[SLOT['right_wrist_roll_joint']] == pytest.approx(angle, abs=1e-9)
+    # 腿的骨骼轴是局部 -y，两边同号。踝内外翻的限位只有 ±15°，这里取小角度避开钳位。
+    small = 0.2
+    leg = solve_with('LEFT_ANKLE', rot('y', -small))
+    assert leg[SLOT['left_ankle_roll_joint']] == pytest.approx(small, abs=1e-9)
+
+
+def test_twist_falls_back_to_zero_without_orientations(kin, retargeter):
+    """报文里没有朝向时必须退回原来的纯位置解法，而不是抛异常或者出 NaN。"""
+    pelvis_pos = np.array([0.0, 0.0, 0.78])
+    positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=pelvis_pos,
+                                   pelvis_rot=np.eye(3))
+    frame = BodyFrame(t=0.0, seq=0, positions=positions, status=1, message=0)
+    assert frame.rotations is None
+    angles = retargeter.solve(frame, identity_calibration(pelvis_pos[2])).joint_pos
+    for name in ('left_wrist_roll_joint', 'right_wrist_roll_joint',
+                 'left_ankle_roll_joint', 'right_ankle_roll_joint'):
+        assert angles[SLOT[name]] == 0.0
 
 
 def test_stream_drops_out_of_order_frames(kin, retargeter):
