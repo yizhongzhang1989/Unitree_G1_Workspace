@@ -51,8 +51,7 @@ class MocapClip:
 
     Args:
         source: 数据源。只要求提供 ``span`` / ``sample`` / ``stats`` 三个方法——
-            ``g1_mocap`` 的 ``FrameBuffer``（订 ``/mocap/frame``）和 ``MocapStream``
-            （自己收头显）都满足，换数据源不用改这里。
+            现在传的是 ``g1_mocap`` 的 ``FrameBuffer``（订 ``/mocap/frame``）。
         control_dt: 控制周期，必须与策略契约一致。
         lead_frames: 播放头落后最新帧多少拍。要盖住 ``max(lookahead_steps)`` 再留余量。
         stale_timeout_s: 多久没有新帧就算断流。
