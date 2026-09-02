@@ -277,8 +277,26 @@ class MocapStream:
         except RuntimeError:
             pass  # stop() 从别的线程把 loop 停了
         finally:
+            self._drain(loop)
             loop.close()
             self._loop = None
+
+    @staticmethod
+    def _drain(loop: asyncio.AbstractEventLoop) -> None:
+        """关 loop 之前把还没收尾的任务取消掉并等它们结束。
+
+        走强制停止那条路时（``stop()`` 里 join 超时后 ``loop.stop()``）一定会有剩的，
+        不收拾就是退出时一串 ``Exception ignored``。
+        """
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        try:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except RuntimeError:
+            pass  # loop 已经被停了，剩下的交给 close()
 
     def _note(self, **fields) -> None:
         with self._stats_lock:
@@ -372,6 +390,12 @@ class MocapStream:
             while not self._stop.is_set():
                 await asyncio.sleep(0.2)
         finally:
+            # 得先主动断开头显：``_on_device`` 卡在 ``async for`` 上，不关它
+            # ``runner.cleanup()`` 会一直等，处理协程就悬到 loop 关闭之后，
+            # GC 时刷一串 “Event loop is closed”。
+            device = self._device
+            if device is not None and not device.closed:
+                await device.close()
             await runner.cleanup()
 
     def _authorized(self, request: web.Request) -> bool:

@@ -31,6 +31,7 @@ import numpy as np
 import rclpy
 from g1_mocap_msgs.msg import MocapFrame, MocapStatus
 from geometry_msgs.msg import Point, Pose
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -113,10 +114,10 @@ class MocapNode(Node):
             f'站立高度基准 {self._retarget.stand_height:.3f} m。'
             f'人站直后按双摇杆、或调 ~/calibrate 校准。')
 
-    def destroy_node(self) -> bool:
+    def destroy_node(self) -> None:
         self._stream.on_frame = None
         self._stream.stop()
-        return super().destroy_node()
+        super().destroy_node()
 
     def _on_calibrate(self, _request, response):
         try:
@@ -187,7 +188,9 @@ def main() -> None:
     node = MocapNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # launch 发 SIGINT 时 rclpy 抛的是后者，不接就以 exit code 1 退出，
+        # launch 那边把每次正常关停都刷成 process has died。
         pass
     finally:
         node.destroy_node()

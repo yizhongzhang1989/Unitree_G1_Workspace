@@ -33,6 +33,7 @@ from pathlib import Path
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from g1_mocap_msgs.msg import MocapFrame, MocapStatus
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
@@ -49,6 +50,9 @@ SMPL_PARENTS = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17
 
 
 class _Handler(BaseHTTPRequestHandler):
+
+    # 基类把它标成 BaseServer，窄化一下才能拿到 dashboard。
+    server: _Server
 
     # 默认是 HTTP/1.0，每个 mesh 都要新开一条连接：一个模型四十多个零件，握手开销
     # 比传输还大，而且并发一多就有请求被截在半路（浏览器报 CONTENT_LENGTH_MISMATCH，
@@ -132,6 +136,8 @@ class _Server(ThreadingHTTPServer):
     request_queue_size = 128
     daemon_threads = True
     allow_reuse_address = True
+    # 起完立刻赋上，处理线程靠它回到节点。
+    dashboard: DashboardNode
 
 
 class DashboardNode(Node):
@@ -182,9 +188,9 @@ class DashboardNode(Node):
         self.get_logger().info(
             f'面板已就绪: http://<本机IP>:{http_port}   数据源 {frame_topic}')
 
-    def destroy_node(self) -> bool:
+    def destroy_node(self) -> None:
         self._http.shutdown()
-        return super().destroy_node()
+        super().destroy_node()
 
     def _on_frame(self, message: MocapFrame) -> None:
         with self._lock:
@@ -227,6 +233,9 @@ class DashboardNode(Node):
         if not future.done():
             return {'ok': False, 'message': '校准服务超时'}
         result = future.result()
+        if result is None:
+            # future 也可能是因为异常而 done。
+            return {'ok': False, 'message': '校准服务没有返回结果'}
         return {'ok': bool(result.success), 'message': result.message}
 
     def state(self) -> dict:
@@ -275,7 +284,7 @@ def main() -> None:
     node = DashboardNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
