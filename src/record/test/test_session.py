@@ -11,8 +11,9 @@ STREAMS = {'joint_states': True, 'head': True, 'head_depth': False}
 
 
 @pytest.fixture
-def session(tmp_path):
-    s = Session.create(tmp_path, STREAMS, meta={'note': 'x'})
+def session(tmp_path, calibration):
+    s = Session.create(tmp_path, STREAMS, meta={'note': 'x'},
+                       calibration=calibration)
     yield s
     if s.state is not State.IDLE:
         s.finish({})

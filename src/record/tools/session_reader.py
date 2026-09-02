@@ -34,6 +34,12 @@ CAMERA_DELAY_S = {'wrist_left': 0.110, 'wrist_right': 0.110, 'head': 0.0}
 #: 而 ``DONE`` 只核对它自己列出的那些文件，多一个旁挂文件不影响它。
 EDITS_FILE = 'edits.json'
 
+#: 每次采集自带的相机内外参，由采集侧 ``record/camera_params.py`` 写。
+#: 它是导出时相机参数的**唯一来源** —— 相机被碰过之后，全局那份
+#: ``calibration.yaml`` 只能解释最近一次标定之后的采集（2026-08-31 头部相机
+#: 偏了 13.7°，同一份标定同时解释 8/28 和 8/31 必错一批）。两边的文件名常量有测试核对。
+CAMERA_PARAMS_FILE = 'camera_params.yaml'
+
 
 def episode_label(round_index: int, episode_index: int) -> str:
     """一条 episode 的稳定标签。回放、校验视频、删除都拿它当键。"""
@@ -77,6 +83,25 @@ class Session:
             if h.hexdigest() != info['sha256']:
                 bad.append(f'{rel}: 校验不符')
         return bad
+
+    # ---------------------------------------------------------------- 相机参数
+
+    @property
+    def camera_params_path(self) -> Path:
+        return self.root / CAMERA_PARAMS_FILE
+
+    def camera_params(self) -> dict | None:
+        """这次采集自带的相机内外参，没有就返回 None。
+
+        顶层键与 ``calibration.yaml`` 兼容（``intrinsics`` / ``urdf_overrides``），
+        导出侧直接当标定字典用。**拿不到就应该停下来**，别拿别处的标定顶替——
+        外参错一点导出的数据看着全是正常的。
+        """
+        if not self.camera_params_path.is_file():
+            return None
+        import yaml
+        return yaml.safe_load(
+            self.camera_params_path.read_text(encoding='utf-8')) or {}
 
     # -------------------------------------------------------------------- 信号
 

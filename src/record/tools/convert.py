@@ -2,8 +2,7 @@
 """B 侧的转换入口。**和 A 面板下拉框读的是同一张注册表**，选项逐字一致。
 
     python convert.py --list
-    python convert.py <session 目录> --to yb -o <输出目录> \\
-        --urdf final.urdf --calibration calibration.yaml
+    python convert.py <session 目录> --to yb -o <输出目录> --urdf final.urdf
 
 只做三件事：查依赖、拼命令、转发输出。真正的活在 `format/<格式名>/export.py` 里，
 这里不复制任何一行转换逻辑 —— 复制了就会和面板跑的那条分叉。
@@ -28,7 +27,6 @@ def main() -> int:
     ap.add_argument('--to', default='dataset_format')
     ap.add_argument('-o', '--out')
     ap.add_argument('--urdf')
-    ap.add_argument('--calibration')
     ap.add_argument('--video-height', type=int)
     ap.add_argument('--hz', type=float)
     args = ap.parse_args()

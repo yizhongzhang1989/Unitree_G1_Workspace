@@ -1,0 +1,75 @@
+/mocap:
+  ros__parameters:
+    # 头显上的 APK **直连**这个端口，不经 PicoBridge 的 server.py。
+    # 头显配置面板里填「本机局域网IP:18000」。全程 WiFi，不用 adb。
+    host: 0.0.0.0
+    port: 18000
+    # 共享密钥，非空时所有接口要带 ?token=。放在开放网络上时务必设。
+    token: ''
+
+    # 踝原点离地的高度，用来把「G1 骨盆比踝高多少」换算成「骨盆离地多少」。
+    foot_ground_clearance_m: 0.03
+
+    # 只有 dashboard_node 用。它是 /mocap/frame 的纯消费者，不连头显，
+    # 所以可以和 mocap_node 同时跑。
+    dashboard_host: 0.0.0.0
+    dashboard_port: 18080
+    frame_topic: /mocap/frame
+    status_topic: /mocap/status
+    calibrate_service: /mocap/calibrate
+
+    urdf_path: package://unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf
+
+    # 只有面板用。实机构型：G1 + KWR57B 腕 + Gloria-M 夹爪。这些末端都是 fixed
+    # 挂在 wrist_yaw_link 上，不进运动学链，所以只影响画面。重定向仍走上面的 29 轴
+    # 本体 URDF：pinocchio 每帧都要 FK，多拖 80 个夹爪内部连杆白花算力。
+    dashboard_urdf_path: package://unitree_g1_description/model/final.urdf
+    anchor_body: torso_link
+
+    # 要算笛卡尔位置的刚体。默认这一组与 RGMT 策略契约的 reference_key_bodies 一致，
+    # 换别的下游可以随便改，本包不校验。
+    key_bodies:
+      - torso_link
+      - left_wrist_yaw_link
+      - right_wrist_yaw_link
+      - left_ankle_roll_link
+      - right_ankle_roll_link
+
+    # 29 个动作关节，顺序即输出关节角的顺序。
+    joints:
+      - left_hip_pitch_joint
+      - left_hip_roll_joint
+      - left_hip_yaw_joint
+      - left_knee_joint
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+      - right_hip_pitch_joint
+      - right_hip_roll_joint
+      - right_hip_yaw_joint
+      - right_knee_joint
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+      - waist_yaw_joint
+      - waist_roll_joint
+      - waist_pitch_joint
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+
+    # 只用来量 G1 自己的站立高度（人机高度对齐的基准），不参与重定向。
+    default_joint_pos: [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+                        -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+                        0.0, 0.0, 0.0,
+                        0.35, 0.25, 0.0, 0.87, 0.0, 0.0, 0.0,
+                        0.35, -0.25, 0.0, 0.87, 0.0, 0.0, 0.0]

@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>g1_mocap_msgs</name>
+  <version>0.1.0</version>
+  <description>
+    g1_mocap 的消息定义。MocapFrame 把一帧动捕的重定向结果（关节角、根/锚位姿、
+    key body 位置、原始骨架）打成一个**原子**消息——拆成多个 topic 发会引入时间同步
+    问题，而配错了不报错、只是姿态悄悄不对。MocapStatus 是低频的链路状态，
+    结构化是为了让下游能拿它做急停判据。
+  </description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

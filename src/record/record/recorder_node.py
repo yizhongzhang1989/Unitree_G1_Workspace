@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import cast
 
 import rclpy
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (PackageNotFoundError,
+                                         get_package_share_directory)
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -31,6 +32,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_srvs.srv import Trigger
 
 from record import signals as sig
+from record.camera_params import read_calibration
 from record.session import Session, State
 from record.table_writer import TableWriter
 from record.video import (HeadPreview, HeadRecorder, PreviewPump, WristRecorder,
@@ -69,6 +71,14 @@ def _liveness(last: float, now: float) -> dict:
     return {'online': age < 3.0, 'age': round(min(age, 999.0), 1)}
 
 
+def _share(package: str, *parts: str) -> str:
+    try:
+        path = Path(get_package_share_directory(package)).joinpath(*parts)
+    except PackageNotFoundError:
+        return ''
+    return str(path) if path.is_file() else ''
+
+
 class Recorder(Node):
     """采集主体。对外只暴露几个状态迁移方法，dashboard 调它们。"""
 
@@ -97,6 +107,10 @@ class Recorder(Node):
         self.n_items = cast(int, p('round_items', 4).value)
         self.n_moves = cast(int, p('round_moves', 6).value)
         self.peer_port = cast(int, p('peer_port', 8221).value)
+        # 每次开录都把它里用得上的那部分裁进 session（camera_params.yaml）。
+        # 相机被碰过之后，历史数据只能靠自带的那份解释。
+        self.calibration = cast(str, p('calibration', '').value) or _share(
+            'camera_calibration', 'config', 'calibration.yaml')
         # 置空则不代钉世界原点。只有想让多个 session 共用同一个世界系时才需要关。
         self._origin_service = cast(
             str, p('origin_service', '/g1_localization/set_origin').value)
@@ -345,7 +359,13 @@ class Recorder(Node):
                 'table': self._table,
                 'joint_order': list(sig.CANONICAL_JOINTS),
             }
-            session = Session.create(self.root, streams, meta=meta)
+            calib = read_calibration(self.calibration)
+            if calib is None:
+                self.get_logger().warn(
+                    f'读不到相机标定（{self.calibration or "未配置"}），'
+                    '这次采集不会自带 camera_params.yaml，导出时会因为缺相机参数被拒')
+            session = Session.create(self.root, streams, meta=meta,
+                                     calibration=calib)
             paths = session.paths
             for key, spec in self.specs.items():
                 if not streams.get(key) or not spec.columns:

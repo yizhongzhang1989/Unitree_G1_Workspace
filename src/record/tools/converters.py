@@ -76,15 +76,15 @@ CONVERTERS = {
             id='yb',
             label='YB 训练数据集（h5 + mp4）',
             script='format/YB/export.py',
-            # yaml 只有给了 calibration 才真的 import（export.py 的 `_yaml()`），仍然无条件
-            # 要求：腕相机的 link 就是那份标定文件现建的，缺它的人去掉 --calibration 也跑不通
+            # yaml 是惰性 import（session_reader 读每次采集自带的 camera_params.yaml），
+            # 依然无条件声明：缺了它一条都导不出来，而报错在很深的地方
             modules=('numpy', 'h5py', 'yaml'),
             binaries=('ffmpeg', 'ffprobe'),
             inputs=('urdf',),
-            options={'calibration': '', 'video_height': 360, 'hz': 30.0},
+            options={'video_height': 360, 'hz': 30.0},
             progress_flag='--progress',
             note='一条 episode 一个 h5 + 每路相机一个 mp4，30 Hz 统一栅格；'
-                 '只导标注成功的那些；腕相机的 link 在 calibration.yaml 里，不给就报错',
+                 '只导标注成功的那些；相机内外参取每次采集自带的 camera_params.yaml',
         ),
     )
 }

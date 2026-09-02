@@ -211,12 +211,14 @@ instruction_en / instruction_zh / lint_warnings[] / outcome
 
 - **`tools/` 整个拷过去**，别只拷几个文件；里面刻意不依赖 ROS，有测试用正则守着。
   面板右上角的「⤓ 导出工具」就是打这一包。
-- **`final.urdf` 和 `calibration.yaml` 要单独拷**，它们不在 session 里（「导出工具」那一包
-  已经帮你带上了）。末端位姿和
-  腕相机外参都得靠 FK 现算，而机器人当时用的 URDF 是「`final.urdf` 叠上
-  `calibration.yaml` 的 `urdf_overrides`」—— `unitree_g1_ros2_control/launch/control.launch.py`
-  就是这么拼的，两边必须一致。FK 是 `urdf_fk.py`，纯 numpy 手写（B 上没有 pinocchio），
+- **`final.urdf` 要单独拷**，它不在 session 里（「导出工具」那一包已经帮你带上了）。
+  末端位姿和腕相机外参都得靠 FK 现算，而机器人当时用的 URDF 是「`final.urdf` 叠上
+  相机外参」—— `unitree_g1_ros2_control/launch/control.launch.py` 就是这么拼的，
+  两边必须一致。FK 是 `urdf_fk.py`，纯 numpy 手写（B 上没有 pinocchio），
   已和 pinocchio 逐姿态对拍到双精度舍入。
+- **相机内外参不用拷，它就在 session 里**（`camera_params.yaml`，开录时自动写）。
+  相机会被碰（2026-08-31 头部偏了 13.7°），一份全局标定没法同时解释两批采集，
+  所以导出只认自带的那一份，缺了直接拒绝。
 - **导出格式叫 YB**，规范在 [tools/format/YB/README.md](tools/format/YB/README.md) ——
   **把数据交给别人时给那一份**。
 
@@ -339,8 +341,8 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 
 | 段 | 来源 | 不用它会怎样 |
 |---|---|---|
-| `torso_link → d435_link` | `calibration.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
-| `d435_link → camera_color_optical_frame` | `tools/urdf_fk.py` 的 `HEAD_OPTICAL` | 没有别的来源 —— 那是 realsense-ros 从设备出厂标定读出来发的 TF，`calibration.yaml` 里没这条 |
+| `torso_link → d435_link` | session 自带 `camera_params.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
+| `d435_link → camera_color_optical_frame` | `tools/urdf_fk.py` 的 `HEAD_OPTICAL` | 没有别的来源 —— 那是 realsense-ros 从设备出厂标定读出来发的 TF，标定文件里没这条 |
 | 内参 `fx/fy/cx/cy` | session 自己的 `meta.json` | 也没有别的来源 —— `intrinsics` 段只有两台腕相机，头部在 `cameras.yaml` 里是 `role: reference`，只出外参修正不出内参。而且这份正是采集当时真正发布的那一份 |
 > **夹爪的 mimic 必须夹到各段自己的 `<limit>`。** URDF 的 mimic 只能写线性式，而夹爪是
 > 连杆（非线性）。G1 的做法是把一根滑块拆成 **8 段同轴、origin 全零的 prismatic 串联**，
@@ -372,7 +374,7 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 
 | 想要什么 | 怎么拿 |
 |---|---|
-| **导出机要的工具** | 右上角「⤓ 导出工具」—— `tools/` + `final.urdf` + `calibration.yaml` 一包带走 |
+| **导出机要的工具** | 右上角「⤓ 导出工具」—— `tools/` + `final.urdf` 一包带走（相机参数在 session 里）|
 | 某一个文件 | 树里那一行的 ⤓ |
 | 某个目录 / 整次采集 | 目录那一行的 ⤓，服务端现打 zip 流式发 |
 | 转成 YB 训练格式 | 左边勾上要导的那几次（标题行有「全选 / 全不选」）→ 页顶选格式 → 「开始转换」→ 转完点「下载」 |
