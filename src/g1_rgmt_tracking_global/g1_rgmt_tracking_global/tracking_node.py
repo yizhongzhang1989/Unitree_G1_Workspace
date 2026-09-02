@@ -352,7 +352,7 @@ class RgmtTrackingNode(Node):
         with self._lock:
             if self._measured is None:
                 return
-            waist_yaw = float(self._measured[self._waist_slots][0])
+            waist = self._measured[self._waist_slots].copy()
         pos = message.pose.pose.position
         q = message.pose.pose.orientation
         try:
@@ -360,9 +360,10 @@ class RgmtTrackingNode(Node):
         except ValueError:
             return
         stamp = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
-        torso = torso_pos_from_pelvis(np.array([pos.x, pos.y, pos.z]), quat, waist_yaw)
+        torso = torso_pos_from_pelvis(np.array([pos.x, pos.y, pos.z]), quat, waist[0])
+        torso_quat = torso_quat_from_pelvis(quat, waist[0], waist[1], waist[2])
         with self._lock:
-            self._odom.push_odom(stamp, torso, quat)
+            self._odom.push_odom(stamp, torso, torso_quat)
 
     def _on_lidar(self, message: Odometry) -> None:
         """雷达定位直接就是 ``world -> torso_link``，不需要 FK。
@@ -517,7 +518,8 @@ class RgmtTrackingNode(Node):
             else:
                 measured, measured_vel, base_quat = snapshot
                 omega = self._imu_omega.copy()
-                torso_quat = self._torso_quat(measured, base_quat)
+                torso_quat = self._odom.orientation_in_world(
+                    self._torso_quat(measured, base_quat))
                 torso_pos = self._odom.torso_position()
                 state = self._state
                 stand_from = None if self._stand_from is None else self._stand_from.copy()
@@ -560,7 +562,7 @@ class RgmtTrackingNode(Node):
                     joint_vel=measured_vel[self._obs_slots],
                     ang_vel=omega,
                     # 两个刚体不能混：投影重力与角速度挂 pelvis（IMU 直给），
-                    # key body 局部化挂 anchor=torso（需 FK）。
+                    # key body 局部化挂 anchor=torso（需 FK 和定位世界系 yaw 修正）。
                     base_quat=base_quat,
                     clip=clip,
                     robot_anchor_pos=torso_pos,

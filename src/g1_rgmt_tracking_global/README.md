@@ -37,7 +37,7 @@ local = quat_apply(quat_inv(yaw_quat(robot_anchor_quat)), rel)
 |---|---|---|
 | `projected_gravity` | **pelvis** | IMU 四元数直接投影，**不要做腰部 FK** |
 | `base_ang_vel` | **pelvis** | IMU 角速度直接用 |
-| key body 局部化 / 倾角保护 | **torso_link** | IMU + 腰三轴 FK |
+| key body 局部化 / 倾角保护 | **torso_link** | IMU + 腰三轴 FK；局部化姿态再乘定位 yaw 修正 |
 | 里程计位置 | **torso_link** | `/dog_odom` 给盆骨，需 FK；雷达直接给躯干 |
 
 依据在 `mjlab/entity/data.py:586`：
@@ -74,7 +74,8 @@ T_world_torso(t) = T_world_odom(t_k) @ T_odom_torso(t)
 
 - 雷达 stamp 比 odom 滞后约 34 ms，**必须按 stamp 回溯匹配**同一时刻的 odom，直接和当前值相除会把这 34 ms 的运动算成漂移
 - `/dog_odom` 订阅**必须 `depth=1`**，实测 `depth=50` 时接收时刻恒定滞后约 48 ms，静默不报错
-- `/dog_odom` 给的是盆骨，本包用腰偏航做一次 FK 推到 `torso_link`（偏移 4.4 cm，漏掉就是恒定偏置）
+- `/dog_odom` 给的是盆骨，本包用腰三轴把位置和姿态都 FK 到 `torso_link`；雷达与快通道必须是同一个刚体，否则腰偏航会被误算成定位 yaw 漂移
+- 融合输出的位置和 anchor 姿态必须乘同一个定位 yaw 修正；只旋位置会让 key body 的局部误差整体转错
 
 ## 已知风险：漂移会被策略当真
 

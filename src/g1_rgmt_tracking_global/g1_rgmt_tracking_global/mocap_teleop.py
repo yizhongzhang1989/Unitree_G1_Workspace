@@ -27,9 +27,9 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
-# 当前状态 -> （推进一步该调的服务, 中文名）。和 vr_teleop 的表一致。
-ADVANCE = {'idle': ('engage', '站立'), 'estop': ('engage', '站立'),
-           'stand': ('start', '启动策略'), 'running': ('estop', '急停')}
+# RGMT 的 engage 只激活控制器，状态仍是 idle；是否已激活要由服务回执补足。
+ADVANCE = {'estop': ('engage', '激活控制器'),
+           'stand': ('estop', '急停'), 'running': ('estop', '急停')}
 
 
 class MocapTeleop(Node):
@@ -52,6 +52,7 @@ class MocapTeleop(Node):
         self._trigger = {name: self.create_client(Trigger, f'{namespace}/{name}')
                          for name in ('engage', 'start', 'estop')}
         self._state = ''
+        self._engaged = False
         self._pressed = False
         # 初始当作「按着」：连上之后必须真的松手再按才算一次，避免启动瞬间误触。
         self._held, self._down_at, self._used = True, None, True
@@ -73,6 +74,10 @@ class MocapTeleop(Node):
         for chunk in message.data.split():
             if chunk.startswith('state='):
                 self._state = chunk[len('state='):]
+                if self._state == 'estop':
+                    self._engaged = False
+                elif self._state in ('stand', 'running'):
+                    self._engaged = True
                 return
 
     def _on_input(self, message: MocapControllers) -> None:
@@ -100,13 +105,13 @@ class MocapTeleop(Node):
             self._call('estop', '急停')
         elif cooled and (up and not self._used
                          # 这一步本来就是急停，没有"先把策略拉起来"的风险，按下即走
-                         or down and ADVANCE.get(self._state, ('', ''))[0] == 'estop'):
+                         or down and self._next_step()[0] == 'estop'):
             self._used, self._stamp = True, now
             self._advance()
         self._held = pressed
 
     def _advance(self) -> None:
-        name, label = ADVANCE.get(self._state, ('', ''))
+        name, label = self._next_step()
         if not name:
             self.get_logger().warning(
                 f'收到 B/Y，但跟踪层状态是「{self._state or "未知"}」，先确认它起来了')
@@ -114,21 +119,31 @@ class MocapTeleop(Node):
         self.get_logger().info(f'B/Y -> {label}')
         self._call(name, label)
 
+    def _next_step(self) -> tuple[str, str]:
+        if self._state == 'idle':
+            return ('start', '启动策略') if self._engaged \
+                else ('engage', '激活控制器')
+        return ADVANCE.get(self._state, ('', ''))
+
     def _call(self, name: str, label: str) -> None:
         client = self._trigger[name]
         if not client.service_is_ready():
             self.get_logger().warning(f'{label}：服务 {client.srv_name} 还没就绪')
             return
         client.call_async(Trigger.Request()).add_done_callback(
-            lambda future: self._report(label, future))
+            lambda future: self._report(name, label, future))
 
-    def _report(self, label: str, future) -> None:
+    def _report(self, name: str, label: str, future) -> None:
         result = future.result()
         if result is None:
             self.get_logger().error(f'{label}：服务没有返回结果')
         elif not result.success:
             self.get_logger().warning(f'{label}被拒绝：{result.message}')
         else:
+            if name == 'engage':
+                self._engaged = True
+            elif name == 'estop':
+                self._engaged = False
             self.get_logger().info(f'{label}：{result.message}')
 
 

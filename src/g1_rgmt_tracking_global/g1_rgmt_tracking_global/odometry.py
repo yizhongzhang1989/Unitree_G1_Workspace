@@ -7,16 +7,19 @@
   ``/dog_odom`` 滞后约 34 ms。10 Hz 直接喂 50 Hz 控制环等于每 5 拍才更新一次，
   中间 4 拍全是零阶保持，位置台阶会被策略读成"我在瞬移"。
 
-融合式::
+融合式（只修正水平平移与偏航）::
 
     T_world_torso(t) = T_world_odom(t_k) @ T_odom_torso(t)
 
 左边那项是 odom 的**累积漂移本身**，属于慢变量，可以滤得很狠也不引入动态滞后——
 全部动态都由 500 Hz 的快通道承担。这就是"高频 + 有界漂移"的来源。
 
-姿态不参与融合，这个模块也**只输出位置**：roll/pitch 由 IMU 直接给，比任何里程计都准，
-anchor 姿态由盆骨 IMU 加腰三轴 FK 算得。内部仍估计 yaw 偏置，因为 odom 的偏航同样会漂，
-而它会通过修正量影响位置。
+``g1_localization/set_origin`` 会把此刻躯干的 XYZ 都归零，所以它的 Z 是“相对原点高度”，
+不是训练参考使用的“离地高度”。融合时若也修正 Z，会把 ``/dog_odom`` 的约 0.7 m
+物理高度抹成 0，参考窗口随即产生一个巨大的假竖直误差。Z 因此始终保留快通道的值。
+
+roll/pitch 由 IMU 直接给，比任何里程计都准；但 anchor 的 yaw 必须乘同一个世界系修正，
+否则位置在雷达世界系、姿态却还在 odom 世界系，参考关键点的局部化方向会整体转错。
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .rotations import quat_apply, quat_normalize
+from .rotations import quat_apply, quat_mul, quat_normalize
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,9 @@ class OdometryFuser:
         # T_world_odom = T_world_torso(雷达) @ inv(T_odom_torso)，只取 yaw 与平移
         yaw = _wrap(_yaw_of(quat) - _yaw_of(paired.quat))
         target_pos = pos - quat_apply(_yaw_quat(yaw), paired.pos)
+        # localization 的世界原点钉在躯干上，z≈0 不是离地高度。训练参考保留离地
+        # 高度，所以 fused 只能拿雷达修正水平漂移；竖直方向沿用 dog_odom 的物理高度。
+        target_pos[2] = 0.0
 
         if not self._corr_ready:
             self._corr_pos = target_pos
@@ -180,6 +186,13 @@ class OdometryFuser:
         if self._last_odom is None:
             return None
         return self._corr_pos + quat_apply(_yaw_quat(self._corr_yaw), self._last_odom.pos)
+
+    def orientation_in_world(self, quat) -> np.ndarray:
+        """把 odom/IMU 世界系姿态旋到本融合器输出位置所在的世界系。"""
+        quat = quat_normalize(quat)
+        if self._mode == 'lidar_only':
+            return quat
+        return quat_mul(_yaw_quat(self._corr_yaw), quat)
 
     def stale(self, now: float) -> str | None:
         """返回超时原因，None 表示健康。看门狗按它急停。"""

@@ -11,19 +11,19 @@ import pytest
 
 sys.path.insert(0, '/workspace/src/g1_rgmt_tracking_global')
 
-from g1_rgmt_tracking_global.mocap_teleop import ADVANCE  # noqa: E402
-
-
 class Fake:
     """只保留按键状态机需要的那几个字段，不碰 rclpy。"""
 
     from g1_rgmt_tracking_global.mocap_teleop import MocapTeleop
     _tick = MocapTeleop._tick
     _advance = MocapTeleop._advance
+    _next_step = MocapTeleop._next_step
+    _report = MocapTeleop._report
 
     def __init__(self, state='idle', *, estop_hold=1.0, cooldown=1.0, timeout=0.3):
         self.t = 100.0
         self._state, self._pressed = state, False
+        self._engaged = False
         self._held, self._down_at, self._used = True, None, True
         self._stamp, self._last_input = 0.0, 100.0
         self._estop_hold, self._cooldown, self._timeout = estop_hold, cooldown, timeout
@@ -60,6 +60,18 @@ def test_engage_fires_on_release_not_on_press():
     assert node.calls == [], '按住期间不能推进'
     node.step(False)
     assert node.calls == ['engage']
+
+
+def test_second_press_starts_after_engage_succeeds_while_state_stays_idle():
+    """RGMT 的 engage 成功后仍上报 idle；下一次短按必须 start，不能重复 engage。"""
+    node = Fake('idle', cooldown=0.0).arm()
+    node.step(True)
+    node.step(False)
+    result = types.SimpleNamespace(success=True, message='已激活')
+    node._report('engage', '激活控制器', types.SimpleNamespace(result=lambda: result))
+    node.step(True)
+    node.step(False)
+    assert node.calls == ['engage', 'start']
 
 
 def test_estop_fires_on_press():
@@ -126,8 +138,10 @@ def test_unknown_state_does_not_call_anything():
     assert node.calls == []
 
 
-@pytest.mark.parametrize('state,service', [
-    ('idle', 'engage'), ('estop', 'engage'), ('stand', 'start'), ('running', 'estop')])
-def test_advance_table_matches_the_state_machine(state, service):
-    """这张表和 tracking_node 的 State 枚举必须对得上，错了就是按了没反应。"""
-    assert ADVANCE[state][0] == service
+@pytest.mark.parametrize('state,engaged,service', [
+    ('idle', False, 'engage'), ('idle', True, 'start'),
+    ('estop', False, 'engage'), ('stand', True, 'estop'), ('running', True, 'estop')])
+def test_next_step_matches_rgmt_state_machine(state, engaged, service):
+    node = Fake(state)
+    node._engaged = engaged
+    assert node._next_step()[0] == service

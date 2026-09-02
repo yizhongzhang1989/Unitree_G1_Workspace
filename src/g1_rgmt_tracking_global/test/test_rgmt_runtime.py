@@ -172,6 +172,40 @@ def test_fused_first_lidar_frame_snaps_to_lidar():
     assert np.allclose(fuser.torso_position(), [5.0, 3.0, 0.8], atol=1e-9)
 
 
+def test_fused_preserves_physical_height_when_lidar_origin_is_at_torso():
+    """set_origin 后雷达 z≈0；它不能把 dog_odom 的离地高度一起归零。"""
+    fuser = OdometryFuser(mode='fused')
+    fuser.push_odom(1.0, [1.0, 2.0, 0.72], [1.0, 0.0, 0.0, 0.0])
+    fuser.push_lidar(1.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0])
+    assert np.allclose(fuser.torso_position(), [0.0, 0.0, 0.72], atol=1e-9)
+    correction, _ = fuser.correction
+    assert correction[2] == 0.0
+
+
+def test_fused_rotates_orientation_into_lidar_world():
+    """位置与 anchor 姿态必须落在同一世界系，否则 key body 误差方向会转错。"""
+    fuser = OdometryFuser(mode='fused')
+    identity = np.array([1.0, 0.0, 0.0, 0.0])
+    lidar_yaw = quat_from_axis('z', np.pi / 2)
+    fuser.push_odom(1.0, [1.0, 0.0, 0.72], identity)
+    fuser.push_lidar(1.0, [0.0, 1.0, 0.0], lidar_yaw)
+
+    assert np.allclose(fuser.torso_position(), [0.0, 1.0, 0.72], atol=1e-9)
+    assert np.allclose(fuser.orientation_in_world(identity), lidar_yaw, atol=1e-9)
+
+
+def test_fused_yaw_correction_does_not_count_waist_twice():
+    """快慢两路都是 torso 姿态时，腰偏航不能混进世界系修正再叠加一次。"""
+    fuser = OdometryFuser(mode='fused')
+    torso_yaw = quat_from_axis('z', 0.4)
+    fuser.push_odom(1.0, [0.0, 0.0, 0.72], torso_yaw)
+    fuser.push_lidar(1.0, [0.0, 0.0, 0.0], torso_yaw)
+
+    _, correction_yaw = fuser.correction
+    assert correction_yaw == pytest.approx(0.0, abs=1e-9)
+    assert np.allclose(fuser.orientation_in_world(torso_yaw), torso_yaw, atol=1e-9)
+
+
 def test_fused_pairs_lidar_with_matching_odom_stamp():
     """雷达 stamp 滞后约 34 ms，必须拿同一时刻的 odom 配对，不能用当前值。"""
     fuser = OdometryFuser(mode='fused')
