@@ -332,6 +332,36 @@ def test_stream_calibration_reports_its_result(kin, retargeter):
     assert logs and '校准完成' in logs[-1]
 
 
+def test_stream_drops_out_of_order_frames(kin, retargeter):
+    """时间戳倒退的一帧不能发出去。
+
+    下游按 ``header.stamp`` 建时间轴、靠帧间差分求速度，插进一个倒退的样本就是
+    一次速度尖峰。这道闸原来在环形缓冲的 push 里，缓冲删掉之后由 stream 自己守。
+    """
+    positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
+                                   pelvis_rot=np.eye(3))
+    xr = positions @ XR_TO_ROBOT
+
+    def payload(t: float) -> dict:
+        return {'t': t, 'seq': 0, 'body': {
+            'status': 1, 'message': 0,
+            'joints': {name: {'position': list(xr[i]), 'position_valid': True}
+                       for i, name in enumerate(SMPL_JOINTS)}}}
+
+    stream = MocapStream(retargeter, log=lambda _message: None)
+    for i in range(30):
+        stream._ingest(payload(i * 0.01))
+    stream.calibrate()
+
+    stamped = []
+    stream.on_frame = lambda t, _raw, _result: stamped.append(t)
+    for t in (0.40, 0.42, 0.41, 0.44):     # 第三个倒退，且幅度小于时钟重同步阈值
+        stream._ingest(payload(t))
+
+    assert len(stamped) == 3, '倒退的那一帧应该被丢掉'
+    assert stamped == sorted(stamped)
+
+
 def test_ankle_bias_cancels_a_toe_down_skeleton(kin, retargeter):
     """SMPL 的 *_FOOT 是脚趾根部，站直时本就朝前下方；不扣掉就是一直勾着脚。"""
     pelvis_pos = np.array([0.0, 0.0, 0.78])

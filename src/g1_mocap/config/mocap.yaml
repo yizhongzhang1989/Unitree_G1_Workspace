@@ -7,13 +7,6 @@
     # 共享密钥，非空时所有接口要带 ?token=。放在开放网络上时务必设。
     token: ''
 
-    # 缓冲时长。下游要取过去若干帧做速度差分，也要留出重同步的余量。
-    buffer_s: 2.0
-
-    # 起来之后攒够帧就自动标一次人机比例，所以**启动时人要站直**。
-    # 站得不对就 `ros2 service call /mocap/calibrate std_srvs/srv/Trigger` 重标。
-    auto_calibrate: true
-
     # 踝原点离地的高度，用来把「G1 骨盆比踝高多少」换算成「骨盆离地多少」。
     foot_ground_clearance_m: 0.03
 

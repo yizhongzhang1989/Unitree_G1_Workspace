@@ -90,7 +90,6 @@ class MocapNode(Node):
             host=p('host', '0.0.0.0').get_parameter_value().string_value,
             port=int(p('port', 18000).get_parameter_value().integer_value),
             token=p('token', '').get_parameter_value().string_value,
-            buffer_s=float(p('buffer_s', 2.0).get_parameter_value().double_value),
             log=self.get_logger().info)
 
         self._joints = joints

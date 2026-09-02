@@ -47,8 +47,8 @@ ros2 launch g1_mocap dashboard.launch.py   # 带 mesh 的可视化面板，http:
 
 没校准之前 `~/frame` 不会发任何数据。
 
-> `mocap_node`、`dashboard_node`、`g1_rgmt_tracking_global` 的跟踪层**三选一**：
-> 头显同一时刻只连一个上行地址。
+> 只有 `mocap_node` 连头显。`dashboard_node` 和 `g1_rgmt_tracking_global` 的跟踪层
+> 都只订 `~/frame`，三者可以同时跑。
 
 ## 重定向怎么做的
 

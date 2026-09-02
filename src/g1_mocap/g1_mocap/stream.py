@@ -1,11 +1,12 @@
-"""PicoBridge 接入：后台线程收帧、重定向、写进按时间索引的环形缓冲。
+"""PicoBridge 接入：后台线程收帧、重定向、逐帧回调出去。
 
 头显上的 APK **直连**本模块监听的 ``/ws/device``，中间不过 PicoBridge 那个
 ``server.py``——少一跳转发、少一个要守的进程，头显配置面板里直接填机器人的
 ``IP:18000`` 就行。全程 WiFi，不用 adb。
 
-缓冲区按**时间**索引而不是按帧号：头显是 72/90 Hz，控制环是 50 Hz，两边没有整数比。
-取样一律线性插值到下游要的时刻，速度则在 50 Hz 网格上做差分——和训练侧同一个网格。
+算完的帧走 ``on_frame`` 回调直接发出去，**本模块不攒重定向结果**：要按时间插值的
+下游订 ``/mocap/frame``、用 :class:`~.consumer.FrameBuffer` 自己攒。这里只留一份
+原始骨架（校准用）和一个单调时间戳（挡乱序帧）。
 
 .. note::
    重定向（含一次 pinocchio FK）跑在收帧线程里，每帧一次、90 Hz 上限。控制环那边
@@ -153,26 +154,25 @@ class _RingBuffer:
 
 
 class MocapStream:
-    """收帧线程 + 缓冲区。``sample`` 是给下游用的唯一入口，线程安全。
+    """收帧线程：把头显推来的骨架重定向成 G1 关节角，逐帧回调给 ``on_frame``。
 
     Args:
         retargeter: SMPL -> G1 的重定向器，只在收帧线程里用。
         host / port: 上行服务的监听地址。头显连 ``ws://<host>:<port>/ws/device``。
         token: 非空时所有接口要带 ``?token=``。放开放网络上时务必设。
-        buffer_s: 缓冲时长。要盖住参考窗口的整个跨度加上重同步余量。
         log: 单参数的日志回调，节点把 ``get_logger().info`` 传进来。
     """
 
     def __init__(self, retargeter: Retargeter, *, host: str = '0.0.0.0',
-                 port: int = 18000, token: str = '', buffer_s: float = 2.0,
+                 port: int = 18000, token: str = '',
                  log: Callable[[str], None] = print) -> None:
         self._retarget = retargeter
         self._host, self._port, self._token = host, int(port), token
         self._log = log
         self._clock = ClockAligner()
-        self._capacity = max(int(buffer_s * 120), 64)
-        self._buffer = _RingBuffer(self._capacity, len(retargeter.joint_names),
-                                   len(retargeter.key_bodies))
+        # 只用来挡乱序帧。重定向结果不在这边攒：本类只管算完回调，要按时间
+        # 插值的下游用自己的 FrameBuffer（订 /mocap/frame）。只在收帧线程里读写。
+        self._last_stamp = float('-inf')
         self._calibration: RetargetCalibration | None = None
         self._raw: deque[BodyFrame] = deque(maxlen=RAW_FRAMES)
         self._raw_lock = threading.Lock()
@@ -236,20 +236,6 @@ class MocapStream:
         with self._raw_lock:
             return list(self._raw)
 
-    def latest_frame(self) -> BodyFrame | None:
-        """只要最新一帧时走这里：面板 30 Hz 轮询，没必要每次拷两百多帧。"""
-        with self._raw_lock:
-            return self._raw[-1] if self._raw else None
-
-    def frame_count(self) -> int:
-        return len(self._raw)
-
-    def span(self) -> tuple[float, float] | None:
-        return self._buffer.span()
-
-    def sample(self, times: np.ndarray) -> SampleBatch | None:
-        return self._buffer.sample(times)
-
     def calibrate(self, *, min_frames: int = 20) -> RetargetCalibration:
         """用最近这批原始骨架标出人机比例。调用者要保证人当时**站直**。"""
         frames = self.recent_frames()
@@ -257,9 +243,6 @@ class MocapStream:
             raise RuntimeError(f'只攒到 {len(frames)} 帧动捕，不足 {min_frames} 帧，无法校准')
         calibration = self._retarget.calibrate(frames)
         self._calibration = calibration
-        # 换了标定就换了坐标尺度，旧样本和新样本混在一条时间轴上会插出跳变。
-        self._buffer = _RingBuffer(self._capacity, len(self._retarget.joint_names),
-                                   len(self._retarget.key_bodies))
         self._log(f'动捕校准完成: 缩放 {calibration.scale:.3f}, '
                   f'站立高度 {calibration.stand_height:.3f} m, '
                   f'站姿零位最大偏置 {np.abs(calibration.joint_bias).max():.3f} rad')
@@ -348,8 +331,9 @@ class MocapStream:
                 self._stats.dropped += 1
                 self._stats.last_error = str(exc)
             return
-        if not self._buffer.push(stamped, result):
+        if stamped <= self._last_stamp:
             return
+        self._last_stamp = stamped
         if self.on_frame is not None:
             try:
                 self.on_frame(stamped, frame, result)
