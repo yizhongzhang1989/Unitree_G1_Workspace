@@ -140,24 +140,24 @@ class MocapClip:
             raise RuntimeError('参考动作尚未对齐，必须先调用 align()')
         play = self._play_time(frame, advance=True)
         offsets = np.asarray(offsets, dtype=np.float64)
-        # 每个 token 都要它自己的前一拍来做速度差分，两批时刻一次取完。
+        # 训练语料的速度定义是 (x[t+1] - x[t]) / dt；实时源也必须逐拍一致。
         times = np.concatenate([play + offsets * self._dt,
-                                play + (offsets - 1.0) * self._dt])
+                                play + (offsets + 1.0) * self._dt])
         batch = self._require(times)
         n = len(offsets)
-        current, previous = batch.at(slice(0, n)), batch.at(slice(n, 2 * n))
+        current, following = batch.at(slice(0, n)), batch.at(slice(n, 2 * n))
         self._ensure_alignment(current, offsets)
 
         root_quat = current.root_quat
-        lin_vel_w = (current.root_pos - previous.root_pos) / self._dt
-        ang_vel_w = _angular_velocity(previous.root_quat, root_quat, self._dt)
+        lin_vel_w = (following.root_pos - current.root_pos) / self._dt
+        ang_vel_w = _angular_velocity(root_quat, following.root_quat, self._dt)
         gravity = np.broadcast_to(GRAVITY_W, (n, 3))
 
         # 后 30 维：先把参考搬进机器人坐标系，再转进机器人 anchor 的 yaw 局部系。
         key_pos_w = self._to_world(current.key_pos.reshape(-1, 3)).reshape(n, -1, 3)
         key_vel_w = quat_apply(
             self._align_quat,
-            ((current.key_pos - previous.key_pos) / self._dt).reshape(-1, 3)).reshape(n, -1, 3)
+            ((following.key_pos - current.key_pos) / self._dt).reshape(-1, 3)).reshape(n, -1, 3)
 
         inverse = quat_conj(yaw_quat(quat_normalize(robot_anchor_quat)))
         rel = key_pos_w - np.asarray(robot_anchor_pos, dtype=np.float64)

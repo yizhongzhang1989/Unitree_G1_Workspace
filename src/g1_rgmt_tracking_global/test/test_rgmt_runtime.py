@@ -250,7 +250,33 @@ def test_contract_matches_onnx_graph():
     assert len(spec.window_offsets) == 21
     assert spec.reference_key_bodies == KEY_BODIES
     assert spec.key_pos_offset == 38
+    assert spec.reference_joint_pos_offset == 9
     assert np.allclose(spec.window_offsets, OFFSETS)
+
+
+def test_zero_action_tracks_the_current_reference():
+    """训练使用 q_target=q_ref(t)+scale*action；部署不能把残差叠到默认站姿"""
+    policy = _policy()
+    clip, data = _aligned_clip()
+
+    class ZeroActionSession:
+        @staticmethod
+        def run(_outputs, _feed):
+            return [np.zeros((1, len(policy.spec.action_joint_names)), dtype=np.float32)]
+
+    policy._session = ZeroActionSession()
+    target = policy.step(
+        joint_pos=policy.spec.default_joint_pos,
+        joint_vel=np.zeros(len(policy.spec.obs_joint_names)),
+        ang_vel=np.zeros(3),
+        base_quat=np.array([1.0, 0.0, 0.0, 0.0]),
+        clip=clip,
+        robot_anchor_pos=data['anchor_pos'][0],
+        robot_anchor_quat=data['anchor_quat'][0],
+    )
+    expected = clip.joint_pos[0, clip._policy_joint_ids]
+    assert np.allclose(target, expected)
+    assert not np.allclose(target, policy.spec.default_joint_pos[policy.action_slots()])
 
 
 def test_closed_loop_stays_finite():

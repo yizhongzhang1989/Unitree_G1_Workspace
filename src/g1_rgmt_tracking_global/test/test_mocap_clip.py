@@ -91,15 +91,17 @@ class FakeStream:
     速度/角速度取的是解析上的常量，参考窗口那边算出来的差分必须和它对得上。
     """
 
-    def __init__(self, kin, retargeter, *, rate=90.0, speed=0.5, yaw_rate=0.4,
-                 duration=6.0) -> None:
-        self.speed, self.yaw_rate, self.rate = speed, yaw_rate, rate
+    def __init__(self, kin, retargeter, *, rate=90.0, speed=0.5, acceleration=0.0,
+                 yaw_rate=0.4, duration=6.0) -> None:
+        self.speed, self.acceleration = speed, acceleration
+        self.yaw_rate, self.rate = yaw_rate, rate
         self._buffer = _RingBuffer(int(duration * rate) + 8, 29, len(KEY_BODIES))
         self._stats = StreamStats(connected=True, status=1, frames=int(duration * rate))
         calibration = RetargetCalibration.identity(0.78)
         for i in range(int(duration * rate)):
             t = i / rate
-            positions = _skeleton(kin, DEFAULT_Q, np.array([speed * t, 0.0, 0.78]),
+            x = speed * t + 0.5 * acceleration * t * t
+            positions = _skeleton(kin, DEFAULT_Q, np.array([x, 0.0, 0.78]),
                                   _rot_z(yaw_rate * t))
             frame = BodyFrame(t=t, seq=i, positions=positions, status=1, message=0)
             self._buffer.push(t, retargeter.solve(frame, calibration))
@@ -120,6 +122,14 @@ def fake_stream() -> FakeStream:
     retargeter = Retargeter(kin, key_bodies=KEY_BODIES, anchor_body='torso_link',
                             default_joint_pos=DEFAULT_Q)
     return FakeStream(kin, retargeter)
+
+
+@pytest.fixture(scope='module')
+def accelerating_stream() -> FakeStream:
+    kin = G1Kinematics(URDF, ACTION_JOINTS)
+    retargeter = Retargeter(kin, key_bodies=KEY_BODIES, anchor_body='torso_link',
+                            default_joint_pos=DEFAULT_Q)
+    return FakeStream(kin, retargeter, speed=0.0, acceleration=2.0, yaw_rate=0.0)
 
 
 def make_clip(stream, offsets=CONTRACT_OFFSETS, **kwargs) -> MocapClip:
@@ -167,6 +177,18 @@ def test_key_velocity_segment_tracks_the_root(fake_stream):
     anchor_velocity = window[:, 53:56]
     assert np.allclose(np.linalg.norm(anchor_velocity, axis=-1), fake_stream.speed,
                        atol=5e-3)
+
+
+def test_velocity_uses_the_training_forward_difference(accelerating_stream):
+    """训练 NPZ 把第 t 帧速度定义为 (x[t+1] - x[t]) / dt。"""
+    offsets = np.array([0])
+    clip = make_clip(accelerating_stream, offsets)
+    clip.align(np.zeros(3), IDENTITY_QUAT)
+    window = clip.reference_window(0, offsets, np.zeros(3), IDENTITY_QUAT)
+    t = clip._last_play
+    expected = accelerating_stream.acceleration * (t + 0.5 * CONTROL_DT)
+    assert window[0, 0] == pytest.approx(expected, abs=3e-3)
+    assert window[0, 53] == pytest.approx(expected, abs=3e-3)
 
 
 ##

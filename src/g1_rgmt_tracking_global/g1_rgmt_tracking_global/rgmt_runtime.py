@@ -89,6 +89,20 @@ class RgmtSpec:
             cursor += width
         raise ValueError('token 布局里没有 key_body_pos 段')
 
+    @property
+    def reference_joint_pos_offset(self) -> int:
+        """参考关节角在 token 里的起始下标。动作残差必须叠加到这一段。"""
+        cursor = 0
+        for name, width in self.token_layout:
+            if name == 'joint_pos':
+                if width != len(self.action_joint_names):
+                    raise ValueError(
+                        f'token 的 joint_pos 宽度 {width} != 动作关节数 '
+                        f'{len(self.action_joint_names)}')
+                return cursor
+            cursor += width
+        raise ValueError('token 布局里没有 joint_pos 段')
+
 
 def load_spec(session: onnxruntime.InferenceSession) -> RgmtSpec:
     meta = dict(session.get_modelmeta().custom_metadata_map)
@@ -153,6 +167,9 @@ def load_spec(session: onnxruntime.InferenceSession) -> RgmtSpec:
             f'default_joint_pos 长度 {len(spec.default_joint_pos)} != 观测关节数 {n_obs}')
     if len(spec.action_scale) != n_act:
         raise ValueError(f'action_scale 长度 {len(spec.action_scale)} != 动作关节数 {n_act}')
+    if np.count_nonzero(spec.window_offsets == 0) != 1:
+        raise ValueError('残差动作要求参考窗口恰好包含一个 offset=0 token')
+    _ = spec.reference_joint_pos_offset
     return spec
 
 
@@ -314,5 +331,7 @@ class RgmtPolicy:
 
         self._last_action[:] = action
         self.frame += 1
-        default = spec.default_joint_pos[self.action_slots()]
-        return np.clip(default + spec.action_scale * action, self._lower, self._upper)
+        zero = int(np.flatnonzero(spec.window_offsets == 0)[0])
+        start = spec.reference_joint_pos_offset
+        reference = window[zero, start:start + len(spec.action_joint_names)]
+        return np.clip(reference + spec.action_scale * action, self._lower, self._upper)
