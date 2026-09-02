@@ -19,8 +19,8 @@
 链路全程 WiFi：头显上的 PicoBridge APK 直连本节点的 ``/ws/device``，中间不过
 PicoBridge 的 ``server.py``。头显配置面板里填「本机IP:18000」。
 
-> 本节点、``dashboard_node``、``g1_rgmt_tracking_global`` 的跟踪层**三选一**：
-> 头显同一时刻只连一个上行地址。
+只有本节点连接头显；``dashboard_node`` 和 ``g1_rgmt_tracking_global`` 都订阅 ROS topic，
+可以同时运行。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import time
 
 import numpy as np
 import rclpy
-from g1_mocap_msgs.msg import MocapFrame, MocapStatus
+from g1_mocap_msgs.msg import MocapControllers, MocapFrame, MocapStatus
 from geometry_msgs.msg import Point, Pose
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -40,7 +40,7 @@ from std_srvs.srv import Trigger
 
 from .kinematics import G1Kinematics
 from .retarget import Retargeter, RetargetResult
-from .skeleton import STATUS_MESSAGES, BodyFrame
+from .skeleton import STATUS_MESSAGES, BodyFrame, ControllerState
 from .stream import MocapStream
 from .urdf import DEFAULT_URDF, resolve_package_path
 
@@ -102,11 +102,15 @@ class MocapNode(Node):
         self._joint_publisher = self.create_publisher(JointState, '~/joint_states',
                                                       stream_qos)
         self._status_publisher = self.create_publisher(MocapStatus, '~/status', 10)
+        # 急停一类的操作走这条，所以给 RELIABLE：丢一帧按键和丢一帧姿态不是一回事。
+        self._controller_publisher = self.create_publisher(MocapControllers,
+                                                           '~/controllers', 10)
         self._joint_message = JointState()
         self._joint_message.name = joints
 
         self.create_service(Trigger, '~/calibrate', self._on_calibrate)
         self._stream.on_frame = self._publish_frame
+        self._stream.on_controllers = self._publish_controllers
         self.create_timer(1.0, self._publish_status)
         self._stream.start()
         self.get_logger().info(
@@ -116,6 +120,7 @@ class MocapNode(Node):
 
     def destroy_node(self) -> None:
         self._stream.on_frame = None
+        self._stream.on_controllers = None
         self._stream.stop()
         super().destroy_node()
 
@@ -163,6 +168,25 @@ class MocapNode(Node):
         self._joint_message.header.stamp = stamp
         self._joint_message.position = message.joint_positions
         self._joint_publisher.publish(self._joint_message)
+
+    def _publish_controllers(
+            self, controllers: tuple[ControllerState, ControllerState]) -> None:
+        """跟随头显帧率，跟骨架能不能用、标没标定都无关。同样跑在收帧线程里。"""
+        message = MocapControllers()
+        message.header.stamp = self.get_clock().now().to_msg()
+        for state, target in zip(controllers, (message.left, message.right)):
+            target.connected = state.connected
+            target.trigger = state.trigger
+            target.squeeze = state.squeeze
+            target.trigger_click = state.trigger_click
+            target.squeeze_click = state.squeeze_click
+            target.thumbstick_pressed = state.thumbstick_pressed
+            target.a_x = state.a_x
+            target.b_y = state.b_y
+            target.menu = state.menu
+            target.thumbstick = list(state.thumbstick)
+            target.battery = state.battery
+        self._controller_publisher.publish(message)
 
     def _publish_status(self) -> None:
         stats = self._stream.stats()

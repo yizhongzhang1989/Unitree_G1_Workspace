@@ -6,7 +6,7 @@
 
 * :mod:`.skeleton`   —— 报文解析、XR 坐标系换到机器人坐标系、发送端时钟对齐
 * :mod:`.kinematics` —— pinocchio 封装；零位几何常量全部从 URDF 现算，不硬编码
-* :mod:`.retarget`   —— SMPL 24 关节位置 -> G1 29 轴关节角（纯几何，不用厂商的关节朝向）
+* :mod:`.retarget`   —— SMPL 24 关节骨架 -> G1 29 轴关节角；朝向只补自转与膝轴
 * :mod:`.stream`     —— 后台线程收帧 + 环形缓冲 + 按时间插值
 * :mod:`.urdf`       —— URDF -> 面板要的关节树与 mesh 清单
 * :mod:`.rotations`  —— 四元数工具，wxyz 顺序

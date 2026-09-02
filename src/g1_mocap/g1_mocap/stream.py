@@ -29,8 +29,8 @@ import numpy as np
 from aiohttp import web
 
 from .retarget import RetargetCalibration, Retargeter, RetargetResult
-from .skeleton import (STATUS_MESSAGES, STATUS_VALID, BodyFrame, ClockAligner,
-                       both_thumbsticks_pressed, parse_body)
+from .skeleton import (STATUS_MESSAGES, STATUS_VALID, BodyFrame, ClockAligner, ControllerState,
+                       both_thumbsticks_pressed, parse_body, parse_controllers)
 
 # 一帧全身数据约 6.5 KB；给到 1 MB 已经是 150 倍余量，再大就是异常报文。
 MAX_MESSAGE_BYTES = 1 << 20
@@ -191,6 +191,11 @@ class MocapStream:
 
         跑在**收帧线程**里，所以里面不能阻塞。存在的意义是让发布跟随头显的
         72/90 Hz：换成定时器取最新样本会同时丢帧和引入拖油拖尾的拖延。"""
+        self.on_controllers: Callable[
+            [tuple[ControllerState, ControllerState]], None] | None = None
+        """每收一帧报文就回调一次双手柄状态，**与骨架是否可用无关**。
+
+        同样跑在收帧线程里，不能阻塞。"""
 
     ##
     # 生命周期
@@ -303,14 +308,15 @@ class MocapStream:
             for key, value in fields.items():
                 setattr(self._stats, key, value)
 
-    def _check_calibration_shortcut(self, payload: dict) -> None:
+    def _check_calibration_shortcut(self,
+                                    controllers: tuple[ControllerState, ControllerState]) -> None:
         """双摇杆同时按下 -> 原地校准。**边沿触发**，按住不会反复标。
 
         校准会清空缓冲、换掉坐标尺度，所以下游在跟动作的时候误按，那边会因为
         缓冲空了而断流急停——安全，但会打断操作。这里不做跨节点的状态判断：
         本包不知道下游在干什么，也不应该知道。
         """
-        down = both_thumbsticks_pressed(payload)
+        down = both_thumbsticks_pressed(controllers)
         pressed, self._sticks_were_down = down and not self._sticks_were_down, down
         if not pressed:
             return
@@ -338,7 +344,16 @@ class MocapStream:
             pass  # loop 正在关
 
     def _ingest(self, payload: dict) -> None:
-        self._check_calibration_shortcut(payload)
+        # 手柄先走，而且不受下面任何一个 return 影响：它服务于急停，而最需要急停的
+        # 时刻正是骨架坏掉、或者还没标定的时候。
+        controllers = parse_controllers(payload)
+        self._check_calibration_shortcut(controllers)
+        if self.on_controllers is not None:
+            try:
+                self.on_controllers(controllers)
+            except Exception as exc:  # noqa: BLE001
+                with self._stats_lock:
+                    self._stats.last_error = f'on_controllers: {type(exc).__name__}: {exc}'
         frame = parse_body(payload)
         if frame is None or not frame.usable:
             with self._stats_lock:

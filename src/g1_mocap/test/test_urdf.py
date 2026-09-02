@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from g1_mocap.skeleton import both_thumbsticks_pressed
+from g1_mocap.skeleton import both_thumbsticks_pressed, parse_body, parse_controllers
 from g1_mocap.urdf import mesh_url, parse, rpy_to_quat, under
 
 URDF_PATH = (Path(__file__).resolve().parents[2] / 'unitree_g1_description' / 'model'
@@ -116,16 +116,20 @@ def controllers(left: bool, right: bool, connected: bool = True) -> dict:
             for hand, pressed in (('left', left), ('right', right))}
 
 
+def pressed(payload: dict) -> bool:
+    return both_thumbsticks_pressed(parse_controllers(payload))
+
+
 def test_both_thumbsticks_needed():
-    assert both_thumbsticks_pressed(controllers(True, True)) is True
-    assert both_thumbsticks_pressed(controllers(True, False)) is False
-    assert both_thumbsticks_pressed(controllers(False, True)) is False
-    assert both_thumbsticks_pressed(controllers(False, False)) is False
+    assert pressed(controllers(True, True)) is True
+    assert pressed(controllers(True, False)) is False
+    assert pressed(controllers(False, True)) is False
+    assert pressed(controllers(False, False)) is False
 
 
 def test_disconnected_controller_does_not_trigger():
     """手柄没连的时候 buttons 里的值不可信，不能当成按下。"""
-    assert both_thumbsticks_pressed(controllers(True, True, connected=False)) is False
+    assert pressed(controllers(True, True, connected=False)) is False
 
 
 @pytest.mark.parametrize('payload', [
@@ -136,4 +140,31 @@ def test_disconnected_controller_does_not_trigger():
 ])
 def test_malformed_controller_payloads_are_safe(payload):
     """报文来自网络。缺字段、类型不对都只能是「没按下」，不能抛。"""
-    assert both_thumbsticks_pressed(payload) is False
+    assert pressed(payload) is False
+
+
+def test_controller_parsing_survives_garbage():
+    """这条流服务于急停，宁可读到「没按」也不能断——坏字段一律退化成默认值。"""
+    left, right = parse_controllers({
+        'left': {'connected': True, 'battery': 'x',
+                 'buttons': {'trigger': None, 'b_y': True, 'menu': 1},
+                 'thumbstick': [float('nan'), 0.5]},
+        'right': {'connected': True,
+                  'buttons': {'trigger': 0.75, 'a_x': True},
+                  'thumbstick': 'bad'},
+    })
+    assert left.connected and left.b_y and left.menu
+    assert left.trigger == 0.0 and left.battery == 0.0
+    assert left.thumbstick == (0.0, 0.5), '非有限值要退化成 0，不能带进下游'
+    assert right.trigger == 0.75 and right.a_x and not right.b_y
+    assert right.thumbstick == (0.0, 0.0)
+
+
+def test_controllers_are_independent_of_the_skeleton():
+    """骨架坏掉时手柄照样要能解出来：最需要急停的时刻正是数据流出问题的时刻。"""
+    payload = {'left': {'connected': True, 'buttons': {'b_y': True}},
+               'right': {'connected': True, 'buttons': {'b_y': True}},
+               'body': {'status': 0, 'joints': {}}}
+    assert parse_body(payload) is None, '骨架确实是坏的'
+    left, right = parse_controllers(payload)
+    assert left.b_y and right.b_y

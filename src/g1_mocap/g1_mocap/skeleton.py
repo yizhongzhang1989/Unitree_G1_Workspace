@@ -155,23 +155,72 @@ def _rotations(quats: list) -> np.ndarray | None:
     return XR_TO_ROBOT @ rot
 
 
-def both_thumbsticks_pressed(payload: dict) -> bool:
+@dataclass(frozen=True)
+class ControllerState:
+    """一只手柄。``connected`` 为 False 时其余字段全是占位值。"""
+
+    connected: bool = False
+    trigger: float = 0.0
+    squeeze: float = 0.0
+    trigger_click: bool = False
+    squeeze_click: bool = False
+    thumbstick_pressed: bool = False
+    a_x: bool = False
+    b_y: bool = False
+    menu: bool = False
+    thumbstick: tuple[float, float] = (0.0, 0.0)
+    battery: float = 0.0
+
+
+def _controller(entry) -> ControllerState:
+    if not isinstance(entry, dict) or not entry.get('connected'):
+        return ControllerState()
+    buttons = entry.get('buttons')
+    buttons = buttons if isinstance(buttons, dict) else {}
+    stick = entry.get('thumbstick')
+    if not (isinstance(stick, (list, tuple)) and len(stick) == 2):
+        stick = (0.0, 0.0)
+
+    def number(value) -> float:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return value if math.isfinite(value) else 0.0
+
+    return ControllerState(
+        connected=True,
+        trigger=number(buttons.get('trigger')),
+        squeeze=number(buttons.get('squeeze')),
+        trigger_click=bool(buttons.get('trigger_click')),
+        squeeze_click=bool(buttons.get('squeeze_click')),
+        thumbstick_pressed=bool(buttons.get('thumbstick_pressed')),
+        a_x=bool(buttons.get('a_x')),
+        b_y=bool(buttons.get('b_y')),
+        menu=bool(buttons.get('menu')),
+        thumbstick=(number(stick[0]), number(stick[1])),
+        battery=number(entry.get('battery')),
+    )
+
+
+def parse_controllers(payload: dict) -> tuple[ControllerState, ControllerState]:
+    """从一帧报文里取双手柄。**不校验骨架**——手柄要在骨架坏掉时照样能用。
+
+    坏字段一律退化成默认值而不是抛异常：这条流服务于急停，宁可读到「没按」也不能断。
+    """
+    if not isinstance(payload, dict):
+        return ControllerState(), ControllerState()
+    return _controller(payload.get('left')), _controller(payload.get('right'))
+
+
+def both_thumbsticks_pressed(controllers: tuple[ControllerState, ControllerState]) -> bool:
     """双手摇杆是否同时按下。
 
     戴着头显没法去点网页上的按钮，这个组合键就是「原地校准」的触发器。选双摇杆
     而不是扳机/AB，是因为它需要两只手一起动，误触的代价（重标一次人机比例）
     又只在站姿不对时才有害。
     """
-    if not isinstance(payload, dict):
-        return False
-    for hand in ('left', 'right'):
-        controller = payload.get(hand)
-        if not isinstance(controller, dict) or not controller.get('connected'):
-            return False
-        buttons = controller.get('buttons')
-        if not isinstance(buttons, dict) or not buttons.get('thumbstick_pressed'):
-            return False
-    return True
+    return all(c.connected and c.thumbstick_pressed for c in controllers)
 
 
 class ClockAligner:

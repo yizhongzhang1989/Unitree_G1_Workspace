@@ -7,6 +7,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/MocapController.msg"
+  "msg/MocapControllers.msg"
   "msg/MocapFrame.msg"
   "msg/MocapStatus.msg"
   DEPENDENCIES geometry_msgs std_msgs
