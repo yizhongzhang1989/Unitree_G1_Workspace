@@ -34,6 +34,8 @@ import math
 import threading
 import time
 from enum import Enum
+from functools import partial
+from typing import TYPE_CHECKING
 
 import numpy as np
 import rclpy
@@ -51,6 +53,12 @@ from std_srvs.srv import Trigger
 
 from .motion_library import MotionLibrary
 from .odometry import OdometryFuser
+
+if TYPE_CHECKING:
+    # 只为类型标注。运行时这两个是延迟导入的——motion 那条路不该依赖 g1_mocap。
+    from g1_mocap.consumer import FrameBuffer
+
+    from .mocap_clip import MocapClip
 from .rgmt_runtime import RgmtPolicy, resolve_policy_path, spec_matches
 from .rotations import (
     quat_from_xyzw,
@@ -113,10 +121,12 @@ class RgmtTrackingNode(Node):
         self._source = p('reference_source', 'motion').get_parameter_value().string_value
         if self._source not in ('motion', 'mocap'):
             raise RuntimeError(f"reference_source 只能是 motion 或 mocap，收到 {self._source!r}")
-        self._mocap = None
+        self._mocap: FrameBuffer | None = None
+        # 和 _clip 指向同一个对象，只是把「这条路才有 stale/describe」写进类型里。
+        self._mocap_clip: MocapClip | None = None
+        self._motions: MotionLibrary | None = None
         if self._source == 'mocap':
-            self._motions = None
-            self._clip = self._build_mocap_clip(spec, action_joints)
+            self._clip = self._mocap_clip = self._build_mocap_clip(spec, action_joints)
         else:
             self._motions = MotionLibrary(
                 resolve_policy_path(p('motion_dir', '').get_parameter_value().string_value),
@@ -217,8 +227,9 @@ class RgmtTrackingNode(Node):
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
 
-        source = (f'实时动捕 {self._mocap_topic}' if self._mocap is not None
-                  else f'动作库 {len(self._motions.names)} 段, 当前 {self._clip.name}'
+        library = self._motions
+        source = (f'实时动捕 {self._mocap_topic}' if library is None
+                  else f'动作库 {len(library.names)} 段, 当前 {self._clip.name}'
                        f' ({self._clip.duration_s:.1f}s)')
         self.get_logger().info(
             f'RGMT 跟踪就绪: 历史 H={spec.history_len}, 参考窗口 '
@@ -238,9 +249,10 @@ class RgmtTrackingNode(Node):
         p = self.declare_parameter
         self._mocap_joints = list(action_joints)
         self._mocap_key_bodies = list(spec.reference_key_bodies)
-        self._mocap = FrameBuffer(
+        buffer = FrameBuffer(
             n_joints=len(action_joints), n_keys=len(spec.reference_key_bodies),
             buffer_s=float(p('mocap_buffer_s', 2.0).get_parameter_value().double_value))
+        self._mocap = buffer
 
         self._mocap_topic = p('mocap_frame_topic', '/mocap/frame') \
             .get_parameter_value().string_value
@@ -252,10 +264,11 @@ class RgmtTrackingNode(Node):
         # 那一刻打一次警告，表现就是「话题在、自己收不到」。
         stream = QoSProfile(depth=10, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.create_subscription(MocapFrame, self._mocap_topic, self._on_mocap_frame,
+        self.create_subscription(MocapFrame, self._mocap_topic,
+                                 partial(self._on_mocap_frame, buffer),
                                  stream, callback_group=mocap_group)
         self.create_subscription(MocapStatus, status_topic,
-                                 lambda m: self._mocap.push_status(m), 10,
+                                 buffer.push_status, 10,
                                  callback_group=mocap_group)
 
         margin = int(p('mocap_lead_margin_frames', 2)
@@ -265,11 +278,11 @@ class RgmtTrackingNode(Node):
             f'实时动捕参考：端到端延迟 {lead * spec.control_dt:.2f}s（{lead} 拍）。'
             f'这是策略要未来 {int(max(spec.window_offsets))} 帧带来的下界，砍不掉。')
         return MocapClip(
-            self._mocap, control_dt=spec.control_dt, lead_frames=lead,
+            buffer, control_dt=spec.control_dt, lead_frames=lead,
             stale_timeout_s=float(p('mocap_stale_timeout_s', 0.3)
                                   .get_parameter_value().double_value))
 
-    def _on_mocap_frame(self, message: MocapFrame) -> None:
+    def _on_mocap_frame(self, buffer: FrameBuffer, message: MocapFrame) -> None:
         """每帧核对两份名单。两者都是**顺序敏感**且错了不报错的。
 
         关节名单错位 = 左右腿指令互换；key body 名单错位 = 参考窗口后 30 维整段
@@ -287,7 +300,7 @@ class RgmtTrackingNode(Node):
                 f'期望 {self._mocap_key_bodies}，收到 {list(message.key_body_names)}。',
                 throttle_duration_sec=5.0)
             return
-        self._mocap.push_frame(message)
+        buffer.push_frame(message)
 
     def _slots(self, names: list[str]) -> np.ndarray:
         try:
@@ -422,11 +435,16 @@ class RgmtTrackingNode(Node):
             if stale:
                 response.success, response.message = False, stale
                 return response
-            self._stand_from = self._measured.copy()
+            snapshot = self._snapshot()
+            if snapshot is None:
+                response.success, response.message = False, '/joint_states 或 IMU 首帧未到'
+                return response
+            measured, _, pelvis_quat = snapshot
+            self._stand_from = measured
             self._stand_start = self._now()
             self._policy.reset()
             # 同时锁偏航与平移。中途重算等于把已产生的跟踪误差抹掉，那 15 维就永远读作零。
-            self._clip.align(pose, self._torso_quat_locked())
+            self._clip.align(pose, self._torso_quat(measured, pelvis_quat))
             self._state = State.STAND
         response.success = True
         response.message = f'STAND 中，{self._stand_s:.1f}s 后开始放 {self._clip.name}'
@@ -459,7 +477,8 @@ class RgmtTrackingNode(Node):
         # 超时给窄了会在切换其实成功的情况下报「超时」。
         if not self._wait(future, 15.0):
             return False, 'switch_controller 超时'
-        ok = bool(future.result() and future.result().ok)
+        result = future.result()
+        ok = bool(result and result.ok)
         return ok, ('已激活' if activate else '已反激活') if ok else '切换失败'
 
     def _wait(self, future, timeout: float) -> bool:
@@ -475,21 +494,30 @@ class RgmtTrackingNode(Node):
     # 控制环
     ##
 
-    def _torso_quat_locked(self) -> np.ndarray:
-        waist = self._measured[self._waist_slots]
-        return torso_quat_from_pelvis(self._imu_quat, waist[0], waist[1], waist[2])
+    def _torso_quat(self, measured: np.ndarray, pelvis_quat: np.ndarray) -> np.ndarray:
+        waist = measured[self._waist_slots]
+        return torso_quat_from_pelvis(pelvis_quat, waist[0], waist[1], waist[2])
+
+    def _snapshot(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """锁内取关节与 IMU。三者都是首帧到达才赋上，在那之前一律返回 None。"""
+        measured, vel, quat = self._measured, self._measured_vel, self._imu_quat
+        if measured is None or vel is None or quat is None:
+            return None
+        return measured.copy(), vel.copy(), quat.copy()
 
     def _control(self) -> None:
         with self._lock:
             if self._state not in ACTIVE_STATES:
                 return
             stale = self._stale()
-            if not stale:
-                measured = self._measured.copy()
-                measured_vel = self._measured_vel.copy()
+            snapshot = self._snapshot()
+            if snapshot is None:
+                # _stale() 那边也会报超时，这里只是把「首帧还没到」写进类型。
+                stale = stale or '/joint_states 或 IMU 首帧未到'
+            else:
+                measured, measured_vel, base_quat = snapshot
                 omega = self._imu_omega.copy()
-                base_quat = self._imu_quat.copy()
-                torso_quat = self._torso_quat_locked()
+                torso_quat = self._torso_quat(measured, base_quat)
                 torso_pos = self._odom.torso_position()
                 state = self._state
                 stand_from = None if self._stand_from is None else self._stand_from.copy()
@@ -511,6 +539,11 @@ class RgmtTrackingNode(Node):
         targets[self._gripper_slots] = self._gripper_targets
 
         if state is State.STAND:
+            if stand_from is None:
+                # 和 State.STAND 是同时赋上的，走到这里就是内部不变式坏了。
+                # 不接的话是 TypeError，控制环线程直接死掉——那比急停危险得多。
+                self._estop('STAND 缺少插值起点')
+                return
             goal = np.empty(len(self._joints))
             goal[self._gripper_slots] = self._gripper_targets
             goal[self._action_slots] = clip.stand_joint_pos()
@@ -558,11 +591,11 @@ class RgmtTrackingNode(Node):
             return '/joint_states 超时'
         if self._imu_quat is None or now - self._imu_stamp > self._timeout:
             return 'IMU 超时'
-        if self._mocap is not None:
+        if self._mocap_clip is not None:
             # 断流后参考会被钳在最后一帧，机器人保持最后姿势继续站着，看起来毫无异样，
             # 实际上已经完全失去操作。必须当成急停条件。
             # 缓冲里的时间轴是消息的 header.stamp，所以比较基准用 ROS 时钟。
-            mocap = self._clip.stale(now)
+            mocap = self._mocap_clip.stale(now)
             if mocap:
                 return mocap
         return self._odom.stale(now) or ''
@@ -586,7 +619,8 @@ class RgmtTrackingNode(Node):
             f'state={state.value} motion={clip.name} frame={frame}/{total}'
             f'{offset} drift={float(np.linalg.norm(corr_pos)):.3f}'
             + (' CLAMPED' if clamped else '')
-            + (f' mocap[{clip.describe()}]' if self._mocap is not None else '')
+            + (f' mocap[{self._mocap_clip.describe()}]'
+               if self._mocap_clip is not None else '')
             + (f' reason={reason}' if reason else ''))
         self._status_publisher.publish(message)
 
