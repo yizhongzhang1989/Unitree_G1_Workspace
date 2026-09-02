@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'tracking_node = g1_rgmt_tracking_global.tracking_node:main',
             'teleop_keyboard = g1_rgmt_tracking_global.teleop_keyboard:main',
+            'mocap_teleop = g1_rgmt_tracking_global.mocap_teleop:main',
         ],
     },
 )

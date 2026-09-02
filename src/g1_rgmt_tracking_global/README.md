@@ -208,10 +208,29 @@ ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py reference_source:=mo
 
 # e. 操作台：G = engage，Enter = start，空格 = estop
 ros2 run g1_rgmt_tracking_global teleop_keyboard
+
+# e'. 或者用手柄推状态机——戴着头显看不见屏幕时用这个
+ros2 run g1_rgmt_tracking_global mocap_teleop
 ```
 
 `~/status` 里会多出 `mocap[...]`，`link=up` 且 `body_status=1` 才算通。
 `body_status=2` 配 `message=7` 是头显没被正常佩戴/站好，站直走两步通常能回到 VALID。
+
+### 手柄推状态机（`mocap_teleop`）
+
+**双手同时按 B/Y** 走一步：`idle`/`estop` → 站立 → 启动策略 → 急停。规则和
+`g1_motion_control` 的 `vr_teleop` 完全一致，是那边踩出来的：
+
+- 站立 / 启动策略 **松手才走**，急停那一步 **按下即走**。都按下即走的话，从站立长按会先把
+  策略拉起来、再急停，**中间那一秒机器人已经在跑了**。
+- 按满 `estop_hold_s`（默认 1 s）**不看当前状态直接急停**。
+- 一上来当作「按着」，必须真松手再按才算一次——避免刚连上就误触。
+- 按键流断掉时长按计时作废，恢复后同样要真松手再按。
+
+数据源是 `/mocap/controllers` 而**不是** `/mocap/frame`：后者要校准完成、骨架可用才发，
+而最需要急停的时刻恰恰是那些条件不成立的时刻（tracker 全丢、骨架出现非有限值、还没标定）。
+
+> ⚠️ 这意味着**戴头显的人能直接启动机器人**，而他自己看不见周围。旁边必须有人守着物理急停。
 
 ### 三件必须知道的事
 
