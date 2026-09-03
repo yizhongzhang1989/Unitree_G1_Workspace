@@ -91,6 +91,13 @@ def level_frame(t_ref_body: np.ndarray) -> np.ndarray:
     return out
 
 
+def ground_level_frame(t_ref_body: np.ndarray, ground_z: float) -> np.ndarray:
+    """水平世界系在参考系中的位姿：XY/yaw 取 body，z 原点取物理地面。"""
+    out = level_frame(t_ref_body)
+    out[2, 3] = float(ground_z)
+    return out
+
+
 def rigid_point_velocity(v_ref_a, omega_ref, p_ref_a, p_ref_b) -> np.ndarray:
     """同一刚体上由 a 点速度求 b 点速度：`v_b = v_a + ω × (p_b - p_a)`。
 

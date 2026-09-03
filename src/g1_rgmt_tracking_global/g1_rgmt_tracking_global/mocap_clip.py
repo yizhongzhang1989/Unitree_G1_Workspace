@@ -62,11 +62,13 @@ class MocapClip:
     streaming = True
 
     def __init__(self, source, *, control_dt: float, lead_frames: int,
+                 stand_joint_pos: np.ndarray,
                  name: str = 'live', stale_timeout_s: float = 0.3,
                  resync_slew: float = 0.02, hard_resync_s: float = 0.5) -> None:
         self._stream = source
         self._dt = float(control_dt)
         self._lead_s = int(lead_frames) * self._dt
+        self._stand_joint_pos = np.asarray(stand_joint_pos, dtype=np.float64).copy()
         self.name = name
         self._stale_timeout = float(stale_timeout_s)
         self._slew = float(resync_slew) * self._dt
@@ -75,7 +77,7 @@ class MocapClip:
         self._align_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self._align_pos = np.zeros(3)
         self._aligned = False
-        self._pending: tuple[np.ndarray, np.ndarray] | None = None
+        self._pending: tuple[np.ndarray, ...] | None = None
         self._origin: float | None = None
         self._origin_frame = 0
         self._last_play = 0.0
@@ -100,7 +102,8 @@ class MocapClip:
     def clamp(self, frame: int) -> int:
         return int(max(int(frame), 0))
 
-    def align(self, robot_anchor_pos: np.ndarray, robot_anchor_quat: np.ndarray) -> None:
+    def align(self, robot_anchor_pos: np.ndarray, robot_anchor_quat: np.ndarray,
+              robot_ground_z: float | None = None) -> None:
         """记下要对齐到的机器人位姿。
 
         真正的对齐推迟到**第一次取参考窗口**那一刻——``~/start`` 之后还有几秒 STAND，
@@ -108,7 +111,8 @@ class MocapClip:
         运动算成跟踪误差。
         """
         self._pending = (np.asarray(robot_anchor_pos, dtype=np.float64).copy(),
-                         np.asarray(robot_anchor_quat, dtype=np.float64).copy())
+                 np.asarray(robot_anchor_quat, dtype=np.float64).copy(),
+                 None if robot_ground_z is None else float(robot_ground_z))
         self._align_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self._align_pos = np.zeros(3)
         self._origin = None
@@ -116,13 +120,32 @@ class MocapClip:
         self._aligned = True
 
     def stand_joint_pos(self) -> np.ndarray:
-        """STAND 阶段插值的目标：人**此刻**的位形。
+        """STAND 阶段以及 squeeze 首次接合前使用的固定策略默认站姿。"""
+        return self._stand_joint_pos.copy()
 
-        故意用实时值而不是 ``~/start`` 那一刻的快照——插完就直接进 RUNNING，两边取
-        同一个姿态才不会在切换那一拍跳一下。代价是 STAND 这几秒人得站着别乱动。
-        """
+    def live_joint_pos(self) -> np.ndarray:
+        """最新可播放的实时姿态；start 前已接合 squeeze 时保持旧启动语义。"""
         batch = self._require(np.array([self._latest_playable()]))
         return batch.joint_pos[0]
+
+    def align_from_reference(self, robot_anchor_pos: np.ndarray,
+                             robot_anchor_quat: np.ndarray,
+                             robot_ground_z: float,
+                             reference_time: float,
+                             reference_anchor_pos: np.ndarray,
+                             reference_anchor_quat: np.ndarray,
+                             reference_ground_z: float) -> None:
+        """请求在该 live 帧走到延迟播放头时按一对 anchor 位姿重建对齐。"""
+        self._pending = (
+            np.asarray(robot_anchor_pos, dtype=np.float64).copy(),
+            np.asarray(robot_anchor_quat, dtype=np.float64).copy(),
+            float(robot_ground_z),
+            float(reference_time),
+            np.asarray(reference_anchor_pos, dtype=np.float64).copy(),
+            np.asarray(reference_anchor_quat, dtype=np.float64).copy(),
+            float(reference_ground_z),
+        )
+        self._aligned = True
 
     def anchor_pose_world(self, frame: int) -> tuple[np.ndarray, np.ndarray]:
         if self._origin is None:
@@ -146,7 +169,7 @@ class MocapClip:
         batch = self._require(times)
         n = len(offsets)
         current, following = batch.at(slice(0, n)), batch.at(slice(n, 2 * n))
-        self._ensure_alignment(current, offsets)
+        self._ensure_alignment(current, offsets, play)
 
         root_quat = current.root_quat
         lin_vel_w = (following.root_pos - current.root_pos) / self._dt
@@ -236,20 +259,31 @@ class MocapClip:
         self._last_play = self._origin + (int(frame) - self._origin_frame) * self._dt
         return self._last_play
 
-    def _ensure_alignment(self, current: SampleBatch, offsets: np.ndarray) -> None:
+    def _ensure_alignment(self, current: SampleBatch, offsets: np.ndarray,
+                          play: float) -> None:
         """第一次取窗口时才把参考搬到机器人所在的坐标系，之后整段用同一个变换。"""
         if self._pending is None:
             return
-        robot_pos, robot_quat = self._pending
+        pending = self._pending
+        window_end = play + float(np.max(offsets)) * self._dt
+        if len(pending) == 7 and window_end < pending[3]:
+            return
         self._pending = None
-        zero = int(np.argmin(np.abs(offsets)))
-        anchor_pos = current.anchor_pos[zero]
-        anchor_quat = quat_normalize(current.anchor_quat[zero])
+        robot_pos, robot_quat, robot_ground_z = pending[:3]
+        if len(pending) == 7:
+            anchor_pos, anchor_quat = pending[4:6]
+            reference_ground_z = pending[6]
+        else:
+            zero = int(np.argmin(np.abs(offsets)))
+            anchor_pos = current.anchor_pos[zero]
+            anchor_quat = current.anchor_quat[zero]
+            reference_ground_z = float(np.min(current.key_pos[zero, -2:, 2]))
+        anchor_quat = quat_normalize(anchor_quat)
         relative = quat_mul(quat_normalize(robot_quat), quat_conj(anchor_quat))
         self._align_quat = yaw_quat(relative)
         self._align_pos = robot_pos - quat_apply(self._align_quat, anchor_pos)
-        # 高度不对齐：人的离地高度是动作内容，机器人站立高度的差异由策略自己补。
-        self._align_pos[2] = 0.0
+        if robot_ground_z is not None:
+            self._align_pos[2] = robot_ground_z - reference_ground_z
 
     def _to_world(self, positions: np.ndarray) -> np.ndarray:
         return self._align_pos + quat_apply(self._align_quat, positions)

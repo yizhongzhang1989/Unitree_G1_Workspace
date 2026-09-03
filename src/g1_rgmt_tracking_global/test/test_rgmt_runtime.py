@@ -21,6 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from g1_rgmt_tracking_global.motion_library import MotionClip  # noqa: E402
 from g1_rgmt_tracking_global.odometry import OdometryFuser  # noqa: E402
+from g1_rgmt_tracking_global.tracking_node import (  # noqa: E402
+    _gripper_from_trigger,
+    _origin_stamp,
+    _policy_joint_state,
+    _tracking_from_squeezes,
+)
 from g1_rgmt_tracking_global.rotations import (  # noqa: E402
     quat_apply,
     quat_conj,
@@ -36,6 +42,43 @@ KEY_BODIES = ('torso_link', 'left_wrist_yaw_link', 'right_wrist_yaw_link',
               'left_ankle_roll_link', 'right_ankle_roll_link')
 OFFSETS = np.array([-15, -13, -11, -9, -8, -6, -5, -3, -2, -1, 0,
                     1, 2, 3, 5, 6, 8, 9, 11, 13, 15])
+
+
+def test_trigger_maps_open_to_closed_and_clamps():
+    opened, closed = 2.76377472169236, 0.0
+    assert _gripper_from_trigger(0.0, opened, closed) == pytest.approx(opened)
+    assert _gripper_from_trigger(0.5, opened, closed) == pytest.approx(opened / 2.0)
+    assert _gripper_from_trigger(1.0, opened, closed) == pytest.approx(closed)
+    assert _gripper_from_trigger(-1.0, opened, closed) == pytest.approx(opened)
+    assert _gripper_from_trigger(2.0, opened, closed) == pytest.approx(closed)
+
+
+def test_tracking_requires_both_squeezes_with_hysteresis():
+    press, release = 0.7, 0.5
+    assert not _tracking_from_squeezes(False, 0.8, 0.6, press, release)
+    assert _tracking_from_squeezes(False, 0.8, 0.7, press, release)
+    assert _tracking_from_squeezes(True, 0.6, 0.55, press, release)
+    assert not _tracking_from_squeezes(True, 0.6, 0.49, press, release)
+
+
+def test_uncontrolled_grippers_use_the_training_observation_default():
+    measured = np.array([1.0, 2.0, 9.0, 4.0])
+    velocity = np.array([0.1, 0.2, 8.0, 0.4])
+    obs_slots = np.array([0, 1, 2, 3])
+    uncontrolled_slots = np.array([2])
+    defaults = np.array([0.0, 0.0, 0.0, 0.0])
+
+    position, speed = _policy_joint_state(
+        measured, velocity, obs_slots, uncontrolled_slots, defaults)
+
+    assert np.array_equal(position, [1.0, 2.0, 0.0, 4.0])
+    assert np.array_equal(speed, [0.1, 0.2, 0.0, 0.4])
+
+
+def test_origin_stamp_is_read_from_localization_response():
+    assert _origin_stamp('origin_stamp=12.345000 tilt_deg=1.20') == 12.345
+    with pytest.raises(ValueError, match='origin_stamp'):
+        _origin_stamp('origin set')
 
 
 def _clip() -> MotionClip:
@@ -172,6 +215,24 @@ def test_fused_first_lidar_frame_snaps_to_lidar():
     assert np.allclose(fuser.torso_position(), [5.0, 3.0, 0.8], atol=1e-9)
 
 
+def test_reset_lidar_origin_discards_old_correction_but_keeps_odom():
+    fuser = OdometryFuser(mode='fused')
+    identity = [1.0, 0.0, 0.0, 0.0]
+    fuser.push_odom(1.0, [1.0, 2.0, 0.8], identity)
+    fuser.push_lidar(1.0, [5.0, 3.0, 0.0], identity)
+    assert fuser.torso_position() is not None
+
+    fuser.reset_lidar_origin(origin_stamp=1.0)
+    assert fuser.torso_position() is None
+    assert fuser.stale(1.0) == '等待首帧雷达定位'
+
+    # 队列里旧原点的同 stamp 残帧不能把旧世界修正灌回来。
+    assert not fuser.push_lidar(1.0, [99.0, 99.0, 0.0], identity)
+    fuser.push_odom(1.1, [1.0, 2.0, 0.8], identity)
+    fuser.push_lidar(1.1, [0.0, 0.0, 0.0], identity)
+    assert np.allclose(fuser.torso_position(), [0.0, 0.0, 0.8], atol=1e-9)
+
+
 def test_fused_preserves_physical_height_when_lidar_origin_is_at_torso():
     """set_origin 后雷达 z≈0；它不能把 dog_odom 的离地高度一起归零。"""
     fuser = OdometryFuser(mode='fused')
@@ -218,6 +279,16 @@ def test_fused_pairs_lidar_with_matching_odom_stamp():
     assert np.allclose(corr, 0.0, atol=1e-9)
     # 若错误地和最新 odom(x=0.038) 配对，修正量会是 -0.028
     assert np.allclose(fuser.torso_position()[0], 0.038, atol=1e-9)
+
+def test_unpaired_lidar_does_not_refresh_the_health_timestamp():
+    fuser = OdometryFuser(mode='fused', lidar_timeout_s=0.5)
+    identity = [1.0, 0.0, 0.0, 0.0]
+    fuser.push_odom(1.0, [0.0, 0.0, 0.8], identity)
+    assert fuser.push_lidar(1.0, [0.0, 0.0, 0.0], identity)
+
+    fuser.push_odom(1.6, [0.0, 0.0, 0.8], identity)
+    assert not fuser.push_lidar(2.0, [0.0, 0.0, 0.0], identity)
+    assert fuser.stale(1.6) == '雷达定位超时 0.60s'
 
 
 def test_fused_rejects_unpairable_lidar():

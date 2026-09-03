@@ -83,6 +83,7 @@ class OdometryFuser:
         self._odom_stamps: list[float] = []
         self._last_odom: PoseSample | None = None
         self._last_lidar_stamp: float = -1.0
+        self._min_lidar_stamp = -1.0
 
         # T_world_odom 的 yaw + 平移，慢通道估计
         self._corr_pos = np.zeros(3)
@@ -97,6 +98,16 @@ class OdometryFuser:
     def correction(self) -> tuple[np.ndarray, float]:
         """当前的漂移修正量，供 status 上报。范数持续增长就是 odom 在漂。"""
         return self._corr_pos.copy(), self._corr_yaw
+
+    def reset_lidar_origin(self, origin_stamp: float = -1.0) -> None:
+        """定位重新定原点后丢弃旧慢通道修正，等待新原点下的首帧雷达。"""
+        if self._mode == 'odom_only':
+            return
+        self._last_lidar_stamp = -1.0
+        self._min_lidar_stamp = float(origin_stamp)
+        self._corr_pos[:] = 0.0
+        self._corr_yaw = 0.0
+        self._corr_ready = False
 
     def push_odom(self, stamp: float, pos, quat) -> None:
         sample = PoseSample(float(stamp), np.asarray(pos, dtype=np.float64),
@@ -123,11 +134,13 @@ class OdometryFuser:
         if self._mode == 'odom_only':
             return False
         stamp = float(stamp)
+        if stamp <= self._min_lidar_stamp:
+            return False
         pos = np.asarray(pos, dtype=np.float64)
         quat = quat_normalize(quat)
-        self._last_lidar_stamp = stamp
 
         if self._mode == 'lidar_only':
+            self._last_lidar_stamp = stamp
             self._corr_pos = pos
             self._corr_yaw = _yaw_of(quat)
             self._corr_ready = True
@@ -136,6 +149,7 @@ class OdometryFuser:
         paired = self._sample_at(stamp)
         if paired is None:
             return False
+        self._last_lidar_stamp = stamp
 
         # T_world_odom = T_world_torso(雷达) @ inv(T_odom_torso)，只取 yaw 与平移
         yaw = _wrap(_yaw_of(quat) - _yaw_of(paired.quat))

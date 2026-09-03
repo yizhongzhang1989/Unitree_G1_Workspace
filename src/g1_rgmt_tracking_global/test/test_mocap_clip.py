@@ -134,7 +134,8 @@ def accelerating_stream() -> FakeStream:
 
 def make_clip(stream, offsets=CONTRACT_OFFSETS, **kwargs) -> MocapClip:
     return MocapClip(stream, control_dt=CONTROL_DT,
-                     lead_frames=lead_frames_for(offsets), **kwargs)
+                     lead_frames=lead_frames_for(offsets),
+                     stand_joint_pos=DEFAULT_Q, **kwargs)
 
 
 ##
@@ -195,17 +196,20 @@ def test_velocity_uses_the_training_forward_difference(accelerating_stream):
 # 对齐
 ##
 
-def test_alignment_zeroes_the_horizontal_drift(fake_stream):
-    """对齐那一刻，anchor 那 3 维（也就是漂移量）的水平分量必须是 0。
-
-    高度**故意**不对齐——参考的离地高度是动作内容，和 MotionClip 的约定一致。
-    """
+def test_alignment_uses_the_fk_ground_height(fake_stream):
+    """垂直平移对齐双踝最低点，不要求参考和机器人具有相同 torso 高度。"""
     offsets = np.array([-15, 0, 15])
     clip = make_clip(fake_stream, offsets)
     robot_pos = np.array([1.5, -0.3, 0.80])
     robot_quat = np.array([math.cos(0.55), 0.0, 0.0, math.sin(0.55)])
-    clip.align(robot_pos, robot_quat)
+    reference = fake_stream.sample(np.array([clip._latest_playable()]))
+    assert reference is not None
+    reference_ground_z = float(np.min(reference.key_pos[0, -2:, 2]))
+    robot_ground_z = -0.02
+    clip.align(robot_pos, robot_quat, robot_ground_z)
     window = clip.reference_window(0, offsets, robot_pos, robot_quat)
+    expected_anchor_z = reference.anchor_pos[0, 2] + robot_ground_z - reference_ground_z
+    assert window[1, 40] == pytest.approx(expected_anchor_z - robot_pos[2], abs=1e-6)
     assert np.linalg.norm(window[1, 38:40]) < 1e-6
 
 
@@ -284,9 +288,35 @@ def test_streaming_flag_separates_it_from_a_finite_clip(fake_stream):
     assert math.isinf(clip.duration_s)
 
 
-def test_stand_joint_pos_tracks_the_live_pose(fake_stream):
+def test_stand_joint_pos_is_fixed_before_squeeze(fake_stream):
     clip = make_clip(fake_stream)
     assert np.allclose(clip.stand_joint_pos(), DEFAULT_Q, atol=2e-2)
+
+
+def test_live_joint_pos_preserves_the_original_engaged_start(fake_stream):
+    clip = make_clip(fake_stream)
+    expected = fake_stream.sample(np.array([clip._latest_playable()]))
+    assert expected is not None
+    assert np.allclose(clip.live_joint_pos(), expected.joint_pos[0])
+
+
+def test_explicit_live_alignment_uses_the_squeeze_frame(fake_stream):
+    offsets = np.array([0])
+    clip = make_clip(fake_stream, offsets)
+    reference_time = clip._latest_playable()
+    reference = fake_stream.sample(np.array([reference_time]))
+    assert reference is not None
+    robot_pos = np.array([2.0, -1.0, 0.8])
+    robot_ground_z = -0.03
+    reference_ground_z = float(np.min(reference.key_pos[0, -2:, 2]))
+    clip.align_from_reference(robot_pos, IDENTITY_QUAT, robot_ground_z,
+                              reference_time, reference.anchor_pos[0],
+                              reference.anchor_quat[0],
+                              reference_ground_z)
+    window = clip.reference_window(0, offsets, robot_pos, IDENTITY_QUAT)
+    assert np.linalg.norm(window[0, 38:40]) < 1e-6
+    expected_anchor_z = reference.anchor_pos[0, 2] + robot_ground_z - reference_ground_z
+    assert window[0, 40] == pytest.approx(expected_anchor_z - robot_pos[2], abs=1e-6)
 
 
 def test_stale_detects_a_dead_link(fake_stream):
@@ -316,7 +346,8 @@ def test_clip_accepts_a_frame_buffer():
 
     buffer = FrameBuffer(n_joints=len(ACTION_JOINTS), n_keys=len(KEY_BODIES))
     clip = MocapClip(buffer, control_dt=CONTROL_DT,
-                     lead_frames=lead_frames_for(CONTRACT_OFFSETS))
+                     lead_frames=lead_frames_for(CONTRACT_OFFSETS),
+                     stand_joint_pos=DEFAULT_Q)
     # 还没收到任何 status，也没有帧：必须给出明确理由，而不是当成正常。
     assert clip.stale(0.0) != ''
     assert clip.streaming is True

@@ -1,7 +1,8 @@
 # g1_rgmt_tracking_global
 
 G1 全身动作跟踪层：50 Hz 输出 31 轴关节位置目标。
-29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动，2 个夹爪偏心轴透传。
+29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动，2 个夹爪偏心轴由 VR
+手柄 trigger 控制。
 
 参考动作二选一，`reference_source`：
 
@@ -116,9 +117,9 @@ ros2 param set /forward_position_controller adaptive_stiffness_scale 0.0
 #    表现是 localization_node 刷「没有里程计输入」
 ros2 launch head_sensors head_sensors.launch.py camera:=false
 
-# 3. 雷达定位栈（Point-LIO + 接口层）。起完必须钉原点，否则位姿协方差恒为 -1
+# 3. 雷达定位栈（Point-LIO + 接口层）。不用手工钉原点：本层每次 engage 都会自动调用
+#    /g1_localization/set_origin；定位未就绪或调用失败时 engage 会被拒绝
 ros2 launch g1_localization localization.launch.py
-ros2 service call /g1_localization/set_origin std_srvs/srv/Trigger
 
 # 4. 本层
 ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py
@@ -154,7 +155,14 @@ IDLE --engage--> (激活 FPC) --start--> STAND --(插值到位)--> RUNNING
                                             任何时候 estop --> ESTOP
 ```
 
-`~/start` 那一刻会把参考动作**按偏航和平移**对齐到机器人当前位姿（旧包只锁偏航）。高度不对齐——参考的离地高度是动作内容。
+录制 motion 在 `~/start` 时按偏航和水平平移对齐到机器人当前位姿；高度不对齐，因为
+参考的离地高度属于动作内容。实时 mocap 的高度规则见下一段。
+
+实时 mocap 的垂直原点不能直接把 torso z 贴到一起：人和机器人可能屈膝或弯腰，二者
+torso 到地面的高度并不相同。当前做法是分别按当拍关节姿态做 FK，取左右
+`ankle_roll_link` 中沿重力方向的最低点并令两者重合；XY 和 yaw 仍按 torso 对齐。
+localization 的 `world` 本身以雷达 RANSAC 物理地面为 `z=0`，因此参考和实机最终落在同一
+地面坐标系。录制 motion 的离地高度属于动作内容，不走这条实时对齐规则。
 
 `~/status` 每 100 ms 一条：
 
@@ -214,6 +222,23 @@ ros2 run g1_rgmt_tracking_global teleop_keyboard
 ros2 run g1_rgmt_tracking_global mocap_teleop
 ```
 
+运行中两只手柄分工如下：
+
+- `trigger`：各自控制同侧夹爪，0 = 完全打开，1 = 完全闭合
+- `start` 后先平滑插值到策略契约的 `default_joint_pos`；首次按住 `squeeze` 前，参考窗口
+    的 21 个 token 也始终填满这套固定直立站姿，只借用动捕世界中的位置和 yaw，
+    不继承人的实时关节角或骨盆 roll/pitch
+- 如果调用 `start` 时已经按住 `squeeze`，则保持旧版行为：STAND 直接平滑插值到当前
+    实时动捕姿态；进入 RUNNING 的边界再用机器人当拍 torso 建立坐标对齐
+- 双手同时按住 `squeeze`：接合首帧先把人体 root 的位置和 yaw 接到队列中最后一个
+    固定姿态，避免参考速度跳变；XY 和 yaw 按 torso 对齐，z 则分别用当前关节姿态做
+    FK，令参考与机器人双踝最低点处在同一地面。每次重新按住都会重新建立这两层对齐
+- 松开 `squeeze`：后续参考帧持续复制松手前最后一个有效动捕姿态，相当于人一直保持
+    该姿势；重新按住后才恢复实时流
+
+`squeeze` 使用 0.7/0.5 的接合/释放迟滞，避免模拟量卡在门限附近反复切换。手柄断连也会
+立即冻结参考；动捕骨架流断开仍按 `mocap_stale_timeout_s` 急停。
+
 `~/status` 里会多出 `mocap[...]`，`link=up` 且 `body_status=1` 才算通。
 `body_status=2` 配 `message=7` 是头显没被正常佩戴/站好，站直走两步通常能回到 VALID。
 
@@ -247,10 +272,9 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
 **RUNNING 中人误按双摇杆会触发重标**，校准会清空动捕缓冲，本层随即因断流急停——
 安全，但会打断操作。跟人说清楚别乱按。
 
-**三、STAND 那几秒人别乱动。** `stand_joint_pos()` 取的是人**此刻**的位形而不是 `~/start`
-那一刻的快照——插完就直接进 RUNNING，两边取同一个姿态才不会在切换那一拍跳一下。
-代价就是这 3 秒里人动、机器人的插值目标就跟着改。按 Enter 前先摆成接近机器人当前站姿的
-自然站立。
+**三、STAND 使用固定站姿。** `start` 后机器人平滑插值到策略契约的
+`default_joint_pos`，进入 RUNNING 后、首次按住 `squeeze` 前也继续以该站姿作为参考。
+人可以在这段时间调整自己的位置和姿势；按住 `squeeze` 的上升沿才会建立坐标对齐并接管。
 
 ### 断流会怎样
 
@@ -262,8 +286,23 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
 | 名单 | 数量 | 说明 |
 |---|---|---|
 | FPC 指令 | 31 | 夹爪在**末尾** |
-| 策略观测 | 31 | 夹爪夹在**中间**（第 22、30 位） |
+| 策略观测 | 31 | 夹爪夹在**中间**（第 23、31 位） |
 | 策略动作 | 29 | 不含夹爪 |
 
 两套 31 轴顺序**不同**，所以全部按名字查槽位，绝不切片。`joints` 由 launch 从
 `unitree_g1_ros2_control/config/default_31dof_param.yaml` 注入，不在本包抄第二份。
+两个夹爪偏心轴虽然出现在 31 维观测名单里，但策略训练时恒为默认值 0；实机 trigger
+可以照常控制夹爪，送入策略的位置与速度仍固定为训练默认值，避免夹爪动作污染全身输出。
+
+这条不是可选优化，而是实机确认过的部署契约。物理夹爪完全打开时 eccentric 约为
+`2.764 rad`；若把该反馈原样送进策略，真实 ONNX 离线重放中仅 `0.5 rad` 就会把肩 roll
+从约 `+0.30/-0.33 rad` 推到 `+1.29/-1.25 rad`，`2.764 rad` 时多路手臂目标直接逼近限位。
+表现就是**不按 squeeze、刚进入 RUNNING 也会抬手并站不稳**，而调整参考 z 几乎没有改善。
+
+因此两条链必须分开：
+
+- FPC 指令：trigger 正常控制实际夹爪开合
+- 策略观测：左右 eccentric 位置恒填 `0`，速度恒填 `0`
+
+排查类似问题时不要只检查 29 轴策略动作；还必须审计 31 维本体观测中那两个“策略不控制、
+但模型看得见”的轴。

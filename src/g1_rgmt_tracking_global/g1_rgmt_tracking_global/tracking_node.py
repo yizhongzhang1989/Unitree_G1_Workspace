@@ -5,7 +5,7 @@
 
 分工：
 * 29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动；
-* 2 个夹爪偏心轴透传 ``gripper_targets``，策略不管它们，但它们的**实测角要进观测**。
+* 2 个夹爪偏心轴由 VR trigger 控制；策略训练时没有它们，观测恒填 0。
 
 状态机与 ``g1_motion_control`` 一致，便于同一套操作流程::
 
@@ -13,8 +13,8 @@
                                                  任何时候 estop --> ESTOP
 
 **与旧 g1_gmt_tracking 的关键差异**：本策略的参考窗口里有 15 维是"参考 key body 相对
-机器人躯干"的位移，其中头 3 维就是漂移量本身。所以必须接里程计，并在 ``~/start``
-那一刻把参考动作**同时**按偏航和平移对齐到机器人当前位姿。旧包只锁偏航。
+机器人躯干"的位移，其中头 3 维就是漂移量本身。所以必须接里程计；录制动作在
+``~/start`` 对齐，实时动捕在每次 squeeze 接合时对齐。旧包只锁偏航。
 **两种参考源**，``reference_source`` 二选一：
 
 ``motion``（默认）
@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import rclpy
 from controller_manager_msgs.srv import SwitchController
-from g1_mocap_msgs.msg import MocapFrame, MocapStatus
+from g1_mocap_msgs.msg import MocapControllers, MocapFrame, MocapStatus
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -52,6 +52,7 @@ from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 from .motion_library import MotionLibrary
+from .mocap_gate import MocapFrameGate, ZeroReferenceFactory
 from .odometry import OdometryFuser
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
     from .mocap_clip import MocapClip
 from .rgmt_runtime import RgmtPolicy, resolve_policy_path, spec_matches
 from .rotations import (
+    quat_apply,
     quat_from_xyzw,
     rotate_inverse,
     torso_pos_from_pelvis,
@@ -69,6 +71,36 @@ from .rotations import (
 
 WAIST_JOINTS = ('waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint')
 GRAVITY_W = np.array([0.0, 0.0, -1.0])
+
+
+def _tracking_from_squeezes(current: bool, left: float, right: float,
+                            press: float, release: float) -> bool:
+    """双手 squeeze 迟滞门：两侧都越过同一条边界才切换。"""
+    threshold = release if current else press
+    return float(left) >= threshold and float(right) >= threshold
+
+
+def _policy_joint_state(measured: np.ndarray, velocity: np.ndarray,
+                        obs_slots: np.ndarray, uncontrolled_slots: np.ndarray,
+                        default_joint_pos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """组装策略本体观测；策略不控制的轴保持训练时默认值。"""
+    position = measured[obs_slots].copy()
+    speed = velocity[obs_slots].copy()
+    position[uncontrolled_slots] = default_joint_pos[uncontrolled_slots]
+    speed[uncontrolled_slots] = 0.0
+    return position, speed
+
+
+def _gripper_from_trigger(trigger: float, opened: float, closed: float) -> float:
+    value = min(max(float(trigger), 0.0), 1.0)
+    return opened + (closed - opened) * value
+
+
+def _origin_stamp(message: str) -> float:
+    for field in message.split():
+        if field.startswith('origin_stamp='):
+            return float(field.partition('=')[2])
+    raise ValueError('响应缺少 origin_stamp')
 
 
 class State(Enum):
@@ -118,6 +150,30 @@ class RgmtTrackingNode(Node):
 
         names = list(spec.all_body_names)
         # 训练侧前瞻特征取 body_names[0] 作根位姿，这里保持同一约定。
+        self._lock = threading.Lock()
+        self._state = State.IDLE
+        self._reason = ''
+        gripper_limits = np.asarray(
+            p('gripper_limits', [0.0, 2.76377472169236])
+            .get_parameter_value().double_array_value, dtype=np.float64)
+        if gripper_limits.shape != (2,) or gripper_limits[0] > gripper_limits[1]:
+            raise RuntimeError('gripper_limits 必须是 [闭合角, 打开角]')
+        self._gripper_closed, self._gripper_open = gripper_limits
+        self._gripper_targets = np.full(2, self._gripper_open)
+        self._tracking = False
+        self._mocap_had_tracking = False
+        self._mocap_align_pending = None
+        self._stand_tracks_mocap = False
+        self._controllers_stamp = 0.0
+        self._controllers_timeout = float(p('mocap_controllers_timeout_s', 0.2)
+                                          .get_parameter_value().double_value)
+        self._squeeze_press = float(p('squeeze_press_threshold', 0.7)
+                                    .get_parameter_value().double_value)
+        self._squeeze_release = float(p('squeeze_release_threshold', 0.5)
+                                      .get_parameter_value().double_value)
+        if not 0.0 <= self._squeeze_release < self._squeeze_press <= 1.0:
+            raise RuntimeError('squeeze 门限必须满足 0 <= release < press <= 1')
+
         self._source = p('reference_source', 'motion').get_parameter_value().string_value
         if self._source not in ('motion', 'mocap'):
             raise RuntimeError(f"reference_source 只能是 motion 或 mocap，收到 {self._source!r}")
@@ -147,10 +203,6 @@ class RgmtTrackingNode(Node):
         self._stand_s = float(p('stand_s', 3.0).get_parameter_value().double_value)
         self._timeout = float(p('state_timeout_s', 0.2).get_parameter_value().double_value)
         self._tilt_limit = float(p('tilt_limit_rad', 0.8).get_parameter_value().double_value)
-        self._gripper_targets = np.asarray(
-            p('gripper_targets', [0.0, 0.0]).get_parameter_value().double_array_value,
-            dtype=np.float64)
-
         self._odom = OdometryFuser(
             mode=p('odometry_mode', 'fused').get_parameter_value().string_value,
             odom_timeout_s=float(p('odom_timeout_s', 0.2).get_parameter_value().double_value),
@@ -162,15 +214,15 @@ class RgmtTrackingNode(Node):
         self._action_slots = self._slots(action_joints)
         self._gripper_slots = self._slots(gripper_joints)
         self._obs_slots = self._slots(obs_joints)
+        policy_action_slots = self._policy.action_slots()
+        self._policy_uncontrolled_slots = np.setdiff1d(
+            np.arange(len(obs_joints)), policy_action_slots)
         self._waist_slots = self._slots(list(WAIST_JOINTS))
         if len(action_joints) + len(gripper_joints) != len(joints):
             raise RuntimeError(
                 f'动作 {len(action_joints)} + 夹爪 {len(gripper_joints)} '
                 f'必须正好盖满 {len(joints)} 轴')
 
-        self._lock = threading.Lock()
-        self._state = State.IDLE
-        self._reason = ''
         self._measured: np.ndarray | None = None
         self._measured_vel: np.ndarray | None = None
         self._joint_stamp = 0.0
@@ -223,6 +275,11 @@ class RgmtTrackingNode(Node):
             .get_parameter_value().string_value
         self._switch = self.create_client(
             SwitchController, f'{manager}/switch_controller', callback_group=services)
+        self._set_origin = self.create_client(
+            Trigger,
+            p('set_origin_service', '/g1_localization/set_origin')
+            .get_parameter_value().string_value,
+            callback_group=services)
         self.create_service(Trigger, '~/engage', self._on_engage, callback_group=services)
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
@@ -243,6 +300,8 @@ class RgmtTrackingNode(Node):
         对不上就丢帧，而不是静默地把左右腿接反。
         """
         from g1_mocap.consumer import FrameBuffer
+        from g1_mocap.kinematics import G1Kinematics
+        from g1_mocap.urdf import DEFAULT_URDF, resolve_package_path
 
         from .mocap_clip import MocapClip, lead_frames_for
 
@@ -253,6 +312,16 @@ class RgmtTrackingNode(Node):
             n_joints=len(action_joints), n_keys=len(spec.reference_key_bodies),
             buffer_s=float(p('mocap_buffer_s', 2.0).get_parameter_value().double_value))
         self._mocap = buffer
+        kin = G1Kinematics(resolve_package_path(DEFAULT_URDF), action_joints)
+        self._mocap_kin = kin
+        stand = spec.default_joint_pos[self._policy.action_slots()]
+        key_local = kin.key_body_pos(stand, spec.reference_key_bodies)
+        anchor_local = kin.frame_pos(spec.anchor_body_name)
+        anchor_rot = kin.frame_rot(spec.anchor_body_name)
+        gate = MocapFrameGate(
+            buffer,
+            ZeroReferenceFactory(stand, anchor_local, anchor_rot, key_local),
+        )
 
         self._mocap_topic = p('mocap_frame_topic', '/mocap/frame') \
             .get_parameter_value().string_value
@@ -265,10 +334,15 @@ class RgmtTrackingNode(Node):
         stream = QoSProfile(depth=10, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(MocapFrame, self._mocap_topic,
-                                 partial(self._on_mocap_frame, buffer),
+                                 partial(self._on_mocap_frame, gate),
                                  stream, callback_group=mocap_group)
         self.create_subscription(MocapStatus, status_topic,
                                  buffer.push_status, 10,
+                                 callback_group=mocap_group)
+        controllers_topic = p('mocap_controllers_topic', '/mocap/controllers') \
+            .get_parameter_value().string_value
+        self.create_subscription(MocapControllers, controllers_topic,
+                                 self._on_mocap_controllers, 10,
                                  callback_group=mocap_group)
 
         margin = int(p('mocap_lead_margin_frames', 2)
@@ -279,10 +353,11 @@ class RgmtTrackingNode(Node):
             f'这是策略要未来 {int(max(spec.window_offsets))} 帧带来的下界，砍不掉。')
         return MocapClip(
             buffer, control_dt=spec.control_dt, lead_frames=lead,
+            stand_joint_pos=stand,
             stale_timeout_s=float(p('mocap_stale_timeout_s', 0.3)
                                   .get_parameter_value().double_value))
 
-    def _on_mocap_frame(self, buffer: FrameBuffer, message: MocapFrame) -> None:
+    def _on_mocap_frame(self, gate: MocapFrameGate, message: MocapFrame) -> None:
         """每帧核对两份名单。两者都是**顺序敏感**且错了不报错的。
 
         关节名单错位 = 左右腿指令互换；key body 名单错位 = 参考窗口后 30 维整段
@@ -300,7 +375,65 @@ class RgmtTrackingNode(Node):
                 f'期望 {self._mocap_key_bodies}，收到 {list(message.key_body_names)}。',
                 throttle_duration_sec=5.0)
             return
-        buffer.push_frame(message)
+        with self._lock:
+            if self._tracking:
+                mode = 'live'
+            elif self._mocap_had_tracking:
+                mode = 'hold'
+            else:
+                mode = 'default'
+            pending = self._mocap_align_pending if mode == 'live' else None
+        accepted = gate.push(message, mode=mode)
+        if accepted and pending is not None:
+            payload = gate.last_payload
+            if payload is None:
+                return
+            position = payload.anchor.position
+            orientation = payload.anchor.orientation
+            reference_ground_z = min(
+                point.z for point in payload.key_body_positions[-2:])
+            self._mocap_clip.align_from_reference(
+                pending[0], pending[1],
+                pending[2],
+                float(message.header.stamp.sec) + message.header.stamp.nanosec * 1e-9,
+                np.array([position.x, position.y, position.z]),
+                quat_from_xyzw((orientation.x, orientation.y,
+                                orientation.z, orientation.w)),
+                reference_ground_z,
+            )
+            with self._lock:
+                if self._mocap_align_pending is pending:
+                    self._mocap_align_pending = None
+
+    def _on_mocap_controllers(self, message: MocapControllers) -> None:
+        left, right = message.left, message.right
+        connected = left.connected and right.connected
+        with self._lock:
+            self._controllers_stamp = self._now()
+            tracking = connected and _tracking_from_squeezes(
+                self._tracking, left.squeeze, right.squeeze,
+                self._squeeze_press, self._squeeze_release)
+            changed = tracking != self._tracking
+            self._tracking = tracking
+            self._mocap_had_tracking = self._mocap_had_tracking or tracking
+            if changed and tracking and self._measured is not None and self._imu_quat is not None:
+                robot_pos = self._odom.torso_position()
+                if robot_pos is not None:
+                    robot_quat = self._odom.orientation_in_world(
+                        self._torso_quat(self._measured, self._imu_quat))
+                    robot_ground_z = self._robot_ground_z(
+                        self._measured, self._imu_quat, robot_pos)
+                    self._mocap_align_pending = (
+                        robot_pos.copy(), robot_quat.copy(), robot_ground_z)
+            if left.connected:
+                self._gripper_targets[0] = _gripper_from_trigger(
+                    left.trigger, self._gripper_open, self._gripper_closed)
+            if right.connected:
+                self._gripper_targets[1] = _gripper_from_trigger(
+                    right.trigger, self._gripper_open, self._gripper_closed)
+        if changed:
+            self.get_logger().info(
+                '双手 squeeze 接合，开始跟踪' if tracking else '双手 squeeze 断开，姿势冻结')
 
     def _slots(self, names: list[str]) -> np.ndarray:
         try:
@@ -408,6 +541,11 @@ class RgmtTrackingNode(Node):
             if self._state not in (State.IDLE, State.ESTOP):
                 response.success, response.message = False, f'当前状态 {self._state.value}'
                 return response
+        if self._odom.mode != 'odom_only':
+            ok, detail = self._set_world_origin()
+            if not ok:
+                response.success, response.message = False, detail
+                return response
         ok, detail = self._switch_controller(activate=True)
         if ok:
             with self._lock:
@@ -415,6 +553,24 @@ class RgmtTrackingNode(Node):
                 self._reason = ''
         response.success, response.message = ok, detail
         return response
+
+    def _set_world_origin(self) -> tuple[bool, str]:
+        if not self._set_origin.wait_for_service(timeout_sec=2.0):
+            return False, f'定位定原点服务 {self._set_origin.srv_name} 不可用'
+        future = self._set_origin.call_async(Trigger.Request())
+        if not self._wait(future, 3.0):
+            return False, '定位定原点超时'
+        result = future.result()
+        if result is None or not result.success:
+            detail = '' if result is None else result.message
+            return False, f'定位定原点失败: {detail or "无响应"}'
+        try:
+            origin_stamp = _origin_stamp(result.message)
+        except ValueError as exc:
+            return False, f'定位定原点响应无效: {exc}'
+        with self._lock:
+            self._odom.reset_lidar_origin(origin_stamp)
+        return True, result.message
 
     def _on_start(self, _request, response):
         with self._lock:
@@ -443,9 +599,17 @@ class RgmtTrackingNode(Node):
             measured, _, pelvis_quat = snapshot
             self._stand_from = measured
             self._stand_start = self._now()
+            self._mocap_had_tracking = self._tracking
+            self._stand_tracks_mocap = self._mocap_clip is not None and self._tracking
             self._policy.reset()
             # 同时锁偏航与平移。中途重算等于把已产生的跟踪误差抹掉，那 15 维就永远读作零。
-            self._clip.align(pose, self._torso_quat(measured, pelvis_quat))
+            torso_quat = self._torso_quat(measured, pelvis_quat)
+            if self._mocap_clip is None:
+                self._clip.align(pose, torso_quat)
+            else:
+                self._clip.align(
+                    pose, torso_quat,
+                    self._robot_ground_z(measured, pelvis_quat, pose))
             self._state = State.STAND
         response.success = True
         response.message = f'STAND 中，{self._stand_s:.1f}s 后开始放 {self._clip.name}'
@@ -499,6 +663,18 @@ class RgmtTrackingNode(Node):
         waist = measured[self._waist_slots]
         return torso_quat_from_pelvis(pelvis_quat, waist[0], waist[1], waist[2])
 
+    def _robot_ground_z(self, measured: np.ndarray, pelvis_quat: np.ndarray,
+                        torso_pos: np.ndarray) -> float:
+        """当前姿态 FK 的双踝最低点世界 z；准备阶段该点定义地面。"""
+        local = self._mocap_kin.key_body_pos(
+            measured[self._action_slots],
+            ('torso_link', 'left_ankle_roll_link', 'right_ankle_roll_link'))
+        world_pelvis_quat = self._odom.orientation_in_world(pelvis_quat)
+        pelvis_pos = np.asarray(torso_pos, dtype=np.float64) \
+            - quat_apply(world_pelvis_quat, local[0])
+        ankles = pelvis_pos + quat_apply(world_pelvis_quat, local[1:])
+        return float(np.min(ankles[:, 2]))
+
     def _snapshot(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """锁内取关节与 IMU。三者都是首帧到达才赋上，在那之前一律返回 None。"""
         measured, vel, quat = self._measured, self._measured_vel, self._imu_quat
@@ -510,6 +686,10 @@ class RgmtTrackingNode(Node):
         with self._lock:
             if self._state not in ACTIVE_STATES:
                 return
+            controllers_timed_out = self._mocap_clip is not None and self._tracking \
+                and self._now() - self._controllers_stamp > self._controllers_timeout
+            if controllers_timed_out:
+                self._tracking = False
             stale = self._stale()
             snapshot = self._snapshot()
             if snapshot is None:
@@ -525,6 +705,11 @@ class RgmtTrackingNode(Node):
                 stand_from = None if self._stand_from is None else self._stand_from.copy()
                 stand_elapsed = self._now() - self._stand_start
                 clip = self._clip
+                stand_tracks_mocap = self._stand_tracks_mocap
+                tracking = self._tracking
+                gripper_targets = self._gripper_targets.copy()
+        if controllers_timed_out:
+            self.get_logger().warning('VR 手柄状态超时，姿势冻结')
         if stale:
             self._estop(stale)
             return
@@ -538,7 +723,7 @@ class RgmtTrackingNode(Node):
             return
 
         targets = np.empty(len(self._joints))
-        targets[self._gripper_slots] = self._gripper_targets
+        targets[self._gripper_slots] = gripper_targets
 
         if state is State.STAND:
             if stand_from is None:
@@ -547,19 +732,32 @@ class RgmtTrackingNode(Node):
                 self._estop('STAND 缺少插值起点')
                 return
             goal = np.empty(len(self._joints))
-            goal[self._gripper_slots] = self._gripper_targets
-            goal[self._action_slots] = clip.stand_joint_pos()
+            goal[self._gripper_slots] = gripper_targets
+            goal[self._action_slots] = clip.live_joint_pos() \
+                if stand_tracks_mocap else clip.stand_joint_pos()
             alpha = min(stand_elapsed / max(self._stand_s, 1e-3), 1.0)
             targets[:] = stand_from + alpha * (goal - stand_from)
             if alpha >= 1.0:
+                # squeeze 在 start 前或 STAND 中已经接合时，把 RUNNING 边界视为
+                # 有效接合点。start 的对齐只供固定站姿使用，不能覆盖实时参考的锚。
+                if self._mocap_clip is not None and tracking:
+                    clip.align(
+                        torso_pos, torso_quat,
+                        self._robot_ground_z(measured, base_quat, torso_pos))
                 with self._lock:
+                    if self._mocap_clip is not None and tracking:
+                        self._mocap_align_pending = None
                     self._state = State.RUNNING
                 self.get_logger().info(f'开始放 {clip.name}')
         else:
             try:
+                policy_position, policy_velocity = _policy_joint_state(
+                    measured, measured_vel, self._obs_slots,
+                    self._policy_uncontrolled_slots,
+                    self._policy.spec.default_joint_pos)
                 action_targets = self._policy.step(
-                    joint_pos=measured[self._obs_slots],
-                    joint_vel=measured_vel[self._obs_slots],
+                    joint_pos=policy_position,
+                    joint_vel=policy_velocity,
                     ang_vel=omega,
                     # 两个刚体不能混：投影重力与角速度挂 pelvis（IMU 直给），
                     # key body 局部化挂 anchor=torso（需 FK 和定位世界系 yaw 修正）。

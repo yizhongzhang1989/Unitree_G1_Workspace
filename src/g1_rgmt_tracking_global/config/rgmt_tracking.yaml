@@ -24,8 +24,8 @@
     loop: false
 
     # 观测里 joint_pos / joint_vel 覆盖的 31 轴，顺序必须与 ONNX metadata 一致。
-    # **注意两个 eccentric（夹爪）轴夹在中间，不在末尾**——它们进观测但不由策略驱动，
-    # 真机上夹爪编码器的读数必须照喂，缺了观测就整体错位。
+    # **注意两个 eccentric（夹爪）轴夹在中间，不在末尾**。名单必须保留以匹配 ONNX
+    # 布局，但训练时这两轴恒为 0，运行时送给策略的位置与速度也恒填 0。
     obs_joints:
       - left_hip_pitch_joint
       - left_hip_roll_joint
@@ -91,9 +91,10 @@
       - right_wrist_pitch_joint
       - right_wrist_yaw_joint
 
-    # 策略不管的 2 轴，透传下面的目标值。
+    # 策略不管的 2 轴，由 VR 手柄 trigger 控制：0 = 完全打开，1 = 完全闭合。
     gripper_joints: [left_eccentric_joint, right_eccentric_joint]
-    gripper_targets: [0.0, 0.0]
+    # eccentric_joint 的方向与 trigger 相反：0 rad 闭合，2.76377 rad 打开。
+    gripper_limits: [0.0, 2.76377472169236]
 
     # 失控保护边界 = 训练模型里 MuJoCo 算的 ctrlrange（jnt_range ± effort_limit/stiffness）。
     #
@@ -146,6 +147,8 @@
     odometry_mode: fused
     odom_topic: /dog_odom
     lidar_pose_topic: /g1_localization/torso_pose
+    # fused / lidar_only 每次 engage 前自动调用；失败则拒绝激活控制器。
+    set_origin_service: /g1_localization/set_origin
     odom_timeout_s: 0.2
     # 雷达 10 Hz，给到 1 s 容得下几帧丢失；超时即急停。
     lidar_timeout_s: 1.0
@@ -169,6 +172,12 @@
     # 校准也归 mocap_node：人站直后按双摇杆，或调 /mocap/calibrate。
     mocap_frame_topic: /mocap/frame
     mocap_status_topic: /mocap/status
+    mocap_controllers_topic: /mocap/controllers
+    # 手柄状态不再持续到达时不能沿用最后一个“按住”状态；超时后冻结，夹爪保持最后值。
+    mocap_controllers_timeout_s: 0.2
+    # 两只手都按过 press 才开始跟踪；任一只松到 release 以下就冻结参考姿势。
+    squeeze_press_threshold: 0.7
+    squeeze_release_threshold: 0.5
     # 缓冲时长。要盖住参考窗口的整个跨度加上重同步余量。
     mocap_buffer_s: 2.0
     # 播放头在「最新帧减去前瞻跨度」之外还要再退几拍。策略要 +15 帧的未来，实时流
