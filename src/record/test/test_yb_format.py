@@ -10,9 +10,12 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import sys
 from pathlib import Path
+
+import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
@@ -160,6 +163,50 @@ def test_episode_name_only_lives_in_the_all_index():
     assert "'episode_name': record['name']" in source
 
 
+def _cogact_spaces(frames=12):
+    pose = np.zeros((frames, 2, 7), dtype=float)
+    pose[..., 6] = 1.0
+    intrinsic = np.broadcast_to(np.eye(3), (frames, 3, 3, 3)).copy()
+    intrinsic[..., 0, 0] = 500.0
+    intrinsic[..., 1, 1] = 500.0
+    extrinsic = np.zeros((frames, 3, 3, 4), dtype=float)
+    extrinsic[..., :3] = np.eye(3)
+    return {
+        'end': {
+            'names': ['left_arm_end', 'right_arm_end'],
+            'state': {'pose': pose.copy(), 'pose_unified': pose.copy()},
+            'action': {'pose': pose.copy(), 'pose_unified': pose.copy()},
+        },
+        'actuator': {
+            'state': {'value': np.zeros((frames, 2))},
+            'action': {'value': np.zeros((frames, 2))},
+        },
+        'camera': {
+            'names': ['headcam', 'leftcam', 'rightcam'],
+            'state': {
+                'intrinsic': intrinsic,
+                'extrinsic': extrinsic,
+                'frame_index': np.broadcast_to(np.arange(frames)[:, None],
+                                                (frames, 3)).copy(),
+            },
+        },
+    }
+
+
+def test_cogact_compatibility_check_accepts_complete_episode():
+    assert ex.cogact_compatibility_problems(_cogact_spaces(), 'pick up the box') == []
+
+
+def test_cogact_compatibility_check_rejects_values_loader_cannot_mask():
+    spaces = copy.deepcopy(_cogact_spaces())
+    spaces['end']['action']['pose_unified'][3, 0, 0] = np.nan
+    spaces['camera']['state']['frame_index'][4, 1] = -1
+    problems = ex.cogact_compatibility_problems(spaces, '')
+    assert any('CogACT 不读取 valid_mask' in problem for problem in problems)
+    assert any('leftcam 有 1/12 帧没有源图像' in problem for problem in problems)
+    assert 'instruction_en 为空' in problems
+
+
 def _postcheck_source() -> str:
     """把 `sync_and_convert.ps1` 里内嵌的那段自检 python 抠出来。"""
     text = (TOOLS / 'sync_and_convert.ps1').read_text(encoding='utf-8')
@@ -168,6 +215,16 @@ def _postcheck_source() -> str:
 
 def test_postcheck_script_still_compiles():
     compile(_postcheck_source(), 'yb_postcheck.py', 'exec')
+
+
+def test_yb_always_enforces_cogact_compatibility():
+    source = (HERE / 'export.py').read_text(encoding='utf-8')
+    main = source.split('def main() -> int:', 1)[1]
+    check = main.index('problems = cogact_compatibility_problems(')
+    write_h5 = main.index("with h5py.File(out / 'data'")
+    assert check < write_h5
+    assert 'if writing:\n            export_videos(' in main
+    assert 'unified_v2__UnitreeG1__YB' in TEXT
 
 
 def test_postcheck_reads_only_keys_and_cameras_that_exist():

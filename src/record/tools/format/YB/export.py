@@ -631,6 +631,82 @@ def build_spaces(session: Session, model, grid, args, intrinsics,
     }
 
 
+def cogact_compatibility_problems(spaces: dict, instruction: str) -> list[str]:
+    """Return reasons this episode cannot be consumed safely by CogACT unified_v2."""
+    problems = []
+    expected_names = {
+        'end': ['left_arm_end', 'right_arm_end'],
+        'camera': ['headcam', 'leftcam', 'rightcam'],
+    }
+    for key, expected in expected_names.items():
+        actual = list(spaces[key].get('names') or [])
+        if actual != expected:
+            problems.append(f'{key}_space names 应为 {expected}，实际是 {actual}')
+
+    state_pose = np.asarray(spaces['end']['state']['pose'])
+    frames = state_pose.shape[0] if state_pose.ndim else 0
+    required = {
+        'state/end_space/pose': (state_pose, (frames, 2, 7)),
+        'state/end_space/pose_unified': (
+            spaces['end']['state']['pose_unified'], (frames, 2, 7)),
+        'action/end_space/pose': (
+            spaces['end']['action']['pose'], (frames, 2, 7)),
+        'action/end_space/pose_unified': (
+            spaces['end']['action']['pose_unified'], (frames, 2, 7)),
+        'state/actuator_space/value': (
+            spaces['actuator']['state']['value'], (frames, 2)),
+        'action/actuator_space/value': (
+            spaces['actuator']['action']['value'], (frames, 2)),
+        'state/camera_space/intrinsic': (
+            spaces['camera']['state']['intrinsic'], (frames, 3, 3, 3)),
+        'state/camera_space/extrinsic': (
+            spaces['camera']['state']['extrinsic'], (frames, 3, 3, 4)),
+        'state/camera_space/frame_index': (
+            spaces['camera']['state']['frame_index'], (frames, 3)),
+    }
+    arrays = {}
+    for path, (value, expected_shape) in required.items():
+        array = np.asarray(value)
+        arrays[path] = array
+        if array.shape != expected_shape:
+            problems.append(f'{path} shape 应为 {expected_shape}，实际是 {array.shape}')
+        elif path != 'state/camera_space/frame_index' and not np.isfinite(array).all():
+            count = int(array.size - np.isfinite(array).sum())
+            problems.append(f'{path} 含 {count} 个 NaN/Inf；CogACT 不读取 valid_mask')
+
+    if frames < 2:
+        problems.append(f'episode 只有 {frames} 帧，无法构造 next-step action')
+    if not instruction.strip():
+        problems.append('instruction_en 为空')
+
+    for path in ('state/end_space/pose', 'state/end_space/pose_unified',
+                 'action/end_space/pose', 'action/end_space/pose_unified'):
+        array = arrays[path]
+        if array.shape == required[path][1] and np.isfinite(array).all():
+            norm = np.linalg.norm(array[..., 3:7], axis=-1)
+            if not np.allclose(norm, 1.0, atol=1e-3):
+                problems.append(f'{path} 含非单位四元数')
+
+    for path in ('state/actuator_space/value', 'action/actuator_space/value'):
+        array = arrays[path]
+        if array.shape == required[path][1] and np.isfinite(array).all():
+            if np.any((array < 0.0) | (array > 1.0)):
+                problems.append(f'{path} 超出 [0, 1]')
+
+    intrinsic = arrays['state/camera_space/intrinsic']
+    if intrinsic.shape == required['state/camera_space/intrinsic'][1]:
+        if np.isfinite(intrinsic).all() and np.any(intrinsic[..., (0, 1), (0, 1)] <= 0):
+            problems.append('state/camera_space/intrinsic 的 fx/fy 必须为正数')
+
+    frame_index_array = arrays['state/camera_space/frame_index']
+    if frame_index_array.shape == required['state/camera_space/frame_index'][1]:
+        for column, name in enumerate(expected_names['camera']):
+            missing = int(np.count_nonzero(frame_index_array[:, column] < 0))
+            if missing:
+                problems.append(f'{name} 有 {missing}/{frames} 帧没有源图像')
+    return problems
+
+
 def episode_name(serial: int, session_id: str, episode: dict) -> str:
     """h5 / mp4 / episode json 共用这一个基名，示例里就是靠同名把三者对起来的。"""
     return (f'{serial:08d}-{session_id}__g1__'
@@ -808,11 +884,15 @@ def main() -> int:
                          'cam_T_base: camera_xyz = extrinsic @ world_xyz')
     ap.add_argument('--video-height', type=int, default=360,
                     help='导出视频的高度，0 = 保持源分辨率')
-    ap.add_argument('--no-video', action='store_true')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--progress', action='store_true',
                     help='往 stdout 多吐 "@progress <0..1>" 行，给面板的进度条用')
     args = ap.parse_args()
+
+    if not np.isclose(args.hz, DEFAULT_HZ):
+        print(f'！YB/CogACT 固定为 {DEFAULT_HZ:g} Hz，'
+              f'不能用 --hz {args.hz:g}', file=sys.stderr)
+        return 2
 
     sessions = [Session(path) for path in args.sessions]
     session_ids = [session.manifest['session_id'] for session in sessions]
@@ -880,6 +960,13 @@ def main() -> int:
                   f'{episode.get("instruction_en", "")}')
             for line in _report(spaces, verbose=args.dry_run):
                 print(f'    {line}')
+            problems = cogact_compatibility_problems(
+                spaces, episode.get('instruction_en', ''))
+            if problems:
+                print(f'！{name} 不满足 CogACT unified_v2：', file=sys.stderr)
+                for problem in problems:
+                    print(f'  - {problem}', file=sys.stderr)
+                return 2
             records.append({'name': name, 'episode': episode, 'frames': grid.size})
             if not writing:
                 continue
@@ -891,7 +978,7 @@ def main() -> int:
                 plans[camera.name].append(resample_video.Plan(
                     out / f'video_{camera.name}' / f'{name}.mp4',
                     frames[:, column].tolist()))
-        if writing and not args.no_video:
+        if writing:
             export_videos(session, plans, args, order, len(sessions))
 
     if not writing:

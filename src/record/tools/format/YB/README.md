@@ -12,8 +12,14 @@ episode 文件序号跨采集连续（§3）。
 
 ```bash
 python3 convert.py <session A> <session B> <session C> --to yb -o <输出目录> \
-        --urdf final.urdf
+  --urdf final.urdf
 ```
+
+转换器会在写每条 episode 前按 CogACT 实际读取的字段做严格检查。YB 规范允许用
+`valid_mask=0` + `NaN` 表示缺数据，但 CogACT 的 `UnifiedV2EpisodicDataset` 不读取这些
+mask；严格模式因此会拒绝 state/action pose、夹爪、相机参数中的 NaN/Inf，也会拒绝
+空指令、非 30 Hz 或缺任一路视频源帧。YB 专门用于 CogACT，因此检查始终启用，
+也始终导出三路视频；只检查而不写盘使用 `--dry-run`。
 
 ---
 
@@ -509,3 +515,38 @@ h5 的 `meta` attrs 只有三个：`version`、`gripper_unified="v1"`（夹爪�
 - **合并多次采集时，`meta.json` 里的内参出处只报第一次采集的**（h5 逐条用的仍是各自
   采集当时那份）。几次采集之间重标过相机的话，以 h5 里 `meta/camera_space/intrinsic`
   为准。`head_optical` 不一致时导出直接拒绝，不会悄悄按第一次的算。
+
+---
+
+## 11. 接入 CogACT
+
+CogACT 使用 `cogact/datasets/sub_datasets/unified_v2/` 下的 HDF5 loader。YB 的目录、
+字段和视频命名已经按这个 loader 对齐，不需要二次转换。把整份导出结果放成：
+
+```text
+${data_mount_dir}/UnitreeG1/YB/
+├── episodes_all.json
+├── data/*.h5
+├── episode/*.json
+├── video_headcam/*.mp4
+├── video_leftcam/*.mp4
+└── video_rightcam/*.mp4
+```
+
+训练配置选择：
+
+```yaml
+data_mount_dir: /path/to/data-root
+train_dataset:
+  data_mix: unified_v2__UnitreeG1__YB
+```
+
+注册项固定为三路视角、30 Hz、`pose_source: unified`，并使用
+`action_source: action_next`。原因是 YB 的 `action[t]` 是零阶保持后在时刻 `t` 生效的
+末端 setpoint；CogACT 的 next-step 标签用 `action[t+1]` 对 `state[t]`。不要改成
+`action_same`，否则 prev-relative 动作类型会把当前 command 与当前 state 对齐，监督语义
+不再是下一步目标。
+
+CogACT 当前会使用 `state/action/end_space/pose_unified`、state/action 夹爪、相机内外参和
+外部 MP4；不会使用 joint space、`timestamp`、`frame_index` 或任何 `valid_mask`。因此用于
+训练的数据必须完整通过导出检查，不能只看 H5 的 shape 正常。
