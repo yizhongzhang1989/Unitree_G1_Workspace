@@ -97,7 +97,8 @@
       # 本机也不跑 rviz。开着就是每帧白构造点云 + pcl::toROSMsg 序列化 + 灌 DDS。
       # 要在 rviz 里看建图效果时临时改回 true 即可。
       path_en: false
-      scan_publish_en: false
+      # localization_node 用这路已去畸变、位于重力对齐 lio_odom 系的云拟合地面。
+      scan_publish_en: true
       scan_bodyframe_pub_en: false
 
     pcd_save:

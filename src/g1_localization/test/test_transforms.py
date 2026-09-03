@@ -13,6 +13,7 @@ from g1_localization.transforms import (
     body_twist,
     invert,
     level_frame,
+    ground_level_frame,
     make_tf,
     mat_to_quat,
     quat_to_mat,
@@ -20,6 +21,18 @@ from g1_localization.transforms import (
     rot_z,
     yaw_of,
 )
+
+
+def test_ground_level_frame_keeps_heading_and_places_ground_at_zero():
+    t_ref_body = make_tf([2.0, -1.0, 0.82], [0.12, -0.08, 0.31, 0.938])
+    t_world_ref = invert(ground_level_frame(t_ref_body, ground_z=0.07))
+    body_world = t_world_ref @ t_ref_body
+    ground_world = t_world_ref @ np.array([2.0, -1.0, 0.07, 1.0])
+
+    assert np.allclose(ground_world[:3], 0.0, atol=1e-12)
+    assert body_world[2, 3] == pytest.approx(0.75)
+    assert np.allclose(t_world_ref[:3, :3] @ np.array([0.0, 0.0, 1.0]),
+                       [0.0, 0.0, 1.0], atol=1e-12)
 
 RNG = np.random.default_rng(20260825)
 

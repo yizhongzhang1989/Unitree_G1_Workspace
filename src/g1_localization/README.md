@@ -1,10 +1,10 @@
 # g1_localization
 
-用头部 Livox MID-360 做世界定位，对外只给**两个**东西：
+用头部 Livox MID-360 做世界定位，对外只给两个接口：
 
 | 接口 | 类型 | 说明 |
 |---|---|---|
-| `~/set_origin` | `std_srvs/Trigger` | 把此刻的躯干位姿钉成世界原点。响应 `message` 带原点时间戳 |
+| `~/set_origin` | `std_srvs/Trigger` | XY/yaw 按此刻躯干，z 按雷达 RANSAC 地面钉世界原点。响应带原点时间戳 |
 | `~/torso_pose` | `nav_msgs/Odometry` | `world` → `torso_link` 的位姿、速度 |
 
 外加一条可关的 TF：`world -> pelvis`（参数 `publish_tf`，默认开）。
@@ -15,7 +15,7 @@
 ```
 /utlidar/cloud_livox_mid360 ─┐
                              ├─ head_lidar_node ─┬─ /head/lidar/points_full ─┐
-/utlidar/imu_livox_mid360   ─┘                   └─ /head/lidar/imu ─────────┤
+/utlidar/imu_livox_mid360   ─────────────────────────────────────────────────┤
                                                                              │
                                               point_lio ◄─────────────────────┘
                                                   │ /aft_mapped_to_init (10 Hz)
@@ -49,9 +49,30 @@ ros2 launch g1_localization point_lio.launch.py
 「有不确定度估计」的假象。下游要判有效性就看这一位，**按帧判，别按「调过服务没有」判**：
 调用 `set_origin` 之后，队列里的残留帧仍然带 -1。
 
-**世界系的 z 轴铅垂。** 设原点时只冻结 yaw 和平移，roll/pitch 交给 Point-LIO 的
+**世界系的 z 轴铅垂，z=0 是雷达拟合的物理地面。** 设原点时 XY 和 yaw 取当前躯干，
+z 取 `/cloud_registered` 的重力约束 RANSAC 地面；roll/pitch 交给 Point-LIO 的
 `gravity_align`。直接拿当时的躯干位姿当原点是不对的：那一刻的躯干倾角会被一起冻进去
 （实测有 2.2°），之后所有高度和水平距离都是斜的。
+
+完整坐标系定义：
+
+- `+Z`：反重力方向
+- `+X`：调用 `set_origin` 时，`torso_link` 正前方投影到水平面的方向
+- `+Y`：按右手系确定
+- `x=y=0`：调用 `set_origin` 时的躯干水平位置
+- `z=0`：机器人附近雷达点云拟合出的物理地面，不是 pelvis 或 torso 原点
+
+地面使用 Point-LIO 已去畸变、已重力对齐的 `/cloud_registered`，只取机器人附近且位于
+躯干下方的点，再以近水平法向约束做 RANSAC。2026-09-03 实机静止验证：10 Hz，地面
+RMSE 约 9.6 mm、内点率约 70.6%；设原点后 torso 为 `(x,y,z) ≈ (0.001,-0.001,0.767) m`，
+证明 `z=0` 在地面而不是躯干。
+
+`world` 只在 `set_origin` 时建立一次，之后绝不随逐帧地面估计移动；让 world 原点动态
+漂移会被下游策略当成机器人真的发生了竖直位移。
+
+`set_origin` 会拒绝陈旧里程计或陈旧地面。遇到「里程计已陈旧」先查发布者数量：实测同时
+残留两套 `point_lio`/`g1_localization` 时，输出会积压 36~38 s，而原始点云仅延迟约 0.11 s。
+同名节点并存不能靠加大 stale 门限掩盖，必须退出旧进程并保证每个节点只有一个实例。
 
 ## 为什么 TF 挂在 pelvis 而不是 torso_link
 
@@ -92,10 +113,9 @@ publisher 抢同一个 child，**而 tf2 不保证取哪一个，且完全静默
 - **`lidar_type: 2`（Velodyne）不能改成 1（AVIA）**。上游把 AVIA 分支连同
   `livox_ros_driver2` 一起注释掉了，`switch(lidar_type)` 里只剩 OUST64/VELO16/HESAI/UNILIDAR，
   填 1 一个点都收不到。上游自带的 `config/mid360.yaml` 正是填的 1，**别直接拿来用**。
-- **`satu_acc: 29.42` 不是笔误**。饱和判定用的是归一化**前**的原始读数
-  （`Estimator.cpp` 里先判 `fabs(acc_avr(i)) >= 0.99*satu_acc`，之后才乘 `G_m_s2/acc_norm`）。
-  我们喂的 `/head/lidar/imu` 已经是 m/s²，静止就是 9.81；照抄上游的 `3.0` 会**开机即误判
-  IMU 饱和**。29.42 = 3 g × 9.80665。改喂原始的 g 单位话题就要连 `acc_norm` 一起改回去。
+- **`satu_acc: 3.0` 与 `acc_norm: 1.0` 必须配套。** Point-LIO 直接订阅原始
+  `/utlidar/imu_livox_mid360`，加速度单位是 g；饱和判定发生在单位换算之前。若改成
+  m/s² 话题，两项必须同步改为约 `29.42` 和 `9.81`。
 - **`blind: 1.0`** 剔的是雷达自己所在的头部外壳（实测 0~0.3 m 有 6.14% 的点，
   平均距离 0.154 m）。这些点刚性固连、在雷达系里永远静止，会把里程计锚死。
   代价接近零：实测 0.3~1.5 m 之间总共只有 0.33% 的点。
@@ -126,7 +146,7 @@ python3 -m pycodestyle --max-line-length=120 src/g1_localization/
 
 1. 起 `point_lio` 后**不出现** `Failed to find match for field 'time'`
 2. 未调 `set_origin` 时 `pose.covariance[0]` 恒为 -1；调用后转为 0
-3. 设原点瞬间 `~/torso_pose` 的位姿约等于单位（平移 0、yaw 0，只剩 roll/pitch）
+3. 设原点瞬间 `~/torso_pose` 的 x/y 和 yaw 约为 0，z 是躯干真实离地高度
 4. 静止 10 分钟位置漂移在几厘米以内
 5. `lookup_transform('world','torso_link')` 与 `~/torso_pose` 一致（p50 应为 0）
 6. 手臂大幅摆动时，`~/torso_pose` 的姿态变化应与 `/secondary_imu` 高度相关 ——

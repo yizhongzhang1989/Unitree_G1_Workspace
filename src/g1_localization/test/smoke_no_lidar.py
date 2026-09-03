@@ -9,6 +9,7 @@
 """
 
 import math
+import array
 import threading
 import time
 
@@ -19,6 +20,7 @@ from nav_msgs.msg import Odometry
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import PointCloud2, PointField
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
@@ -60,6 +62,7 @@ class Fixture(Node):
             _stf('torso_link', 'pelvis', (0.0, 0.0, -0.32)),
         ])
         self.pub = self.create_publisher(Odometry, '/aft_mapped_to_init', QOS)
+        self.ground_pub = self.create_publisher(PointCloud2, '/cloud_registered', QOS)
         self.got = []
         self.create_subscription(Odometry, '/g1_localization/torso_pose',
                                  self.got.append, QOS)
@@ -94,6 +97,20 @@ class Fixture(Node):
         msg.twist.twist.linear.x = 0.25          # odom 系，Point-LIO 的约定
         msg.twist.twist.angular.z = 0.4          # IMU 体系，同上
         self.pub.publish(msg)
+
+        xy = np.array([(x, y, 0.0) for x in np.linspace(-2.0, 2.0, 20)
+                   for y in np.linspace(-2.0, 2.0, 20)], dtype=np.float32)
+        cloud = PointCloud2()
+        cloud.header = msg.header
+        cloud.height, cloud.width = 1, len(xy)
+        cloud.fields = [PointField(name=name, offset=4 * index,
+                       datatype=PointField.FLOAT32, count=1)
+                for index, name in enumerate(('x', 'y', 'z'))]
+        cloud.point_step = 12
+        cloud.row_step = cloud.point_step * cloud.width
+        cloud.is_dense = True
+        cloud.data = array.array('B', xy.tobytes())
+        self.ground_pub.publish(cloud)
 
     def run(self):
         while not self.stop:
@@ -153,7 +170,8 @@ def main():
     at0 = fx.got[-1]
     check('cov[0] 归零', at0.pose.covariance[0] == 0.0)
     p = at0.pose.pose.position
-    check('位置回到原点', abs(p.x) + abs(p.y) + abs(p.z) < 1e-6,
+    check('水平位置回到原点、保留离地高度',
+          abs(p.x) + abs(p.y) < 1e-6 and abs(p.z - POS0[2]) < 1e-6,
           f'({p.x:.2e}, {p.y:.2e}, {p.z:.2e})')
     q = at0.pose.pose.orientation
     m = quat_to_mat([q.x, q.y, q.z, q.w])
@@ -180,7 +198,7 @@ def main():
     fx.got.clear()
     spin_for(1.5)
     p = fx.got[-1].pose.pose.position
-    dist = math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2)
+    dist = math.hypot(p.x, p.y)
     check('世界系里正好前进 1 m', abs(dist - 1.0) < 1e-6, f'{dist:.6f} m')
     check('沿世界 x 方向（设原点时的朝向）',
           abs(p.x - 1.0) < 1e-6 and abs(p.y) < 1e-6,

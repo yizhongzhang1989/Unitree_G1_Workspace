@@ -3,7 +3,7 @@
 
     /head/lidar/points_full ─┐
                              ├─> point_lio ──> /aft_mapped_to_init ──> 本节点
-    /head/lidar/imu         ─┘                （IMU 体在 lio_odom 系的位姿）
+    /utlidar/imu_livox_mid360 ┘              （IMU 体在 lio_odom 系的位姿）
 
 对外契约就两条，其余都是实现细节，将来整体换掉 Point-LIO 也不影响下游：
 
@@ -44,13 +44,16 @@ from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 
+from g1_localization.ground_plane import GroundPlane, fit_ground_plane
+
 from g1_localization.transforms import (
     body_twist,
+    ground_level_frame,
     invert,
-    level_frame,
     make_tf,
     mat_to_quat,
 )
@@ -75,6 +78,22 @@ def _fill(t: np.ndarray, translation, rotation) -> None:
     translation.z = float(t[2, 3])
     q = mat_to_quat(t[:3, :3])
     rotation.x, rotation.y, rotation.z, rotation.w = (float(v) for v in q)
+
+
+def _cloud_xyz(msg: PointCloud2) -> np.ndarray:
+    """按标准 PointCloud2 字段偏移读取 xyz，不依赖具体点类型。"""
+    fields = {field.name: field for field in msg.fields}
+    if not all(name in fields for name in ('x', 'y', 'z')):
+        raise ValueError('点云缺少 x/y/z 字段')
+    endian = '>' if msg.is_bigendian else '<'
+    dtype = np.dtype({
+        'names': ('x', 'y', 'z'),
+        'formats': tuple(endian + 'f4' for _ in range(3)),
+        'offsets': tuple(fields[name].offset for name in ('x', 'y', 'z')),
+        'itemsize': msg.point_step,
+    })
+    records = np.frombuffer(msg.data, dtype=dtype)
+    return np.column_stack((records['x'], records['y'], records['z']))
 
 
 class LocalizationNode(Node):
@@ -102,12 +121,20 @@ class LocalizationNode(Node):
         self._tf_wait = Duration(
             nanoseconds=int(1e9 * p('tf_lookup_timeout_s', 0.05)))
         self._warn_period = p('warn_period_s', 5.0)
+        self._ground_cloud_topic = p('ground_cloud_topic', '/cloud_registered')
+        self._ground_stale_s = p('ground_stale_s', 1.0)
+        self._ground_sync_s = p('ground_sync_s', 0.2)
+        self._ground_radius = p('ground_radius_m', 3.0)
+        self._ground_min_radius = p('ground_min_radius_m', 0.8)
+        if not 0.0 < self._ground_min_radius < self._ground_radius:
+            raise RuntimeError('ground 半径必须满足 0 < min < max')
 
         self._lock = threading.Lock()
         self._t_imu_base: np.ndarray | None = None   # 常量，等 TF 到齐才算得出
         self._t_world_odom: np.ndarray | None = None
         self._last: tuple[Odometry, np.ndarray] | None = None
         self._odom_count = 0
+        self._ground: tuple[Time, GroundPlane] | None = None
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -117,6 +144,9 @@ class LocalizationNode(Node):
                          reliability=ReliabilityPolicy.BEST_EFFORT)
         self._pose_pub = self.create_publisher(Odometry, '~/torso_pose', qos)
         self.create_subscription(Odometry, odom_topic, self._on_odom, qos,
+                                 callback_group=MutuallyExclusiveCallbackGroup())
+        self.create_subscription(PointCloud2, self._ground_cloud_topic,
+                                 self._on_ground_cloud, qos,
                                  callback_group=MutuallyExclusiveCallbackGroup())
         self.create_service(Trigger, '~/set_origin', self._on_set_origin,
                             callback_group=ReentrantCallbackGroup())
@@ -160,6 +190,31 @@ class LocalizationNode(Node):
         return result
 
     # -- 主链路 ----------------------------------------------------------------
+
+    def _on_ground_cloud(self, msg: PointCloud2) -> None:
+        try:
+            xyz = _cloud_xyz(msg)
+        except ValueError as exc:
+            self.get_logger().warn(str(exc), throttle_duration_sec=self._warn_period)
+            return
+        with self._lock:
+            last = self._last
+        if last is None:
+            return
+        torso = last[1][:3, 3]
+        relative_xy = xyz[:, :2] - torso[:2]
+        radius = np.linalg.norm(relative_xy, axis=1)
+        keep = ((radius >= self._ground_min_radius)
+                & (radius <= self._ground_radius)
+                & (xyz[:, 2] >= torso[2] - 1.3)
+                & (xyz[:, 2] <= torso[2] - 0.35))
+        roi = xyz[keep]
+        plane = fit_ground_plane(roi)
+        if plane is None:
+            return
+        stamp = Time.from_msg(msg.header.stamp)
+        with self._lock:
+            self._ground = (stamp, plane)
 
     def _on_odom(self, msg: Odometry) -> None:
         # 计数放在最前面：它回答的是「里程计有没有在来」。放到外参查成功之后的话，
@@ -251,6 +306,7 @@ class LocalizationNode(Node):
             return fail('外参未就绪：查不到 %s -> %s' % (self._base, self._lidar))
         with self._lock:
             last = self._last
+            ground = self._ground
         if last is None:
             return fail('还没收到里程计，确认 point_lio 在跑且已收敛')
         msg, t_odom_base = last
@@ -259,14 +315,28 @@ class LocalizationNode(Node):
         if age > 1.0:
             return fail('里程计已陈旧 %.1f s，拒绝设原点' % age)
 
-        t_world_odom = invert(level_frame(t_odom_base))
+        if ground is None:
+            return fail('还没有可靠地面：确认 /cloud_registered 已发布')
+        ground_stamp, plane = ground
+        ground_age = (self.get_clock().now() - ground_stamp).nanoseconds * 1e-9
+        if ground_age > self._ground_stale_s:
+            return fail('地面估计已陈旧 %.1f s，拒绝设原点' % ground_age)
+        ground_delta = abs((ground_stamp - stamp).nanoseconds * 1e-9)
+        if ground_delta > self._ground_sync_s:
+            return fail('地面与里程计相差 %.2f s，拒绝设原点' % ground_delta)
+
+        origin = ground_level_frame(
+            t_odom_base,
+            plane.height_at(t_odom_base[0, 3], t_odom_base[1, 3]))
+        t_world_odom = invert(origin)
         with self._lock:
             self._t_world_odom = t_world_odom
         stamp_s = stamp.nanoseconds * 1e-9
         tilt = math.degrees(math.acos(
             min(max((t_world_odom @ t_odom_base)[2, 2], -1.0), 1.0)))
         self.get_logger().info(
-            '世界原点已钉在 t=%.6f，此刻躯干相对铅垂倾斜 %.2f°' % (stamp_s, tilt))
+            '世界原点已钉在地面 t=%.6f，此刻躯干相对铅垂倾斜 %.2f°，地面 rmse %.3f m'
+            % (stamp_s, tilt, plane.rmse))
         response.success = True
         response.message = 'origin_stamp=%.6f tilt_deg=%.2f' % (stamp_s, tilt)
         return response

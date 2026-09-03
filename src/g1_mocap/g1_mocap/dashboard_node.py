@@ -152,6 +152,8 @@ class DashboardNode(Node):
                            .get_parameter_value().double_array_value)
         # 只用来标关节角条上的「策略见过的范围」，按名字对齐，顺序无所谓。
         self._defaults = dict(zip(joints, default_pos))
+        self._default_names = joints
+        self._default_pos = default_pos
         self._action_joints = set(joints)
 
         urdf = resolve_package_path(
@@ -251,6 +253,8 @@ class DashboardNode(Node):
             'error': status.last_error if status else ('' if frame else '等 /mocap/frame'),
         }
         if frame is None:
+            base['joint_names'] = self._default_names
+            base['angles'] = self._default_pos
             return base
         base['joint_names'] = list(frame.joint_names)
         base['angles'] = list(frame.joint_positions)
