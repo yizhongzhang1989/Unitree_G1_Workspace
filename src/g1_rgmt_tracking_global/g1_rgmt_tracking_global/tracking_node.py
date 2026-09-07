@@ -603,7 +603,8 @@ class RgmtTrackingNode(Node):
             self._stand_tracks_mocap = self._mocap_clip is not None and self._tracking
             self._policy.reset()
             # 同时锁偏航与平移。中途重算等于把已产生的跟踪误差抹掉，那 15 维就永远读作零。
-            torso_quat = self._torso_quat(measured, pelvis_quat)
+            torso_quat = self._odom.orientation_in_world(
+                self._torso_quat(measured, pelvis_quat))
             if self._mocap_clip is None:
                 self._clip.align(pose, torso_quat)
             else:
