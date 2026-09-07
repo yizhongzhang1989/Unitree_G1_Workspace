@@ -67,8 +67,6 @@ class MotionClip:
             raise RejectedMotion('Joint angle exceeds the supplied model limits')
 
     def _check_steps(self, rows, intervals):
-        if np.any(np.abs(np.diff(rows[:, 7:], axis=0)) / intervals[:, None] > 30.0 + 1e-7):
-            raise RejectedMotion('Joint speed exceeds 30 rad/s')
         if np.any(np.linalg.norm(np.diff(rows[:, :3], axis=0), axis=1)
                   / intervals > self.max_root_speed):
             raise RejectedMotion('Root translation jump')

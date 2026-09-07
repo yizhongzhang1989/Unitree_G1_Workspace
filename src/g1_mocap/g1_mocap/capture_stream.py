@@ -80,6 +80,13 @@ class CaptureStream(MocapStream):
             clip, self.clip = self.clip, None
             return clip
 
+    def seal(self):
+        with self.capture_lock:
+            if self.clip is not None and not self.complete:
+                if time.monotonic() - self.last_valid_arrival > self.clip.max_gap:
+                    self.clip.reject('Tracking lost before stop')
+                self.complete = True
+
     def _capture_frame(self, stamped, raw, result):
         if self.clip is not None and not self.complete:
             if self.clip.stamps and raw.t - self.clip.stamps[0] > self.duration_limit:

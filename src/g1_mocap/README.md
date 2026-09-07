@@ -50,6 +50,9 @@ ros2 launch g1_mocap dashboard.launch.py \
   calibrate_service:=/motion_capture/calibrate dashboard_port:=18081
 ```
 
+面板右侧列出已保存动作，点击即回放，可暂停、拖动进度、倍速或循环，点“返回实时”退出。
+默认读取 `/home/unitree/motions_dataset/motions/*.csv`；自定义录制目录时给面板加 `motions_dir:=录制目录`。回放不控制机器人。
+
 ## 输出
 
 ```text
@@ -78,14 +81,64 @@ motions_dataset/
 ## 注意事项
 
 - 默认使用 G1 `g1_29dof_mode_15.urdf`，轴、零位、限位取自模型。自定义模型须以 pelvis 为根、含指定 29 轴，脚部碰撞几何支持 sphere/box。面板显示模型需另行核对。
-- 录制中跟踪失效、LIMITED、朝向缺失、掉帧、跳变或尝试校准会废弃整段。关节速度超过 30 rad/s、超限、非有限值和严重穿地也会拒绝保存。
+- 录制中跟踪失效、LIMITED、朝向缺失、掉帧、根位姿跳变或尝试校准会废弃整段。关节超限、非有限值和严重穿地也会拒绝保存；不按关节速度丢弃或限速。
 - 禁止录制中 Home/recenter 或重设地面。建议使用 STAGE；小幅坐标重置可能漏检，发生时主动丢弃。
 - 开录前预览左右映射和脚底接触，交付前回放检查顶限位、动作失真及不合理悬空。只采集能安全完成的动作。
 - 实时模式允许 LIMITED、缺朝向时退化为位置解法；采集模式更严格。开放网络请设置 `token`。
 
+## 离线修正导出
+
+### 为什么需要后处理
+
+实时重定向逐帧映射人体姿态，骨盆位移与腿部关节分别计算；人机比例、站姿偏置和关节限位会使原本踩地的脚在 G1 上滑动、倾斜或穿地。**CSV 格式合格、关节不超限，不代表接触合理。** 用于 motion track 的动作应检查这些问题，必要时通过后处理联合修正脚底接触。
+
+后处理读取完整片段，推断连续支撑区间并平滑处理离地/落地。它是独立的离线步骤，**不在录制时计算，也不会在停止录制后自动执行**；保留原文件，修正版另存，便于对照验收。
+
+### 导出与使用
+
+1. 结束录制，确认日志提示 `Saved` 且输入 CSV 已存在，然后执行：
+
+```bash
+source /workspace/install/setup.bash
+python3 -m g1_mocap.contact_refine \
+  /home/unitree/motions_dataset/motions/locomotion_balance_001.csv \
+  --output-dir /home/unitree/motions_experiments/contact_refined
+```
+
+将输入路径替换为其他已保存动作即可，所有动作使用同一框架，不需要 `--mode`。自定义模型加 `--urdf /绝对路径/model.urdf`，须与录制时一致；建议原版和修正版使用不同目录。
+
+2. 等待命令完成。输出保留原来的 50 Hz、帧数和 36 列格式：
+
+```text
+contact_refined/
+  motions/refined_locomotion_balance_001_001.csv
+  metadata.csv
+  refined_locomotion_balance_001_001_report.json
+```
+
+输出名包含输入文件名，末尾编号自动递增、不覆盖。报告记录收敛情况、修正前后滑移/穿地/速度及姿态改变量；求解未收敛时会报错，不导出该次修正版。
+
+3. 打开修正版回放：
+
+```bash
+ros2 launch g1_mocap dashboard.launch.py \
+  motions_dir:=/home/unitree/motions_experiments/contact_refined \
+  dashboard_port:=18084
+```
+
+浏览器访问 `http://<本机IP>:18084`，点击右侧动作播放；端口被占用时换一个。与原版对照脚底滑移、穿地、抬脚幅度和接触切换处的抖动，同时检查报告，不能只看锁脚效果。验收通过后交付输出目录下的 `motions/` 和 `metadata.csv`，原版和指标报告自行留存。
+
+### 算法原理
+
+- 用 G1 URDF 正运动学计算脚底碰撞接触点的世界位置，根据高度和垂直速度逐点判断支撑；使用滞回抑制状态抖动，不填补短暂腾空。
+- 为连续支撑区间建立符合刚性脚掌几何的固定锚点；平脚支撑对齐地面，仅脚尖/脚跟支撑且无整脚支撑证据时保留脚掌倾角。接触首尾平滑进入和释放，过渡长度随短接触段缩短。
+- 使用带关节限位的非线性最小二乘，联合调整根平移和双腿 12 轴，同时惩罚接触偏差、穿地、偏离原动作和修正量突变。根姿态、腰和上肢不变；无接触且无穿地的帧原样保留。
+
+当前范围是**平地足部接触的运动学修正**：已验证真实 balance 和合成多接触动作，尚未完成真实跳跃、手撑地、跪地及动力学验收。接触来自推断，支撑约束是数值惩罚，不保证严格零滑移，也不保证平衡、接触力或真机可跟踪性。
+
 ## 开发
 
-重定向实现：[g1_mocap/retarget.py](g1_mocap/retarget.py)。
+重定向实现：[g1_mocap/retarget.py](g1_mocap/retarget.py)，离线修正：[g1_mocap/contact_refine.py](g1_mocap/contact_refine.py)。
 
 ```bash
 cd src/g1_mocap && python3 -m pytest test/ -q

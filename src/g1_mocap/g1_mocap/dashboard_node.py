@@ -39,6 +39,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
+from .motion_library import MotionLibrary
 from .skeleton import SMPL_JOINTS
 from .urdf import DEFAULT_URDF, resolve_package_path
 from .urdf import parse as parse_urdf
@@ -102,6 +103,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, 'application/json', json.dumps(board.model).encode())
         elif path == '/state':
             self._send(200, 'application/json', json.dumps(board.state()).encode())
+        elif path in ('/motions', '/motion'):
+            try:
+                result = (board.motions.list() if path == '/motions' else
+                          board.motions.load((parse_qs(url.query).get('name') or [''])[0]))
+                self._send(200, 'application/json', json.dumps(result, allow_nan=False).encode())
+            except FileNotFoundError as exc:
+                self._send(404, 'application/json', json.dumps({'error': str(exc)}).encode())
+            except ValueError as exc:
+                self._send(400, 'application/json', json.dumps({'error': str(exc)}).encode())
         elif path == '/mesh':
             data = board.read_mesh(unquote((parse_qs(url.query).get('path') or [''])[0]))
             if data is None:
@@ -155,6 +165,8 @@ class DashboardNode(Node):
         self._default_names = joints
         self._default_pos = default_pos
         self._action_joints = set(joints)
+        self.motions = MotionLibrary(
+            p('motions_dir', '/home/unitree/motions_dataset').get_parameter_value().string_value)
 
         urdf = resolve_package_path(
             p('dashboard_urdf_path', '').get_parameter_value().string_value

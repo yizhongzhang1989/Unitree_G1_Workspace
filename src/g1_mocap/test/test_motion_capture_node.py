@@ -155,3 +155,61 @@ def test_queued_stop_cannot_restart_after_discard(node):
     node._discard(None, Trigger.Response())
     node._tick()
     assert node.stream.clip is None
+
+
+def test_stop_button_seals_take_before_reset_and_timer(node, tmp_path):
+    start_and_fill(node)
+    clip = node.stream.clip
+    rows_before = np.asarray(clip.rows).copy()
+    row = rows_before[-1]
+    solved = SimpleNamespace(root_pos=row[:3] + [10.0, 0.0, 0.0],
+                             root_quat=row[[6, 3, 4, 5]], joint_pos=row[7:])
+    node.stream.on_preview = None
+    controllers = (ControllerState(), ControllerState(connected=True, a_x=True))
+    with patch('g1_mocap.stream.parse_controllers', return_value=controllers), \
+            patch.object(node.stream._retarget, 'solve', return_value=solved):
+        for seq in (1, 2):
+            message = payload(np.zeros((24, 3)))
+            message.update(seq=seq, t=3.0 + seq / 90)
+            node.stream._ingest(message)
+    assert not clip.reason
+    np.testing.assert_array_equal(clip.rows, rows_before)
+    node._tick()
+    assert node.stream.clip is None
+    assert node.last_outcome.startswith('Saved ')
+    saved = list((tmp_path / 'motions').glob('*.csv'))
+    assert len(saved) == 1
+    np.testing.assert_allclose(np.loadtxt(saved[0], delimiter=',')[:, 0], 0.0)
+
+
+def test_reset_while_idle_does_not_report_recording_error(node):
+    start_and_fill(node)
+    node._discard(None, Trigger.Response())
+    outcome = node.last_outcome
+    node.stream.on_preview = None
+    solved = SimpleNamespace(root_pos=np.array([100.0, 0.0, 0.8]),
+                             root_quat=np.array([1.0, 0.0, 0.0, 0.0]), joint_pos=np.zeros(29))
+    with patch.object(node.stream._retarget, 'solve', return_value=solved):
+        node.stream._ingest(payload(np.zeros((24, 3))))
+    node._tick()
+    assert node.stream.clip is None
+    assert node.last_outcome == outcome
+
+
+def test_stop_button_does_not_clear_jump_during_recording(node, tmp_path):
+    start_and_fill(node)
+    clip = node.stream.clip
+    row = clip.rows[-1]
+    solved = SimpleNamespace(root_pos=row[:3] + [10.0, 0.0, 0.0],
+                             root_quat=row[[6, 3, 4, 5]], joint_pos=row[7:])
+    node.stream.on_preview = None
+    message = payload(np.zeros((24, 3)))
+    message.update(seq=1, t=3.0 + 1 / 90)
+    with patch.object(node.stream._retarget, 'solve', return_value=solved):
+        node.stream._ingest(message)
+    assert clip.reason == 'Root translation jump'
+    node._controllers((ControllerState(), ControllerState(connected=True, a_x=True)))
+    node._tick()
+    assert node.stream.clip is None
+    assert node.last_outcome == 'Not saved: Root translation jump'
+    assert not list(tmp_path.iterdir())

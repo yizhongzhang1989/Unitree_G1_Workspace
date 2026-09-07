@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>G1 动捕重定向</title>
 <style>
   /* [hidden] 会被作者样式里的 display 盖掉，全局补一条 */
@@ -32,7 +33,9 @@
   #md-note.md-err { color: #f87171; }
   #md-note.md-good { color: #4ade80; }
 
-  #md-main { display: flex; height: calc(100vh - 43px); }
+  body { height: 100dvh; display: flex; flex-direction: column; }
+  #md-bar { flex: 0 0 auto; }
+  #md-main { display: flex; flex: 1; min-height: 0; }
   #md-view { flex: 1 1 auto; position: relative; min-width: 0; }
   canvas { display: block; width: 100%; height: 100%; }
   #md-hint { position: absolute; left: 12px; bottom: 10px; color: #6b7280; pointer-events: none; }
@@ -50,6 +53,31 @@
   .md-band { position: absolute; top: 0; bottom: 0; background: #333c4d; }
   .md-tick { position: absolute; top: -1px; bottom: -1px; width: 2px; background: #7dd3fc; }
   .md-tick.md-out { background: #f87171; width: 3px; }
+  button:disabled { opacity: .45; cursor: default; }
+  #md-library { border-bottom: 1px solid #2b313c; padding-bottom: 12px; margin-bottom: 14px; }
+  .md-library-head { display: flex; align-items: center; justify-content: space-between; }
+  #md-refresh, #md-play { width: 34px; height: 32px; padding: 0; flex: 0 0 34px; }
+  button svg { width: 16px; height: 16px; vertical-align: middle; }
+  #md-motion-search { width: 100%; margin: 6px 0; }
+  input[type="search"], select { background: #232935; color: #d8dee9; border: 1px solid #3b4351; border-radius: 4px; padding: 6px; }
+  #md-motion-directory { color: #9aa5b8; font-size: 11px; overflow-wrap: anywhere; margin-bottom: 8px; }
+  #md-recordings { max-height: 260px; overflow-y: auto; min-height: 34px; }
+  .md-motion-item { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 5px; margin-bottom: 4px; padding: 8px; overflow-wrap: anywhere; }
+  .md-motion-item small { color: #9aa5b8; font-size: 10px; }
+  .md-motion-item.md-selected { border-color: #66cbbb; background: #213b3b; }
+  #md-transport { background: #1b1f27; border-top: 1px solid #3b4351; padding: 8px 12px; flex: 0 0 auto; }
+  #md-playing-title { display: block; overflow-wrap: anywhere; margin-bottom: 6px; color: #85dece; }
+  .md-player-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  #md-timeline { flex: 1 1 160px; min-width: 100px; accent-color: #66cbbb; }
+  #md-play-time { min-width: 125px; font-variant-numeric: tabular-nums; }
+  @media (max-width: 700px) {
+    body { height: auto; min-height: 100dvh; }
+    #md-main { flex-direction: column; flex: none; }
+    #md-view { flex: none; height: 48dvh; min-height: 280px; }
+    #md-side { flex: none; width: 100%; border-left: 0; border-top: 1px solid #2b313c; }
+    #md-transport { position: sticky; bottom: 0; }
+    #md-hint { display: none; }
+  }
 </style>
 <script type="importmap">
 { "imports": { "three": "/vendor/three.module.js", "three/addons/": "/vendor/addons/" } }
@@ -71,15 +99,35 @@
     <div id="md-hint">左键旋转 · 右键平移 · 滚轮缩放</div>
   </div>
   <div id="md-side">
+    <section id="md-library">
+      <div class="md-library-head"><h2>录制动作 <span id="md-motion-count">0</span></h2><button id="md-refresh" title="刷新列表" aria-label="刷新列表"><i data-lucide="refresh-cw"></i></button></div>
+      <input id="md-motion-search" type="search" placeholder="搜索动作" aria-label="搜索动作">
+      <div id="md-motion-directory"></div>
+      <div id="md-recordings" aria-label="录制动作列表">加载中…</div>
+    </section>
     <h2>关节角（蓝=当前，灰带=训练分布，红=越界）</h2>
     <div id="md-joints"></div>
   </div>
 </div>
+<div id="md-transport" hidden>
+  <span id="md-playing-title"></span>
+  <div class="md-player-controls">
+    <button id="md-play" title="暂停" aria-label="暂停"><i data-lucide="pause"></i></button>
+    <input id="md-timeline" type="range" min="0" max="0" step="0.001" value="0" aria-label="回放进度">
+    <output id="md-play-time">0.00 / 0.00 s</output>
+    <select id="md-speed" aria-label="播放速度"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <label><input id="md-loop" type="checkbox"> 循环</label>
+    <button id="md-live">返回实时</button>
+  </div>
+</div>
+<script src="/vendor/lucide.min.js"></script>
 <script type="module">
 import * as viewer from "/viewer.js";
+import { createPlayback } from "/playback.js";
 
 const note = document.getElementById("md-note");
 let layout = null, byName = null, noteHold = 0;
+let playback = null;
 
 function say(text, kind) {
   // 30 Hz 轮询会在一瞬间把提示冲掉，要紧的消息给一个保留期
@@ -117,7 +165,7 @@ function buildJoints() {
 function updateJoints(names, values) {
   // 按**名字**取，不按下标：layout 的顺序来自 URDF，消息的顺序来自策略名单，
   // 两者没有理由一致，按下标读就是静默错位。
-  if (!byName || byName.length !== names.length) {
+  if (!byName || byName.length !== names.length || names.some((name, index) => name !== byName[index])) {
     byName = names;
     for (const joint of layout.joints) joint._index = names.indexOf(joint.name);
   }
@@ -140,6 +188,7 @@ function setDot(id, textId, cls, text) {
 async function poll() {
   try {
     const state = await (await fetch("/state", { cache: "no-store" })).json();
+    if (playback?.isActive()) return;
     setDot("md-link", "md-link-t", state.connected ? "md-ok" : "md-bad",
            state.connected ? ("头显已连 " + state.frames + " 帧") : "头显未连接");
     setDot("md-body", "md-body-t",
@@ -157,9 +206,10 @@ async function poll() {
     viewer.frameOnce();
     say(state.error || "", state.error ? "err" : "idle");
   } catch (err) {
-    say("后端连不上：" + err.message, "err");
+    if (!playback?.isActive()) say("后端连不上：" + err.message, "err");
+  } finally {
+    setTimeout(poll, 33);
   }
-  setTimeout(poll, 33);
 }
 
 document.getElementById("md-do-cal").addEventListener("click", async () => {
@@ -177,14 +227,17 @@ for (const which of ["human", "robot"]) {
   });
 }
 window.addEventListener("resize", viewer.resize);
+new ResizeObserver(viewer.resize).observe(document.getElementById("md-view"));
 
 (async () => {
+  lucide.createIcons();
   const model = await (await fetch("/model")).json();
   layout = await (await fetch("/layout")).json();
   buildJoints();
   viewer.buildRobot(model);
   viewer.buildHuman(layout.human_parents);
   viewer.start();
+  playback = createPlayback(updateJoints, say);
   poll();
 })();
 </script>

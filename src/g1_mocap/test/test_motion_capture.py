@@ -31,7 +31,7 @@ def test_timestamp_resampling_and_xyzw(rate):
     np.testing.assert_allclose(output[:, 3:7], expected, atol=1e-12)
 
 
-@pytest.mark.parametrize('defect', ['nan', 'limit', 'speed', 'gap', 'clock', 'epoch',
+@pytest.mark.parametrize('defect', ['nan', 'limit', 'gap', 'clock', 'epoch',
                                     'teleport', 'flip', 'norm'])
 def test_rejects_entire_take(defect):
     clip = make_clip()
@@ -41,8 +41,6 @@ def test_rejects_entire_take(defect):
         row[0] = np.nan
     elif defect == 'limit':
         row[7] = 3.1
-    elif defect == 'speed':
-        row[7] += 0.5
     elif defect == 'gap':
         stamp += 0.2
     elif defect == 'clock':
@@ -59,6 +57,26 @@ def test_rejects_entire_take(defect):
         clip.append(stamp, row, epoch)
     with pytest.raises(RejectedMotion):
         clip.resample()
+
+
+@pytest.mark.parametrize('rate', [50, 90])
+def test_high_joint_speed_is_preserved_and_saved(tmp_path, rate):
+    clip = MotionClip(np.full(29, -3.0), np.full(29, 3.0))
+    stamps = np.arange(3 * rate + 1) / rate
+    angles = 2.0 * np.sin(2.0 * np.pi * 8.0 * stamps)
+    assert np.max(np.abs(np.diff(angles)) * rate) > 30.0
+    for stamp, angle in zip(stamps, angles):
+        row = np.r_[[0.0, 0.0, 0.8], [0.0, 0.0, 0.0, 1.0], np.zeros(29)]
+        row[7] = angle
+        clip.append(stamp, row, 'calibration-1')
+    output = clip.resample()
+    expected = np.interp(np.arange(len(output)) / 50, stamps, angles)
+    np.testing.assert_allclose(output[:, 7], expected, atol=1e-12)
+    assert not clip.reason
+    path = save_motion(tmp_path, output, category='dynamic', action='fast')
+    saved = np.loadtxt(path, delimiter=',')
+    np.testing.assert_allclose(saved, output, atol=1e-10)
+    assert np.max(np.abs(np.diff(saved[:, 7])) * 50) > 30.0
 
 
 def test_quaternion_sign_is_not_a_flip():

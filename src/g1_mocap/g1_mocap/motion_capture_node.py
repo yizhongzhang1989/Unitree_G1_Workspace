@@ -101,8 +101,10 @@ class MotionCaptureNode(Node):
             with self.stream.capture_lock:
                 clip = self.stream.clip
                 if buttons[1] and not self.buttons[1]:
+                    self.stream.seal()
                     self.commands.put(('discard', clip))
                 elif buttons[0] and not self.buttons[0]:
+                    self.stream.seal()
                     self.commands.put(('stop' if clip is not None else 'start', clip))
         self.buttons = buttons
 
@@ -130,9 +132,7 @@ class MotionCaptureNode(Node):
     def _stop(self, request, response):
         try:
             with self.stream.capture_lock:
-                if self.stream.clip is not None and not self.stream.complete and (
-                        time.monotonic() - self.stream.last_valid_arrival > self.quality['max_gap']):
-                    self.stream.clip.reject('Tracking lost before stop')
+                self.stream.seal()
                 clip = self.stream.finish()
             rows = clip.resample()
             validate_ground(self.model.foot_heights(rows))
@@ -166,6 +166,8 @@ class MotionCaptureNode(Node):
             clip = self.stream.clip
             if clip is None:
                 response.message = self.last_outcome
+            elif self.stream.complete:
+                response.message = f'Recording stopped; pending save/discard; error={clip.reason or "none"}'
             else:
                 response.message = f'Recording: {len(clip.rows)} source frames; error={clip.reason or "none"}'
         response.success = True

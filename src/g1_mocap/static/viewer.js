@@ -167,7 +167,30 @@ export function applyRootQuat(wxyz) {
 
 export function applyRootHeight(z) {
   // URDF 的根是骨盆，不抬起来整个机器人就埋在地面下面。
-  robotRoot.position.z = z;
+  robotRoot.position.set(0, 0, z);
+}
+
+export function applyRootPosition(xyz) {
+  robotRoot.position.fromArray(xyz);
+}
+
+export function resetFraming() { framed = false; grid.position.set(0, 0, 0); }
+
+export function frameMotion(rows) {
+  const box = new THREE.Box3();
+  for (const row of rows) box.expandByPoint(new THREE.Vector3(row[0], row[1], row[2]));
+  box.expandByScalar(0.9);
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = box.getSize(new THREE.Vector3()).length() / 2;
+  const angle = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * Math.min(1, camera.aspect));
+  const distance = radius / Math.sin(angle);
+  controls.target.copy(center);
+  camera.position.copy(center).add(new THREE.Vector3(0.94, -0.35, 0.32).normalize().multiplyScalar(distance));
+  camera.far = Math.max(60, distance + radius * 3);
+  camera.updateProjectionMatrix();
+  grid.position.set(center.x, center.y, 0);
+  controls.update();
+  framed = true;
 }
 
 export function applyHuman(points) {
