@@ -266,6 +266,22 @@ $outDir = $OutRoot
 if ((Test-Path (Join-Path $outDir 'episodes_all.json')) -and -not $Force) {
     Write-Host "  跳过：dataset 已存在（要按当前 session 集合重转加 -Force）" -ForegroundColor Yellow
 } else {
+    Write-Host "--- 预检：只读检查全部 session 的有效率 ---" -ForegroundColor White
+    $dryArgs = @((Join-Path $toolsDir 'format/YB/export.py'))
+    $dryArgs += @($sealed | ForEach-Object { $_.FullName })
+    $dryArgs += @('--urdf', $urdf, '--dry-run')
+    $dry = Invoke-Native $py $dryArgs
+    if ($dry.ExitCode -ne 0) {
+        Stop-With "转换预检失败（code $($dry.ExitCode)）" `
+                  '预检不会写数据；先按上面的错误处理，确认所有 session 都能被 dry-run 读取'
+    }
+    foreach ($line in ($dry.Lines | Where-Object { $_ -match '有效率' })) {
+        if ($line -match '(?<!\d)0%') {
+            Stop-With "预检发现有效率 0%：$($line.Trim())" `
+                      '未写入 YB dataset。回 A 侧检查对应 session 的视频时间戳/发布流，或用 -Session 排除该 session'
+        }
+    }
+
     Write-Host ''
     Write-Host "--- $($sealed.Count) 个 session -> $outDir ---" -ForegroundColor White
     $convertArgs = @((Join-Path $toolsDir 'convert.py'))
