@@ -30,6 +30,7 @@ setup(
         'console_scripts': [
             'mocap_node = g1_mocap.mocap_node:main',
             'dashboard_node = g1_mocap.dashboard_node:main',
+            'motion_capture_node = g1_mocap.motion_capture_node:main',
         ],
     },
 )

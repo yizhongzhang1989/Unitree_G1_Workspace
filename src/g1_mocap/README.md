@@ -3,69 +3,90 @@
 PICO 4 Ultra 全身动捕（5 个 Motion Tracker，24 关节 SMPL 骨架）到 G1 29 轴关节角的重定向。
 数据经 **WiFi** 从头显上的动作捕捉桥接软件 [madderscientist/PicoBridge](https://github.com/madderscientist/PicoBridge) APK 过来。
 
-本包**不含任何策略逻辑**，输出就是关节角加各刚体位姿。谁来消费是消费者的事——
-`g1_rgmt_tracking_global` 的 `MocapClip` 把它装配成 RGMT 的参考窗口，那部分属于策略契约，
-不在这里。
-
-## 数据从哪来
-
-```
-PICO 4 Ultra + 5x Motion Tracker ──ws──> 本包的 /ws/device
-```
-
-头显上的 APK **直连**本包，中间不过 PicoBridge 的 `server.py`——少一跳转发、少一个要守的进程。头显的配置面板里填**本机局域网 IP** 加 `:18000`，点连接就行。全程 WiFi，不用 adb。
-
-## 对外的 topic
-
-| Topic | 类型 | 频率 | 内容 |
-|---|---|---|---|
-| `~/frame` | `g1_mocap_msgs/MocapFrame` | **跟随头显 72/90 Hz** | 一帧的全部产物：关节角、根/锚位姿、key body 位置、人的原始骨架 |
-| `~/joint_states` | `sensor_msgs/JointState` | 同上 | 只有关节角。喂 `robot_state_publisher` / rqt / plotjuggler |
-| `~/status` | `g1_mocap_msgs/MocapStatus` | 1 Hz | 结构化链路状态，可直接作看门狗判据 |
-| `~/calibrate` | `std_srvs/Trigger` 服务 | — | 标人机差异 |
-
-`MocapFrame` 里的字段全部出自**同一帧**骨架。拆成多个 topic 发会引入时间同步问题，而配错了不报错、只是姿态悄悄不对——所以打成一个原子消息。
-
-> ⚠️ **不要先降采样再插值。** 下游要靠帧间差分求速度（参考窗口就是这么用的），先降到
-> 50 Hz 会把原始时间分辨率丢掉，速度噪声直接放大。要 50 Hz 就订原始帧率、自己按
-> `header.stamp` 插值。`header.stamp` 已从头显时钟平移到 ROS 时钟，**只平移不改帧间隔**。
-
-## 用法
+## 实时动捕
 
 ```bash
-ros2 launch g1_mocap mocap.launch.py       # 发 topic
-ros2 launch g1_mocap dashboard.launch.py   # 带 mesh 的可视化面板，http://<本机IP>:18080
+ros2 launch g1_mocap mocap.launch.py
+ros2 launch g1_mocap dashboard.launch.py
 ```
 
-**人站直，然后校准**——三选一：
-- 戴着头显**双手摇杆同时按下**（成功会双手各震一下当回执）
-- 面板上点「校准」
-- `ros2 service call /mocap/calibrate std_srvs/srv/Trigger`
+头显连接 **本机 IP:18000**；面板访问 `http://<本机IP>:18080`。
+自然站直后，**双摇杆同时按下**或在面板校准，随后发布 `/mocap/frame`、`/mocap/joint_states` 和 `/mocap/status`。
+动作帧保留原始 72/90 Hz，下游按时间戳插值，不要先降采样。
 
-没校准之前 `~/frame` 不会发任何数据。
+## 录制动作
 
-> 只有 `mocap_node` 连头显。`dashboard_node` 和 `g1_rgmt_tracking_global` 的跟踪层
-> 都只订 `~/frame`，三者可以同时跑。
+```bash
+ros2 launch g1_mocap record_motion.launch.py \
+  output_dir:=/home/unitree/motions_dataset \
+  category:=locomotion action:=walk_forward model_confirmed:=true
+```
 
-## 重定向约定
+头显改连 **本机 IP:18001**。采集源独立于实时控制，不要向两者同时发送。
+确认模型与下游一致后才设 `model_confirmed:=true`；换模型用 `urdf_path:=绝对路径`。
 
-- 位置决定肢体方向和屈伸；厂商关节朝向只补位置无法观测的腕/踝自转，并在腿伸直时提供稳定的膝轴。
-- G1 的关节轴、零位弯角和 key body 位置全部从 URDF/FK 计算，不直接拿人体关节点冒充机器人刚体。
-- 校准按腿长缩放位移、修正盆骨/躯干姿态，并把人的站立位形映射到策略的默认关节角；因此必须站直校准。
-- 拿不到关节朝向时会退回纯位置解法，自转归零且膝轴精度下降。
-- PicoBridge 使用 OpenXR 右手系（X 右、Y 上、-Z 前）；本包统一转换为 X 前、Y 左、Z 上。
+1. 全部 tracker 跟踪有效，自然站直约 3 秒，双摇杆按下校准。
+2. **右手 A** 开始，再按 **A** 停止并验证保存；**右手 B** 丢弃。
+3. 每段独立保存，编号递增、不覆盖。换动作名需结束当前片段后重启 launch。
 
-离线闭环测试覆盖随机位形、固定人体关节中心退化、关节限位和 key body FK；详细公式与实测误差见
-[`retarget.py`](g1_mocap/retarget.py) 和 [`test_retarget.py`](test/test_retarget.py)。
+至少 2 秒，推荐 4 至 30 秒；**不会在 30 秒自动结束**，默认到 60 秒硬上限结束保存。
+所有动作均允许腾空。Ctrl-C 丢弃未完成片段；失败后需重新按 A 开始，头显重连后需重新校准。
 
-## 上机前必过
+也可调用服务（`controller_buttons:=false` 关闭按键）：
+
+```bash
+ros2 service call /motion_capture/calibrate std_srvs/srv/Trigger '{}'
+ros2 service call /motion_capture/start std_srvs/srv/Trigger '{}'
+ros2 service call /motion_capture/stop std_srvs/srv/Trigger '{}'
+ros2 service call /motion_capture/discard std_srvs/srv/Trigger '{}'
+ros2 service call /motion_capture/capture_status std_srvs/srv/Trigger '{}'
+```
+
+采集预览，浏览器访问 `http://<本机IP>:18081`：
+
+```bash
+ros2 launch g1_mocap dashboard.launch.py \
+  frame_topic:=/motion_capture/frame status_topic:=/motion_capture/status \
+  calibrate_service:=/motion_capture/calibrate dashboard_port:=18081
+```
+
+## 输出
+
+```text
+motions_dataset/
+  motions/locomotion_walk_forward_001.csv
+  metadata.csv
+```
+
+- 无表头 CSV，每行 36 个有限浮点数：`pelvis_pos_xyz(3), pelvis_quat_xyzw(4), joint_pos(29)`。
+- 固定 **50 Hz**，位置/关节线性插值，四元数 SLERP；不补断流、不镜像。
+- 世界系 X 前、Y 左、Z 上，地面 Z=0，单位米/弧度；人机尺度和站立高度由校准对齐。
+- 关节顺序见 [config/mocap.yaml](config/mocap.yaml)，启动时严格核验。
+- metadata 列：`file_name,action,duration_seconds,fps,num_frames`，时长为 `num_frames/50`。
+
+
+## 重定向
+
+- **姿态求解**：人体关节位置决定肢体方向和屈伸；厂商关节朝向补充腕/踝自转，并在腿伸直时稳定膝轴。
+- **模型约定**：关节轴、零位几何和限位从 G1 URDF 计算，不把人体关节角直接当作机器人关节角；输出角度限制在模型行程内。
+- **站立校准**：按腿长比缩放位移，对齐骨盆高度、修正盆骨/躯干姿态偏置，再将人的站姿映射到 `default_joint_pos`，之后按动作增量重定向。因此必须站直校准，站姿不等于所有关节归零。
+- **坐标与输出**：OpenXR 坐标转换为 X 前、Y 左、Z 上；根节点是 G1 pelvis，其他刚体位置由重定向关节角通过 G1 正运动学（FK）计算，不直接复制人体位置。
+
+实现见 [g1_mocap/retarget.py](g1_mocap/retarget.py)，模型闭环测试见 [test/test_retarget.py](test/test_retarget.py)。真人体型差异与极端姿态仍需回放验收。
+
+
+## 注意事项
+
+- 默认使用 G1 `g1_29dof_mode_15.urdf`，轴、零位、限位取自模型。自定义模型须以 pelvis 为根、含指定 29 轴，脚部碰撞几何支持 sphere/box。面板显示模型需另行核对。
+- 录制中跟踪失效、LIMITED、朝向缺失、掉帧、跳变或尝试校准会废弃整段。关节速度超过 30 rad/s、超限、非有限值和严重穿地也会拒绝保存。
+- 禁止录制中 Home/recenter 或重设地面。建议使用 STAGE；小幅坐标重置可能漏检，发生时主动丢弃。
+- 开录前预览左右映射和脚底接触，交付前回放检查顶限位、动作失真及不合理悬空。只采集能安全完成的动作。
+- 实时模式允许 LIMITED、缺朝向时退化为位置解法；采集模式更严格。开放网络请设置 `token`。
+
+## 开发
+
+重定向实现：[g1_mocap/retarget.py](g1_mocap/retarget.py)。
+
 ```bash
 cd src/g1_mocap && python3 -m pytest test/ -q
 ```
-
-## 已知风险
-- **`body.status`**：头显放桌上没戴时是 `2 (LIMITED) / message=7`。LIMITED 本包放行
-  （精度降级但数值仍连续），`0 (INVALID)` 才丢帧。站直走两步通常能回到 VALID。
-- **参考空间是 `LOCAL_FLOOR`**，长按 Home 重置视角会让所有坐标整体跳变。跳变会被下游
-  当成真实运动。要避免就在头显上 `setprop debug.pico.bridge_space stage`。
-- **`token` 默认为空**，任何人都能往 `/ws/device` 推数据。放在开放网络上时务必设。
