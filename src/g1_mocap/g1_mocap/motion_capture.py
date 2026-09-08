@@ -122,14 +122,6 @@ class MotionClip:
         return output
 
 
-def validate_ground(heights, *, penetration=0.06):
-    heights = np.asarray(heights, dtype=float)
-    if heights.ndim != 2 or heights.shape[1] != 2 or not np.isfinite(heights).all():
-        raise RejectedMotion('Invalid model-derived foot heights')
-    if np.any(heights < -penetration):
-        raise RejectedMotion('Foot collision geometry penetrates the floor')
-
-
 def validate_label(value):
     if not re.fullmatch(r'[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*', value):
         raise ValueError('Labels must use letters, digits and single underscores')
@@ -149,6 +141,24 @@ def _atomic_text(path, content):
             os.unlink(temporary)
 
 
+def _read_metadata(path):
+    if not path.exists():
+        return []
+    with path.open(newline='', encoding='utf-8') as stream:
+        reader = csv.DictReader(stream)
+        if tuple(reader.fieldnames or ()) != METADATA_FIELDS:
+            raise ValueError('Existing metadata.csv has incompatible columns')
+        return list(reader)
+
+
+def _write_metadata(path, rows):
+    buffer = io.StringIO(newline='')
+    writer = csv.DictWriter(buffer, fieldnames=METADATA_FIELDS)
+    writer.writeheader()
+    writer.writerows(rows)
+    _atomic_text(path, buffer.getvalue())
+
+
 def save_motion(directory, rows, *, category, action):
     """Write one validated take without overwriting any existing motion."""
     validate_label(category)
@@ -160,15 +170,10 @@ def save_motion(directory, rows, *, category, action):
     try:
         fcntl.flock(directory_fd, fcntl.LOCK_EX)
         metadata = directory / 'metadata.csv'
-        previous = []
-        if metadata.exists():
-            with metadata.open(newline='', encoding='utf-8') as stream:
-                reader = csv.DictReader(stream)
-                if tuple(reader.fieldnames or ()) != METADATA_FIELDS:
-                    raise ValueError('Existing metadata.csv has incompatible columns')
-                previous = list(reader)
+        previous = _read_metadata(metadata)
         take = 1
         reserved = {entry['file_name'] for entry in previous}
+        reserved.update(path.name for path in (motions / '.trash').glob('*.csv'))
         while True:
             name = f'{category}_{action}_{take:03d}.csv'
             path = motions / name
@@ -183,17 +188,52 @@ def save_motion(directory, rows, *, category, action):
                 stream.write(buffer.getvalue())
                 stream.flush()
                 os.fsync(stream.fileno())
-            buffer = io.StringIO(newline='')
-            writer = csv.DictWriter(buffer, fieldnames=METADATA_FIELDS)
-            writer.writeheader()
-            writer.writerows(previous)
-            writer.writerow(dict(file_name=name, action=action,
-                                 duration_seconds=f'{len(rows) / FPS:.6f}',
-                                 fps=FPS, num_frames=len(rows)))
-            _atomic_text(metadata, buffer.getvalue())
+            current = dict(file_name=name, action=action,
+                           duration_seconds=f'{len(rows) / FPS:.6f}',
+                           fps=FPS, num_frames=len(rows))
+            _write_metadata(metadata, [*previous, current])
         except Exception:
             path.unlink()
             raise
         return path
+    finally:
+        os.close(directory_fd)
+
+
+def archive_motion(directory, name):
+    """Move one take out of delivery without making its number reusable."""
+    if (not isinstance(name, str) or not name or Path(name).name != name
+            or not name.endswith('.csv')):
+        raise ValueError('Invalid motion file name')
+    directory = Path(directory).expanduser().resolve()
+    motions = directory / 'motions'
+    if not directory.is_dir() or not motions.is_dir():
+        raise FileNotFoundError('Motion not found')
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        path = motions / name
+        resolved = path.resolve()
+        if (not resolved.is_relative_to(motions.resolve())
+                or not resolved.is_file()):
+            raise FileNotFoundError('Motion not found')
+        metadata = directory / 'metadata.csv'
+        previous = _read_metadata(metadata)
+        remaining = [entry for entry in previous if entry['file_name'] != name]
+        trash = motions / '.trash'
+        trash.mkdir(exist_ok=True)
+        if trash.is_symlink() or not trash.is_dir():
+            raise ValueError('Motion trash must be a directory inside the dataset')
+        archived = trash / name
+        if archived.exists():
+            raise ValueError('Motion is already present in the trash')
+        os.replace(path, archived)
+        try:
+            if len(remaining) != len(previous):
+                _write_metadata(metadata, remaining)
+        except Exception:
+            os.replace(archived, path)
+            raise
+        return archived
     finally:
         os.close(directory_fd)

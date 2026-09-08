@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .motion_capture import FPS, JOINT_NAMES
+from .motion_capture import FPS, JOINT_NAMES, archive_motion
 from .urdf import under
 
 
@@ -57,3 +57,7 @@ class MotionLibrary:
         return dict(file_name=name, fps=FPS, num_frames=len(rows),
                     duration_seconds=len(rows) / FPS, joint_names=list(JOINT_NAMES),
                     frames=rows.tolist())
+
+    def archive(self, name):
+        path = archive_motion(self.directory, name)
+        return {'file_name': name, 'archived_to': str(path)}

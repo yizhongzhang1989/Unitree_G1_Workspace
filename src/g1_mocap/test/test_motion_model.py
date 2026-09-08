@@ -7,7 +7,7 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
-from g1_mocap.motion_capture import JOINT_NAMES, validate_ground
+from g1_mocap.motion_capture import JOINT_NAMES
 from g1_mocap.motion_model import MotionModel
 
 
@@ -24,7 +24,6 @@ def test_joint_order_and_standing_floor():
     row = np.r_[[0, 0, height], [0, 0, 0, 1], joints]
     heights = model.foot_heights(row[None, :])
     assert np.max(np.abs(heights)) < 0.04
-    validate_ground(heights)
     raised = row.copy()
     raised[2] += 0.25
     np.testing.assert_allclose(model.foot_heights(raised[None, :]), heights + 0.25, atol=1e-12)

@@ -51,7 +51,7 @@ def start_and_fill(node, *, root_offset=0.0):
     response = node._start(None, Trigger.Response())
     assert response.success, response.message
     joints = np.asarray(CONFIG['default_joint_pos'])
-    height = node.model.kin.pelvis_height(joints, node.model.feet) + 0.03 + root_offset
+    height = node.stream._retarget.stand_height + root_offset
     row = np.r_[[0, 0, height], [0, 0, 0, 1], joints]
     for stamp in np.arange(271) / 90:
         node.stream.clip.append(stamp, row, id(node.stream.calibration))
@@ -69,11 +69,13 @@ def test_services_save_one_valid_take(node, tmp_path):
     assert not node._stop(None, Trigger.Response()).success
 
 
-def test_ground_failure_never_writes(node, tmp_path):
+def test_ground_penetration_is_saved_for_offline_refinement(node, tmp_path):
     start_and_fill(node, root_offset=-0.5)
     response = node._stop(None, Trigger.Response())
-    assert not response.success and 'penetrates' in response.message
-    assert not list(tmp_path.iterdir())
+    assert response.success, response.message
+    files = list((tmp_path / 'motions').glob('*.csv'))
+    assert len(files) == 1
+    assert np.loadtxt(files[0], delimiter=',').shape == (151, 36)
 
 
 def test_airborne_take_is_allowed_without_profile(node, tmp_path):

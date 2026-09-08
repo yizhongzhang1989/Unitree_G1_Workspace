@@ -8,7 +8,7 @@ export function createPlayback(updateJoints, say) {
   const transport = element('md-transport');
   const play = element('md-play');
   const title = element('md-playing-title');
-  let entries = [], signature = '', motion = null, selected = '', requestId = 0;
+  let entries = [], signature = '', motion = null, selected = '', requestId = 0, refreshId = 0;
   let active = false, playing = false, position = 0, previousTime = null;
   const rootQuat = new THREE.Quaternion(), nextQuat = new THREE.Quaternion();
   const angles = new Array(29), root = new Array(3);
@@ -43,10 +43,60 @@ export function createPlayback(updateJoints, say) {
   }
 
   function markSelection() {
-    for (const button of list.querySelectorAll('button')) {
+    for (const button of list.querySelectorAll('.md-motion-item')) {
       const current = button.dataset.name === selected;
       button.classList.toggle('md-selected', current);
       button.setAttribute('aria-pressed', String(current));
+    }
+  }
+
+  function returnLive(message = '实时预览') {
+    requestId++;
+    active = playing = false;
+    motion = null;
+    selected = '';
+    transport.hidden = true;
+    element('md-do-cal').disabled = false;
+    element('md-show-human').disabled = false;
+    viewer.setVisible('human', element('md-show-human').checked);
+    viewer.resetFraming();
+    markSelection();
+    say(message, 'good');
+  }
+
+  async function archive(name, button) {
+    const now = performance.now();
+    if (now > Number(button.dataset.confirmUntil || 0)) {
+      button.dataset.confirmUntil = String(now + 3000);
+      button.classList.add('md-confirm');
+      button.title = button.ariaLabel = '再次点击确认归档';
+      button.innerHTML = '<i data-lucide="triangle-alert"></i>';
+      lucide.createIcons();
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        delete button.dataset.confirmUntil;
+        button.classList.remove('md-confirm');
+        button.title = button.ariaLabel = '归档动作';
+        button.innerHTML = '<i data-lucide="archive-x"></i>';
+        lucide.createIcons();
+      }, 3000);
+      return;
+    }
+    button.disabled = true;
+    try {
+      const response = await fetch('/motion/archive', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name}),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '归档失败');
+      if (selected === name) returnLive('已归档 ' + name);
+      else say('已归档 ' + name, 'good');
+      signature = '';
+      await refresh();
+    } catch (error) {
+      button.disabled = false;
+      say(error.message, 'err');
     }
   }
 
@@ -54,6 +104,8 @@ export function createPlayback(updateJoints, say) {
     const query = element('md-motion-search').value.toLowerCase();
     list.replaceChildren();
     for (const entry of entries.filter(item => item.file_name.toLowerCase().includes(query))) {
+      const row = document.createElement('div');
+      row.className = 'md-motion-row';
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'md-motion-item';
@@ -64,17 +116,27 @@ export function createPlayback(updateJoints, say) {
       detail.textContent = `${new Date(entry.modified_ns / 1e6).toLocaleString()} · ${(entry.size_bytes / 1024).toFixed(0)} KB`;
       button.append(name, detail);
       button.addEventListener('click', () => load(entry.file_name));
-      list.appendChild(button);
+      const archiveButton = document.createElement('button');
+      archiveButton.type = 'button';
+      archiveButton.className = 'md-archive';
+      archiveButton.title = archiveButton.ariaLabel = '归档动作';
+      archiveButton.innerHTML = '<i data-lucide="archive-x"></i>';
+      archiveButton.addEventListener('click', () => archive(entry.file_name, archiveButton));
+      row.append(button, archiveButton);
+      list.appendChild(row);
     }
     if (!list.childElementCount) list.textContent = entries.length ? '无匹配动作' : '暂无录制';
     element('md-motion-count').textContent = String(entries.length);
     markSelection();
+    lucide.createIcons();
   }
 
   async function refresh() {
+    const ticket = ++refreshId;
     try {
       const response = await fetch('/motions', {cache: 'no-store'});
       const data = await response.json();
+      if (ticket !== refreshId) return;
       if (!response.ok) throw new Error(data.error || '读取列表失败');
       element('md-motion-directory').textContent = data.directory;
       const nextSignature = JSON.stringify(data.motions);
@@ -118,25 +180,13 @@ export function createPlayback(updateJoints, say) {
       say(`${name} · ${motion.num_frames} 帧 · ${motion.fps} Hz`, 'good');
     } catch (error) {
       if (ticket === requestId) {
-        element('md-play-time').textContent = '加载失败';
+        returnLive();
         say(error.message, 'err');
       }
     }
   }
 
-  element('md-live').addEventListener('click', () => {
-    requestId++;
-    active = playing = false;
-    motion = null;
-    selected = '';
-    transport.hidden = true;
-    element('md-do-cal').disabled = false;
-    element('md-show-human').disabled = false;
-    viewer.setVisible('human', element('md-show-human').checked);
-    viewer.resetFraming();
-    markSelection();
-    say('实时预览', 'good');
-  });
+  element('md-live').addEventListener('click', () => returnLive());
   play.addEventListener('click', () => {
     if (!motion) return;
     if (position >= Number(timeline.max)) position = 0;

@@ -62,9 +62,12 @@
   input[type="search"], select { background: #232935; color: #d8dee9; border: 1px solid #3b4351; border-radius: 4px; padding: 6px; }
   #md-motion-directory { color: #9aa5b8; font-size: 11px; overflow-wrap: anywhere; margin-bottom: 8px; }
   #md-recordings { max-height: 260px; overflow-y: auto; min-height: 34px; }
-  .md-motion-item { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 5px; margin-bottom: 4px; padding: 8px; overflow-wrap: anywhere; }
+  .md-motion-row { display: flex; align-items: stretch; gap: 4px; margin-bottom: 4px; }
+  .md-motion-item { min-width: 0; flex: 1 1 auto; text-align: left; display: flex; flex-direction: column; gap: 5px; padding: 8px; overflow-wrap: anywhere; }
   .md-motion-item small { color: #9aa5b8; font-size: 10px; }
   .md-motion-item.md-selected { border-color: #66cbbb; background: #213b3b; }
+  .md-archive { width: 34px; padding: 0; flex: 0 0 34px; color: #9aa5b8; }
+  .md-archive.md-confirm { border-color: #ef6464; color: #ff8585; background: #3a2328; }
   #md-transport { background: #1b1f27; border-top: 1px solid #3b4351; padding: 8px 12px; flex: 0 0 auto; }
   #md-playing-title { display: block; overflow-wrap: anywhere; margin-bottom: 6px; color: #85dece; }
   .md-player-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

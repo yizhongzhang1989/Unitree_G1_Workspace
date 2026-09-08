@@ -1,7 +1,7 @@
 """SMPL 24 关节骨架 -> G1 29 轴关节角。纯几何 + numpy + pinocchio，可离线单测。
 
-位置决定肢体方向和屈伸；PICO 关节朝向只用于位置无法观测的腕/踝自转，以及腿伸直时
-会退化的膝轴。未知的局部系常量由站立校准吸收到关节偏置中。G1 轴系、零位几何和
+位置决定肢体方向和屈伸；PICO 关节朝向用于位置无法观测的腕/踝自转，并稳定会退化的
+膝轴和肘轴。未知的局部系常量由站立校准吸收到关节偏置中。G1 轴系、零位几何和
 key body 位置均从 URDF/FK 计算，人机差异集中在 :class:`RetargetCalibration`。
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -278,6 +278,7 @@ class RetargetCalibration:
         pelvis_fix / torso_fix: 局部系修正，右乘在解出来的朝向上。
         joint_bias: 校准帧解出的 29 轴位形。
         joint_target: 它该被映射到哪里，也就是 G1 的 ``default_joint_pos``。
+        arm_hinge_axes: 双臂肘轴在 PICO 肘关节局部系中的方向。零向量表示退回位置叉乘。
     """
 
     scale: float
@@ -287,6 +288,7 @@ class RetargetCalibration:
     torso_fix: np.ndarray
     joint_bias: np.ndarray
     joint_target: np.ndarray
+    arm_hinge_axes: np.ndarray = field(default_factory=lambda: np.zeros((len(ARMS), 3)))
 
     @staticmethod
     def identity(stand_height: float, n_joints: int = 29) -> RetargetCalibration:
@@ -392,6 +394,7 @@ class Retargeter:
         # 就会原封不动地出现在输出里。
         sample = BodyFrame(t=0.0, seq=0, positions=positions, status=1, message=0,
                            rotations=_average_rotations(frames))
+        arm_hinge_axes = self._calibrate_arm_hinge_axes(frames)
         rough = RetargetCalibration(
             scale=self._leg_length / human_leg,
             pelvis_ref_z=float(positions[JOINT_INDEX['PELVIS']][2])
@@ -399,7 +402,8 @@ class Retargeter:
             stand_height=self._stand_height,
             pelvis_fix=np.eye(3), torso_fix=np.eye(3),
             joint_bias=np.zeros(len(self._names)),
-            joint_target=np.zeros(len(self._names)))
+            joint_target=np.zeros(len(self._names)),
+            arm_hinge_axes=arm_hinge_axes)
 
         pelvis, torso = self._body_frames(positions)
         posed = replace(rough,
@@ -407,6 +411,33 @@ class Retargeter:
                         torso_fix=torso.T @ _yaw_only(torso))
         return replace(posed, joint_bias=self.solve(sample, posed).joint_pos,
                        joint_target=self._default_joint_pos)
+
+    def _calibrate_arm_hinge_axes(self, frames: Sequence[BodyFrame]) -> np.ndarray:
+        """Learn elbow hinge axes in PICO joint-local coordinates."""
+        axes = np.zeros((len(ARMS), 3))
+        for slot, (side, spec) in enumerate(ARMS.items()):
+            geom = self._arms[side]
+            proximal, mid, distal = (JOINT_INDEX[name] for name in spec.smpl[:3])
+            samples = []
+            for frame in frames:
+                if frame.rotations is None:
+                    continue
+                upper = frame.positions[mid] - frame.positions[proximal]
+                lower = frame.positions[distal] - frame.positions[mid]
+                cross = geom.hinge.axis_sign * _cross(upper, lower)
+                scale = _norm(upper) * _norm(lower)
+                if _norm(cross) / max(scale, _EPS) >= 0.05:
+                    world_axis = _unit(cross)
+                else:
+                    _, torso = self._body_frames(frame.positions)
+                    world_axis = _fallback_hinge_axis(torso, upper)
+                samples.append(frame.rotations[mid].T @ world_axis)
+            if not samples:
+                continue
+            mean = np.mean(samples, axis=0)
+            if _norm(mean) >= 0.5:
+                axes[slot] = _unit(mean)
+        return axes
 
     ##
     # 单帧求解
@@ -440,9 +471,9 @@ class Retargeter:
         for side, spec in LEGS.items():
             self._solve_limb(angles, spec, self._legs[side], point, rot_pelvis,
                              frame.rotations)
-        for side, spec in ARMS.items():
+        for arm_slot, (side, spec) in enumerate(ARMS.items()):
             self._solve_limb(angles, spec, self._arms[side], point, rot_torso,
-                             frame.rotations)
+                             frame.rotations, calib.arm_hinge_axes[arm_slot])
 
         # 站立零位映射：把校准帧的位形整体搬到 G1 的 default 上，之后按增量走。
         angles = np.clip(angles - calib.joint_bias + calib.joint_target,
@@ -465,7 +496,8 @@ class Retargeter:
         )
 
     def _solve_limb(self, angles: np.ndarray, spec: LimbSpec, geom: LimbGeometry,
-                    point, rot_root: np.ndarray, rotations: np.ndarray | None) -> None:
+                    point, rot_root: np.ndarray, rotations: np.ndarray | None,
+                    calibrated_hinge_axis: np.ndarray | None = None) -> None:
         proximal, mid, distal, tip = (point(n) for n in spec.smpl)
         upper = mid - proximal
         lower = distal - mid
@@ -476,7 +508,8 @@ class Retargeter:
         # 远端段实际转过的角还要带上铰链 origin 自己的那一段。
         turned = hinge + geom.hinge.placement_offset
 
-        axis = self._hinge_axis(spec, geom, upper, lower, tip_dir, rot_root, rotations)
+        axis = self._hinge_axis(spec, geom, upper, lower, tip_dir, rot_root, rotations,
+                    calibrated_hinge_axis)
         rot_ball = _rotation_between(geom.proximal_dir, self._rest_axis(spec, geom, turned),
                                      _unit(upper), axis)
         local = geom.ball.pre.T @ rot_root.T @ rot_ball
@@ -535,7 +568,8 @@ class Retargeter:
     @staticmethod
     def _hinge_axis(spec: LimbSpec, geom: LimbGeometry, upper: np.ndarray,
                     lower: np.ndarray, tip_dir: np.ndarray, rot_root: np.ndarray,
-                    rotations: np.ndarray | None) -> np.ndarray:
+                    rotations: np.ndarray | None,
+                    calibrated_axis: np.ndarray | None = None) -> np.ndarray:
         """铰链转轴。它同时也是球窝那三轴里“自转”那一路的唯一约束，取错就是整条肢体拧着。
 
         **标过 ``hinge_axis`` 就直接读关节朝向**，全程稳定。下面两条都是拿不到朝向时的兜底：
@@ -551,10 +585,14 @@ class Retargeter:
            被拉到 [-35.9, +28.4] 度，而训练分布 p95 只有 ±14 度。所以真机上要保证拿得到
            ``orientation``。
         """
-        if rotations is not None and spec.hinge_axis is not None:
+        local = None
+        if spec.hinge_axis is not None:
             index, sign = spec.hinge_axis
             local = np.zeros(3)
             local[index] = sign
+        elif calibrated_axis is not None and _norm(calibrated_axis) > 0.5:
+            local = calibrated_axis
+        if rotations is not None and local is not None:
             axis = rotations[JOINT_INDEX[spec.smpl[1]]] @ local
             if _norm(axis) > 1e-6:
                 return _unit(axis)

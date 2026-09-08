@@ -15,9 +15,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
 from .capture_stream import CaptureStream
-from .kinematics import G1Kinematics
 from .mocap_node import fill_pose, to_points
-from .motion_capture import JOINT_NAMES, save_motion, validate_ground, validate_label
+from .motion_capture import JOINT_NAMES, save_motion, validate_label
 from .motion_model import MotionModel
 from .retarget import Retargeter
 from .urdf import DEFAULT_URDF, resolve_package_path
@@ -34,10 +33,10 @@ class MotionCaptureNode(Node):
         if tuple(configured_joints) != JOINT_NAMES:
             raise ValueError('Configured joints differ from the motion CSV contract')
         urdf = resolve_package_path(parameter('urdf_path', DEFAULT_URDF))
-        self.model = MotionModel(urdf)
+        kinematics = MotionModel(urdf).kin
         self.key_bodies = list(parameter('key_bodies', Parameter.Type.STRING_ARRAY))
         retargeter = Retargeter(
-            G1Kinematics(urdf, JOINT_NAMES), key_bodies=self.key_bodies,
+            kinematics, key_bodies=self.key_bodies,
             anchor_body=parameter('anchor_body', 'torso_link'),
             default_joint_pos=np.asarray(parameter('default_joint_pos', Parameter.Type.DOUBLE_ARRAY)),
             foot_ground_clearance_m=parameter('foot_ground_clearance_m', 0.03))
@@ -60,7 +59,7 @@ class MotionCaptureNode(Node):
             MocapFrame, '~/frame', QoSProfile(depth=20, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.status_publisher = self.create_publisher(MocapStatus, '~/status', 10)
         self.stream = CaptureStream(
-            retargeter, limits=self.model.kin.limits(),
+            retargeter, limits=kinematics.limits(),
             host=parameter('host', '0.0.0.0'), port=parameter('port', 18001),
             token=parameter('token', ''), log=self.get_logger().info)
         self.stream.on_preview = self._preview
@@ -135,7 +134,6 @@ class MotionCaptureNode(Node):
                 self.stream.seal()
                 clip = self.stream.finish()
             rows = clip.resample()
-            validate_ground(self.model.foot_heights(rows))
             path = save_motion(self.directory, rows, category=self.category, action=self.action)
             self.last_outcome = f'Saved {path} ({len(rows)} frames, 50 Hz)'
             if len(rows) < 200:

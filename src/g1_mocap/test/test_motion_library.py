@@ -4,7 +4,7 @@ import json
 import threading
 from types import SimpleNamespace
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pytest
@@ -96,6 +96,40 @@ def test_http_motion_routes(tmp_path):
         for name, status in [('bad.csv', 400), ('missing.csv', 404), ('..%2Fsecret.csv', 400)]:
             with pytest.raises(HTTPError) as error:
                 urlopen(base + '/motion?name=' + name, timeout=5)
+            assert error.value.code == status
+            assert 'error' in json.load(error.value)
+            error.value.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+
+
+def test_http_archive_route(tmp_path):
+    from g1_mocap.dashboard_node import _Handler, _Server
+    path = tmp_path / 'motions' / 'good.csv'
+    write_motion(path)
+    server = _Server(('127.0.0.1', 0), _Handler)
+    server.dashboard = SimpleNamespace(motions=MotionLibrary(tmp_path))
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f'http://127.0.0.1:{server.server_port}'
+    try:
+        request = Request(base + '/motion/archive', method='POST',
+                          data=json.dumps({'name': path.name}).encode(),
+                          headers={'Content-Type': 'application/json'})
+        with urlopen(request, timeout=5) as response:
+            assert json.load(response)['file_name'] == path.name
+        assert not path.exists()
+        assert (tmp_path / 'motions' / '.trash' / path.name).exists()
+        for payload, status in (({'name': '../secret.csv'}, 400),
+                                ({'name': 1}, 400),
+                                ({'name': 'missing.csv'}, 404)):
+            request = Request(base + '/motion/archive', method='POST',
+                              data=json.dumps(payload).encode(),
+                              headers={'Content-Type': 'application/json'})
+            with pytest.raises(HTTPError) as error:
+                urlopen(request, timeout=5)
             assert error.value.code == status
             assert 'error' in json.load(error.value)
             error.value.close()

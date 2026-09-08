@@ -7,7 +7,7 @@ import pytest
 from scipy.spatial.transform import Rotation
 
 from g1_mocap.motion_capture import (
-    JOINT_NAMES, MotionClip, RejectedMotion, save_motion, validate_ground,
+    JOINT_NAMES, MotionClip, RejectedMotion, archive_motion, save_motion,
 )
 
 
@@ -105,13 +105,6 @@ def test_duration_limits():
         make_clip(rate=50, seconds=60.1)
 
 
-def test_ground_check_allows_airborne():
-    validate_ground(np.zeros((100, 2)))
-    validate_ground(np.full((100, 2), 0.2))
-    with pytest.raises(RejectedMotion, match='penetrates'):
-        validate_ground(np.full((100, 2), -0.07))
-
-
 def test_delivery_layout_and_unique_takes(tmp_path):
     rows = make_clip().resample()
     first = save_motion(tmp_path, rows, category='locomotion', action='walk_forward')
@@ -135,6 +128,37 @@ def test_delivery_layout_and_unique_takes(tmp_path):
 def test_filename_traversal_rejected(tmp_path):
     with pytest.raises(ValueError):
         save_motion(tmp_path, make_clip().resample(), category='../bad', action='walk')
+
+
+def test_archived_take_is_removed_from_delivery_and_number_stays_reserved(tmp_path):
+    rows = make_clip().resample()
+    first = save_motion(tmp_path, rows, category='locomotion', action='walk')
+    archived = archive_motion(tmp_path, first.name)
+    assert not first.exists()
+    assert archived == tmp_path / 'motions' / '.trash' / first.name
+    assert archived.exists()
+    with (tmp_path / 'metadata.csv').open() as stream:
+        assert list(csv.DictReader(stream)) == []
+    second = save_motion(tmp_path, rows, category='locomotion', action='walk')
+    assert second.name == 'locomotion_walk_002.csv'
+
+
+@pytest.mark.parametrize('name', ['../secret.csv', '/tmp/a.csv', 'sub/a.csv', 'bad.txt', ''])
+def test_archive_rejects_invalid_paths(tmp_path, name):
+    with pytest.raises(ValueError):
+        archive_motion(tmp_path, name)
+
+
+def test_archive_rejects_external_trash_symlink(tmp_path):
+    first = save_motion(tmp_path / 'dataset', make_clip().resample(),
+                        category='locomotion', action='walk')
+    external = tmp_path / 'external'
+    external.mkdir()
+    (first.parent / '.trash').symlink_to(external, target_is_directory=True)
+    with pytest.raises(ValueError, match='inside the dataset'):
+        archive_motion(tmp_path / 'dataset', first.name)
+    assert first.exists()
+    assert not list(external.iterdir())
 
 
 @pytest.mark.parametrize('failed_sync', [1, 2])

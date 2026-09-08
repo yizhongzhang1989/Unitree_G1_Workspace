@@ -49,6 +49,20 @@ def test_start_requires_fresh_calibration():
         stream.begin()
 
 
+def test_calibration_failure_reports_tracking_quality():
+    stream = source()
+    limited = frame(status=2)
+    limited = BodyFrame(limited.t, limited.seq, limited.positions, limited.status, 7,
+                        limited.rotations)
+    stream._raw.append(limited)
+    stream.last_valid_arrival = float('-inf')
+    stream._note(status=2, message=7)
+    with pytest.raises(RuntimeError, match=(
+            r'latest=LIMITED\(2\), 追踪姿态错误.*\(7\); recent=1, non-VALID=1, '
+            r'nonzero-message=1, missing-orientations=0, fresh-VALID=False')):
+        stream.calibrate()
+
+
 @pytest.mark.parametrize('bad', [None, frame(status=2), frame(status=0)])
 def test_bad_tracking_is_latched(bad):
     stream = source()

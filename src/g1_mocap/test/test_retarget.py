@@ -521,6 +521,96 @@ def test_straight_limbs_do_not_flip_the_hinge_axis(kin, retargeter):
         assert abs(result.joint_pos[SLOT['left_hip_yaw_joint']]) < 0.05, knee
 
 
+def test_elbow_orientation_stabilizes_shoulder_against_position_plane_jump(kin, retargeter):
+    pelvis_pos = np.array([0.0, 0.0, 0.78])
+    q = DEFAULT_Q.copy()
+    positions = skeleton_from_pose(kin, q, pelvis_pos=pelvis_pos, pelvis_rot=np.eye(3))
+    rotations = np.tile(np.eye(3), (len(SMPL_JOINTS), 1, 1))
+    frames = [BodyFrame(t=0.0, seq=index, positions=positions, status=1, message=0,
+                        rotations=rotations) for index in range(30)]
+    calibration = retargeter.calibrate(frames)
+    assert np.all(np.linalg.norm(calibration.arm_hinge_axes, axis=1) > 0.99)
+
+    moved = positions.copy()
+    shoulder = JOINT_INDEX['LEFT_SHOULDER']
+    elbow = JOINT_INDEX['LEFT_ELBOW']
+    wrist = JOINT_INDEX['LEFT_WRIST']
+    hand = JOINT_INDEX['LEFT_HAND']
+    upper = moved[elbow] - moved[shoulder]
+    axis = upper / np.linalg.norm(upper)
+    angle = 1.0
+    cross = np.cross(axis, moved[wrist] - moved[elbow])
+    lower = (moved[wrist] - moved[elbow]) * math.cos(angle) + cross * math.sin(angle) \
+        + axis * (axis @ (moved[wrist] - moved[elbow])) * (1.0 - math.cos(angle))
+    hand_offset = moved[hand] - moved[wrist]
+    moved[wrist] = moved[elbow] + lower
+    moved[hand] = moved[wrist] + hand_offset
+
+    before = retargeter.solve(frames[0], calibration).joint_pos
+    after = retargeter.solve(BodyFrame(
+        t=0.02, seq=31, positions=moved, status=1, message=0,
+        rotations=rotations), calibration).joint_pos
+    shoulder_joints = [SLOT[name] for name in ARMS['left'].ball_joints]
+    np.testing.assert_allclose(after[shoulder_joints], before[shoulder_joints], atol=1e-9)
+
+
+def test_straight_calibration_arms_still_learn_orientation_hinge_axes(kin, retargeter):
+    pelvis_pos = np.array([0.0, 0.0, 0.78])
+    positions = skeleton_from_pose(
+        kin, DEFAULT_Q, pelvis_pos=pelvis_pos, pelvis_rot=np.eye(3))
+    for prefix in ('LEFT', 'RIGHT'):
+        shoulder = JOINT_INDEX[f'{prefix}_SHOULDER']
+        elbow = JOINT_INDEX[f'{prefix}_ELBOW']
+        wrist = JOINT_INDEX[f'{prefix}_WRIST']
+        hand = JOINT_INDEX[f'{prefix}_HAND']
+        direction = positions[elbow] - positions[shoulder]
+        direction /= np.linalg.norm(direction)
+        lower_length = np.linalg.norm(positions[wrist] - positions[elbow])
+        hand_length = np.linalg.norm(positions[hand] - positions[wrist])
+        positions[wrist] = positions[elbow] + lower_length * direction
+        positions[hand] = positions[wrist] + hand_length * direction
+    rotations = np.tile(np.eye(3), (len(SMPL_JOINTS), 1, 1))
+    frames = [BodyFrame(t=0.0, seq=index, positions=positions, status=1, message=0,
+                        rotations=rotations) for index in range(30)]
+    calibration = retargeter.calibrate(frames)
+    np.testing.assert_allclose(np.linalg.norm(calibration.arm_hinge_axes, axis=1), 1.0,
+                               atol=1e-12)
+
+
+def test_arm_moving_behind_by_shoulder_stays_continuous(kin, retargeter):
+    pelvis_pos = np.array([0.0, 0.0, 0.78])
+    positions = skeleton_from_pose(
+        kin, DEFAULT_Q, pelvis_pos=pelvis_pos, pelvis_rot=np.eye(3))
+    rotations = np.tile(np.eye(3), (len(SMPL_JOINTS), 1, 1))
+    frames = [BodyFrame(t=0.0, seq=index, positions=positions, status=1, message=0,
+                        rotations=rotations) for index in range(30)]
+    calibration = retargeter.calibrate(frames)
+    shoulder = JOINT_INDEX['LEFT_SHOULDER']
+    arm = [JOINT_INDEX[name] for name in ('LEFT_ELBOW', 'LEFT_WRIST', 'LEFT_HAND')]
+    elbow = JOINT_INDEX['LEFT_ELBOW']
+    shoulder_slots = [SLOT[name] for name in ARMS['left'].ball_joints]
+    calibrations = (calibration, replace(
+        calibration, arm_hinge_axes=np.zeros_like(calibration.arm_hinge_axes)))
+    outputs = [[], []]
+    for index, angle in enumerate(np.linspace(0.0, 2.4, 97)):
+        rotation = rot('y', angle)
+        moved = positions.copy()
+        moved[arm] = positions[shoulder] + (positions[arm] - positions[shoulder]) @ rotation.T
+        noise = 0.005 * np.array([
+            math.sin(17.0 * angle), math.cos(13.0 * angle), math.sin(23.0 * angle)])
+        moved[arm[1:]] += noise
+        oriented = rotations.copy()
+        oriented[elbow] = rotation
+        frame = BodyFrame(t=index / 50, seq=index, positions=moved, status=1,
+                          message=0, rotations=oriented)
+        for output, calibrated in zip(outputs, calibrations):
+            output.append(retargeter.solve(frame, calibrated).joint_pos[shoulder_slots])
+    stable_max, position_only_max = (
+        np.abs(np.diff(output, axis=0)).max() for output in outputs)
+    assert stable_max < 0.04
+    assert position_only_max > 0.045
+
+
 def test_ankle_links_exist_in_the_model(kin):
     """名单打错字不会报错，只会让站立高度悄悄取到别的刚体上。"""
     for link in ANKLE_LINKS + KEY_BODIES:

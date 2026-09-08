@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from .motion_capture import FPS, MotionClip, RejectedMotion
-from .skeleton import STATUS_VALID, ClockAligner, parse_body
+from .skeleton import STATUS_MESSAGES, STATUS_VALID, ClockAligner, parse_body
 from .stream import MocapStream
 
 
@@ -51,10 +51,21 @@ class CaptureStream(MocapStream):
                 raise RuntimeError('Stop/discard the take before recalibrating')
             self._require_connection()
             frames = self.recent_frames()
-            if (not frames or time.monotonic() - self.last_valid_arrival > 0.2
-                    or any(frame.status != STATUS_VALID or frame.message != 0
-                           or frame.rotations is None for frame in frames)):
-                raise RuntimeError('Calibration needs recent fully VALID tracking with orientations')
+            stale = time.monotonic() - self.last_valid_arrival > 0.2
+            limited = sum(frame.status != STATUS_VALID for frame in frames)
+            messages = sum(frame.message != 0 for frame in frames)
+            missing_orientations = sum(frame.rotations is None for frame in frames)
+            if not frames or stale or limited or messages or missing_orientations:
+                stats = self.stats()
+                status = {0: 'INVALID', 1: 'VALID', 2: 'LIMITED'}.get(
+                    stats.status, str(stats.status))
+                message = STATUS_MESSAGES.get(stats.message, str(stats.message))
+                raise RuntimeError(
+                    'Calibration needs recent fully VALID tracking with orientations: '
+                    f'latest={status}({stats.status}), {message}({stats.message}); '
+                    f'recent={len(frames)}, non-VALID={limited}, '
+                    f'nonzero-message={messages}, missing-orientations={missing_orientations}, '
+                    f'fresh-VALID={not stale}')
             return super().calibrate(min_frames=min_frames)
 
     def begin(self, *, duration_limit=60.0, **quality):
