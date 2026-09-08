@@ -77,7 +77,7 @@ def _parameter(value, value_type):
 
 
 def camera(side: str, url, server_port: int, image_width=0,
-           image_height=240, fps=15) -> Node:
+           image_height=240, fps=15, calib_file='') -> Node:
     """由左右手部署参数构造一个 IP 相机节点"""
     camera_name = f"camera_{side}"
     return Node(
@@ -86,6 +86,7 @@ def camera(side: str, url, server_port: int, image_width=0,
         parameters=[{
             "rtsp_url": _parameter(url, str),
             "image_topic": f"/{camera_name}/image_raw",
+            "calib_file": _parameter(calib_file, str),
             "image_width": _parameter(image_width, int),
             "image_height": _parameter(image_height, int),
             "fps": _parameter(fps, int),
@@ -100,13 +101,20 @@ def end_effector_actions(
         enable_grippers_on_start: Union[str, Substitution],
         wrist_left_url='rtsp://admin:123456@192.168.123.97/stream1',
         wrist_right_url='rtsp://admin:123456@192.168.123.98/stream1',
-        wrist_image_width=0, wrist_image_height=240, wrist_fps=15):
+        wrist_image_width=0, wrist_image_height=240, wrist_fps=15,
+        wrist_calib_file=None):
     """Build all end-effector actions with KWR57 in the bridge process"""
+    if wrist_calib_file is None:
+        wrist_calib_file = os.path.join(
+            get_package_share_directory("camera_calibration"),
+            "config", "calibration.yaml")
     return [
         bridge(buses, kwr57_devices, gloria_devices),
         *(gripper(device, enable_grippers_on_start) for device in gloria_devices),
         camera("left", wrist_left_url, 8010,
-               wrist_image_width, wrist_image_height, wrist_fps),
+             wrist_image_width, wrist_image_height, wrist_fps,
+             wrist_calib_file),
         camera("right", wrist_right_url, 8011,
-               wrist_image_width, wrist_image_height, wrist_fps),
+             wrist_image_width, wrist_image_height, wrist_fps,
+             wrist_calib_file),
     ]

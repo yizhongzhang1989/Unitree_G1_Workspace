@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 import requests
 
-from g1_vla_bridge.transforms import invert_pose
 from g1_vla_bridge.vla_backend import (
     SIDES,
     ActionChunk,
@@ -76,7 +75,7 @@ def normalized_intrinsic(calibration, image: np.ndarray) -> list[list[float]]:
 
 
 def build_payload(observation: Observation, frame) -> dict[str, Any]:
-    """构造 CogACT RayPE 请求；外参在线协议中使用 ``world2cam``。"""
+    """构造 CogACT RayPE 请求；外参与训练数据同为 ``base_T_cam``。"""
     slots = SPEC.images.slots
     missing_calibration = [slot for slot in slots if slot not in observation.calibrations]
     missing_pose = [slot for slot in slots if slot not in observation.camera_poses]
@@ -100,7 +99,7 @@ def build_payload(observation: Observation, frame) -> dict[str, Any]:
             for slot in slots
         ],
         'extrinsics_per_view': [
-            invert_pose(observation.camera_poses[slot]).tolist() for slot in slots
+            observation.camera_poses[slot].tolist() for slot in slots
         ],
     }
 

@@ -85,7 +85,7 @@ class EndEffectorsNodesTest(unittest.TestCase):
         with patch("robot_bringup.end_effectors.nodes.Node") as node_type:
             action = camera(
                 "left", "rtsp://admin:123456@192.168.123.97/stream0", 8010,
-                1920, 1080, 30)
+                1920, 1080, 30, "/tmp/calibration.yaml")
 
         self.assertIs(action, node_type.return_value)
         node_type.assert_called_once_with(
@@ -94,6 +94,7 @@ class EndEffectorsNodesTest(unittest.TestCase):
             parameters=[{
                 "rtsp_url": "rtsp://admin:123456@192.168.123.97/stream0",
                 "image_topic": "/camera_left/image_raw",
+                "calib_file": "/tmp/calibration.yaml",
                 "image_width": 1920,
                 "image_height": 1080,
                 "fps": 30,
@@ -121,6 +122,8 @@ class EndEffectorsNodesTest(unittest.TestCase):
 
     def test_bringup_adds_left_and_right_cameras(self) -> None:
         with (
+            patch("robot_bringup.end_effectors.nodes.get_package_share_directory",
+                  return_value="/opt/camera_calibration"),
             patch("robot_bringup.end_effectors.nodes.bridge",
                   return_value="bridge"),
             patch("robot_bringup.end_effectors.nodes.camera", side_effect=[
@@ -132,9 +135,11 @@ class EndEffectorsNodesTest(unittest.TestCase):
         self.assertEqual(actions, ["bridge", "left_camera", "right_camera"])
         self.assertEqual(camera_factory.call_args_list, [
             call("left", "rtsp://admin:123456@192.168.123.97/stream1", 8010,
-                 0, 240, 15),
+                  0, 240, 15,
+                  "/opt/camera_calibration/config/calibration.yaml"),
             call("right", "rtsp://admin:123456@192.168.123.98/stream1", 8011,
-                 0, 240, 15),
+                  0, 240, 15,
+                  "/opt/camera_calibration/config/calibration.yaml"),
         ])
 
 

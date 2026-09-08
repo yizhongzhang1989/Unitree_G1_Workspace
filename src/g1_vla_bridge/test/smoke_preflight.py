@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""起飞前检查：链路是否齐、模型首点离实测多远、重投影开关值不值得开。
+"""只读预检：三路观测是否齐、推理耗时、双臂首点偏差与整段位移。
 
     source install/setup.bash
     python3 src/g1_vla_bridge/test/smoke_preflight.py --rounds 6 --task "Pick up the cup"
 
-**不发任何指令**，纯读。走的是和 ``vla_node`` 完全同一条路径（同一个 backend、同一份
-``Observation``），所以这里跑通就等于节点能跑通。
-
-判据：模型自身噪声约 0.037 m（同一请求重复测得），所以两个变体的均值差要明显大于它
-才说明重投影真的有用。
+**不发任何指令**。使用同一个 backend 和 Observation 格式，不验证执行器或闭环跟踪。
 """
 
 from __future__ import annotations
@@ -17,7 +13,6 @@ import argparse
 import json
 import time
 
-import cv2
 import numpy as np
 import rclpy
 import yaml
@@ -28,12 +23,10 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
-from g1_vla_bridge.backends.a2d_omnipicker import describe_reprojection
 from g1_vla_bridge.transforms import pose_matrix, quat_angle
 from g1_vla_bridge.vla_backend import SIDES, Observation, backend_parameters, load_backend
-from g1_vla_bridge.vla_node import IMAGE_TOPICS, camera_calibration, image_to_bgr
-
-MODEL_NOISE = 0.037
+from g1_vla_bridge.vla_node import (CAMERA_FRAMES, CAMERA_INFO_TOPICS, IMAGE_TOPICS,
+                                    camera_calibration, image_to_bgr)
 
 
 def load_config() -> dict:
@@ -73,25 +66,29 @@ def gather(cfg, slots, timeout: float, warmup: float):
         if slot in slots:
             node.create_subscription(Image, cfg.get(param, default),
                                      image_callback(slot), image_qos)
-    node.create_subscription(CameraInfo, cfg['head_camera_info_topic'],
-                             lambda m: info.setdefault('m', m), small)
+    for slot, param, default in CAMERA_INFO_TOPICS:
+        if slot in slots:
+            node.create_subscription(
+                CameraInfo, cfg.get(param, default),
+                lambda message, key=slot: info.__setitem__(key, message), small)
     node.create_subscription(String, cfg['status_topic'],
                              lambda m: status.update(json.loads(m.data)), 10)
     needed = (cfg['head_camera_frame'], cfg['left_camera_frame'],
               cfg['right_camera_frame'], cfg['left_tip_frame'], cfg['right_tip_frame'])
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and (
-            len(frames) < len(slots) or not info or not status or not all(
+            len(frames) < len(slots) or len(info) < len(slots) or not status or not all(
                 tf.can_transform(cfg['base_frame'], f, rclpy.time.Time()) for f in needed)):
         rclpy.spin_once(node, timeout_sec=0.1)
     missing_tf = [f for f in needed
                   if not tf.can_transform(cfg['base_frame'], f, rclpy.time.Time())]
     missing_images = [k for k in slots if k not in frames]
+    missing_info = [k for k in slots if k not in info]
     print('图像   %s' % ('齐' if not missing_images else '缺 %s' % missing_images))
-    print('内参   %s' % ('有' if info else '缺 %s' % cfg['head_camera_info_topic']))
+    print('内参   %s' % ('齐' if not missing_info else '缺 %s' % missing_info))
     print('TF     %s' % ('齐' if not missing_tf else '缺 %s' % missing_tf))
     print('底层   %s' % ({k: status.get(k) for k in ('state', 'arms_live')} or '收不到'))
-    if missing_images or not info or missing_tf:
+    if missing_images or missing_info or missing_tf:
         raise SystemExit('前置条件不齐，先把相机/控制栈起起来')
 
     print('\n预热 %.0f s 等关键帧...' % warmup)
@@ -108,7 +105,7 @@ def gather(cfg, slots, timeout: float, warmup: float):
     if not status.get('arms_live'):
         print('  提醒：arms_live 不为真，~/start 会被拒。先 ros2 service call '
               '/motion_control/engage std_srvs/srv/Trigger')
-    return node, tf, frames, info['m'], status
+    return node, tf, frames, info, status
 
 
 def main() -> None:
@@ -117,16 +114,19 @@ def main() -> None:
     parser.add_argument('--task', default='Pick up the cup using the left arm.')
     parser.add_argument('--timeout', type=float, default=40.0)
     parser.add_argument('--warmup', type=float, default=4.0)
+    parser.add_argument('--proxy', default='')
     args = parser.parse_args()
+    if args.rounds < 1:
+        parser.error('--rounds must be positive')
 
     cfg = load_config()
     name = cfg.get('vla_backend', 'a2d_omnipicker')
     params = dict(backend_parameters(name))
     params.update({k: v for k, v in cfg.items() if k in params})
-    variants = {'不重投影': dict(params, head_reproject=False),
-                '重投影': dict(params, head_reproject=True)}
-    backends = {label: load_backend(name, value) for label, value in variants.items()}
-    slots = backends['重投影'].spec.images.slots
+    if args.proxy:
+        params['proxy'] = args.proxy
+    backend = load_backend(name, params)
+    slots = backend.spec.images.slots
 
     rclpy.init()
     node, tf, frames, info, status = gather(cfg, slots, args.timeout, args.warmup)
@@ -136,9 +136,18 @@ def main() -> None:
         return np.array([t.translation.x, t.translation.y, t.translation.z,
                          t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w])
 
-    camera = camera_calibration(info)
-    cam_pose = pose7(cfg['head_camera_frame'])
-    grip = status.get('grip') or {}
+    camera_frames = {
+        slot: cfg.get(param, default)
+        for slot, param, default in CAMERA_FRAMES if slot in slots
+    }
+    calibrations = {slot: camera_calibration(info[slot]) for slot in slots}
+    camera_poses = {
+        slot: pose_matrix(pose[3:], pose[:3])
+        for slot, pose in ((slot, pose7(camera_frames[slot])) for slot in slots)
+    }
+    grip_value = status.get('grip') or []
+    grip = (grip_value if isinstance(grip_value, dict)
+            else dict(zip(SIDES, grip_value)))
     measured = {s: pose7(cfg['%s_tip_frame' % s]) for s in SIDES}
     observation = Observation(
         task=args.task,
@@ -146,45 +155,54 @@ def main() -> None:
         poses=measured,
         grippers={s: float(grip.get(s, 0.0)) for s in SIDES},
         enabled={s: bool(cfg['has_%s' % s]) for s in SIDES},
-        calibrations={'head': camera},
-        camera_poses={'head': pose_matrix(cam_pose[3:], cam_pose[:3])})
+        calibrations=calibrations,
+        camera_poses=camera_poses)
 
-    print('\n%s' % describe_reprojection(camera))
-    for label, backend in backends.items():
-        backend.debug_dir = '/tmp/preflight_%s' % ('reproj' if '重' in label else 'raw')
-    cv2.imwrite('/tmp/preflight_raw.png', observation.images['head'])
-    print('头部原图已存 /tmp/preflight_raw.png；实际发出的 JPEG 见 /tmp/preflight_*/')
+    print('\n观测标定（相机位姿表示在 base_frame 下，线上格式由 backend 决定）')
+    for slot in slots:
+        fx, fy, cx, cy = calibrations[slot].intrinsics
+        width, height = calibrations[slot].size
+        print('  %-12s K_norm=[%.6f %.6f %.6f %.6f]  t=%s'
+              % (slot, fx / width, fy / height, cx / width, cy / height,
+                 np.round(camera_poses[slot][:3, 3], 4)))
+    backend.debug_dir = '/tmp/vla_preflight'
+    print('实际发出的 JPEG 见 /tmp/vla_preflight/')
 
     print('\n实测末端 左 %s' % np.round(measured['left'][:3], 3))
-    first_points = {}
-    for label, backend in backends.items():
-        rows = []
+    try:
+        rows = {side: [] for side in SIDES}
+        infer_times = []
         for _ in range(args.rounds):
+            started = time.monotonic()
             chunk = backend.infer(observation)
-            poses = chunk.poses['left']
-            rows.append((poses[0, :3],
-                         float(np.linalg.norm(poses[0, :3] - measured['left'][:3])),
-                         float(np.degrees(quat_angle(poses[0, 3:], measured['left'][3:]))),
-                         float(np.linalg.norm(poses[-1, :3] - poses[0, :3]))))
-        pts = np.stack([r[0] for r in rows])
-        first_points[label] = pts.mean(axis=0)
-        print('%-8s 首点均值 %s  自身散布 %.4f  距实测 %.3f±%.3f  姿态差 %.0f度  整段位移 %.3f'
-              % (label, np.round(pts.mean(axis=0), 3),
-                 float(np.linalg.norm(pts - pts.mean(axis=0), axis=1).max()),
-                 float(np.mean([r[1] for r in rows])), float(np.std([r[1] for r in rows])),
-                 float(np.mean([r[2] for r in rows])), float(np.mean([r[3] for r in rows]))))
+            elapsed = time.monotonic() - started
+            infer_times.append(elapsed)
+            for side in SIDES:
+                poses = chunk.poses[side]
+                rows[side].append((
+                    poses[0, :3],
+                    float(np.linalg.norm(poses[0, :3] - measured[side][:3])),
+                    float(np.degrees(quat_angle(poses[0, 3:], measured[side][3:]))),
+                    float(np.linalg.norm(poses[-1, :3] - poses[0, :3]))))
+        print('%-8s 推理 %.0f±%.0f ms' % (
+            name, 1e3 * float(np.mean(infer_times)),
+            1e3 * float(np.std(infer_times))))
+        for side in SIDES:
+            pts = np.stack([row[0] for row in rows[side]])
+            print(('  %-5s 首点 %s  散布 %.4f  距实测 %.3f±%.3f  姿态差 %.0f度  '
+                   '整段 %.3f')
+                  % (side, np.round(pts.mean(axis=0), 3),
+                     float(np.linalg.norm(pts - pts.mean(axis=0), axis=1).max()),
+                     float(np.mean([row[1] for row in rows[side]])),
+                     float(np.std([row[1] for row in rows[side]])),
+                     float(np.mean([row[2] for row in rows[side]])),
+                     float(np.mean([row[3] for row in rows[side]]))))
         print('         %s' % backend.stats())
 
-    shift = float(np.linalg.norm(first_points['重投影'] - first_points['不重投影']))
-    print('\n两个变体的首点相差 %.4f m（模型自身噪声 %.3f m）-> %s'
-          % (shift, MODEL_NOISE,
-             '重投影确实改变了模型判断，值得按抓取成功率进一步验证'
-             if shift > 2 * MODEL_NOISE else '差异淹没在噪声里，重投影暂时看不出收益'))
-
-    for backend in backends.values():
+    finally:
         backend.close()
-    node.destroy_node()
-    rclpy.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

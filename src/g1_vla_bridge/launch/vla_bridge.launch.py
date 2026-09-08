@@ -28,7 +28,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 # 只暴露现场最常改的这几个，其余走 config/*.yaml。
-_ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description')
+_ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'execution_mode')
 
 
 def _node(context):

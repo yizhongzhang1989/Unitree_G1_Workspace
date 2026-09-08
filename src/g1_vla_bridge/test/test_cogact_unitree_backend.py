@@ -56,7 +56,8 @@ def test_payload_matches_cogact_raype_contract():
         'ROBOT_RIGHT_TRANS', 'ROBOT_RIGHT_ROT_MAT'}
     assert np.allclose(payload['intrinsics_per_view'][0],
                        [[0.5, 0, 0.5], [0, 0.5, 0.5], [0, 0, 1]])
-    assert payload['extrinsics_per_view'][1][0][3] == pytest.approx(-0.2)
+    # 与 record/YB 训练数据一致：world_xyz = extrinsic @ camera_xyz。
+    assert payload['extrinsics_per_view'][1][0][3] == pytest.approx(0.2)
 
 
 def test_payload_uses_unified_gripper_orientation():

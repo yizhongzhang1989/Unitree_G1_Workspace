@@ -31,7 +31,7 @@
 
     # 头部图按训练相机的内参逐像素重采样，把镜头尺度对齐（两台相机焦距差 1.42 倍）。
     # 代价是画布只填得满约 49%，边上是外推出来的——**那本身也是分布偏移**，先用
-    # test/smoke_preflight.py 做 A/B。训练相机的内参/畸变写死在 backend 里。
+    # 分别配置开关后用预检比较。训练相机的内参/畸变写死在 backend 里。
     head_reproject: true
 
     # -- 坐标系标定（ros2 run g1_vla_bridge calibrate_frame 生成）--------------

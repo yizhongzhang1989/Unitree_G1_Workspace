@@ -9,16 +9,15 @@
 
 **本文件里没有任何一家 VLA 的协议细节。** 流程是固定的：
 
-    采观测 -> backend.infer() -> 重锚 -> 逐帧限幅 -> /motion_control/command
+    采观测 -> backend.infer() -> 重锚 -> 可选限幅 -> /motion_control/command
 
 接口定义见 ``vla_backend.py``。换一家 VLA = 在 ``backends/`` 下加一个模块 + 改 ``vla_backend`` 参数。
 
 两条线程各干各的：
 
-* **推理线程**背靠背地跑，一轮 = 采一组观测 -> ``backend.infer()`` -> 整体替换动作缓冲。
-  推理耗时几百毫秒且抖动大，放在 ROS 回调里会把执行器堵死。
+* **推理线程**收到请求才采观测并调用 backend，播放期间不请求下一段。
 * **下发定时器**按 ``action_rate_hz`` 从缓冲里逐个取 waypoint。缓冲走完就停在最后一个
-  waypoint 上（不是回中），等下一次推理结果顶上来。
+    waypoint 上；manual 等待 ~/next，continuous 请求下一段。
 
 本节点**不做使能**。启动前 ``motion_control`` 必须已经 ``~/engage`` 且
 ``arms_live=true``，否则 ``~/start`` 直接拒绝；运行中掉了会自动停。
@@ -76,6 +75,26 @@ CAMERA_FRAMES = (
 _BGR_FROM = {'bgr8': (3, None),
              'rgb8': (3, cv2.COLOR_RGB2BGR),
              'yuv422_yuy2': (2, cv2.COLOR_YUV2BGR_YUY2)}
+
+
+def playback_step(cursor: int, horizon: int) -> tuple[int, int, bool]:
+    """返回本拍索引、下一 cursor，以及本拍是否播完整个 chunk。"""
+    if horizon <= 0:
+        raise ValueError('horizon 必须大于 0')
+    index = min(max(0, cursor), horizon - 1)
+    finished = index == horizon - 1
+    return index, index if finished else index + 1, finished
+
+
+def inference_request_error(running: bool, active: bool, has_chunk: bool) -> str:
+    """返回当前状态拒绝新推理请求的原因；空串表示可以请求。"""
+    if not running:
+        return '尚未 start'
+    if active:
+        return '正在推理'
+    if has_chunk:
+        return '当前 chunk 尚未执行完'
+    return ''
 
 
 def image_to_bgr(msg: Image) -> np.ndarray:
@@ -148,6 +167,10 @@ class VlaBridgeNode(Node):
         }
 
         rate = float(p('action_rate_hz', 30.0).get_parameter_value().double_value)
+        self._execution_mode = p('execution_mode', 'manual') \
+            .get_parameter_value().string_value
+        if self._execution_mode not in ('continuous', 'manual'):
+            raise ValueError("execution_mode 只能是 'continuous' 或 'manual'")
         # 位置和姿态分开选：位置的标定（frame.origin_in_base）不确定，姿态的
         # （tool_rotation_rpy）是确定的。
         self._delta_pos = p('delta_position', False).get_parameter_value().bool_value
@@ -157,6 +180,8 @@ class VlaBridgeNode(Node):
             raise ValueError(f'{name} 输出的是 {self._spec.action_semantics} 动作，'
                              '不能再开 delta_position / delta_rotation')
         self._horizon = p('action_horizon', 0).get_parameter_value().integer_value
+        self._cartesian_limit_enabled = p('cartesian_limit_enabled', False) \
+            .get_parameter_value().bool_value
         self._max_step_pos = float(
             p('max_step_pos', 0.02).get_parameter_value().double_value)
         self._max_step_ori = float(
@@ -176,6 +201,9 @@ class VlaBridgeNode(Node):
         self._jump = 0.0
         self._error = ''
         self._running = threading.Event()
+        self._infer_requested = threading.Event()
+        self._inference_active = False
+        self._generation = 0
 
         small = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                            reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -218,6 +246,7 @@ class VlaBridgeNode(Node):
         self.create_timer(1.0 / rate, self._on_tick, callback_group=control)
         self.create_timer(0.2, self._publish_status, callback_group=control)
         self.create_service(Trigger, '~/start', self._on_start, callback_group=control)
+        self.create_service(Trigger, '~/next', self._on_next, callback_group=control)
         self.create_service(Trigger, '~/stop', self._on_stop, callback_group=control)
 
         self._alive = True
@@ -326,39 +355,58 @@ class VlaBridgeNode(Node):
 
     def _infer_loop(self) -> None:
         while self._alive:
-            if not self._running.wait(timeout=0.1):
+            if not self._infer_requested.wait(timeout=0.1):
                 continue
+            with self._lock:
+                if not self._infer_requested.is_set():
+                    continue
+                self._infer_requested.clear()
+                if not self._running.is_set():
+                    continue
+                generation = self._generation
             try:
                 observation = self._observe()
                 clock = time.monotonic()
                 chunk = self._backend.infer(observation)
                 elapsed = (time.monotonic() - clock) * 1e3
+                self._accept(chunk, elapsed, generation)
             except Exception as error:  # 网络/服务/数据任何异常都只是这一轮作废。
-                self._fail(f'{type(error).__name__}: {error}')
-                continue
-            self._accept(chunk, elapsed)
+                self._fail(f'{type(error).__name__}: {error}', generation)
 
-    def _fail(self, reason: str) -> None:
+    def _request_inference(self, generation: int | None = None) -> str:
+        """空闲时排入一次推理；返回非空表示当前不能接新请求。"""
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return '请求已取消'
+            reason = inference_request_error(
+                self._running.is_set(), self._inference_active,
+                self._chunk is not None)
+            if reason:
+                return reason
+            self._inference_active = True
+            self._infer_requested.set()
+        return ''
+
+    def _fail(self, reason: str, generation: int) -> None:
+        with self._lock:
+            if generation != self._generation or not self._running.is_set():
+                return
+            self._inference_active = False
             self._error = reason
         self.get_logger().warning(f'推理失败，保持当前目标: {reason}',
                                   throttle_duration_sec=2.0)
         # 网络/服务出错时别原地空转把日志和服务端一起打爆。
         time.sleep(self._retry_delay)
+        if self._execution_mode == 'continuous':
+            self._request_inference(generation)
 
-    def _accept(self, chunk: ActionChunk, elapsed_ms: float) -> None:
+    def _accept(self, chunk: ActionChunk, elapsed_ms: float, generation: int) -> None:
         """按需重锚，并记录准入指标。收到的 chunk 已经在 ``base_frame`` 里。"""
-        # 传进来的 chunk 是发请求那一刻观测的，推理要 ~200 ms，期间手臂已经走了一段，
-        # jump/lead 要拿当前实测算才准。
-        try:
-            measured = {side: self._measured_pose(side) for side in SIDES}
-        except Exception as error:
-            self._fail(f'重锚时读不到实测末端位姿: {error}')
-            return
         with self._lock:
-            # delta 的锚点必须是**当前指令值**而不是实测值。推理一轮 ~250 ms，30 Hz 下
-            # 只播得完 30 个 waypoint 里的前 8 个；若锚回几乎没动过的实测位姿，每段都把
-            # 走过的那一截抹掉，机器人就只会在原地按模型噪声抖。
+            if generation != self._generation or not self._running.is_set():
+                return
+        measured = {side: self._measured_pose(side) for side in SIDES}
+        with self._lock:
             anchor = {side: self._command.get(side, measured[side]) for side in SIDES}
         poses, jump = {}, 0.0
         for side in SIDES:
@@ -370,6 +418,9 @@ class VlaBridgeNode(Node):
                            float(np.linalg.norm(poses[side][0, :3] - measured[side][:3])))
         lead = max(float(np.linalg.norm(anchor[s][:3] - measured[s][:3])) for s in SIDES)
         with self._lock:
+            if generation != self._generation or not self._running.is_set():
+                return
+            self._inference_active = False
             self._chunk = ActionChunk(poses=poses, grippers=chunk.grippers)
             self._cursor = 0
             self._infer_ms = elapsed_ms
@@ -384,7 +435,9 @@ class VlaBridgeNode(Node):
     # -- 下发 ---------------------------------------------------------------
 
     def _limit(self, current: np.ndarray, target: np.ndarray) -> np.ndarray:
-        """把单帧笛卡尔步长夹到限幅内。模型跳变时只是变慢，不会甩手臂。"""
+        """可选的 VLA 笛卡尔限速；关闭时原样返回 waypoint。"""
+        if not self._cartesian_limit_enabled:
+            return target.copy()
         out = current.copy()
         delta = target[:3] - current[:3]
         distance = float(np.linalg.norm(delta))
@@ -405,19 +458,26 @@ class VlaBridgeNode(Node):
             if chunk is not None:
                 limit = chunk.horizon if self._horizon <= 0 \
                     else min(self._horizon, chunk.horizon)
-                self._cursor = min(cursor + 1, limit - 1)
+                index, self._cursor, finished = playback_step(cursor, limit)
+            else:
+                index, finished = 0, False
         if reason:
             self._stop(f'手臂不可用: {reason}')
             return
         if chunk is None:
             return
 
-        index = min(cursor, chunk.horizon - 1)
         for side in SIDES:
             if not self._active[side]:
                 continue                     # 冻结：位姿和夹爪都停在 ~/start 那一刻。
             command[side] = self._limit(command[side], chunk.poses[side][index])
             grip[side] = float(chunk.grippers[side][index])
+
+        if finished:
+            finished = all(
+                np.linalg.norm(command[side][:3] - chunk.poses[side][index, :3]) < 1e-9
+                and quat_angle(command[side][3:], chunk.poses[side][index, 3:]) < 1e-6
+                for side in SIDES if self._active[side])
 
         # 协议只认 14（双臂位姿）和 2（夹爪）这两种长度，拼不到一帧里，发两条。
         self._publisher.publish(Float64MultiArray(
@@ -426,13 +486,21 @@ class VlaBridgeNode(Node):
             data=join_command(grip=[grip[s] for s in SIDES])))
         with self._lock:
             self._command, self._grip_command = command, grip
+            if finished and self._chunk is chunk:
+                self._chunk = None
+                self._cursor = 0
+        if finished and self._execution_mode == 'continuous':
+            self._request_inference()
 
     def _publish_status(self) -> None:
         with self._lock:
             chunk, cursor = self._chunk, self._cursor
             payload = {
                 'backend': self._spec.name,
+                'execution_mode': self._execution_mode,
+                'cartesian_limit_enabled': self._cartesian_limit_enabled,
                 'running': self._running.is_set(),
+                'inference_active': self._inference_active,
                 'task': self._task,
                 'infer_ms': round(self._infer_ms, 1),
                 'lead': round(self._lead, 4),
@@ -441,6 +509,9 @@ class VlaBridgeNode(Node):
                 'error': self._error,
                 'horizon': 0 if chunk is None else chunk.horizon,
                 'cursor': int(cursor),
+                'waiting_for_next': all((
+                    self._execution_mode == 'manual', self._running.is_set(),
+                    chunk is None, not self._inference_active)),
                 'grip': {s: round(self._grip_command[s], 3) for s in SIDES},
                 'images': sorted(self._images),
                 'image_dir': self._backend.debug_dir,
@@ -478,9 +549,27 @@ class VlaBridgeNode(Node):
             opened = float(self._spec.gripper.to_robot(self._spec.gripper.model_open))
             self._grip_command = {s: opened for s in SIDES}
             self._chunk, self._cursor, self._error = None, 0, ''
+            self._generation += 1
             self._running.set()
+        if self._execution_mode == 'continuous':
+            self._request_inference()
         self.get_logger().info(f'开始执行: {task!r}')
-        response.success, response.message = True, f'running: {task}'
+        state = '自动请求首段' if self._execution_mode == 'continuous' else '等待 ~/next'
+        response.success, response.message = True, f'running: {task}，{state}'
+        return response
+
+    def _on_next(self, request, response):
+        if self._execution_mode != 'manual':
+            response.success, response.message = False, '仅 execution_mode=manual 可用'
+            return response
+        with self._lock:
+            reason = self._arms_ready()
+        if reason:
+            response.success, response.message = False, reason
+            return response
+        reason = self._request_inference()
+        response.success = not reason
+        response.message = reason or '已请求下一段'
         return response
 
     def _on_stop(self, request, response):
@@ -490,17 +579,20 @@ class VlaBridgeNode(Node):
         return response
 
     def _stop(self, reason: str) -> None:
-        if not self._running.is_set():
-            return
-        self._running.clear()
         with self._lock:
-            self._chunk, self._cursor = None, 0
+            if not self._running.is_set():
+                return
+            self._generation += 1
+            self._running.clear()
+            self._infer_requested.clear()
+            self._chunk, self._cursor, self._inference_active = None, 0, False
         # 停止只是不再发新目标，手臂保持在最后一帧；卸力要走 motion_control 的 ~/estop。
         self.get_logger().warning(f'停止下发: {reason}')
 
     def shutdown(self) -> None:
         self._alive = False
-        self._running.clear()
+        self._stop('节点退出')
+        self._infer_requested.set()
         self._worker.join(timeout=2.0)
         self._backend.close()
 

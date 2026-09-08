@@ -53,6 +53,9 @@
     command_topic: /motion_control/command
     status_topic: /motion_control/status
     action_rate_hz: 30.0
+    # manual：~/start 只进入待命，每次 ~/next 请求并完整执行一个 chunk。
+    # continuous：完整执行当前 chunk 后自动请求下一段。
+    execution_mode: manual
 
     # 增量控制：只取模型整段的**形状**，叠到上一段留下的指令值上。位置和姿态分开选：
     #   delta_position —— 相减时 model_origin_in_base 和 tool_offset **完全抵消**，
@@ -64,14 +67,13 @@
     # 锚点为什么必须是指令值而不是实测值，见 README。
     delta_position: false
     delta_rotation: false
-    # 每段动作最多用前几个 waypoint，0 = 用 backend 返回的全部（A2D 是 30）。
-    # 调小 = 更早换用新观测的结果，代价是推理跟不上时缓冲会提前见底。
+    # 每段动作最多用前几个 waypoint，0 = 用 backend 返回的全部（CogACT 是 30）。
     action_horizon: 0
 
     # -- 安全 ----------------------------------------------------------------
-    # 单帧笛卡尔步长上限，**这是现在唯一的运动安全限制**。30 Hz 下 0.02 m/帧 = 0.6 m/s；
-    # 模型输出跳变时只是变慢，不会把手臂甩出去。它在 motion_control 的 IK 限幅之上再加
-    # 一道，两者不冲突。首点距实测的距离只记录不拦截，见 ~/status 的 jump 字段。
+    # 默认原样下发 waypoint；开启后才使用下面的位置/姿态步长上限。
+    # motion_control 的关节限速和 IK 保护不受此开关影响。
+    cartesian_limit_enabled: false
     max_step_pos: 0.02
     max_step_ori: 0.10
 

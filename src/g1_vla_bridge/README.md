@@ -3,7 +3,7 @@
 VLA 推理服务与 `g1_motion_control` 之间的桥。**流程是固定的，VLA 是可换的**：
 
 ```
-采观测 → backend.infer() → 重锚 → 逐帧限幅 → /motion_control/command
+采观测 → backend.infer() → 重锚 → 可选逐帧限幅 → /motion_control/command
 ```
 
 节点只认三样东西，全部定义在 [vla_backend.py](g1_vla_bridge/vla_backend.py)：
@@ -27,9 +27,9 @@ flowchart LR
     end
 
     subgraph node["vla_node（与 VLA 无关）"]
-        worker["推理线程<br/>背靠背"]
+        worker["推理线程<br/>按 chunk 请求"]
         buffer[("动作缓冲")]
-        timer["下发定时器<br/>action_rate_hz，逐帧限幅"]
+        timer["下发定时器<br/>action_rate_hz，可选限幅"]
     end
 
     subgraph be["backends/&lt;名字&gt;.py + config/backends/&lt;名字&gt;.yaml"]
@@ -41,14 +41,19 @@ flowchart LR
     worker -- Observation --> be
     be -- ActionChunk --> worker
     wire <--> vla["VLA 服务"]
-    worker -- 整段替换 --> buffer
+    worker -- 完整一段 --> buffer
     buffer --> timer
     timer --> mc["/motion_control/command<br/>14 双臂位姿 + 2 夹爪"]
 ```
 
-推理和下发是两条线程：推理线程背靠背跑（一轮几百毫秒且抖动大，放回调里会堵死执行器），
-下发定时器按 `action_rate_hz` 逐个取 waypoint，缓冲走完就停在最后一个上（不是回中）。
-任何一轮推理失败都只是这一轮作废，手臂保持当前目标，`retry_delay_s` 之后重试。
+推理和下发是两条线程（一轮推理几百毫秒且抖动大，放回调里会堵死执行器）。默认是手动模式：
+每次请求得到一个完整 chunk，下发定时器按 `action_rate_hz` 从第 0 点播到最后一点，中途绝不
+替换；播完停在最后一点，等待下一次请求。`execution_mode:=continuous` 则播完后自动请求下一段。
+默认 `cartesian_limit_enabled: false`，VLA 不裁剪位置和姿态，按 30 Hz 原样下发 waypoint；
+motion_control 的关节限速和 IK 保护仍保留。设置该参数为 `true` 可恢复 VLA 限速。
+开启时，最后一点若被限速截断，会继续下发到指令达到末点后才结束；这不代表实机反馈已经到位。
+任何一轮推理失败都只是这一轮作废，手臂保持当前目标；manual 模式等待下一次 Enter，
+continuous 模式在 `retry_delay_s` 后自动重试。
 
 ## 接一个新的 VLA
 
@@ -126,7 +131,10 @@ python -m cogact.inference.serve_batch \
   --port 5500
 ```
 
-RayPE 请求会发送三路 `image_types`、归一化内参和 `world2cam`。机器人侧必须提供：
+客户端目前发送三路 `image_types`、归一化内参和 `base_T_cam`，其方向与 `record` 默认导出一致：
+`world_xyz = extrinsic @ camera_xyz`。注意：训练文件的存储方向不等于 HTTP 接口的输入契约；
+仍需用服务端 dataset 和 serve_batch 的消费代码确认是否取逆、是否再次归一化 K，以及响应是否为
+`pose_unified`。仅推理成功或客户端测试通过不能证明这些约定正确。机器人侧必须提供：
 
 | 槽位 | CameraInfo | TF（相对 `torso_link`） |
 |---|---|---|
@@ -137,7 +145,7 @@ RayPE 请求会发送三路 `image_types`、归一化内参和 `world2cam`。机
 `CameraInfo` 的宽高必须和对应原图一致；不一致时本轮推理会被拒绝，避免错误几何静默运行。
 
 ```bash
-# 先决条件
+# 先决条件 相机参数和 record 保持一致
 ros2 launch robot_bringup all_data.launch.py \
   scope:=whole_body topology:=dual \
   wrist_left_url:=rtsp://admin:123456@192.168.123.97/stream0 \
@@ -150,12 +158,9 @@ ros2 launch head_sensors head_camera.launch.py \
 # 服务在电脑 B 的局域网里时，先从 B 开反向 SOCKS：ssh -N -R 1080 user@<本机>
 ros2 launch g1_vla_bridge vla_bridge.launch.py proxy:=socks5h://127.0.0.1:1080
 
-ros2 topic pub --once /vla_bridge/task std_msgs/msg/String "{data: 'pick up the pink bowl using the left arm.'}"
-ros2 service call /motion_control/engage std_srvs/srv/Trigger
-ros2 service call /vla_bridge/start std_srvs/srv/Trigger
-ros2 topic echo /vla_bridge/status          # backend / running / infer_ms / cursor / error
-ros2 service call /vla_bridge/stop  std_srvs/srv/Trigger
-ros2 service call /motion_control/estop std_srvs/srv/Trigger
+ros2 run g1_vla_bridge vla_cli
+# CLI 中：/engage 明确使能；输入任务文字并 Enter 只更新目标；空行 Enter 请求并完整执行
+# 一个 30 点 chunk。/estop 急停卸力；/stop 停止 VLA；/quit 只退出 CLI，不急停机器人。
 ```
 
 启动日志会打出这次用的规格摘要（原点、图像、语义），现场先核这一行。
@@ -165,13 +170,13 @@ ros2 service call /motion_control/estop std_srvs/srv/Trigger
 
 | 机制 | 参数 | 作用 |
 |---|---|---|
-| 单帧限速 | `max_step_pos` / `max_step_ori` | 笛卡尔空间逐帧夹紧，**现在唯一的运动限制** |
+| 可选单帧限速 | `cartesian_limit_enabled` / `max_step_pos` / `max_step_ori` | 默认关闭；开启后裁剪笛卡尔单帧步长 |
 | 图像新鲜度 | `image_timeout_s` | 任一路图过期就不推理，不拿旧图决策 |
 | 接管检查 | — | `arms_live` 掉了自动 `stop` |
 | 只记录不拦截 | `~/status` 的 `jump` / `lead` | 首点距实测、指令领先实测 |
 
 整段准入门（首点离实测太远就丢整段）**已删**：标定没定死之前首点总在 0.3 m 上下，它会
-把每一段都拒掉。单帧限速在 `motion_control` 的 IK 限幅**之上**，不冲突——那个管的是数值
+把每一段都拒掉。可选单帧限速在 `motion_control` 的 IK 限幅**之上**，不冲突——那个管的是数值
 稳定性，管不住「目标本身给错了」。
 
 ## 坐标系与标定
@@ -253,7 +258,7 @@ out[k].R = poses[k].R · poses[0].Rᵀ · anchor.R
   机器人侧缩放，由 CogACT server 统一缩到 448x256。
 - **`head_reproject`** 把我们的图重采样到训练相机内参上（焦距差 1.42 倍，同一物体在我们
   图里大 42%），代价是画布只填得满约 49%、其余靠边缘外推——**那本身也是分布偏移**。用
-  `smoke_preflight.py` 做 A/B。修正只做**输入侧**：焦距失配是角度误差不是三维相似变换，
+  分别配置开关后用预检比较。修正只做**输入侧**：焦距失配是角度误差不是三维相似变换，
   输出侧再乘系数是双重修正。
 - **畸变顺序**：厂商 JSON 给 `k1 k2 k3 p1 p2`，OpenCV/ROS 要 `[k1,k2,p1,p2,k3]`。抄错
   不报错，只会悄悄画歪。
@@ -266,17 +271,19 @@ out[k].R = poses[k].R · poses[0].Rᵀ · anchor.R
 
 ```bash
 python3 -m pytest src/g1_vla_bridge/test -q
-python3 -m pycodestyle --max-line-length=120 \
+python3 -m pycodestyle --ignore=E501,W503 \
     src/g1_vla_bridge/g1_vla_bridge src/g1_vla_bridge/test src/g1_vla_bridge/launch
 ```
 
-`test_*.py` 不依赖 ROS 和网络。`test/smoke_preflight.py` 不是单测（`smoke_` 前缀不会被
-pytest 收），是**起飞前检查**，要实机 + 网络、**只读不发指令**，走的是和节点完全同一条
-路径（同一个 backend、同一份 `Observation`）：
+`test_*.py` 不启动 ROS 节点、不访问网络；部分测试需要已安装 ROS Python 包。
+`test/smoke_preflight.py` 是**只读预检**，需要传感器、TF 与推理服务：
 
 ```bash
-python3 src/g1_vla_bridge/test/smoke_preflight.py --rounds 6 --task "Pick up the cup"
+python3 src/g1_vla_bridge/test/smoke_preflight.py --rounds 6 \
+  --proxy socks5h://127.0.0.1:1080 --task "pick up the pink bowl using the left arm."
 ```
 
-它逐项报图像/内参/TF/`arms_live` 是否齐、两台相机的 FOV，存下实际发出的 JPEG，然后对
-开/不开重投影各打 N 次推理，报首点距实测的距离和两个变体的差异是否超过模型噪声。
+预检保存实际 JPEG，报告三路内参/TF、推理耗时、双臂首点偏差与整段位移，不验证闭环跟踪。
+执行回归测试直接跑真实推理线程与下发回调（mock backend/publisher），逐帧核对双臂位姿、
+夹爪、单次请求和 stop/start 后旧响应丢弃；关闭 delta 与 VLA 限速、未冻结且 horizon=0 时，
+完整输出每个 waypoint。底层 IK、关节限速和物理跟踪误差仍然存在。
