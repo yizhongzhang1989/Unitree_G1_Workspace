@@ -77,7 +77,8 @@ def gather(cfg, slots, timeout: float, warmup: float):
                              lambda m: info.setdefault('m', m), small)
     node.create_subscription(String, cfg['status_topic'],
                              lambda m: status.update(json.loads(m.data)), 10)
-    needed = (cfg['camera_optical_frame'], cfg['left_tip_frame'], cfg['right_tip_frame'])
+    needed = (cfg['head_camera_frame'], cfg['left_camera_frame'],
+              cfg['right_camera_frame'], cfg['left_tip_frame'], cfg['right_tip_frame'])
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and (
             len(frames) < len(slots) or not info or not status or not all(
@@ -136,7 +137,7 @@ def main() -> None:
                          t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w])
 
     camera = camera_calibration(info)
-    cam_pose = pose7(cfg['camera_optical_frame'])
+    cam_pose = pose7(cfg['head_camera_frame'])
     grip = status.get('grip') or {}
     measured = {s: pose7(cfg['%s_tip_frame' % s]) for s in SIDES}
     observation = Observation(
@@ -145,8 +146,8 @@ def main() -> None:
         poses=measured,
         grippers={s: float(grip.get(s, 0.0)) for s in SIDES},
         enabled={s: bool(cfg['has_%s' % s]) for s in SIDES},
-        camera_in_base=pose_matrix(cam_pose[3:], cam_pose[:3]),
-        camera=camera)
+        calibrations={'head': camera},
+        camera_poses={'head': pose_matrix(cam_pose[3:], cam_pose[:3])})
 
     print('\n%s' % describe_reprojection(camera))
     for label, backend in backends.items():

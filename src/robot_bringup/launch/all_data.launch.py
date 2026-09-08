@@ -24,6 +24,8 @@ _TOPOLOGY_LAUNCHES = {
     "dual": "end_effectors_dual_bus.launch.py",
 }
 _SCOPES = ("end_effectors", "whole_body")
+
+
 def _data_launches(context):
     scope = LaunchConfiguration("scope").perform(context).lower()
     if scope not in _SCOPES:
@@ -41,6 +43,11 @@ def _data_launches(context):
         launch_arguments={
             "enable_grippers_on_start": LaunchConfiguration(
                 "enable_grippers_on_start"),
+            "wrist_left_url": LaunchConfiguration("wrist_left_url"),
+            "wrist_right_url": LaunchConfiguration("wrist_right_url"),
+            "wrist_image_width": LaunchConfiguration("wrist_image_width"),
+            "wrist_image_height": LaunchConfiguration("wrist_image_height"),
+            "wrist_fps": LaunchConfiguration("wrist_fps"),
         }.items(),
     )]
 
@@ -80,6 +87,13 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("scope", default_value="whole_body"),
         DeclareLaunchArgument("topology", default_value="dual"),
         DeclareLaunchArgument("enable_grippers_on_start", default_value="true"),
+        DeclareLaunchArgument(
+            "wrist_left_url", default_value="rtsp://admin:123456@192.168.123.97/stream1"),
+        DeclareLaunchArgument(
+            "wrist_right_url", default_value="rtsp://admin:123456@192.168.123.98/stream1"),
+        DeclareLaunchArgument("wrist_image_width", default_value="0"),
+        DeclareLaunchArgument("wrist_image_height", default_value="240"),
+        DeclareLaunchArgument("wrist_fps", default_value="15"),
         DeclareLaunchArgument("controller_manager", default_value="/controller_manager"),
         DeclareLaunchArgument("lowstate_topic", default_value="/lowstate"),
         DeclareLaunchArgument("arm_stiffness_scale", default_value="1.0"),

@@ -172,9 +172,10 @@ class Observation:
     grippers: dict[str, float]
     #: ``side -> bool`` 这一侧是否参与——发给模型的协议字段，不是执行开关。
     enabled: dict[str, bool]
-    #: 4x4，``base_frame`` -> 头部相机光心。
-    camera_in_base: np.ndarray
-    camera: CameraCalibration | None = None
+    #: 图像槽位 -> 相机内参。
+    calibrations: dict[str, CameraCalibration] = field(default_factory=dict)
+    #: 图像槽位 -> 4x4 ``T_base<-cam``。多视角几何模型使用。
+    camera_poses: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass

@@ -8,6 +8,7 @@ from launch.actions import IncludeLaunchDescription, Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitution import Substitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 from robot_bringup.end_effectors.topology import (
     CanBus,
@@ -70,18 +71,24 @@ def gripper(
     )
 
 
-def camera(side: str, ip_address: str, server_port: int) -> Node:
+def _parameter(value, value_type):
+    return ParameterValue(value, value_type=value_type) \
+        if isinstance(value, Substitution) else value
+
+
+def camera(side: str, url, server_port: int, image_width=0,
+           image_height=240, fps=15) -> Node:
     """由左右手部署参数构造一个 IP 相机节点"""
     camera_name = f"camera_{side}"
     return Node(
         package="camera_node", executable="camera_node",
         name=camera_name, output="screen", emulate_tty=True,
         parameters=[{
-            # stream1 是 640x360 子码流；主码流 stream0 是 1080p，解码开销约 9 倍
-            "rtsp_url": f"rtsp://admin:123456@{ip_address}/stream1",
+            "rtsp_url": _parameter(url, str),
             "image_topic": f"/{camera_name}/image_raw",
-            "image_height": 240,
-            "fps": 15,
+            "image_width": _parameter(image_width, int),
+            "image_height": _parameter(image_height, int),
+            "fps": _parameter(fps, int),
             "server_port": server_port,
         }])
 
@@ -89,12 +96,17 @@ def camera(side: str, ip_address: str, server_port: int) -> Node:
 def end_effector_actions(
         buses: Sequence[CanBus],
         kwr57_devices: Sequence[Kwr57Device],
-    gloria_devices: Sequence[GloriaDevice],
-    enable_grippers_on_start: Union[str, Substitution]):
+        gloria_devices: Sequence[GloriaDevice],
+        enable_grippers_on_start: Union[str, Substitution],
+        wrist_left_url='rtsp://admin:123456@192.168.123.97/stream1',
+        wrist_right_url='rtsp://admin:123456@192.168.123.98/stream1',
+        wrist_image_width=0, wrist_image_height=240, wrist_fps=15):
     """Build all end-effector actions with KWR57 in the bridge process"""
     return [
         bridge(buses, kwr57_devices, gloria_devices),
         *(gripper(device, enable_grippers_on_start) for device in gloria_devices),
-        camera("left", "192.168.123.97", 8010),
-        camera("right", "192.168.123.98", 8011),
+        camera("left", wrist_left_url, 8010,
+               wrist_image_width, wrist_image_height, wrist_fps),
+        camera("right", wrist_right_url, 8011,
+               wrist_image_width, wrist_image_height, wrist_fps),
     ]

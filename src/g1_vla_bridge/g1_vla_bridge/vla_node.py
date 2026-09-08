@@ -59,6 +59,18 @@ IMAGE_TOPICS = (('head', 'head_image_topic', '/head/camera/color/image_raw'),
                 ('left_wrist', 'left_image_topic', '/camera_left/image_raw'),
                 ('right_wrist', 'right_image_topic', '/camera_right/image_raw'))
 
+CAMERA_INFO_TOPICS = (
+    ('head', 'head_camera_info_topic', '/head/camera/color/camera_info'),
+    ('left_wrist', 'left_camera_info_topic', '/camera_left/camera_info'),
+    ('right_wrist', 'right_camera_info_topic', '/camera_right/camera_info'),
+)
+
+CAMERA_FRAMES = (
+    ('head', 'head_camera_frame', 'camera_color_optical_frame'),
+    ('left_wrist', 'left_camera_frame', 'camera_left'),
+    ('right_wrist', 'right_camera_frame', 'camera_right'),
+)
+
 
 # 编码 -> (每像素字节数, 转 BGR 的 cv2 code)。bgr8 已经是目标格式，不用转。
 _BGR_FROM = {'bgr8': (3, None),
@@ -99,7 +111,7 @@ class VlaBridgeNode(Node):
         p = self.declare_parameter
 
         # -- backend：协议、坐标系、夹爪换算全在它那边 -------------------------
-        name = p('vla_backend', 'a2d_omnipicker').get_parameter_value().string_value
+        name = p('vla_backend', 'cogact_unitree').get_parameter_value().string_value
         params = {key: p(key, default).value
                   for key, default in backend_parameters(name).items()}
         self._backend = load_backend(name, params)
@@ -115,8 +127,7 @@ class VlaBridgeNode(Node):
         }
         if not any(self._enabled.values()):
             raise ValueError('has_left 和 has_right 不能同时为假')
-        # has_* 是**发给模型**的协议字段；hold_* 只管**执行**，模型照常规划这一侧，
-        # 我们收下但不发。两者分开，冻结一只手不会改变模型的输入分布。
+        # CogACT 的双臂开关由 server 启动参数决定；这里的开关只控制执行。
         self._hold = {s for s in SIDES
                       if p(f'hold_{s}', False).get_parameter_value().bool_value}
         self._active = {s: self._enabled[s] and s not in self._hold for s in SIDES}
@@ -131,8 +142,10 @@ class VlaBridgeNode(Node):
             'left': p('left_tip_frame', 'left_gripper_base').get_parameter_value().string_value,
             'right': p('right_tip_frame', 'right_gripper_base').get_parameter_value().string_value,
         }
-        self._camera_frame = p('camera_optical_frame', 'camera_color_optical_frame') \
-            .get_parameter_value().string_value
+        self._camera_frames = {
+            slot: p(param, default).get_parameter_value().string_value
+            for slot, param, default in CAMERA_FRAMES
+        }
 
         rate = float(p('action_rate_hz', 30.0).get_parameter_value().double_value)
         # 位置和姿态分开选：位置的标定（frame.origin_in_base）不确定，姿态的
@@ -152,7 +165,7 @@ class VlaBridgeNode(Node):
 
         self._lock = threading.Lock()
         self._images: dict[str, tuple[float, Image]] = {}
-        self._camera_info: CameraInfo | None = None
+        self._camera_info: dict[str, CameraInfo] = {}
         self._status: dict = {}
         self._chunk: ActionChunk | None = None
         self._cursor = 0
@@ -186,10 +199,12 @@ class VlaBridgeNode(Node):
             self._on_status, 10, callback_group=sensors)
         self.create_subscription(String, '~/task', self._on_task, 10, callback_group=sensors)
         # camera_info 只有几十字节，用 BEST_EFFORT 能同时匹配两种发布端。
-        self.create_subscription(
-            CameraInfo, p('head_camera_info_topic', '/head/camera/color/camera_info')
-            .get_parameter_value().string_value,
-            self._on_camera_info, small, callback_group=sensors)
+        for slot, param, default in CAMERA_INFO_TOPICS:
+            topic = p(param, default).get_parameter_value().string_value
+            if slot in self._spec.images.slots:
+                self.create_subscription(
+                    CameraInfo, topic, self._make_camera_info_callback(slot), small,
+                    callback_group=sensors)
 
         self._publisher = self.create_publisher(
             Float64MultiArray, p('command_topic', '/motion_control/command')
@@ -235,9 +250,11 @@ class VlaBridgeNode(Node):
             self._task = msg.data
         self.get_logger().info(f'任务指令更新为: {msg.data!r}')
 
-    def _on_camera_info(self, msg: CameraInfo) -> None:
-        with self._lock:
-            self._camera_info = msg
+    def _make_camera_info_callback(self, slot: str):
+        def callback(msg: CameraInfo) -> None:
+            with self._lock:
+                self._camera_info[slot] = msg
+        return callback
 
     def _arms_ready(self) -> str:
         status = self._status
@@ -275,10 +292,10 @@ class VlaBridgeNode(Node):
             return {}, f'图像过期 {stale}'
         return {k: image_to_bgr(frames[k][1]) for k in slots}, ''
 
-    def _head_camera(self) -> CameraCalibration | None:
+    def _camera_calibrations(self) -> dict[str, CameraCalibration]:
         with self._lock:
-            info = self._camera_info
-        return None if info is None else camera_calibration(info)
+            info = dict(self._camera_info)
+        return {slot: camera_calibration(msg) for slot, msg in info.items()}
 
     def _observe(self) -> Observation:
         """采一组观测，全部表示在 ``base_frame`` 里。"""
@@ -288,15 +305,22 @@ class VlaBridgeNode(Node):
         with self._lock:
             task = self._task
             grippers = dict(self._grip_command)
-        camera = self._lookup(self._camera_frame)
+        camera_poses = {
+            slot: pose_matrix(pose[3:], pose[:3])
+            for slot, pose in (
+                (slot, self._lookup(self._camera_frames[slot]))
+                for slot in self._spec.images.slots
+            )
+        }
+        calibrations = self._camera_calibrations()
         return Observation(
             task=task,
             images=frames,
             poses={side: self._measured_pose(side) for side in SIDES},
             grippers=grippers,
             enabled=dict(self._enabled),
-            camera_in_base=pose_matrix(camera[3:], camera[:3]),
-            camera=self._head_camera())
+            calibrations=calibrations,
+            camera_poses=camera_poses)
 
     # -- 推理线程 -----------------------------------------------------------
 

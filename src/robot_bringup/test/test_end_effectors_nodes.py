@@ -83,17 +83,20 @@ class EndEffectorsNodesTest(unittest.TestCase):
 
     def test_camera_builds_side_specific_node(self) -> None:
         with patch("robot_bringup.end_effectors.nodes.Node") as node_type:
-            action = camera("left", "192.168.123.97", 8010)
+            action = camera(
+                "left", "rtsp://admin:123456@192.168.123.97/stream0", 8010,
+                1920, 1080, 30)
 
         self.assertIs(action, node_type.return_value)
         node_type.assert_called_once_with(
             package="camera_node", executable="camera_node",
             name="camera_left", output="screen", emulate_tty=True,
             parameters=[{
-                "rtsp_url": "rtsp://admin:123456@192.168.123.97/stream1",
+                "rtsp_url": "rtsp://admin:123456@192.168.123.97/stream0",
                 "image_topic": "/camera_left/image_raw",
-                "image_height": 240,
-                "fps": 15,
+                "image_width": 1920,
+                "image_height": 1080,
+                "fps": 30,
                 "server_port": 8010,
             }])
 
@@ -117,19 +120,21 @@ class EndEffectorsNodesTest(unittest.TestCase):
             context, normalize_to_list_of_substitutions(enable_value)), "true")
 
     def test_bringup_adds_left_and_right_cameras(self) -> None:
-        with patch(
-                "robot_bringup.end_effectors.nodes.bridge",
-                return_value="bridge"), \
-                patch(
-                    "robot_bringup.end_effectors.nodes.camera", side_effect=[
-                    "left_camera", "right_camera"]) as camera_factory:
+        with (
+            patch("robot_bringup.end_effectors.nodes.bridge",
+                  return_value="bridge"),
+            patch("robot_bringup.end_effectors.nodes.camera", side_effect=[
+                "left_camera", "right_camera"]) as camera_factory,
+        ):
             actions = end_effector_actions(
                 [], [], [], "false")
 
         self.assertEqual(actions, ["bridge", "left_camera", "right_camera"])
         self.assertEqual(camera_factory.call_args_list, [
-            call("left", "192.168.123.97", 8010),
-            call("right", "192.168.123.98", 8011),
+            call("left", "rtsp://admin:123456@192.168.123.97/stream1", 8010,
+                 0, 240, 15),
+            call("right", "rtsp://admin:123456@192.168.123.98/stream1", 8011,
+                 0, 240, 15),
         ])
 
 

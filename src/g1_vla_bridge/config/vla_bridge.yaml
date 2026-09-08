@@ -11,13 +11,13 @@
     # 选哪一家 VLA。对应 g1_vla_bridge/backends/<名字>.py 与
     # config/backends/<名字>.yaml，那两个文件里装着这家的请求协议、坐标系规格、
     # 图像要求和夹爪换算。
-    vla_backend: a2d_omnipicker
+    vla_backend: cogact_unitree
 
     # -- 任务 ----------------------------------------------------------------
     # 空字符串时 ~/start 会拒绝，必须先发 ~/task 或在这里写死。
     # 实测语言是模型最强的输入（换个物体名输出差 0.114 m，是噪声底 0.019 的 5.6 倍）。
-    task_description: 'Pick up the green potato chip bag using the right arm.'
-    # has_* 是**发给模型**的协议字段，改它等于改模型的输入分布。
+    task_description: 'pick up the green potato chip bag using the right arm.'
+    # CogACT 的双臂开关在 server 启动时配置；这里决定是否执行对应手臂的动作。
     has_left: true
     has_right: true
     # hold_* 只管**执行**：置真的这一侧照常发给模型、照常收到规划，但不下发，
@@ -26,11 +26,13 @@
     hold_right: false
 
     # -- 相机 ----------------------------------------------------------------
-    # 头部 D435i 默认就是 424x240，正好是模型要的高度，不会被重采样。
+    # 客户端保持各路原始分辨率，统一交给 CogACT server 缩放。
     head_image_topic: /head/camera/color/image_raw
     left_image_topic: /camera_left/image_raw
     right_image_topic: /camera_right/image_raw
     head_camera_info_topic: /head/camera/color/camera_info
+    left_camera_info_topic: /camera_left/camera_info
+    right_camera_info_topic: /camera_right/camera_info
     # 任一路图像超过这个时间没更新就跳过本轮推理，宁可不动也不拿旧图决策。
     # 3 s 不是拍脑袋：腕相机走 640x360 子码流限 15 fps，起流初期抖动比这大。
     image_timeout_s: 3.0
@@ -43,7 +45,9 @@
     base_frame: torso_link
     left_tip_frame: left_gripper_base
     right_tip_frame: right_gripper_base
-    camera_optical_frame: camera_color_optical_frame
+    head_camera_frame: camera_color_optical_frame
+    left_camera_frame: camera_left
+    right_camera_frame: camera_right
 
     # -- 下发 ----------------------------------------------------------------
     command_topic: /motion_control/command

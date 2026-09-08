@@ -10,7 +10,7 @@ VLA 推理服务与 `g1_motion_control` 之间的桥。**流程是固定的，VL
 
 | | 是什么 | 表示在哪个系 |
 |---|---|---|
-| `Observation` | 图像 + 双臂末端位姿 + 夹爪 + 头部相机外参 + 任务指令 | `base_frame`（默认 `torso_link`） |
+| `Observation` | 图像 + 双臂末端位姿 + 夹爪 + 各视角相机内外参 + 任务指令 | `base_frame`（默认 `torso_link`） |
 | `ActionChunk` | N 个 waypoint 的末端位姿 + 夹爪 | `base_frame` |
 | `VlaSpec` | 这家 VLA 的**规格**：坐标系原点在哪、要几张什么图、夹爪怎么换算 | — |
 
@@ -108,20 +108,49 @@ def create(params): ...     # -> VlaBackend 子类，实现 infer(Observation) -
 
 | 槽位 | 话题 | 编码 |
 |---|---|---|
-| `head` | `/head/camera/color/image_raw` | rgb8, 424x240 |
-| `left_wrist` | `/camera_left/image_raw` | bgr8, 640x360 |
-| `right_wrist` | `/camera_right/image_raw` | bgr8, 640x360 |
+| `head` | `/head/camera/color/image_raw` | yuv422_yuy2, 1280x720x30 |
+| `left_wrist` | `/camera_left/image_raw` | bgr8, 1920x1080x30（stream0） |
+| `right_wrist` | `/camera_right/image_raw` | bgr8, 1920x1080x30（stream0） |
+
+默认 backend 是 `cogact_unitree`。客户端保持三路图像的原分辨率并编码成 JPEG，缩放由
+CogACT server 完成。这些输入 profile 与 `record` 采集时一致；导出器再把训练视频统一为
+640x360。当前模型实际看到的训练分辨率为 448x256，服务端使用：
+
+```bash
+python -m cogact.inference.serve_batch \
+  --checkpoint_path <checkpoint-dir> \
+  --dataset_class UnifiedV2EpisodicDataset \
+  --image_size 448 256 \
+  --has-left --has-right \
+  --use_bf16 \
+  --port 5500
+```
+
+RayPE 请求会发送三路 `image_types`、归一化内参和 `world2cam`。机器人侧必须提供：
+
+| 槽位 | CameraInfo | TF（相对 `torso_link`） |
+|---|---|---|
+| `head` | `/head/camera/color/camera_info` | `camera_color_optical_frame` |
+| `left_wrist` | `/camera_left/camera_info` | `camera_left` |
+| `right_wrist` | `/camera_right/camera_info` | `camera_right` |
+
+`CameraInfo` 的宽高必须和对应原图一致；不一致时本轮推理会被拒绝，避免错误几何静默运行。
 
 ```bash
 # 先决条件
-ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
+ros2 launch robot_bringup all_data.launch.py \
+  scope:=whole_body topology:=dual \
+  wrist_left_url:=rtsp://admin:123456@192.168.123.97/stream0 \
+  wrist_right_url:=rtsp://admin:123456@192.168.123.98/stream0 \
+  wrist_image_width:=1920 wrist_image_height:=1080 wrist_fps:=30
 ros2 launch g1_motion_control motion_control.launch.py
-ros2 launch head_sensors head_camera.launch.py
+ros2 launch head_sensors head_camera.launch.py \
+  color_profile:=1280x720x30 color_format:=YUYV
 
 # 服务在电脑 B 的局域网里时，先从 B 开反向 SOCKS：ssh -N -R 1080 user@<本机>
 ros2 launch g1_vla_bridge vla_bridge.launch.py proxy:=socks5h://127.0.0.1:1080
 
-ros2 topic pub --once /vla_bridge/task std_msgs/msg/String "{data: 'Pick up the pink bowl using the left arm.'}"
+ros2 topic pub --once /vla_bridge/task std_msgs/msg/String "{data: 'pick up the pink bowl using the left arm.'}"
 ros2 service call /motion_control/engage std_srvs/srv/Trigger
 ros2 service call /vla_bridge/start std_srvs/srv/Trigger
 ros2 topic echo /vla_bridge/status          # backend / running / infer_ms / cursor / error
@@ -219,9 +248,9 @@ out[k].R = poses[k].R · poses[0].Rᵀ · anchor.R
   相对 `torso_link` 解的。改它要同步核对 `motion_control.yaml`——两边不一致不会报错，
   只会让手臂去错地方。
 - **相机没订阅者时根本不拉流**，所以刚起来的头 1~3 秒会因图像过期跳过几轮推理，属正常。
-- **头部相机默认就是 424x240**，正好是模型要的高度，不会被重采样。别把
-  `head_camera.launch.py` 的 `color_profile` 改成 `320x240`：那是从 16:9 横向裁的，
-  水平 FOV 会从 69.74° 掉到 55.48°。
+- **VLA 启动必须显式使用 record 的相机 profile。** 头部是 `1280x720x30 YUYV`，腕部是
+  两路 `stream0 1920x1080x30`；不要沿用普通 bringup 的低带宽 stream1 配置。图像不在
+  机器人侧缩放，由 CogACT server 统一缩到 448x256。
 - **`head_reproject`** 把我们的图重采样到训练相机内参上（焦距差 1.42 倍，同一物体在我们
   图里大 42%），代价是画布只填得满约 49%、其余靠边缘外推——**那本身也是分布偏移**。用
   `smoke_preflight.py` 做 A/B。修正只做**输入侧**：焦距失配是角度误差不是三维相似变换，

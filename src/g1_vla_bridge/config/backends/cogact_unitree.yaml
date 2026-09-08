@@ -1,0 +1,5 @@
+/vla_bridge:
+  ros__parameters:
+    server_url: http://10.172.100.47:5500/api/inference
+    request_timeout_s: 30.0
+    proxy: ''

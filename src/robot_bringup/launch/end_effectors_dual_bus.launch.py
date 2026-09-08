@@ -23,10 +23,22 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument(
             "enable_grippers_on_start", default_value="true"),
+        DeclareLaunchArgument(
+            "wrist_left_url", default_value="rtsp://admin:123456@192.168.123.97/stream1"),
+        DeclareLaunchArgument(
+            "wrist_right_url", default_value="rtsp://admin:123456@192.168.123.98/stream1"),
+        DeclareLaunchArgument("wrist_image_width", default_value="0"),
+        DeclareLaunchArgument("wrist_image_height", default_value="240"),
+        DeclareLaunchArgument("wrist_fps", default_value="15"),
         *end_effector_actions(
             buses,
             kwr57_devices,
             gloria_devices,
             LaunchConfiguration("enable_grippers_on_start"),
+            LaunchConfiguration("wrist_left_url"),
+            LaunchConfiguration("wrist_right_url"),
+            LaunchConfiguration("wrist_image_width"),
+            LaunchConfiguration("wrist_image_height"),
+            LaunchConfiguration("wrist_fps"),
         ),
     ])

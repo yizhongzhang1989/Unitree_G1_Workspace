@@ -217,7 +217,8 @@ class A2DOmnipickerBackend(VlaBackend):
         if missing:
             raise ValueError(f'缺图像 {missing}')
         if self._reproject:
-            frames['head'] = self._ensure_reprojector(observation.camera)(frames['head'])
+            frames['head'] = self._ensure_reprojector(
+                observation.calibrations.get('head'))(frames['head'])
         return [encode_jpeg(frames[slot], self.spec.images.height,
                             self.spec.images.jpeg_quality)
                 for slot in self.spec.images.slots]
@@ -243,7 +244,7 @@ class A2DOmnipickerBackend(VlaBackend):
             grip = float(self.spec.gripper.to_model(observation.grippers[side]))
             state[side] = (trans, rot, grip)
         # 身体高度和俯仰训练时就是靠这一项告知模型的，旋转必须一并搬进模型系。
-        camera = self._frame.base_to_model(observation.camera_in_base)
+        camera = self._frame.base_to_model(observation.camera_poses['head'])
         return build_payload(observation.task, observation.enabled['left'],
                              observation.enabled['right'],
                              state['left'], state['right'], camera)
