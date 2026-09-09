@@ -50,18 +50,22 @@ ros2 launch g1_mocap dashboard.launch.py \
   calibrate_service:=/motion_capture/calibrate dashboard_port:=18081
 ```
 
-面板右侧列出已保存动作，点击即回放，可暂停、拖动进度、倍速或循环，点“返回实时”退出。动作右侧可二次点击确认归档；归档会同步移出 `metadata.csv` 并将原 CSV 保留在 `motions/.trash/`，其编号不会复用。
+面板右侧列出已保存动作，点击即回放，可暂停、拖动进度、倍速或循环，点“返回实时”退出。动作右侧可二次点击确认归档；归档会同步移出 `metadata.csv`，并将原 CSV 及其 source sidecar 保留在 `motions/.trash/`，其编号不会复用。
 默认读取 `/home/unitree/motions_dataset/motions/*.csv`；自定义录制目录时给面板加 `motions_dir:=录制目录`。回放不控制机器人。
+
+每次成功保存都会同时得到实时解析结果和原始 PICO sidecar。机器人本机只负责录制与预览，不运行 PyRoki 等重型离线重定向。
 
 ## 输出
 
 ```text
 motions_dataset/
   motions/locomotion_walk_forward_001.csv
+  motions/locomotion_walk_forward_001.source.npz
   metadata.csv
 ```
 
-- 无表头 CSV，每行 36 个有限浮点数：`pelvis_pos_xyz(3), pelvis_quat_xyzw(4), joint_pos(29)`。
+- 无表头 CSV 是实时解析重定向的 50 Hz 结果，供现场回放和 dashboard 预览；每行 36 个有限浮点数：`pelvis_pos_xyz(3), pelvis_quat_xyzw(4), joint_pos(29)`。
+- 同名 `.source.npz` 是离线处理的原始数据，保存 PICO 24 点位置、旋转、原始时间戳、跟踪状态和本次校准快照；CSV 与 sidecar 同事务保存、回滚和归档。
 - 固定 **50 Hz**，位置/关节线性插值，四元数 SLERP；不补断流、不镜像。
 - 世界系 X 前、Y 左、Z 上，地面 Z=0，单位米/弧度；人机尺度和站立高度由校准对齐。
 - 关节顺序见 [config/mocap.yaml](config/mocap.yaml)，启动时严格核验。
@@ -86,23 +90,23 @@ motions_dataset/
 - 开录前预览左右映射和脚底接触，交付前回放检查顶限位、动作失真及不合理悬空。只采集能安全完成的动作。
 - 实时模式允许 LIMITED、缺朝向时退化为位置解法；采集模式更严格。开放网络请设置 `token`。
 
-## 离线修正导出
+## 简单离线修正
 
 ### 为什么需要后处理
 
 实时重定向逐帧映射人体姿态，骨盆位移与腿部关节分别计算；人机比例、站姿偏置和关节限位会使原本踩地的脚在 G1 上滑动、倾斜或穿地。**CSV 格式合格、关节不超限，不代表接触合理。** 用于 motion track 的动作应检查这些问题，必要时通过后处理联合修正脚底接触。
 
-后处理读取完整片段，推断连续支撑区间并平滑处理离地/落地。它是独立的离线步骤，**不在录制时计算，也不会在停止录制后自动执行**；保留原文件，修正版另存，便于对照验收。
+后处理读取完整片段，推断连续支撑区间并平滑处理离地/落地。它是独立的离线步骤，**不在录制时计算，也不会在停止录制后自动执行**；保留原文件，修正版另存，便于对照验收。后续应把 CSV、同名 `.source.npz` 和录制使用的 URDF 复制到外部工作站处理，不占用机器人计算机。
 
 ### 导出与使用
 
-1. 结束录制，确认日志提示 `Saved` 且输入 CSV 已存在，然后执行：
+1. 结束录制，确认日志提示 `Saved`，将 CSV、同名 `.source.npz` 和录制使用的 URDF 复制到装有本工作区依赖的外部工作站，然后执行：
 
 ```bash
-source /workspace/install/setup.bash
+source <外部工作区>/install/setup.bash
 python3 -m g1_mocap.contact_refine \
-  /home/unitree/motions_dataset/motions/locomotion_balance_001.csv \
-  --output-dir /home/unitree/motions_experiments/contact_refined
+  <输入目录>/locomotion_balance_001.csv \
+  --output-dir <输出目录>/contact_refined
 ```
 
 将输入路径替换为其他已保存动作即可，所有动作使用同一框架，不需要 `--mode`。自定义模型加 `--urdf /绝对路径/model.urdf`，须与录制时一致；建议原版和修正版使用不同目录。
@@ -118,11 +122,11 @@ contact_refined/
 
 输出名包含输入文件名，末尾编号自动递增、不覆盖。报告记录收敛情况、修正前后滑移/穿地/速度及姿态改变量；求解未收敛时会报错，不导出该次修正版。
 
-3. 打开修正版回放：
+3. 在外部工作站启动单独的 dashboard，或只将修正版 CSV 复制回机器人数据集的 `motions/` 目录。运行中的录制 dashboard 会自动刷新动作列表，不需要覆盖原版：
 
 ```bash
 ros2 launch g1_mocap dashboard.launch.py \
-  motions_dir:=/home/unitree/motions_experiments/contact_refined \
+  motions_dir:=<输出目录>/contact_refined \
   dashboard_port:=18084
 ```
 
@@ -132,9 +136,17 @@ ros2 launch g1_mocap dashboard.launch.py \
 
 - 用 G1 URDF 正运动学计算脚底碰撞接触点的世界位置，根据高度和垂直速度逐点判断支撑；使用滞回抑制状态抖动，不填补短暂腾空。
 - 为连续支撑区间建立符合刚性脚掌几何的固定锚点；平脚支撑对齐地面，仅脚尖/脚跟支撑且无整脚支撑证据时保留脚掌倾角。接触首尾平滑进入和释放，过渡长度随短接触段缩短。
-- 使用带关节限位的非线性最小二乘，联合调整根平移和双腿 12 轴，同时惩罚接触偏差、穿地、偏离原动作和修正量突变。根姿态、腰和上肢不变；无接触且无穿地的帧原样保留。
+- 使用带关节限位的非线性最小二乘，联合调整根平移和双腿 12 轴，同时惩罚接触偏差、穿地、偏离原动作和修正量突变。借鉴 PyRoki 的 masked-points 与分组平滑目标：脚点跟踪权重随接触置信度平方变化，稳定支撑点权重为 1000，非接触点保留权重 1；根修正的时间权重高于腿关节。根姿态、腰和上肢不变；无接触且无穿地的帧原样保留。
+
+在 `locomotion_walk_forward_001.csv` 的 810 帧 A/B 中，新目标 810 帧全部收敛；相对旧版，最大穿地由 1.157 mm 降至 1.096 mm，腿关节速度 p95 由 1.686 降至 1.640 rad/s，过渡段速度 p95 由 1.812 降至 1.758 rad/s，最大腿关节加速度由 274.36 降至 269.61 rad/s²。最坏支撑段滑移由 5.02 mm 增至 5.47 mm，根速度 p95 增加约 2.9%，因此它仍是需要回放验收的候选，不是无条件更优的动力学解。
 
 当前范围是**平地足部接触的运动学修正**：已验证真实 balance 和合成多接触动作，尚未完成真实跳跃、手撑地、跪地及动力学验收。接触来自推断，支撑约束是数值惩罚，不保证严格零滑移，也不保证平衡、接触力或真机可跟踪性。
+
+## PyRoki 外机处理
+
+本包不再安装、封装或运行 ProtoMotions/PyRoki。当前轻量修正仅吸收其置信度加权和分组时间正则思路，不包含全片段联合优化。需要从原始 PICO 骨骼重新做全身优化时，将 CSV、同名 `.source.npz` 和录制使用的 URDF 搬到带 NVIDIA GPU 的工作站，按 [pyroki_offboard.md](./pyroki_offboard.md) 转换数据并运行官方工具。
+
+官方 PyRoki 不能直接读取本项目的 `.source.npz`，也不能直接输出本项目的 36 列 CSV；两端都必须按文档做适配和严格校验。只有旧 CSV、没有同名 sidecar 时无法恢复人体关键点。候选须另存并与实时原版并排回放，不能覆盖原始录制。
 
 ## 开发
 

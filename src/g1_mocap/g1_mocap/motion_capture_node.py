@@ -134,7 +134,8 @@ class MotionCaptureNode(Node):
                 self.stream.seal()
                 clip = self.stream.finish()
             rows = clip.resample()
-            path = save_motion(self.directory, rows, category=self.category, action=self.action)
+            path = save_motion(self.directory, rows, category=self.category,
+                               action=self.action, source=clip.source)
             self.last_outcome = f'Saved {path} ({len(rows)} frames, 50 Hz)'
             if len(rows) < 200:
                 self.get_logger().warning('Take is valid but shorter than the recommended 4 seconds')

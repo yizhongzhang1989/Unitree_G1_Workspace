@@ -7,7 +7,7 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
-from g1_mocap.contact_refine import contact_targets, geometry, metrics, refine
+from g1_mocap.contact_refine import _tracking_weights, contact_targets, geometry, metrics, refine
 from g1_mocap.motion_model import MotionModel
 
 
@@ -187,3 +187,8 @@ def test_alternating_support_has_independent_foot_anchors():
     np.testing.assert_array_equal(targets[70:90, 1], points[70:90, 1])
     np.testing.assert_allclose(targets[-1, 0, :, 0], 0.25)
     np.testing.assert_allclose(targets[-1, 1, :, 0], 0.3)
+
+
+def test_tracking_weights_follow_contact_confidence():
+    confidence = np.array([0.0, 0.5, 1.0])
+    np.testing.assert_allclose(_tracking_weights(confidence), [1.0, 250.75, 1000.0])

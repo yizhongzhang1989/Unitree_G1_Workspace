@@ -1,6 +1,7 @@
 """Motion export contract checks without ROS, a headset or robot control."""
 
 import csv
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -125,6 +126,44 @@ def test_delivery_layout_and_unique_takes(tmp_path):
     assert len(JOINT_NAMES) == 29
 
 
+def test_source_sidecar_is_committed_with_motion(tmp_path):
+    rows = make_clip().resample()
+    source = SimpleNamespace(save=lambda path: np.savez(
+        path, timestamps=np.array([1.0]), positions=np.zeros((1, 24, 3)),
+        orientations=np.tile(np.eye(3), (1, 24, 1, 1))))
+    path = save_motion(tmp_path, rows, category='locomotion', action='walk', source=source)
+    sidecar = path.with_name(path.stem + '.source.npz')
+    assert sidecar.exists()
+    with np.load(sidecar) as data:
+        np.testing.assert_array_equal(data['timestamps'], [1.0])
+
+
+def test_source_failure_rolls_back_motion_and_metadata(tmp_path):
+    rows = make_clip().resample()
+
+    def fail(_path):
+        raise OSError('source write failed')
+
+    with pytest.raises(OSError, match='source write failed'):
+        save_motion(tmp_path, rows, category='locomotion', action='walk',
+                    source=SimpleNamespace(save=fail))
+    assert list((tmp_path / 'motions').iterdir()) == []
+    assert not (tmp_path / 'metadata.csv').exists()
+
+
+def test_orphan_source_sidecar_is_not_overwritten(tmp_path):
+    motions = tmp_path / 'motions'
+    motions.mkdir()
+    orphan = motions / 'locomotion_walk_001.source.npz'
+    orphan.write_bytes(b'preserve me')
+    source = SimpleNamespace(save=lambda path: np.savez(path, sample=np.array([1])))
+    motion = save_motion(
+        tmp_path, make_clip().resample(), category='locomotion', action='walk',
+        source=source)
+    assert motion.name == 'locomotion_walk_002.csv'
+    assert orphan.read_bytes() == b'preserve me'
+
+
 def test_filename_traversal_rejected(tmp_path):
     with pytest.raises(ValueError):
         save_motion(tmp_path, make_clip().resample(), category='../bad', action='walk')
@@ -141,6 +180,54 @@ def test_archived_take_is_removed_from_delivery_and_number_stays_reserved(tmp_pa
         assert list(csv.DictReader(stream)) == []
     second = save_motion(tmp_path, rows, category='locomotion', action='walk')
     assert second.name == 'locomotion_walk_002.csv'
+
+
+def test_archive_moves_source_sidecar_and_rolls_both_back_on_metadata_failure(
+        tmp_path, monkeypatch):
+    rows = make_clip().resample()
+    source = SimpleNamespace(save=lambda path: np.savez(path, sample=np.array([1])))
+    motion = save_motion(
+        tmp_path, rows, category='locomotion', action='walk', source=source)
+    sidecar = motion.with_name(motion.stem + '.source.npz')
+    metadata_before = (tmp_path / 'metadata.csv').read_bytes()
+
+    def fail_metadata(*_args):
+        raise OSError('metadata write failed')
+
+    monkeypatch.setattr('g1_mocap.motion_capture._write_metadata', fail_metadata)
+    with pytest.raises(OSError, match='metadata write failed'):
+        archive_motion(tmp_path, motion.name)
+    assert motion.exists() and sidecar.exists()
+    assert (tmp_path / 'metadata.csv').read_bytes() == metadata_before
+    assert not (motion.parent / '.trash' / motion.name).exists()
+    assert not (motion.parent / '.trash' / sidecar.name).exists()
+
+    monkeypatch.undo()
+    archived = archive_motion(tmp_path, motion.name)
+    assert archived.exists() and not motion.exists() and not sidecar.exists()
+    assert (archived.parent / sidecar.name).exists()
+
+
+def test_archive_rolls_back_motion_when_source_move_fails(tmp_path, monkeypatch):
+    rows = make_clip().resample()
+    source = SimpleNamespace(save=lambda path: np.savez(path, sample=np.array([1])))
+    motion = save_motion(
+        tmp_path, rows, category='locomotion', action='walk', source=source)
+    sidecar = motion.with_name(motion.stem + '.source.npz')
+    metadata_before = (tmp_path / 'metadata.csv').read_bytes()
+    replace = __import__('os').replace
+
+    def fail_source_move(source_path, destination):
+        if source_path == sidecar:
+            raise OSError('source move failed')
+        replace(source_path, destination)
+
+    monkeypatch.setattr('g1_mocap.motion_capture.os.replace', fail_source_move)
+    with pytest.raises(OSError, match='source move failed'):
+        archive_motion(tmp_path, motion.name)
+    assert motion.exists() and sidecar.exists()
+    assert (tmp_path / 'metadata.csv').read_bytes() == metadata_before
+    assert not (motion.parent / '.trash' / motion.name).exists()
 
 
 @pytest.mark.parametrize('name', ['../secret.csv', '/tmp/a.csv', 'sub/a.csv', 'bad.txt', ''])

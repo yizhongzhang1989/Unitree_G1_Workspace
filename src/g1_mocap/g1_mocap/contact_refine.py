@@ -36,6 +36,10 @@ def intervals(mask):
     return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
 
 
+def _tracking_weights(confidence):
+    return 1.0 + 999.0 * np.asarray(confidence)**2
+
+
 def contact_targets(points, model=None, rotations=None):
     """Infer stationary contact points without filling short flight intervals."""
     heights = median_filter(points[..., 2], size=(3, 1, 1), mode='nearest')
@@ -89,10 +93,11 @@ def contact_targets(points, model=None, rotations=None):
     return contacts, targets, weights
 
 
-def refine(model, rows, *, max_nfev=200):
+def refine(model, rows, *, max_nfev=400):
     original = np.asarray(rows, dtype=float)
     if original.ndim != 2 or original.shape[1] != 36 or len(original) < 3 or not np.isfinite(original).all():
         raise ValueError('Expected finite Nx36 motion')
+    smoothness = np.r_[[2.0] * 3, [0.5] * 12]
     geometry_before = [geometry(model, row) for row in original]
     points = np.array([item[0] for item in geometry_before])
     rotations = np.array([item[1] for item in geometry_before])
@@ -109,7 +114,7 @@ def refine(model, rows, *, max_nfev=200):
             evaluations.append(0)
             successes.append(True)
             continue
-        tracking_weights = (50.0 + 950.0 * weights[index]**2)[..., None]
+        tracking_weights = _tracking_weights(weights[index])[..., None]
 
         def residual(variables):
             candidate = row.copy()
@@ -120,7 +125,7 @@ def refine(model, rows, *, max_nfev=200):
             delta = variables - reference
             return np.r_[tracking.ravel(), penetration.ravel(),
                          delta * np.r_[[2.0] * 3, [0.1] * 12],
-                         (delta - previous_delta) * 0.5]
+                         (delta - previous_delta) * smoothness]
 
         initial = np.clip(reference + previous_delta, *bounds)
         result = least_squares(residual, initial, bounds=bounds, max_nfev=max_nfev,
@@ -194,7 +199,7 @@ def main():
     swing_mask = ~contacts.any(axis=2)
     swing_error = np.linalg.norm(refined_points - original_points, axis=3)[swing_mask]
     report = dict(source=str(args.input), source_sha256=hashlib.sha256(source).hexdigest(),
-                  algorithm='unified_point_contacts_v1',
+                  algorithm='confidence_weighted_contacts_v2',
                   assumption='Inferred contacts with numerical no-slip penalties; no dynamics validation',
                   solver=solver, before=metrics(model, rows, contacts, weights, targets),
                   after=metrics(model, output, contacts, weights, targets),

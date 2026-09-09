@@ -16,7 +16,11 @@ def source():
     stream = CaptureStream(SimpleNamespace(), limits=(np.full(29, -3), np.full(29, 3)),
                            log=lambda message: None)
     stream._device = SimpleNamespace(closed=False)
-    stream._calibration = object()
+    stream._calibration = SimpleNamespace(
+        scale=1.0, pelvis_ref_z=0.8, stand_height=0.8,
+        pelvis_fix=np.eye(3), torso_fix=np.eye(3),
+        joint_bias=np.zeros(29), joint_target=np.zeros(29),
+        arm_hinge_axes=np.zeros((2, 3)))
     stream.last_valid_arrival = time.monotonic()
     return stream
 
@@ -80,6 +84,9 @@ def test_uses_raw_timestamp_and_xyzw():
     clip = stream.finish()
     assert clip.stamps == [12.0]
     np.testing.assert_array_equal(clip.rows[0][3:7], [0, 0, 0, 1])
+    assert clip.source.timestamps == [12.0]
+    np.testing.assert_array_equal(clip.source.positions[0], frame(stamp=12.0).positions)
+    np.testing.assert_array_equal(clip.source.orientations[0], frame(stamp=12.0).rotations)
 
 
 def test_missing_sequence_invalidates_take():

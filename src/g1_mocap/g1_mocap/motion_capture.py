@@ -26,6 +26,7 @@ JOINT_NAMES = tuple(
                   'wrist_roll', 'wrist_pitch', 'wrist_yaw')
 )
 METADATA_FIELDS: tuple[str, ...] = ('file_name', 'action', 'duration_seconds', 'fps', 'num_frames')
+SOURCE_SUFFIX = '.source.npz'
 
 
 class RejectedMotion(ValueError):
@@ -159,7 +160,7 @@ def _write_metadata(path, rows):
     _atomic_text(path, buffer.getvalue())
 
 
-def save_motion(directory, rows, *, category, action):
+def save_motion(directory, rows, *, category, action, source=None):
     """Write one validated take without overwriting any existing motion."""
     validate_label(category)
     validate_label(action)
@@ -177,7 +178,9 @@ def save_motion(directory, rows, *, category, action):
         while True:
             name = f'{category}_{action}_{take:03d}.csv'
             path = motions / name
-            if not path.exists() and name not in reserved:
+            source_path = motions / f'{path.stem}{SOURCE_SUFFIX}'
+            if (not path.exists() and not source_path.exists()
+                    and name not in reserved):
                 break
             take += 1
         buffer = io.StringIO(newline='')
@@ -188,12 +191,15 @@ def save_motion(directory, rows, *, category, action):
                 stream.write(buffer.getvalue())
                 stream.flush()
                 os.fsync(stream.fileno())
+            if source is not None:
+                source.save(source_path)
             current = dict(file_name=name, action=action,
                            duration_seconds=f'{len(rows) / FPS:.6f}',
                            fps=FPS, num_frames=len(rows))
             _write_metadata(metadata, [*previous, current])
         except Exception:
             path.unlink()
+            source_path.unlink(missing_ok=True)
             raise
         return path
     finally:
@@ -227,12 +233,21 @@ def archive_motion(directory, name):
         archived = trash / name
         if archived.exists():
             raise ValueError('Motion is already present in the trash')
+        source = motions / f'{path.stem}{SOURCE_SUFFIX}'
+        archived_source = trash / source.name
+        if archived_source.exists():
+            raise ValueError('Motion source is already present in the trash')
         os.replace(path, archived)
         try:
+            if source.exists():
+                os.replace(source, archived_source)
             if len(remaining) != len(previous):
                 _write_metadata(metadata, remaining)
         except Exception:
-            os.replace(archived, path)
+            if archived.exists():
+                os.replace(archived, path)
+            if archived_source.exists():
+                os.replace(archived_source, source)
             raise
         return archived
     finally:

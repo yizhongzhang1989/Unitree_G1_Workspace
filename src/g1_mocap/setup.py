@@ -11,7 +11,7 @@ setup(
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        (share, ['package.xml', 'README.md']),
+        (share, ['package.xml', 'README.md', 'pyroki_offboard.md']),
         (share + '/launch', glob('launch/*.launch.py')),
         (share + '/config', glob('config/*.yaml')),
         # 面板页面。vendor 里是 three.js 与两个 addon，本地托管——机器人上没有外网。

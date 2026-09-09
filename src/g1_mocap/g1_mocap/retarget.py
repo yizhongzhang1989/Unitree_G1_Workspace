@@ -509,7 +509,7 @@ class Retargeter:
         turned = hinge + geom.hinge.placement_offset
 
         axis = self._hinge_axis(spec, geom, upper, lower, tip_dir, rot_root, rotations,
-                    calibrated_hinge_axis)
+                                calibrated_hinge_axis)
         rot_ball = _rotation_between(geom.proximal_dir, self._rest_axis(spec, geom, turned),
                                      _unit(upper), axis)
         local = geom.ball.pre.T @ rot_root.T @ rot_ball

@@ -4,12 +4,77 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 from .motion_capture import FPS, MotionClip, RejectedMotion
-from .skeleton import STATUS_MESSAGES, STATUS_VALID, ClockAligner, parse_body
+from .skeleton import SMPL_JOINTS, STATUS_MESSAGES, STATUS_VALID, ClockAligner, parse_body
 from .stream import MocapStream
+
+
+@dataclass
+class SourceClip:
+    """Unscaled PICO skeleton samples needed by offline retargeters."""
+
+    calibration: object
+    timestamps: list[float] = field(default_factory=list)
+    sequences: list[int] = field(default_factory=list)
+    positions: list[np.ndarray] = field(default_factory=list)
+    orientations: list[np.ndarray] = field(default_factory=list)
+    statuses: list[int] = field(default_factory=list)
+    messages: list[int] = field(default_factory=list)
+
+    def append(self, frame):
+        if frame.rotations is None:
+            raise ValueError('Source frame has no joint orientations')
+        self.timestamps.append(float(frame.t))
+        self.sequences.append(int(frame.seq))
+        self.positions.append(np.asarray(frame.positions, dtype=np.float64).copy())
+        self.orientations.append(np.asarray(frame.rotations, dtype=np.float64).copy())
+        self.statuses.append(int(frame.status))
+        self.messages.append(int(frame.message))
+
+    def save(self, path):
+        if not self.timestamps:
+            raise ValueError('Source trajectory is empty')
+        path = Path(path)
+        temporary = path.with_name(f'.{path.name}.tmp')
+        try:
+            with temporary.open('xb') as stream:
+                np.savez_compressed(
+                    stream,
+                    format_version=np.array(1, dtype=np.int64),
+                    joint_names=np.asarray(SMPL_JOINTS),
+                    timestamps=np.asarray(self.timestamps, dtype=np.float64),
+                    sequences=np.asarray(self.sequences, dtype=np.int64),
+                    positions=np.asarray(self.positions, dtype=np.float64),
+                    orientations=np.asarray(self.orientations, dtype=np.float64),
+                    statuses=np.asarray(self.statuses, dtype=np.uint8),
+                    messages=np.asarray(self.messages, dtype=np.int32),
+                    calibration_scale=np.array(self.calibration.scale, dtype=np.float64),
+                    calibration_pelvis_ref_z=np.array(
+                        self.calibration.pelvis_ref_z, dtype=np.float64),
+                    calibration_stand_height=np.array(
+                        self.calibration.stand_height, dtype=np.float64),
+                    calibration_pelvis_fix=np.asarray(
+                        self.calibration.pelvis_fix, dtype=np.float64),
+                    calibration_torso_fix=np.asarray(
+                        self.calibration.torso_fix, dtype=np.float64),
+                    calibration_joint_bias=np.asarray(
+                        self.calibration.joint_bias, dtype=np.float64),
+                    calibration_joint_target=np.asarray(
+                        self.calibration.joint_target, dtype=np.float64),
+                    calibration_arm_hinge_axes=np.asarray(
+                        self.calibration.arm_hinge_axes, dtype=np.float64),
+                )
+                stream.flush()
+                import os
+                os.fsync(stream.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 class CaptureStream(MocapStream):
@@ -17,6 +82,7 @@ class CaptureStream(MocapStream):
         super().__init__(retargeter, **kwargs)
         self.capture_lock = threading.RLock()
         self.clip = None
+        self.source_clip = None
         self.limits = limits
         self.last_valid_arrival = float('-inf')
         self.last_seq = None
@@ -78,6 +144,7 @@ class CaptureStream(MocapStream):
             if not 2 <= duration_limit <= 60:
                 raise ValueError('Duration limit must be between 2 and 60 seconds')
             self.clip = MotionClip(*self.limits, **quality)
+            self.source_clip = SourceClip(self.calibration)
             self.duration_limit = float(duration_limit)
             self.complete = False
             self.last_seq = None
@@ -88,7 +155,9 @@ class CaptureStream(MocapStream):
         with self.capture_lock:
             if self.clip is None:
                 raise RuntimeError('No active take')
-            clip, self.clip = self.clip, None
+            clip, source = self.clip, self.source_clip
+            self.clip = self.source_clip = None
+            clip.source = source if source.timestamps else None
             return clip
 
     def seal(self):
@@ -111,6 +180,7 @@ class CaptureStream(MocapStream):
             if not self.complete:
                 try:
                     self.clip.append(raw.t, row, id(self.calibration))
+                    self.source_clip.append(raw)
                     endpoint = min(self.duration_limit, 60.0 - 1.0 / FPS)
                     self.complete = self.clip.stamps[-1] - self.clip.stamps[0] >= endpoint
                 except RejectedMotion:
