@@ -355,7 +355,9 @@ class RgmtTrackingNode(Node):
             buffer, control_dt=spec.control_dt, lead_frames=lead,
             stand_joint_pos=stand,
             stale_timeout_s=float(p('mocap_stale_timeout_s', 0.3)
-                                  .get_parameter_value().double_value))
+                                  .get_parameter_value().double_value),
+            smoothing_weight=float(p('mocap_smoothing_weight', 0.25)
+                                   .get_parameter_value().double_value))
 
     def _on_mocap_frame(self, gate: MocapFrameGate, message: MocapFrame) -> None:
         """每帧核对两份名单。两者都是**顺序敏感**且错了不报错的。

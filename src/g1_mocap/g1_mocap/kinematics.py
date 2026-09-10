@@ -122,6 +122,21 @@ class G1Kinematics:
         self._fk(q29)
         return np.array([self.frame_pos(n) for n in names])
 
+    def key_body_position_jacobians(
+            self, q29: np.ndarray, names: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+        """返回 pelvis 系下的 ``(K,3)`` 位置和 ``(K,3,29)`` 解析 Jacobian。"""
+        self._q[self._q_index] = np.asarray(q29, dtype=np.float64)
+        pin.computeJointJacobians(self._model, self._data, self._q)
+        pin.updateFramePlacements(self._model, self._data)
+        positions = np.array([self.frame_pos(name) for name in names])
+        jacobians = np.array([
+            pin.getFrameJacobian(
+                self._model, self._data, self._frame_id[name],
+                pin.LOCAL_WORLD_ALIGNED)[:3, self._q_index]
+            for name in names
+        ])
+        return positions, jacobians
+
     def limits(self) -> tuple[np.ndarray, np.ndarray]:
         lower = np.array([self._model.lowerPositionLimit[i] for i in self._q_index])
         upper = np.array([self._model.upperPositionLimit[i] for i in self._q_index])

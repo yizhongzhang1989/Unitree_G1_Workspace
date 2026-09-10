@@ -19,6 +19,7 @@ class SourceClip:
     """Unscaled PICO skeleton samples needed by offline retargeters."""
 
     calibration: object
+    landmark_iterations: int = 2
     timestamps: list[float] = field(default_factory=list)
     sequences: list[int] = field(default_factory=list)
     positions: list[np.ndarray] = field(default_factory=list)
@@ -45,7 +46,8 @@ class SourceClip:
             with temporary.open('xb') as stream:
                 np.savez_compressed(
                     stream,
-                    format_version=np.array(1, dtype=np.int64),
+                    format_version=np.array(2, dtype=np.int64),
+                    landmark_iterations=np.array(self.landmark_iterations, dtype=np.int64),
                     joint_names=np.asarray(SMPL_JOINTS),
                     timestamps=np.asarray(self.timestamps, dtype=np.float64),
                     sequences=np.asarray(self.sequences, dtype=np.int64),
@@ -78,12 +80,13 @@ class SourceClip:
 
 
 class CaptureStream(MocapStream):
-    def __init__(self, retargeter, *, limits, **kwargs):
+    def __init__(self, retargeter, *, limits, landmark_iterations=2, **kwargs):
         super().__init__(retargeter, **kwargs)
         self.capture_lock = threading.RLock()
         self.clip = None
         self.source_clip = None
         self.limits = limits
+        self.landmark_iterations = int(landmark_iterations)
         self.last_valid_arrival = float('-inf')
         self.last_seq = None
         self.last_source_t = None
@@ -144,7 +147,8 @@ class CaptureStream(MocapStream):
             if not 2 <= duration_limit <= 60:
                 raise ValueError('Duration limit must be between 2 and 60 seconds')
             self.clip = MotionClip(*self.limits, **quality)
-            self.source_clip = SourceClip(self.calibration)
+            self.source_clip = SourceClip(
+                self.calibration, landmark_iterations=self.landmark_iterations)
             self.duration_limit = float(duration_limit)
             self.complete = False
             self.last_seq = None

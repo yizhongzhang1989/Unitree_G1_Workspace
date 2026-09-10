@@ -7,12 +7,16 @@ import pytest
 import yaml
 from scipy.spatial.transform import Rotation
 
+import g1_mocap.contact_refine as contact_refine_module
 from g1_mocap.contact_refine import _tracking_weights, contact_targets, geometry, metrics, refine
 from g1_mocap.motion_model import MotionModel
 
 
 ROOT = Path(__file__).resolve().parents[2]
 URDF = ROOT / 'unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf'
+DEFAULT_Q = np.asarray(yaml.safe_load(
+    (ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters'][
+        'default_joint_pos'])
 
 
 def test_contact_hysteresis_preserves_lift():
@@ -24,14 +28,20 @@ def test_contact_hysteresis_preserves_lift():
     assert contacts[:, 1].all()
 
 
-def test_refinement_reduces_slip_and_preserves_upper_body():
+def test_refinement_reduces_slip_and_preserves_upper_body(monkeypatch):
     model = MotionModel(str(URDF))
-    config = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters']
-    joints = np.asarray(config['default_joint_pos'])
-    height = model.kin.pelvis_height(joints, model.feet) + 0.03
-    rows = np.tile(np.r_[[0, 0, height], [0, 0, 0, 1], joints], (21, 1))
+    height = model.kin.pelvis_height(DEFAULT_Q, model.feet) + 0.03
+    rows = np.tile(np.r_[[0, 0, height], [0, 0, 0, 1], DEFAULT_Q], (21, 1))
     rows[:, 0] += np.linspace(0, 0.04, len(rows))
     original = rows.copy()
+    scales = []
+    scipy_least_squares = contact_refine_module.least_squares
+
+    def record_scale(*args, **kwargs):
+        scales.append(kwargs.get('x_scale'))
+        return scipy_least_squares(*args, **kwargs)
+
+    monkeypatch.setattr(contact_refine_module, 'least_squares', record_scale)
     output, contacts, weights, targets, solver = refine(model, rows)
     before = metrics(model, rows, contacts, weights, targets)
     after = metrics(model, output, contacts, weights, targets)
@@ -42,14 +52,14 @@ def test_refinement_reduces_slip_and_preserves_upper_body():
     np.testing.assert_array_equal(output[:, 3:7], rows[:, 3:7])
     np.testing.assert_array_equal(output[:, 19:], rows[:, 19:])
     assert solver['converged_frames'] == len(rows)
+    assert scales and scales[0] == 'jac'
+    assert set(scales) <= {'jac', 1.0}
     assert geometry(model, output[0])[0].shape == (2, 4, 3)
 
 
 def test_airborne_motion_is_not_glued_to_floor():
     model = MotionModel(str(URDF))
-    config = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters']
-    joints = np.asarray(config['default_joint_pos'])
-    rows = np.tile(np.r_[[0, 0, 1.2], [0, 0, 0, 1], joints], (12, 1))
+    rows = np.tile(np.r_[[0, 0, 1.2], [0, 0, 0, 1], DEFAULT_Q], (12, 1))
     rows[:, 0] = np.linspace(0, 0.1, len(rows))
     output, contacts, _, _, solver = refine(model, rows)
     assert not contacts.any()
@@ -80,10 +90,8 @@ def test_dynamic_toe_contact_does_not_flatten_heel():
 
 def test_dynamic_full_jump_keeps_flight_trajectory():
     model = MotionModel(str(URDF))
-    config = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters']
-    joints = np.asarray(config['default_joint_pos'])
-    height = model.kin.pelvis_height(joints, model.feet) + 0.03
-    rows = np.tile(np.r_[[0, 0, height], [0, 0, 0, 1], joints], (90, 1))
+    height = model.kin.pelvis_height(DEFAULT_Q, model.feet) + 0.03
+    rows = np.tile(np.r_[[0, 0, height], [0, 0, 0, 1], DEFAULT_Q], (90, 1))
     lift = np.zeros(len(rows))
     lift[25:56] = 0.18 * np.sin(np.linspace(0, np.pi, 31))
     rows[:, 2] += lift
@@ -132,8 +140,7 @@ def test_dynamic_full_support_targets_form_rigid_foot():
 @pytest.mark.parametrize('pitch', [-0.3, 0.3])
 def test_tilted_support_preserves_unloaded_edge(pitch):
     model = MotionModel(str(URDF))
-    config = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters']
-    row = np.r_[[0, 0, 0.8], Rotation.from_euler('y', pitch).as_quat(), config['default_joint_pos']]
+    row = np.r_[[0, 0, 0.8], Rotation.from_euler('y', pitch).as_quat(), DEFAULT_Q]
     initial_points, _ = geometry(model, row)
     row[2] -= initial_points[..., 2].min()
     rows = np.tile(row, (21, 1))
@@ -153,8 +160,7 @@ def test_tilted_support_preserves_unloaded_edge(pitch):
 
 def test_one_sequence_uses_same_solver_for_support_roll_flight_landing():
     model = MotionModel(str(URDF))
-    config = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters']
-    rows = np.tile(np.r_[[0, 0, 0.8], [0, 0, 0, 1], config['default_joint_pos']], (120, 1))
+    rows = np.tile(np.r_[[0, 0, 0.8], [0, 0, 0, 1], DEFAULT_Q], (120, 1))
     for index, row in enumerate(rows):
         pitch = 0.3 * min(1, max(0, (index - 20) / 20)) if index < 60 else 0.0
         row[3:7] = Rotation.from_euler('y', pitch).as_quat()

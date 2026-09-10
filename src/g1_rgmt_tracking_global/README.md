@@ -268,6 +268,12 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
 `15 + mocap_lead_margin_frames` 拍。把 `mocap_lead_margin_frames` 调小并不会让延迟消失，
 只会让 `+15` 那个 token 被钳成当前帧——**前瞻静默失效**，策略突然没有了未来信息。
 
+实时参考默认还会在 50 Hz 控制网格上做三点对称平滑
+`[mocap_smoothing_weight, 1 - 2 * mocap_smoothing_weight, mocap_smoothing_weight]`，同时处理
+关节、root、anchor、key body 和姿态，再从平滑后的量计算速度。四元数先统一到中心帧的
+同一半球，等价的 `q/-q` 不会相消。默认权重 0.25；设为 0 可关闭。它使用上面 margin
+已经留出的未来一拍，不额外增加播放延迟。
+
 **二、`~/start` 之前必须先校准，而且要人站直。** 校准归 `mocap_node`，本层只检查
 「标过没有」，没标过直接拒绝 `~/start`。标的是人机比例：按腿长比缩放位移，把站立高度
 锚到 G1 自己的高度，再把整个站立位形映射到 `default_joint_pos`。

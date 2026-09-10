@@ -14,6 +14,7 @@ from scipy.spatial.transform import Rotation
 
 from .motion_capture import FPS, save_motion
 from .motion_model import MotionModel
+from .source_replay import retarget_source
 from .urdf import DEFAULT_URDF, resolve_package_path
 
 
@@ -98,6 +99,7 @@ def refine(model, rows, *, max_nfev=400):
     if original.ndim != 2 or original.shape[1] != 36 or len(original) < 3 or not np.isfinite(original).all():
         raise ValueError('Expected finite Nx36 motion')
     smoothness = np.r_[[2.0] * 3, [0.5] * 12]
+    deviation = np.r_[[2.0] * 3, [0.1] * 12]
     geometry_before = [geometry(model, row) for row in original]
     points = np.array([item[0] for item in geometry_before])
     rotations = np.array([item[1] for item in geometry_before])
@@ -124,15 +126,22 @@ def refine(model, rows, *, max_nfev=400):
             penetration = np.minimum(actual[..., 2], 0.0) * 1000.0
             delta = variables - reference
             return np.r_[tracking.ravel(), penetration.ravel(),
-                         delta * np.r_[[2.0] * 3, [0.1] * 12],
+                         delta * deviation,
                          (delta - previous_delta) * smoothness]
 
         initial = np.clip(reference + previous_delta, *bounds)
-        result = least_squares(residual, initial, bounds=bounds, max_nfev=max_nfev,
-                               ftol=1e-7, xtol=1e-7, gtol=1e-7)
+        results = [least_squares(
+            residual, initial, bounds=bounds, max_nfev=max_nfev,
+            x_scale='jac', ftol=1e-7, xtol=1e-7, gtol=1e-7)]
+        if not results[0].success:
+            results.append(least_squares(
+                residual, initial, bounds=bounds, max_nfev=max_nfev,
+                x_scale=1.0, ftol=1e-7, xtol=1e-7, gtol=1e-7))
+        successful = [candidate for candidate in results if candidate.success]
+        result = min(successful or results, key=lambda candidate: candidate.cost)
         output[index, :3], output[index, 7:19] = result.x[:3], result.x[3:]
         previous_delta = result.x - reference
-        evaluations.append(result.nfev)
+        evaluations.append(sum(candidate.nfev for candidate in results))
         successes.append(result.success)
     return output, contacts, weights, targets, dict(
         converged_frames=int(sum(successes)), total_frames=len(original),
@@ -186,10 +195,16 @@ def main():
     parser.add_argument('input', type=Path)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--urdf', default=DEFAULT_URDF)
+    parser.add_argument('--source', type=Path,
+                        help='Raw PICO .source.npz to replay before contact refinement')
     args = parser.parse_args()
     source = args.input.read_bytes()
-    rows = np.loadtxt(args.input, delimiter=',', ndmin=2)
+    baseline = np.loadtxt(args.input, delimiter=',', ndmin=2)
     model = MotionModel(resolve_package_path(args.urdf))
+    rows = retarget_source(model, args.source) if args.source else baseline
+    if rows.shape != baseline.shape:
+        raise ValueError(
+            f'Replayed source shape {rows.shape} differs from CSV shape {baseline.shape}')
     output, contacts, weights, targets, solver = refine(model, rows)
     if solver['unconverged_frames']:
         raise RuntimeError(f"Unconverged frames: {solver['unconverged_frames']}")
@@ -199,7 +214,14 @@ def main():
     swing_mask = ~contacts.any(axis=2)
     swing_error = np.linalg.norm(refined_points - original_points, axis=3)[swing_mask]
     report = dict(source=str(args.input), source_sha256=hashlib.sha256(source).hexdigest(),
-                  algorithm='confidence_weighted_contacts_v2',
+                  raw_source=str(args.source) if args.source else None,
+                  raw_source_sha256=(hashlib.sha256(args.source.read_bytes()).hexdigest()
+                                     if args.source else None),
+                  replayed_from_raw=bool(args.source),
+                  replay_difference_max_rad=float(
+                      np.abs(rows[:, 7:] - baseline[:, 7:]).max()),
+                  algorithm='landmark_dls_then_confidence_weighted_contacts_v3'
+                  if args.source else 'confidence_weighted_contacts_v2',
                   assumption='Inferred contacts with numerical no-slip penalties; no dynamics validation',
                   solver=solver, before=metrics(model, rows, contacts, weights, targets),
                   after=metrics(model, output, contacts, weights, targets),

@@ -174,6 +174,7 @@ class MocapStream:
         # 只用来挡乱序帧。重定向结果不在这边攒：本类只管算完回调，要按时间
         # 插值的下游用自己的 FrameBuffer（订 /mocap/frame）。只在收帧线程里读写。
         self._last_stamp = float('-inf')
+        self._previous_joint_pos: np.ndarray | None = None
         self._calibration: RetargetCalibration | None = None
         self._raw: deque[BodyFrame] = deque(maxlen=RAW_FRAMES)
         self._raw_lock = threading.Lock()
@@ -257,6 +258,7 @@ class MocapStream:
         limited = sum(1 for f in frames if f.status != STATUS_VALID)
         calibration = self._retarget.calibrate(frames)
         self._calibration = calibration
+        self._previous_joint_pos = None
         self.last_calibration_warning = '' if not limited else (
             f'{limited}/{len(frames)} 帧不是 VALID'
             f'（{STATUS_MESSAGES.get(self._stats.message, self._stats.message)}），'
@@ -304,6 +306,8 @@ class MocapStream:
             pass  # loop 已经被停了，剩下的交给 close()
 
     def _note(self, **fields) -> None:
+        if 'connected' in fields:
+            self._previous_joint_pos = None
         with self._stats_lock:
             for key, value in fields.items():
                 setattr(self._stats, key, value)
@@ -373,7 +377,8 @@ class MocapStream:
             return
         stamped = self._clock.stamp(frame.t, time.monotonic())
         try:
-            result = self._retarget.solve(frame, calibration)
+            result = self._retarget.solve(
+                frame, calibration, previous_joint_pos=self._previous_joint_pos)
         except ValueError as exc:
             # 骨架里出现零长肢体（tracker 短暂丢失）时会走到这，丢掉这一帧就好。
             with self._stats_lock:
@@ -383,6 +388,7 @@ class MocapStream:
         if stamped <= self._last_stamp:
             return
         self._last_stamp = stamped
+        self._previous_joint_pos = result.joint_pos.copy()
         if self.on_frame is not None:
             try:
                 self.on_frame(stamped, frame, result)

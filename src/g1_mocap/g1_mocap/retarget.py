@@ -178,12 +178,41 @@ def _decompose_zxy(mat: np.ndarray) -> tuple[float, float, float]:
     return yaw, roll, pitch
 
 
-def _decompose_yxz(mat: np.ndarray) -> tuple[float, float, float]:
-    """``R = Ry(pitch) Rx(roll) Rz(yaw)`` -> (pitch, roll, yaw)。髋和肩都是这个顺序。"""
+def _decompose_yxz(mat: np.ndarray, reference: np.ndarray | None = None
+                   ) -> tuple[float, float, float]:
+    """``R = Ry(pitch) Rx(roll) Rz(yaw)`` -> (pitch, roll, yaw)。
+
+    给定上一帧 ``reference`` 时，在两个等价欧拉分支中选最近者。roll 接近 ±90 度时
+    pitch/yaw 不能被分别观测，只保留矩阵仍能确定的组合角，并把不可观测的自由度留在
+    上一帧附近。
+    """
     roll = math.asin(_clamp(float(-mat[1, 2]), -1.0, 1.0))
     yaw = math.atan2(mat[1, 0], mat[1, 1])
     pitch = math.atan2(mat[0, 2], mat[2, 2])
-    return pitch, roll, yaw
+    if reference is None:
+        return pitch, roll, yaw
+
+    reference = np.asarray(reference, dtype=np.float64)
+    branches = np.array(((pitch, roll, yaw),
+                         (pitch + math.pi, math.pi - roll, yaw + math.pi)))
+    branches += 2.0 * math.pi * np.round(
+        (reference - branches) / (2.0 * math.pi))
+    selected = branches[np.argmin(np.sum((branches - reference) ** 2, axis=1))]
+
+    if abs(math.cos(float(selected[1]))) < 0.02:
+        if selected[1] >= 0.0:
+            combined = math.atan2(mat[0, 1], mat[0, 0])
+            error = math.atan2(math.sin(combined - (reference[0] - reference[2])),
+                               math.cos(combined - (reference[0] - reference[2])))
+            selected[0] = reference[0] + 0.5 * error
+            selected[2] = reference[2] - 0.5 * error
+        else:
+            combined = math.atan2(-mat[0, 1], mat[0, 0])
+            error = math.atan2(math.sin(combined - (reference[0] + reference[2])),
+                               math.cos(combined - (reference[0] + reference[2])))
+            selected[0] = reference[0] + 0.5 * error
+            selected[2] = reference[2] + 0.5 * error
+    return float(selected[0]), float(selected[1]), float(selected[2])
 
 
 def _rot_y(angle: float) -> np.ndarray:
@@ -325,7 +354,8 @@ class Retargeter:
 
     def __init__(self, kin: G1Kinematics, *, key_bodies: Sequence[str], anchor_body: str,
                  default_joint_pos: np.ndarray,
-                 foot_ground_clearance_m: float = 0.03) -> None:
+                 foot_ground_clearance_m: float = 0.03,
+                 landmark_iterations: int = 2) -> None:
         self._kin = kin
         self._names = list(kin.joint_names)
         self._slot = {name: i for i, name in enumerate(self._names)}
@@ -350,6 +380,15 @@ class Retargeter:
             raise ValueError(
                 f'default_joint_pos 有 {len(self._default_joint_pos)} 项，'
                 f'与 {len(self._names)} 轴对不上')
+        if not isinstance(landmark_iterations, int) or not 0 <= landmark_iterations <= 4:
+            raise ValueError('landmark_iterations 必须是 0 到 4 的整数')
+        self._landmark_iterations = landmark_iterations
+        self._landmark_specs = tuple((*LEGS.items(), *ARMS.items()))
+        self._landmark_frames = tuple(
+            name for _, spec in self._landmark_specs for name in spec.kin_links)
+        self._landmark_columns = tuple(np.array([
+            self._slot[name] for name in (*spec.ball_joints, spec.hinge_joint)
+        ]) for _, spec in self._landmark_specs)
         self._leg_length = 0.5 * sum(g.proximal_len + g.distal_len for g in self._legs.values())
 
     @property
@@ -409,7 +448,7 @@ class Retargeter:
         posed = replace(rough,
                         pelvis_fix=pelvis.T @ _yaw_only(pelvis),
                         torso_fix=torso.T @ _yaw_only(torso))
-        return replace(posed, joint_bias=self.solve(sample, posed).joint_pos,
+        return replace(posed, joint_bias=self.solve(sample, posed, refine=False).joint_pos,
                        joint_target=self._default_joint_pos)
 
     def _calibrate_arm_hinge_axes(self, frames: Sequence[BodyFrame]) -> np.ndarray:
@@ -453,8 +492,39 @@ class Retargeter:
                 _frame_zy(point('NECK') - point('SPINE3'),
                           point('LEFT_SHOULDER') - point('RIGHT_SHOULDER')))
 
-    def solve(self, frame: BodyFrame, calib: RetargetCalibration) -> RetargetResult:
+    def _limb_vectors(self, angles: np.ndarray) -> np.ndarray:
+        positions = self._kin.key_body_pos(angles, self._landmark_frames)
+        return np.diff(positions.reshape(-1, 3, 3), axis=1)
+
+    @staticmethod
+    def _transfer_direction(reference: np.ndarray, current: np.ndarray,
+                            target: np.ndarray) -> np.ndarray:
+        source = _unit(reference)
+        destination = _unit(current)
+        cosine = _clamp(float(source @ destination), -1.0, 1.0)
+        axis = _cross(source, destination)
+        sine = _norm(axis)
+        if sine < _EPS:
+            return target.copy() if cosine > 0.0 else -target
+        axis /= sine
+        return (target * cosine + _cross(axis, target) * sine
+                + axis * float(axis @ target) * (1.0 - cosine))
+
+    def solve(self, frame: BodyFrame, calib: RetargetCalibration, *,
+              refine: bool = True,
+              previous_joint_pos: np.ndarray | None = None) -> RetargetResult:
         positions = frame.positions * calib.scale
+
+        raw_reference = None
+        if previous_joint_pos is not None:
+            previous_joint_pos = np.asarray(previous_joint_pos, dtype=np.float64)
+            if (previous_joint_pos.shape != (len(self._names),)
+                    or not np.isfinite(previous_joint_pos).all()):
+                raise ValueError(
+                    f'previous_joint_pos 必须是 {len(self._names)} 个有限关节角')
+            # 上一帧是站立零位映射和 DLS 后的输出；逆向搬回解析角空间只用于选取
+            # 相差 pi 的等价欧拉分支，不要求恢复 DLS 的微小修正。
+            raw_reference = previous_joint_pos + calib.joint_bias - calib.joint_target
 
         def point(name: str) -> np.ndarray:
             return positions[JOINT_INDEX[name]]
@@ -470,14 +540,18 @@ class Retargeter:
 
         for side, spec in LEGS.items():
             self._solve_limb(angles, spec, self._legs[side], point, rot_pelvis,
-                             frame.rotations)
+                             frame.rotations, reference_angles=raw_reference)
         for arm_slot, (side, spec) in enumerate(ARMS.items()):
             self._solve_limb(angles, spec, self._arms[side], point, rot_torso,
-                             frame.rotations, calib.arm_hinge_axes[arm_slot])
+                             frame.rotations, calib.arm_hinge_axes[arm_slot], raw_reference)
+
+        raw_angles = np.clip(angles, self._lower, self._upper)
 
         # 站立零位映射：把校准帧的位形整体搬到 G1 的 default 上，之后按增量走。
         angles = np.clip(angles - calib.joint_bias + calib.joint_target,
                          self._lower, self._upper)
+        if refine:
+            angles = self._refine_limb_directions(angles, raw_angles, calib)
 
         pelvis = point('PELVIS')
         root_pos = np.array([pelvis[0], pelvis[1],
@@ -495,9 +569,47 @@ class Retargeter:
             key_pos=root_pos + key_local @ rot_pelvis.T,
         )
 
+    def _refine_limb_directions(self, angles: np.ndarray, raw_angles: np.ndarray,
+                                calib: RetargetCalibration) -> np.ndarray:
+        if self._landmark_iterations == 0:
+            return angles
+        reference = self._limb_vectors(calib.joint_bias)
+        current = self._limb_vectors(raw_angles)
+        target = self._limb_vectors(calib.joint_target)
+        desired = np.array([
+            [self._transfer_direction(reference[limb, segment],
+                                      current[limb, segment],
+                                      target[limb, segment])
+             for segment in range(2)]
+            for limb in range(len(self._landmark_specs))
+        ])
+
+        refined = angles.copy()
+        for _ in range(self._landmark_iterations):
+            positions, jacobians = self._kin.key_body_position_jacobians(
+                refined, self._landmark_frames)
+            for index, (target_vectors, columns) in enumerate(
+                    zip(desired, self._landmark_columns)):
+                start = index * 3
+                limb_positions = positions[start:start + 3]
+                limb_jacobians = jacobians[start:start + 3, :, columns]
+                actual = np.r_[limb_positions[1] - limb_positions[0],
+                               limb_positions[2] - limb_positions[1]]
+                jacobian = np.vstack((limb_jacobians[1] - limb_jacobians[0],
+                                      limb_jacobians[2] - limb_jacobians[1]))
+                normal = jacobian.T @ jacobian
+                normal.flat[::len(columns) + 1] += 4e-4
+                error = target_vectors.ravel() - actual
+                step = np.linalg.solve(
+                    normal, jacobian.T @ error + 4e-4 * (angles[columns] - refined[columns]))
+                refined[columns] += np.clip(step, -0.08, 0.08)
+            refined = np.clip(refined, self._lower, self._upper)
+        return refined
+
     def _solve_limb(self, angles: np.ndarray, spec: LimbSpec, geom: LimbGeometry,
                     point, rot_root: np.ndarray, rotations: np.ndarray | None,
-                    calibrated_hinge_axis: np.ndarray | None = None) -> None:
+                    calibrated_hinge_axis: np.ndarray | None = None,
+                    reference_angles: np.ndarray | None = None) -> None:
         proximal, mid, distal, tip = (point(n) for n in spec.smpl)
         upper = mid - proximal
         lower = distal - mid
@@ -513,7 +625,10 @@ class Retargeter:
         rot_ball = _rotation_between(geom.proximal_dir, self._rest_axis(spec, geom, turned),
                                      _unit(upper), axis)
         local = geom.ball.pre.T @ rot_root.T @ rot_ball
-        ball = np.array(_decompose_yxz(local)) - geom.ball.offsets
+        ball_slots = np.array([self._slot[name] for name in spec.ball_joints])
+        reference = None if reference_angles is None else (
+            reference_angles[ball_slots] + geom.ball.offsets)
+        ball = np.array(_decompose_yxz(local, reference)) - geom.ball.offsets
         for name, value in zip(spec.ball_joints, ball):
             angles[self._slot[name]] = value
 

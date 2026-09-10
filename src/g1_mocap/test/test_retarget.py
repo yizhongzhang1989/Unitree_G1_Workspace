@@ -26,6 +26,7 @@ from g1_mocap.retarget import (
     LEGS,
     RetargetCalibration,
     Retargeter,
+    _decompose_yxz,
 )
 from g1_mocap.rotations import quat_from_mat, quat_to_mat
 from g1_mocap.skeleton import JOINT_INDEX, SMPL_JOINTS, XR_TO_ROBOT, BodyFrame
@@ -64,6 +65,33 @@ def rot(axis: str, angle: float) -> np.ndarray:
     return {'x': np.array([[1, 0, 0], [0, c, -s], [0, s, c]]),
             'y': np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]),
             'z': np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])}[axis]
+
+
+def pico_payload(positions: np.ndarray, *, t: float = 0.0, status: int = 1,
+                 message: int = 0) -> dict:
+    xr = positions @ XR_TO_ROBOT
+    return {'t': t, 'seq': 0, 'body': {
+        'status': status, 'message': message,
+        'joints': {name: {'position': list(xr[i]), 'position_valid': True}
+                   for i, name in enumerate(SMPL_JOINTS)}}}
+
+
+def test_yxz_equivalent_branch_stays_continuous_across_ninety_degrees():
+    reference = None
+    solved = []
+    rolls = np.deg2rad(np.linspace(70.0, 110.0, 81))
+    for roll in rolls:
+        matrix = rot('y', 0.4) @ rot('x', roll) @ rot('z', -0.3)
+        angles = np.array(_decompose_yxz(matrix, reference))
+        solved.append(angles)
+        reference = angles
+
+    solved = np.asarray(solved)
+    assert np.max(np.abs(np.diff(solved, axis=0))) < np.deg2rad(2.0)
+    for roll, (pitch, solved_roll, yaw) in zip(rolls, solved):
+        expected = rot('y', 0.4) @ rot('x', roll) @ rot('z', -0.3)
+        actual = rot('y', pitch) @ rot('x', solved_roll) @ rot('z', yaw)
+        np.testing.assert_allclose(actual, expected, atol=1e-4)
 
 
 def skeleton_from_pose(kin: G1Kinematics, q29: np.ndarray, *, pelvis_pos: np.ndarray,
@@ -282,6 +310,19 @@ def test_key_bodies_come_from_g1_fk(kin, retargeter):
     assert np.allclose(result.anchor_pos, expected[0], atol=1e-9)
 
 
+def test_key_body_position_jacobians_match_finite_difference(kin):
+    q = random_pose(kin, 42)
+    names = ('left_knee_link', 'right_wrist_roll_link')
+    positions, jacobians = kin.key_body_position_jacobians(q, names)
+    numeric = np.empty_like(jacobians)
+    step = 1e-7
+    for column in range(len(q)):
+        shifted = q.copy()
+        shifted[column] += step
+        numeric[:, :, column] = (kin.key_body_pos(shifted, names) - positions) / step
+    np.testing.assert_allclose(jacobians, numeric, atol=2e-7, rtol=2e-5)
+
+
 ##
 # 校准
 ##
@@ -315,11 +356,7 @@ def test_stream_calibration_reports_its_result(kin, retargeter):
     """
     positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
                                    pelvis_rot=np.eye(3))
-    xr = positions @ XR_TO_ROBOT  # parse_body 会再换回机器人系
-    payload = {'t': 0.0, 'seq': 0, 'body': {
-        'status': 1, 'message': 0,
-        'joints': {name: {'position': list(xr[i]), 'position_valid': True}
-                   for i, name in enumerate(SMPL_JOINTS)}}}
+    payload = pico_payload(positions)
 
     logs = []
     stream = MocapStream(retargeter, log=logs.append)  # 不 start()，不碰网络
@@ -341,18 +378,11 @@ def test_calibration_reports_degraded_frames(kin, retargeter):
     """
     positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
                                    pelvis_rot=np.eye(3))
-    xr = positions @ XR_TO_ROBOT
-
-    def payload(status: int, message: int) -> dict:
-        return {'t': 0.0, 'seq': 0, 'body': {
-            'status': status, 'message': message,
-            'joints': {name: {'position': list(xr[i]), 'position_valid': True}
-                       for i, name in enumerate(SMPL_JOINTS)}}}
 
     logs = []
     stream = MocapStream(retargeter, log=logs.append)
     for _ in range(30):
-        stream._ingest(payload(2, 4))          # LIMITED / tracker 长时间不可见
+        stream._ingest(pico_payload(positions, status=2, message=4))
     stream.calibrate()
     assert stream.calibrated, '降级帧不该阻断校准'
     assert 'VALID' in stream.last_calibration_warning
@@ -361,7 +391,7 @@ def test_calibration_reports_degraded_frames(kin, retargeter):
     # 校准吃的是最近 RAW_FRAMES 帧的滑窗，坏帧得先被挤出去，提示才会消失——
     # 也就是说从 LIMITED 恢复后要等几秒再标，否则标的还是混着坏帧的那一批。
     for _ in range(RAW_FRAMES + 5):
-        stream._ingest(payload(1, 0))
+        stream._ingest(pico_payload(positions))
     stream.calibrate()
     assert stream.last_calibration_warning == ''
 
@@ -417,26 +447,57 @@ def test_stream_drops_out_of_order_frames(kin, retargeter):
     """
     positions = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
                                    pelvis_rot=np.eye(3))
-    xr = positions @ XR_TO_ROBOT
-
-    def payload(t: float) -> dict:
-        return {'t': t, 'seq': 0, 'body': {
-            'status': 1, 'message': 0,
-            'joints': {name: {'position': list(xr[i]), 'position_valid': True}
-                       for i, name in enumerate(SMPL_JOINTS)}}}
 
     stream = MocapStream(retargeter, log=lambda _message: None)
     for i in range(30):
-        stream._ingest(payload(i * 0.01))
+        stream._ingest(pico_payload(positions, t=i * 0.01))
     stream.calibrate()
 
     stamped = []
     stream.on_frame = lambda t, _raw, _result: stamped.append(t)
     for t in (0.40, 0.42, 0.41, 0.44):     # 第三个倒退，且幅度小于时钟重同步阈值
-        stream._ingest(payload(t))
+        stream._ingest(pico_payload(positions, t=t))
 
     assert len(stamped) == 3, '倒退的那一帧应该被丢掉'
     assert stamped == sorted(stamped)
+
+
+def test_stream_passes_previous_solution_and_resets_history(kin, retargeter,
+                                                            monkeypatch):
+    positions = skeleton_from_pose(
+        kin, np.zeros(29), pelvis_pos=np.array([0.0, 0.0, 0.78]),
+        pelvis_rot=np.eye(3))
+
+    previous = []
+    solve = retargeter.solve
+
+    def record(frame, calibration, **kwargs):
+        value = kwargs.get('previous_joint_pos')
+        previous.append(None if value is None else value.copy())
+        return solve(frame, calibration, **kwargs)
+
+    monkeypatch.setattr(retargeter, 'solve', record)
+    stream = MocapStream(retargeter, log=lambda _message: None)
+    for index in range(30):
+        stream._ingest(pico_payload(positions, t=index * 0.01))
+    stream.calibrate()
+
+    stream._ingest(pico_payload(positions, t=0.40))
+    first = stream._previous_joint_pos.copy()
+    stream._ingest(pico_payload(positions, t=0.42))
+    np.testing.assert_array_equal(previous[-1], first)
+
+    stream._ingest(pico_payload(positions, t=0.41))
+    stream._ingest(pico_payload(positions, t=0.44))
+    np.testing.assert_array_equal(previous[-1], stream._previous_joint_pos)
+
+    stream._note(connected=False)
+    stream._ingest(pico_payload(positions, t=0.46))
+    assert previous[-1] is None
+
+    stream.calibrate()
+    stream._ingest(pico_payload(positions, t=0.48))
+    assert previous[-1] is None
 
 
 def test_ankle_bias_cancels_a_toe_down_skeleton(kin, retargeter):
@@ -475,6 +536,42 @@ def test_calibration_maps_the_stand_pose_onto_the_default(kin, retargeter):
     calibration = retargeter.calibrate(frames)
     result = retargeter.solve(frames[0], calibration)
     assert np.allclose(result.joint_pos, DEFAULT_Q, atol=1e-6)
+
+
+def test_landmark_refinement_tracks_motion_relative_to_calibration(kin, retargeter):
+    pelvis_pos = np.array([0.0, 0.0, 0.78])
+    standing = skeleton_from_pose(kin, np.zeros(29), pelvis_pos=pelvis_pos,
+                                  pelvis_rot=np.eye(3), frozen_centers=True)
+    standing[JOINT_INDEX['SPINE1']] += np.array([0.04, 0.0, 0.0])
+    calibration = retargeter.calibrate([
+        BodyFrame(0.0, index, standing, 1, 0) for index in range(30)])
+
+    q = DEFAULT_Q.copy()
+    q[SLOT['left_shoulder_pitch_joint']] += 0.65
+    q[SLOT['left_shoulder_roll_joint']] -= 0.35
+    q[SLOT['left_elbow_joint']] += 0.3
+    moved = skeleton_from_pose(kin, q, pelvis_pos=pelvis_pos,
+                               pelvis_rot=np.eye(3), frozen_centers=True)
+    moved[JOINT_INDEX['SPINE1']] += np.array([0.04, 0.0, 0.0])
+    frame = BodyFrame(1.0, 1, moved, 1, 0)
+    analytic = retargeter.solve(frame, calibration, refine=False)
+    refined = retargeter.solve(frame, calibration)
+
+    raw = np.clip(analytic.joint_pos + calibration.joint_bias
+                  - calibration.joint_target, *kin.limits())
+    reference = retargeter._limb_vectors(calibration.joint_bias)
+    current = retargeter._limb_vectors(raw)
+    target = retargeter._limb_vectors(calibration.joint_target)
+    desired = np.array([
+        [retargeter._transfer_direction(reference[limb, segment],
+                                        current[limb, segment],
+                                        target[limb, segment])
+         for segment in range(2)]
+        for limb in range(4)
+    ])
+    before = np.linalg.norm(retargeter._limb_vectors(analytic.joint_pos) - desired, axis=2)
+    after = np.linalg.norm(retargeter._limb_vectors(refined.joint_pos) - desired, axis=2)
+    assert np.percentile(after, 95) < np.percentile(before, 95) * 0.6
 
 
 def test_pose_fix_uprights_a_tilted_pelvis(kin, retargeter):

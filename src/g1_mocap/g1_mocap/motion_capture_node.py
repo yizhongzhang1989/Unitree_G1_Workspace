@@ -35,11 +35,13 @@ class MotionCaptureNode(Node):
         urdf = resolve_package_path(parameter('urdf_path', DEFAULT_URDF))
         kinematics = MotionModel(urdf).kin
         self.key_bodies = list(parameter('key_bodies', Parameter.Type.STRING_ARRAY))
+        landmark_iterations = parameter('landmark_iterations', 2)
         retargeter = Retargeter(
             kinematics, key_bodies=self.key_bodies,
             anchor_body=parameter('anchor_body', 'torso_link'),
             default_joint_pos=np.asarray(parameter('default_joint_pos', Parameter.Type.DOUBLE_ARRAY)),
-            foot_ground_clearance_m=parameter('foot_ground_clearance_m', 0.03))
+            foot_ground_clearance_m=parameter('foot_ground_clearance_m', 0.03),
+            landmark_iterations=landmark_iterations)
         self.directory = parameter('output_dir', '~/motions_dataset')
         self.category = validate_label(parameter('category', 'locomotion'))
         self.action = validate_label(parameter('action', 'walk_forward'))
@@ -60,6 +62,7 @@ class MotionCaptureNode(Node):
         self.status_publisher = self.create_publisher(MocapStatus, '~/status', 10)
         self.stream = CaptureStream(
             retargeter, limits=kinematics.limits(),
+            landmark_iterations=landmark_iterations,
             host=parameter('host', '0.0.0.0'), port=parameter('port', 18001),
             token=parameter('token', ''), log=self.get_logger().info)
         self.stream.on_preview = self._preview

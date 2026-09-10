@@ -46,6 +46,21 @@ def _angular_velocity(previous: np.ndarray, current: np.ndarray, dt: float) -> n
     return axis * (angle / dt)[:, None]
 
 
+def _smooth_quaternions(previous: np.ndarray, current: np.ndarray,
+                        following: np.ndarray, side_weight: float) -> np.ndarray:
+    """三点四元数平滑；先统一到中心帧所在半球，避免 ``q`` / ``-q`` 抵消。"""
+    previous = np.where(np.sum(previous * current, axis=-1, keepdims=True) < 0.0,
+                        -previous, previous)
+    following = np.where(np.sum(following * current, axis=-1, keepdims=True) < 0.0,
+                         -following, following)
+    smoothed = (side_weight * previous + (1.0 - 2.0 * side_weight) * current
+                + side_weight * following)
+    norm = np.linalg.norm(smoothed, axis=-1, keepdims=True)
+    if np.any(~np.isfinite(norm)) or np.any(norm < 1e-9):
+        raise ValueError('平滑后的四元数非法')
+    return smoothed / norm
+
+
 class MocapClip:
     """把一条动捕数据流包成一段永不结束的参考动作。
 
@@ -57,6 +72,7 @@ class MocapClip:
         stale_timeout_s: 多久没有新帧就算断流。
         resync_slew: 每拍最多修正多少个控制周期的相位。0.02 表示 2%，即 50 s 追回 1 s。
         hard_resync_s: 相位差超过它就直接跳过去——慢修正追不上的那种断流。
+        smoothing_weight: 三点对称平滑的两侧权重，范围 ``[0, 0.25]``；0 表示关闭。
     """
 
     streaming = True
@@ -64,7 +80,8 @@ class MocapClip:
     def __init__(self, source, *, control_dt: float, lead_frames: int,
                  stand_joint_pos: np.ndarray,
                  name: str = 'live', stale_timeout_s: float = 0.3,
-                 resync_slew: float = 0.02, hard_resync_s: float = 0.5) -> None:
+                 resync_slew: float = 0.02, hard_resync_s: float = 0.5,
+                 smoothing_weight: float = 0.0) -> None:
         self._stream = source
         self._dt = float(control_dt)
         self._lead_s = int(lead_frames) * self._dt
@@ -73,6 +90,9 @@ class MocapClip:
         self._stale_timeout = float(stale_timeout_s)
         self._slew = float(resync_slew) * self._dt
         self._hard = float(hard_resync_s)
+        self._smoothing_weight = float(smoothing_weight)
+        if not 0.0 <= self._smoothing_weight <= 0.25:
+            raise ValueError('smoothing_weight 必须在 [0, 0.25] 内')
 
         self._align_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self._align_pos = np.zeros(3)
@@ -111,8 +131,8 @@ class MocapClip:
         运动算成跟踪误差。
         """
         self._pending = (np.asarray(robot_anchor_pos, dtype=np.float64).copy(),
-                 np.asarray(robot_anchor_quat, dtype=np.float64).copy(),
-                 None if robot_ground_z is None else float(robot_ground_z))
+                         np.asarray(robot_anchor_quat, dtype=np.float64).copy(),
+                         None if robot_ground_z is None else float(robot_ground_z))
         self._align_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self._align_pos = np.zeros(3)
         self._origin = None
@@ -125,7 +145,7 @@ class MocapClip:
 
     def live_joint_pos(self) -> np.ndarray:
         """最新可播放的实时姿态；start 前已接合 squeeze 时保持旧启动语义。"""
-        batch = self._require(np.array([self._latest_playable()]))
+        batch = self._sample(np.array([self._latest_playable()]))
         return batch.joint_pos[0]
 
     def align_from_reference(self, robot_anchor_pos: np.ndarray,
@@ -152,7 +172,7 @@ class MocapClip:
             if self._pending is None:
                 raise RuntimeError('参考动作尚未对齐，必须先调用 align()')
             return self._pending[0].copy(), self._pending[1].copy()
-        batch = self._require(np.array([self._play_time(frame, advance=False)]))
+        batch = self._sample(np.array([self._play_time(frame, advance=False)]))
         return (self._to_world(batch.anchor_pos)[0],
                 quat_mul(self._align_quat, quat_normalize(batch.anchor_quat[0])))
 
@@ -166,7 +186,7 @@ class MocapClip:
         # 训练语料的速度定义是 (x[t+1] - x[t]) / dt；实时源也必须逐拍一致。
         times = np.concatenate([play + offsets * self._dt,
                                 play + (offsets + 1.0) * self._dt])
-        batch = self._require(times)
+        batch = self._sample(times)
         n = len(offsets)
         current, following = batch.at(slice(0, n)), batch.at(slice(n, 2 * n))
         self._ensure_alignment(current, offsets, play)
@@ -234,6 +254,33 @@ class MocapClip:
         if batch is None:
             raise RuntimeError('动捕缓冲为空，取不到参考')
         return batch
+
+    def _sample(self, times: np.ndarray) -> SampleBatch:
+        """在控制网格上做三点对称平滑；播放头已有的一拍余量提供未来样本。"""
+        if self._smoothing_weight == 0.0:
+            return self._require(times)
+        times = np.asarray(times, dtype=np.float64)
+        count = len(times)
+        batch = self._require(np.concatenate([times - self._dt, times, times + self._dt]))
+        previous = batch.at(slice(0, count))
+        current = batch.at(slice(count, 2 * count))
+        following = batch.at(slice(2 * count, 3 * count))
+        weight = self._smoothing_weight
+
+        def smooth(before: np.ndarray, center: np.ndarray, after: np.ndarray) -> np.ndarray:
+            return weight * before + (1.0 - 2.0 * weight) * center + weight * after
+
+        return SampleBatch(
+            current.t,
+            smooth(previous.joint_pos, current.joint_pos, following.joint_pos),
+            smooth(previous.root_pos, current.root_pos, following.root_pos),
+            _smooth_quaternions(previous.root_quat, current.root_quat,
+                                following.root_quat, weight),
+            smooth(previous.anchor_pos, current.anchor_pos, following.anchor_pos),
+            _smooth_quaternions(previous.anchor_quat, current.anchor_quat,
+                                following.anchor_quat, weight),
+            smooth(previous.key_pos, current.key_pos, following.key_pos),
+        )
 
     def _latest_playable(self) -> float:
         span = self._stream.span()
