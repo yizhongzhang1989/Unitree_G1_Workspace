@@ -39,7 +39,7 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float64MultiArray, String
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 from tf2_ros import Buffer, TransformListener
 
 from g1_motion_control.command_protocol import join_command
@@ -77,10 +77,13 @@ _BGR_FROM = {'bgr8': (3, None),
              'yuv422_yuy2': (2, cv2.COLOR_YUV2BGR_YUY2)}
 
 
-def playback_step(cursor: int, horizon: int) -> tuple[int, int, bool]:
+def playback_step(cursor: int, horizon: int,
+                  skip_intermediate: bool = False) -> tuple[int, int, bool]:
     """返回本拍索引、下一 cursor，以及本拍是否播完整个 chunk。"""
     if horizon <= 0:
         raise ValueError('horizon 必须大于 0')
+    if skip_intermediate:
+        return horizon - 1, horizon - 1, True
     index = min(max(0, cursor), horizon - 1)
     finished = index == horizon - 1
     return index, index if finished else index + 1, finished
@@ -180,6 +183,8 @@ class VlaBridgeNode(Node):
             raise ValueError(f'{name} 输出的是 {self._spec.action_semantics} 动作，'
                              '不能再开 delta_position / delta_rotation')
         self._horizon = p('action_horizon', 0).get_parameter_value().integer_value
+        self._skip_intermediate = p('skip_intermediate_waypoints', False) \
+            .get_parameter_value().bool_value
         self._cartesian_limit_enabled = p('cartesian_limit_enabled', False) \
             .get_parameter_value().bool_value
         self._max_step_pos = float(
@@ -248,6 +253,9 @@ class VlaBridgeNode(Node):
         self.create_service(Trigger, '~/start', self._on_start, callback_group=control)
         self.create_service(Trigger, '~/next', self._on_next, callback_group=control)
         self.create_service(Trigger, '~/stop', self._on_stop, callback_group=control)
+        self.create_service(SetBool, '~/set_auto', self._on_set_auto, callback_group=control)
+        self.create_service(SetBool, '~/set_skip_intermediate',
+                            self._on_set_skip_intermediate, callback_group=control)
 
         self._alive = True
         self._worker = threading.Thread(target=self._infer_loop, daemon=True)
@@ -458,7 +466,8 @@ class VlaBridgeNode(Node):
             if chunk is not None:
                 limit = chunk.horizon if self._horizon <= 0 \
                     else min(self._horizon, chunk.horizon)
-                index, self._cursor, finished = playback_step(cursor, limit)
+                index, self._cursor, finished = playback_step(
+                    cursor, limit, self._skip_intermediate)
             else:
                 index, finished = 0, False
         if reason:
@@ -498,6 +507,7 @@ class VlaBridgeNode(Node):
             payload = {
                 'backend': self._spec.name,
                 'execution_mode': self._execution_mode,
+                'skip_intermediate_waypoints': self._skip_intermediate,
                 'cartesian_limit_enabled': self._cartesian_limit_enabled,
                 'running': self._running.is_set(),
                 'inference_active': self._inference_active,
@@ -570,6 +580,24 @@ class VlaBridgeNode(Node):
         reason = self._request_inference()
         response.success = not reason
         response.message = reason or '已请求下一段'
+        return response
+
+    def _on_set_auto(self, request, response):
+        enabled = bool(request.data)
+        with self._lock:
+            self._execution_mode = 'continuous' if enabled else 'manual'
+        if enabled and self._running.is_set():
+            self._request_inference()
+        response.success = True
+        response.message = '自动模式已开启' if enabled else '自动模式已关闭'
+        return response
+
+    def _on_set_skip_intermediate(self, request, response):
+        with self._lock:
+            self._skip_intermediate = bool(request.data)
+        response.success = True
+        response.message = ('已跳过中间 waypoint' if self._skip_intermediate
+                            else '已恢复逐 waypoint 执行')
         return response
 
     def _on_stop(self, request, response):

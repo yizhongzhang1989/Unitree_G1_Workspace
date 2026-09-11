@@ -69,6 +69,8 @@
     delta_rotation: false
     # 每段动作最多用前几个 waypoint，0 = 用 backend 返回的全部（CogACT 是 30）。
     action_horizon: 0
+    # true = 跳过中间 waypoint，直接执行每段最后一个有效末端目标。
+    skip_intermediate_waypoints: false
 
     # -- 安全 ----------------------------------------------------------------
     # 默认原样下发 waypoint；开启后才使用下面的位置/姿态步长上限。

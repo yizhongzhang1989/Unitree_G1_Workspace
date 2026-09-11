@@ -33,6 +33,10 @@ def test_playback_visits_every_waypoint_once():
     assert visited == list(range(30))
 
 
+def test_playback_can_skip_directly_to_final_waypoint():
+    assert playback_step(0, 30, skip_intermediate=True) == (29, 29, True)
+
+
 @pytest.mark.parametrize(('running', 'active', 'has_chunk', 'expected'), (
     (False, False, False, '尚未 start'),
     (True, True, False, '正在推理'),

@@ -160,7 +160,8 @@ ros2 launch g1_vla_bridge vla_bridge.launch.py proxy:=socks5h://127.0.0.1:1080
 
 ros2 run g1_vla_bridge vla_cli
 # CLI 中：/engage 明确使能；输入任务文字并 Enter 只更新目标；空行 Enter 请求并完整执行
-# 一个 30 点 chunk。/estop 急停卸力；/stop 停止 VLA；/quit 只退出 CLI，不急停机器人。
+# 一个 30 点 chunk。/auto on 自动连续执行，/auto off 回到单段模式；/skip on 跳过中间点，
+# /skip off 恢复逐点执行。/estop 急停卸力；/stop 停止 VLA；/quit 只退出 CLI，不急停机器人。
 ```
 
 启动日志会打出这次用的规格摘要（原点、图像、语义），现场先核这一行。
@@ -171,6 +172,7 @@ ros2 run g1_vla_bridge vla_cli
 | 机制 | 参数 | 作用 |
 |---|---|---|
 | 可选单帧限速 | `cartesian_limit_enabled` / `max_step_pos` / `max_step_ori` | 默认关闭；开启后裁剪笛卡尔单帧步长 |
+| 跳过中间点 | `skip_intermediate_waypoints` | 默认关闭；开启后每个 chunk 直接以最后一个有效 waypoint 为目标 |
 | 图像新鲜度 | `image_timeout_s` | 任一路图过期就不推理，不拿旧图决策 |
 | 接管检查 | — | `arms_live` 掉了自动 `stop` |
 | 只记录不拦截 | `~/status` 的 `jump` / `lead` | 首点距实测、指令领先实测 |

@@ -22,6 +22,7 @@ def executor_fixture(mode='manual'):
         _grip_command={side: 0. for side in SIDES},
         _active={side: True for side in SIDES},
         _horizon=0, _cursor=0, _max_step_pos=0.02, _max_step_ori=0.1,
+        _skip_intermediate=False,
         _cartesian_limit_enabled=True,
         _publisher=Mock(), _arms_ready=lambda: '', _execution_mode=mode,
         _request_inference=Mock(),
@@ -73,6 +74,52 @@ def test_disabled_limit_sends_each_waypoint_without_extra_ticks():
     assert node._chunk is None
     VlaBridgeNode._on_tick(node)
     assert node._publisher.publish.call_count == 60
+
+
+def test_skip_intermediate_sends_only_final_waypoint():
+    node = executor_fixture()
+    node._cartesian_limit_enabled = False
+    node._skip_intermediate = True
+    final_pose = node._chunk.poses['left'][-1].copy()
+    VlaBridgeNode._on_tick(node)
+    sent = [call.args[0].data for call in node._publisher.publish.call_args_list]
+    arms = [row for row in sent if len(row) == 14]
+    assert len(arms) == 1
+    assert np.allclose(arms[0][:7], final_pose)
+    assert node._chunk is None
+
+
+def test_enable_auto_requests_immediately_when_running_and_idle():
+    node = executor_fixture()
+    node._chunk = None
+    node._request_inference = Mock(return_value='')
+    response = VlaBridgeNode._on_set_auto(
+        node, SimpleNamespace(data=True), SimpleNamespace())
+    assert response.success
+    assert node._execution_mode == 'continuous'
+    node._request_inference.assert_called_once_with()
+
+
+def test_disable_auto_keeps_current_chunk():
+    node = executor_fixture('continuous')
+    chunk = node._chunk
+    node._request_inference = Mock()
+    response = VlaBridgeNode._on_set_auto(
+        node, SimpleNamespace(data=False), SimpleNamespace())
+    assert response.success
+    assert node._execution_mode == 'manual'
+    assert node._chunk is chunk
+    node._request_inference.assert_not_called()
+
+
+def test_set_skip_intermediate_keeps_current_chunk():
+    node = executor_fixture()
+    chunk = node._chunk
+    response = VlaBridgeNode._on_set_skip_intermediate(
+        node, SimpleNamespace(data=True), SimpleNamespace())
+    assert response.success
+    assert node._skip_intermediate is True
+    assert node._chunk is chunk
 
 
 def test_continuous_does_not_request_before_final_target_sent():
