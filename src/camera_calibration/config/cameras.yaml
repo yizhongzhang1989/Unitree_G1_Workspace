@@ -26,7 +26,7 @@ cameras:
     # mount_parent 必须和 URDF 里该关节的 <parent link> 一致 —— 存的是
     # T_parent<-child，写错了会静静地存一个差一段变换的 origin。
     # 没有 mount_create：这条边 URDF 里已经有了，只改 origin。
-    mount_parent: torso_link
+    mount_parent: head_mount_link
     mount_frame: d435_link
     mount_joint: d435_joint
     switch:

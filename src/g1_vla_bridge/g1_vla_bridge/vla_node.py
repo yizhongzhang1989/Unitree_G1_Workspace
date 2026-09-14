@@ -306,20 +306,23 @@ class VlaBridgeNode(Node):
             return f'motion_control 手臂未接管（state={state}），等站立插值走完'
         return ''
 
-    def _lookup(self, child: str) -> np.ndarray:
+    def _lookup(self, child: str, stamp: Time | None = None) -> np.ndarray:
         """``base_frame`` 下的 ``[x,y,z,qx,qy,qz,qw]``。"""
-        tf = self._tf.lookup_transform(self._base_frame, child, Time()).transform
+        tf = self._tf.lookup_transform(
+            self._base_frame, child, Time() if stamp is None else stamp).transform
         return np.array([tf.translation.x, tf.translation.y, tf.translation.z,
                          tf.rotation.x, tf.rotation.y, tf.rotation.z, tf.rotation.w])
 
     def _measured_pose(self, side: str) -> np.ndarray:
         return self._lookup(self._tip_frames[side])
 
-    def _decode_images(self) -> tuple[dict[str, np.ndarray], str]:
+    def _decode_images(self, frames: dict[str, tuple[float, Image]] | None = None
+                       ) -> tuple[dict[str, np.ndarray], str]:
         """解出 spec 要的那几路 BGR。第二个返回值非空 = 这组不能用。不能在持锁时调。"""
         now = time.monotonic()
-        with self._lock:
-            frames = dict(self._images)
+        if frames is None:
+            with self._lock:
+                frames = dict(self._images)
         slots = self._spec.images.slots
         missing = [k for k in slots if k not in frames]
         if missing:
@@ -336,7 +339,9 @@ class VlaBridgeNode(Node):
 
     def _observe(self) -> Observation:
         """采一组观测，全部表示在 ``base_frame`` 里。"""
-        frames, reason = self._decode_images()
+        with self._lock:
+            images = dict(self._images)
+        frames, reason = self._decode_images(images)
         if reason:
             raise RuntimeError(reason)
         with self._lock:
@@ -345,7 +350,8 @@ class VlaBridgeNode(Node):
         camera_poses = {
             slot: pose_matrix(pose[3:], pose[:3])
             for slot, pose in (
-                (slot, self._lookup(self._camera_frames[slot]))
+                (slot, self._lookup(self._camera_frames[slot],
+                                    Time.from_msg(images[slot][1].header.stamp)))
                 for slot in self._spec.images.slots
             )
         }

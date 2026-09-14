@@ -27,6 +27,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'head_tf = head_sensors.head_tf:main',
             'head_lidar_node = head_sensors.head_lidar_node:main',
             'render_head_view = head_sensors.render_head_view:main',
             'verify_head_view = head_sensors.verify_head_view:main',

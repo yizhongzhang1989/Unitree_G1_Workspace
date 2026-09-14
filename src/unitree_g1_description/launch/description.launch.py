@@ -49,6 +49,10 @@ def generate_launch_description() -> LaunchDescription:
             "robot_description_topic", default_value="/robot_description"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
         Node(
+            package="head_sensors", executable="head_tf", name="head_tf",
+            parameters=[{"use_sim_time": ParameterValue(use_sim_time, value_type=bool)}],
+            remappings=[("robot_description", robot_description_topic)]),
+        Node(
             package="robot_state_publisher",    # 根据 URDF 和当前关节角，计算机器人各个 Link 的坐标关系（TF），并发布出去
             executable="robot_state_publisher",
             name="robot_state_publisher",

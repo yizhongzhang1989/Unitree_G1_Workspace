@@ -214,9 +214,13 @@ def _control_nodes(context):
             }],
             remappings=[
                 ("robot_description", LaunchConfiguration("robot_description_topic")),
-                ("joint_states", LaunchConfiguration("joint_states_topic")),
+                ("joint_states", LaunchConfiguration('joint_states_topic')),
             ],
         ),
+        Node(
+            package="head_sensors", executable="head_tf", name="head_tf",
+            parameters=[{"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}],
+            remappings=[("robot_description", LaunchConfiguration("robot_description_topic"))]),
         Node(
             package="controller_manager",
             executable="spawner",

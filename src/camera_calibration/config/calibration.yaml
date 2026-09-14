@@ -1,4 +1,10 @@
 version: 1
+# 本机被动颈轴的双 IMU 零位参考；几何参数读取实际 robot_description
+head_imu_reference:
+  # 直头零位静止加速度均值 [ax, ay, az]，头部雷达 IMU 原始坐标系，单位 g
+  head_zero: [-0.00578804256131985, -0.0032184989924070695, -1.0000095022404754]
+  # 同次躯干加速度均值 [ax, ay, az]，单位 m/s²；假定躯干 IMU 轴与 torso_link 一致
+  torso_zero: [0.39969927717449083, 0.0728190977752604, 9.870482778466137]
 intrinsics:
   camera_left:
   - width: 1920
@@ -236,48 +242,23 @@ extrinsics:
 profile_relations: {}
 urdf_overrides:
   d435_joint:
-    parent: torso_link
+    parent: head_mount_link
     child: d435_link
     xyz:
-    - 0.0701217
-    - 0.0229571
-    - 0.4289327
+    - 0.04319325554787227
+    - 0.020725227398352163
+    - 0.12533086808625643
     rpy:
-    - -0.0375655
-    - 1.0058916
-    - -0.0267109
-    previous_xyz:
-    - 0.0637564
-    - 0.0165915
-    - 0.4148811
-    previous_rpy:
-    - 0.1508909
-    - 0.9440146
-    - 0.0997688
+    - -0.025252522603556767
+    - 0.845550215052385
+    - 0.01327044851519366
     calibrated_frame: camera_color_optical_frame
-    correction:
-      angle_deg: 7.2127
-      trans_mm: 15.244
-      translation:
-      - -0.007744218784081318
-      - -0.0115328051230023
-      - -0.006277067421754104
-      rotation:
-      - -0.028561190493751155
-      - 0.037565827161343726
-      - -0.04158916597614938
-      - 0.9980197434423189
-      rpy:
-      - -0.06032965351555183
-      - 0.07267114918479316
-      - -0.08548892307539788
-    residual_mm: 2.618
-    condition: 26.8
-    samples:
-      camera_left: 3
-      camera_right: 3
-    source: camera_calibration solve_all
-    stamp: '2026-09-01T05:20:50'
+    source: head_mount_imu_zero pose_00 pose_01 equal wrist weighting
+    stamp: '2026-09-14'
+    zero_reference: head_straight_imu_reference_20260911
+    validation_status: experimental
+    heldout_translation_mm: [5.725335981947502, 17.026061020896048]
+    heldout_rotation_deg: [2.3860104844697685, 2.253142821737413]
   right_camera_optical_joint:
     parent: right_camera_mount_link
     child: camera_right

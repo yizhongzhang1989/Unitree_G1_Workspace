@@ -73,9 +73,9 @@ class Capture(Node):
             rclpy.spin_once(self, timeout_sec=0.02)
         return predicate()
 
-    def extrinsic(self, parent: str, child: str, timeout: float = 5.0) -> Optional[np.ndarray]:
+    def extrinsic(self, parent: str, child: str, timeout: float = 5.0, stamp=None) -> Optional[np.ndarray]:
         """`parent` 到 `child` 的 4x4，查不到返回 None。"""
-        zero = rclpy.time.Time()
+        zero = rclpy.time.Time() if stamp is None else rclpy.time.Time.from_msg(stamp)
         if not self.wait_until(lambda: self.tf.can_transform(parent, child, zero), timeout):
             return None
         tf = self.tf.lookup_transform(parent, child, zero).transform
@@ -118,7 +118,7 @@ def main(argv=None) -> int:
     parser.add_argument('--window', type=float, default=0.5, help='关节角采样窗口（秒）')
     parser.add_argument('--still', type=float, default=0.01,
                         help='窗口内峰峰值超过这个值就警告手臂在动（rad）')
-    parser.add_argument('--frame', default='d435_link')
+    parser.add_argument('--frame', default='torso_link')
     parser.add_argument('--optical-frame', default='camera_color_optical_frame',
                         help='彩色成像帧；从 TF 取它相对 --frame 的实测外参')
     parser.add_argument('--out', default='/tmp/verify')
@@ -154,10 +154,13 @@ def main(argv=None) -> int:
           % (len(table), len(names), spread.max(),
              '' if spread.max() <= args.still else '  ← 手臂在动，渲染必然对不上'))
 
-    extrinsic = cap.extrinsic(args.frame, args.optical_frame)
+    extrinsic = cap.extrinsic(args.frame, args.optical_frame, stamp=color.header.stamp)
     if extrinsic is None:
-        print('外参 : 查不到 %s -> %s，只能当相机正好坐在原点上，渲染会整体横移十几个像素'
+        print('外参 : 查不到 %s -> %s，停止渲染'
               % (args.frame, args.optical_frame))
+        cap.destroy_node()
+        rclpy.shutdown()
+        return 1
     else:
         print('外参 : %s -> %s，平移 [%+.1f %+.1f %+.1f] mm'
               % (args.frame, args.optical_frame, *(1000.0 * extrinsic[:3, 3])))
