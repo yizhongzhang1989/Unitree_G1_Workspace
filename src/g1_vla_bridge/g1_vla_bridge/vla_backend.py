@@ -176,6 +176,7 @@ class Observation:
     calibrations: dict[str, CameraCalibration] = field(default_factory=dict)
     #: 图像槽位 -> 4x4 ``T_base<-cam``。多视角几何模型使用。
     camera_poses: dict[str, np.ndarray] = field(default_factory=dict)
+    acquired_monotonic: float | None = None
 
 
 @dataclass

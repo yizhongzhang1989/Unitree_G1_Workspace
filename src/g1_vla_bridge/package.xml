@@ -20,6 +20,11 @@
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-requests</exec_depend>
   <exec_depend>g1_motion_control</exec_depend>
+  <exec_depend>record</exec_depend>
+  <exec_depend>camera_calibration</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-av</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

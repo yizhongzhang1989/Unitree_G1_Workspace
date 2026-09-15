@@ -26,7 +26,11 @@ def executor_fixture(mode='manual'):
         _cartesian_limit_enabled=True,
         _publisher=Mock(), _arms_ready=lambda: '', _execution_mode=mode,
         _request_inference=Mock(),
+        _generation=0, _infer_requested=threading.Event(), _inference_active=False,
+        _delta=False, _spec=SPEC, _timed=None,
     )
+    node._mode_error = lambda mode: VlaBridgeNode._mode_error(node, mode)
+    node._set_execution_mode = lambda mode: VlaBridgeNode._set_execution_mode(node, mode)
     node._running.set()
     node._limit = lambda current, target: VlaBridgeNode._limit(node, current, target)
     poses = np.tile(pose, (30, 1))
@@ -89,15 +93,15 @@ def test_skip_intermediate_sends_only_final_waypoint():
     assert node._chunk is None
 
 
-def test_enable_auto_requests_immediately_when_running_and_idle():
+def test_enable_auto_requires_stopped_bridge():
     node = executor_fixture()
     node._chunk = None
     node._request_inference = Mock(return_value='')
     response = VlaBridgeNode._on_set_auto(
         node, SimpleNamespace(data=True), SimpleNamespace())
-    assert response.success
-    assert node._execution_mode == 'continuous'
-    node._request_inference.assert_called_once_with()
+    assert not response.success
+    assert node._execution_mode == 'manual'
+    node._request_inference.assert_not_called()
 
 
 def test_disable_auto_keeps_current_chunk():
@@ -106,8 +110,8 @@ def test_disable_auto_keeps_current_chunk():
     node._request_inference = Mock()
     response = VlaBridgeNode._on_set_auto(
         node, SimpleNamespace(data=False), SimpleNamespace())
-    assert response.success
-    assert node._execution_mode == 'manual'
+    assert not response.success
+    assert node._execution_mode == 'continuous'
     assert node._chunk is chunk
     node._request_inference.assert_not_called()
 
@@ -174,7 +178,6 @@ def worker_fixture():
     node._spec = SPEC
     node._observe = Mock(return_value=object())
     node._measured_pose = lambda side: node._command[side].copy()
-    node._decode_images = lambda: ({}, '')
     node.get_logger = Mock(return_value=Mock())
     node._fail = Mock()
     node._retry_delay = 0.
@@ -205,8 +208,8 @@ def test_worker_response_matches_all_30_commands_and_grippers():
     node._backend.infer.return_value = chunk
     accepted = threading.Event()
 
-    def accept(*args):
-        VlaBridgeNode._accept(node, *args)
+    def accept(*args, **kwargs):
+        VlaBridgeNode._accept(node, *args, **kwargs)
         accepted.set()
 
     node._accept = accept
@@ -270,8 +273,8 @@ def test_stop_restart_discards_late_response_without_new_next():
         assert release.wait(3)
         return chunk
 
-    def accept(*args):
-        VlaBridgeNode._accept(node, *args)
+    def accept(*args, **kwargs):
+        VlaBridgeNode._accept(node, *args, **kwargs)
         handled.set()
 
     node._backend = SimpleNamespace(infer=infer)

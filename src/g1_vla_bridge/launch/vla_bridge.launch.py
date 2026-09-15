@@ -30,7 +30,8 @@ from launch_ros.actions import Node
 
 # 只暴露现场最常改的这几个，其余走 config/*.yaml。
 _ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'execution_mode',
-              'skip_intermediate_waypoints')
+              'skip_intermediate_waypoints', 'async_ema_alpha', 'async_hold_timeout_s',
+              'execution_rate_hz')
 
 
 def _node(context):
@@ -48,6 +49,8 @@ def _node(context):
                 if normalized not in ('true', 'false'):
                     raise ValueError(f'{name} 只能是 true 或 false，收到 {value!r}')
                 overrides[name] = normalized == 'true'
+            elif name in ('async_ema_alpha', 'async_hold_timeout_s', 'execution_rate_hz'):
+                overrides[name] = float(value)
             else:
                 overrides[name] = value
 

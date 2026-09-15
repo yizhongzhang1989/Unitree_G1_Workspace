@@ -37,6 +37,14 @@ def switch_command(line: str) -> tuple[str, bool | None]:
     return command, values[parts[1]]
 
 
+def mode_command(line: str) -> str:
+    parts = line.lower().split()
+    if len(parts) != 2 or parts[0] != '/mode' or parts[1] not in (
+            'manual', 'continuous', 'async'):
+        raise ValueError('用法：/mode manual|continuous|async')
+    return parts[1]
+
+
 class VlaCli(Node):
 
     def __init__(self) -> None:
@@ -46,6 +54,7 @@ class VlaCli(Node):
         self._next = self.create_client(Trigger, '/vla_bridge/next')
         self._stop = self.create_client(Trigger, '/vla_bridge/stop')
         self._set_auto = self.create_client(SetBool, '/vla_bridge/set_auto')
+        self._set_async = self.create_client(SetBool, '/vla_bridge/set_async')
         self._set_skip = self.create_client(SetBool, '/vla_bridge/set_skip_intermediate')
         self._engage = self.create_client(Trigger, '/motion_control/engage')
         self._estop = self.create_client(Trigger, '/motion_control/estop')
@@ -63,6 +72,7 @@ class VlaCli(Node):
         while time.monotonic() < deadline:
             if all((self._start.service_is_ready(), self._next.service_is_ready(),
                     self._set_auto.service_is_ready(), self._set_skip.service_is_ready(),
+                    self._set_async.service_is_ready(),
                     bool(self._status))):
                 return True
             rclpy.spin_once(self, timeout_sec=0.1)
@@ -137,6 +147,16 @@ class VlaCli(Node):
             enabled = not bool(self._status.get('skip_intermediate_waypoints'))
         self.call_bool(self._set_skip, enabled, '末点直达')
 
+    def set_mode(self, mode: str) -> None:
+        if not self.refresh_status():
+            print('执行模式切换失败：收不到 bridge 状态')
+            return
+        if self._status.get('running') and self._status.get('execution_mode') != mode:
+            print('切换执行模式前请先 /stop')
+            return
+        client = self._set_async if mode == 'async' else self._set_auto
+        self.call_bool(client, mode != 'manual', f'执行模式 {mode}')
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
@@ -147,6 +167,7 @@ def main(args=None) -> None:
         print('直接 Enter：请求并完整执行一个 chunk')
         print('输入文字：更新任务    /engage：使能    /estop：急停卸力')
         print('/auto [on|off]：自动连续执行    /skip [on|off]：跳过中间点')
+        print('/mode manual|continuous|async：选择模式（切换前先 /stop，再 /start）')
         print('/start：进入待命    /stop：停止 VLA    /quit：退出 CLI')
         while rclpy.ok():
             try:
@@ -168,6 +189,9 @@ def main(args=None) -> None:
                 break
             elif action == 'command':
                 try:
+                    if value.lower().split()[0] == '/mode':
+                        cli.set_mode(mode_command(value))
+                        continue
                     command, enabled = switch_command(value)
                     if command == '/auto':
                         cli.set_auto(enabled)
