@@ -20,8 +20,8 @@
   且 HTTP 线程只暂存值，真正的调用由 ROS 定时器异步发出（所以仍不需要
   ``ReentrantCallbackGroup`` + ``MultiThreadedExecutor`` 那一套防死锁配置）。
   改完的实际值从 ``/motion_control/status`` 回读，页面不自己猬状态。
-* **3D 模型只保留手臂**：``base_frame`` 之下**含可动关节**的分支才留（头、雷达、相机
-  那些 fixed 分支自动被剪掉）。不必配置关节名单，换 URDF 也不用改。
+* **3D 模型按可动分支裁剪**：只保留 ``base_frame`` 之下含可动关节的分支，
+    独立的纯 fixed 分支自动剪掉。当前模型保留双臂和可动头部，不必配置关节名单。
 
 ``/joint_states`` 是 100 Hz，回调里只存一个引用，取值推迟到浏览器真的来问的那一刻
 （≤轮询频率）。而且**没人看页面就直接退订**：实测它的反序列化就在 Jetson
@@ -84,10 +84,10 @@ def rpy_to_quat(text: str | None) -> list:
 
 
 def parse_urdf(urdf: str, base: str) -> dict:
-    """URDF -> ``{'base', 'joints', 'links'}``，只保留 ``base`` 之下的手臂分支。
+    """URDF -> ``{'base', 'joints', 'links'}``，保留 ``base`` 之下含可动关节的分支。
 
-    留下哪些分支的判据是**分支里有没有可动关节**，不是关节名单：头、相机、
-    雷达挂在 ``torso_link`` 上但全是 fixed，于是自动被剪掉；换 URDF 也不用改配置。
+    判据不是关节名单：独立的纯 fixed 分支被剪掉，可动关节下的固定附件仍保留。
+    当前 URDF 的 head_pitch_joint 可动，因此头部与双臂一样保留。
     """
     root = ET.fromstring(urdf)
     children = {}

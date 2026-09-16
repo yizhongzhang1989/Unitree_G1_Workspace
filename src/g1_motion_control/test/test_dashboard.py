@@ -1,6 +1,6 @@
 """dashboard_node 的离线校验。不需要真机、不需要 ROS 图、不起 HTTP。
 
-只测和“画得对不对”直接相关的纯逻辑：URDF 裁剪出来的确实只有两条手臂、
+只测和“画得对不对”直接相关的纯逻辑：URDF 裁剪保留可动分支、
 rpy 用的是固定轴约定（写反了夹爪会被甩出手掌）、mimic 能被前端那套**单遍**
 解算还原，以及静态文件 / mesh 的路径容纳不会被穿越。
 
@@ -50,15 +50,22 @@ def model():
     return parse_urdf(_urdf(), BASE)
 
 
-def test_only_the_two_arms_survive(model):
-    """base_frame 之下只留含可动关节的分支——头/相机/雷达全是 fixed，必须剪掉"""
+def test_movable_head_and_arms_survive(model):
+    """保留双臂及可动头部，裁掉独立的纯固定分支和基座以上的关节。"""
     links = {link['name'] for link in model['links']}
-    assert not links & {'head_link', 'logo_link', 'd435_link', 'mid360_link',
+    assert not links & {'logo_link', 'd435_link', 'mid360_link',
                         'imu_in_torso', 'pelvis', 'left_hip_pitch_link'}
+    assert 'head_link' in links
     for side in ('left', 'right'):
         assert f'{side}_shoulder_pitch_link' in links
         assert f'{side}_gripper_base' in links
     names = [joint['name'] for joint in model['joints']]
+    head_pitch = next(joint for joint in model['joints'] if joint['name'] == 'head_pitch_joint')
+    assert head_pitch['type'] == 'revolute'
+    assert head_pitch['parent'] == BASE
+    head = next(joint for joint in model['joints'] if joint['name'] == 'head_joint')
+    assert head['parent'] == head_pitch['child']
+    assert head['child'] == 'head_link'
     assert 'left_elbow_joint' in names and 'right_eccentric_joint' in names
     # 腰和腿不在 torso_link 之下，本来就进不来；这一条防的是 base_frame 写错。
     assert not any('hip' in name or 'waist' in name for name in names)
