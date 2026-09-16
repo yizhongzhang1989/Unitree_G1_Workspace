@@ -217,13 +217,16 @@ class MocapClip:
     # 只有实时源才有的
     ##
 
-    def stale(self, now: float) -> str:
+    def stale(self, now: float, *, require_live: bool = True) -> str:
         """断流检查。返回空串表示正常，非空就是给 ``~/estop`` 的理由。
 
         ``now`` 必须和缓冲里的时间轴**同一个时钟域**。数据从 ``/mocap/frame`` 来时
         那是消息的 ``header.stamp``，也就是 ROS 时钟——所以这里故意不给默认值，
         留个默认的 ``time.monotonic()`` 会让两个域差几小时，永远判成断流。
+        默认或冻结参考可不要求实时链路，但缓冲仍必须可用。
         """
+        if not require_live:
+            return '' if self._stream.span() is not None else '动捕缓冲还没攒够两帧'
         stats = self._stream.stats()
         if not stats.connected:
             return '动捕链路断开'

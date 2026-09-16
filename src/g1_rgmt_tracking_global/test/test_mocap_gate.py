@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from g1_mocap.consumer import FrameBuffer
 
+from g1_rgmt_tracking_global.mocap_clip import MocapClip
 from g1_rgmt_tracking_global.mocap_gate import MocapFrameGate, ZeroReferenceFactory
 
 
@@ -114,3 +116,27 @@ def test_default_reference_discards_human_root_tilt():
     assert np.allclose(batch.root_quat[0], [1.0, 0.0, 0.0, 0.0])
     assert np.allclose(batch.anchor_pos[0], [6.0, 0.0, 0.0])
     assert np.allclose(batch.key_pos[0, 0], [5.0, 1.0, 0.0])
+
+
+@pytest.mark.parametrize('mode', ('default', 'hold'))
+def test_frozen_reference_remains_constant_without_new_frames(mode):
+    buffer = FrameBuffer(n_joints=1, n_keys=1)
+    gate = MocapFrameGate(buffer, _factory())
+    if mode == 'hold':
+        assert gate.push(_frame(9.0, 2.0), mode='live')
+    for index in range(151):
+        assert gate.push(_frame(10.0 + index * 0.02, float(index)), mode=mode)
+    clip = MocapClip(buffer, control_dt=0.02, lead_frames=17,
+                     stand_joint_pos=np.array([0.25]), smoothing_weight=0.25)
+    robot_position = np.array([0.0, 0.0, 0.8])
+    robot_quat = np.array([1.0, 0.0, 0.0, 0.0])
+    offsets = np.array([-15, 0, 15])
+    clip.align(robot_position, robot_quat)
+    first = clip.reference_window(0, offsets, robot_position, robot_quat)
+    assert clip.stale(20.0, require_live=False) == ''
+    assert clip.stale(20.0) != ''
+    for frame in range(1, 501):
+        window = clip.reference_window(frame, offsets, robot_position, robot_quat)
+        np.testing.assert_allclose(window, first, atol=1e-12)
+        np.testing.assert_allclose(window[:, :6], 0.0, atol=1e-12)
+        np.testing.assert_allclose(window[:, -3:], 0.0, atol=1e-12)

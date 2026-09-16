@@ -795,10 +795,9 @@ class RgmtTrackingNode(Node):
         if self._imu_quat is None or now - self._imu_stamp > self._timeout:
             return 'IMU 超时'
         if self._mocap_clip is not None:
-            # 断流后参考会被钳在最后一帧，机器人保持最后姿势继续站着，看起来毫无异样，
-            # 实际上已经完全失去操作。必须当成急停条件。
-            # 缓冲里的时间轴是消息的 header.stamp，所以比较基准用 ROS 时钟。
-            mocap = self._mocap_clip.stale(now)
+            require_live = self._tracking or self._state not in ACTIVE_STATES \
+                or (self._state is State.STAND and self._stand_tracks_mocap)
+            mocap = self._mocap_clip.stale(now, require_live=require_live)
             if mocap:
                 return mocap
         return self._odom.stale(now) or ''
