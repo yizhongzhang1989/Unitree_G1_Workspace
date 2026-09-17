@@ -1,6 +1,7 @@
 """Exercise bridge callbacks with a fake clock and a mock publisher."""
 
 import threading
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,6 +10,9 @@ import pytest
 
 from g1_vla_bridge import vla_node
 from g1_vla_bridge.backends.cogact_unitree import SPEC
+from g1_vla_bridge.control_history import ControlHistory
+from g1_vla_bridge.record_observation import ObservationBuffer
+from test_history_execution import deliver_state
 from g1_vla_bridge.timed_actions import TimedActions
 from g1_vla_bridge.vla_backend import ActionChunk, SIDES
 from g1_vla_bridge.vla_node import VlaBridgeNode
@@ -42,26 +46,43 @@ def bridge(monkeypatch):
     node = SimpleNamespace(
         _lock=threading.Lock(), _running=threading.Event(), _infer_requested=threading.Event(),
         _inference_active=False, _generation=0, _execution_mode='async', _chunk=None,
-        _cursor=0, _timed=TimedActions(30., .5, 0.), _async_timeout=1., _horizon=0,
+        _cursor=0, _timed=TimedActions(30., .5, 0.), _horizon=0,
         _command={side: np.array([0., 0., 0., 0., 0., 0., 1.]) for side in SIDES},
         _grip_command={side: 0. for side in SIDES}, _active={side: True for side in SIDES},
         _publisher=Mock(), _arms_ready=lambda: '', _cartesian_limit_enabled=False,
         _delta=False, _spec=SPEC, _skip_intermediate=False, _error='',
         _max_step_pos=.02, _max_step_ori=.1, get_logger=Mock(return_value=Mock()),
-        _retry_delay=0., _action_rate=30., _async_alpha=.5, _task='test',
-        _async_min_overlap=10,
-        _observe=lambda: object(), _alive=True)
+        _retry_delay=0., _action_rate=30., _execution_rate=30., _async_alpha=.5, _task='test',
+        _async_min_overlap=7,
+        _observe=lambda: SimpleNamespace(grippers={'left': .7, 'right': .8}),
+        _alive=True, _history=None, _pending_control=deque(), _last_control_stamp=None)
     node._running.set()
     node._measured_pose = lambda side: node._command[side].copy()
     node._request_inference = lambda generation=None: VlaBridgeNode._request_inference(node, generation)
     node._accept = lambda *args, **kwargs: VlaBridgeNode._accept(node, *args, **kwargs)
     node._fail = lambda *args: VlaBridgeNode._fail(node, *args)
-    node._stop = lambda reason: VlaBridgeNode._stop(node, reason)
+    node._stop = lambda reason, **kwargs: VlaBridgeNode._stop(node, reason, **kwargs)
     node._on_async_tick = lambda: VlaBridgeNode._on_async_tick(node)
     node._limit = lambda current, target: VlaBridgeNode._limit(node, current, target)
+    node._publish_control = lambda *args: VlaBridgeNode._publish_control(node, *args)
     node._mode_error = lambda mode: VlaBridgeNode._mode_error(node, mode)
     node._set_execution_mode = lambda mode: VlaBridgeNode._set_execution_mode(node, mode)
     return node, clock
+
+
+@pytest.mark.parametrize('held', SIDES)
+def test_start_preserves_inactive_gripper_through_publication(bridge, held):
+    node, clock = bridge
+    node._stop('setup')
+    node._active[held] = False
+    measured = node._observe().grippers[held]
+    assert VlaBridgeNode._on_start(node, None, SimpleNamespace()).success
+    assert node._grip_command[held] == measured
+    clock.now = .2
+    node._accept(prediction(), 200., node._generation, requested_at=0.)
+    VlaBridgeNode._on_tick(node)
+    published = node._publisher.publish.call_args_list[-1].args[0].data
+    assert published[SIDES.index(held)] == measured
 
 
 def test_accept_requests_again_before_playback_and_tick_uses_ema(bridge):
@@ -111,41 +132,87 @@ def test_stop_preserves_last_merge_diagnostics(bridge):
     assert node._async_merge['overlap'] == 0
 
 
-def test_tick_holds_then_stops_and_discards_late_response(bridge):
+def test_async_thirty_hz_publications_and_history(bridge):
     node, clock = bridge
+    node._stop('test setup')
+    node._action_rate, node._execution_rate = 10., 30.
+    node._history = ControlHistory()
+    node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+        nanoseconds=round(clock.now * 1e9)))
+    node._observations = ObservationBuffer(())
+    node._control_measurement = lambda joints: (
+        {side: node._command[side].copy() for side in SIDES},
+        dict(node._grip_command))
+    assert VlaBridgeNode._on_start(node, None, SimpleNamespace()).success
+    assert node._timed.execution_rate == 30.
+    chunk = prediction()
+    for side in SIDES:
+        chunk.poses[side][:, 0] = np.arange(1, 31)
+        chunk.grippers[side][:] = np.arange(1, 31) / 30.
     clock.now = .2
-    node._accept(prediction(), 200., 0, requested_at=0.)
-    clock.now = 1.2
+    node._accept(chunk, 200., node._generation, requested_at=0.)
+    for tick in range(6, 91):
+        clock.now = tick / 30.
+        VlaBridgeNode._on_tick(node)
+        deliver_state(node, clock.now + .001)
+    sent = [call.args[0].data for call in node._publisher.publish.call_args_list]
+    expected = np.arange(6, 91) / 3.
+    expected[:7] *= .5
+    np.testing.assert_allclose(np.array(sent[::2])[:, 0], expected)
+    np.testing.assert_allclose(np.array(sent[1::2])[:, 0], np.arange(6, 91) / 90.)
+    rows = node._history.snapshot()
+    assert len(rows) == 15
+    np.testing.assert_allclose([row.action['left'][0] for row in rows], np.arange(48, 91, 3) / 3.)
+    np.testing.assert_allclose(np.diff([row.action_stamp for row in rows]), .1, atol=1e-9)
+    clock.now = 10.
+    VlaBridgeNode._on_tick(node)
+    assert node._publisher.publish.call_count == 170
+    assert node._running.is_set()
+
+
+@pytest.mark.parametrize('prior_chunk', [False, True])
+def test_empty_queue_holds_and_accepts_nonoverlapping_response(bridge, prior_chunk):
+    node, clock = bridge
+    node._timed = TimedActions(10., .5, 0., first_offset_steps=1)
+    if prior_chunk:
+        clock.now = .2
+        node._accept(prediction(1.), 200., 0, requested_at=0.)
+        VlaBridgeNode._on_tick(node)
+    held = node._command['left'].copy()
+    published = node._publisher.publish.call_count
+    clock.now = 10.
     VlaBridgeNode._on_tick(node)
     assert node._running.is_set()
-    node._publisher.publish.assert_not_called()
-    clock.now = 2.
+    assert node._publisher.publish.call_count == published
+    np.testing.assert_array_equal(node._command['left'], held)
+    node._accept(prediction(4.), 1000., 0, requested_at=9.)
+    assert node._async_merge['overlap'] == 0
+    assert node._async_merge['accepted'] > 0
+    assert node._inference_active and node._infer_requested.is_set()
     VlaBridgeNode._on_tick(node)
-    assert not node._running.is_set()
-    assert '超时' in node._error
-    assert node._timed is None
-    node._accept(prediction(4.), 1800., 0, requested_at=.2)
+    assert node._publisher.publish.call_count == published + 2
+    clock.now = 10.1
+    VlaBridgeNode._on_tick(node)
+    assert node._publisher.publish.call_count == published + 4
+    assert node._command['left'][0] == 4.
+    node._stop('operator stopped')
+    node._accept(prediction(8.), 100., 0, requested_at=10.)
     assert not node._infer_requested.is_set()
     assert node._timed is None
 
 
-def test_response_after_deadline_cannot_revive_queue(bridge):
+def test_expired_response_keeps_waiting_and_requesting(bridge):
     node, clock = bridge
-    clock.now = 1.1
-    with pytest.raises(RuntimeError, match='超时'):
-        node._accept(prediction(), 200., 0, requested_at=.9)
-    assert node._timed.end == 0.
-
-
-def test_expired_response_does_not_extend_deadline(bridge):
-    node, clock = bridge
-    node._async_timeout = 2.
     clock.now = 1.1
     node._accept(prediction(), 1100., 0, requested_at=0.)
     assert not node._timed.samples
     assert node._timed.end == 0.
     assert '过期' in node._error
     assert node._inference_active
+    clock.now = 10.
+    VlaBridgeNode._on_tick(node)
+    assert node._running.is_set()
+    node._publisher.publish.assert_not_called()
 
 
 def test_async_starts_requests_and_mode_change_invalidates_results(bridge):

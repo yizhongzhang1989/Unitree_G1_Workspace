@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from g1_vla_bridge.control_history import ControlStep
 from g1_vla_bridge.transforms import FrameTransform, rpy_to_mat
 
 SIDES = ('left', 'right')
@@ -177,6 +178,7 @@ class Observation:
     #: 图像槽位 -> 4x4 ``T_base<-cam``。多视角几何模型使用。
     camera_poses: dict[str, np.ndarray] = field(default_factory=dict)
     acquired_monotonic: float | None = None
+    history: tuple[ControlStep, ...] = ()
 
 
 @dataclass
@@ -228,6 +230,13 @@ class VlaBackend(abc.ABC):
     def stats(self) -> dict[str, Any]:
         """给 ``~/status`` 的补充信息，比如重投影填充率。"""
         return {}
+
+    @property
+    def history_enabled(self) -> bool:
+        return False
+
+    def reset(self) -> None:
+        """Reset server episode state, when supported by the backend."""
 
     def close(self) -> None:
         """释放连接等资源。"""

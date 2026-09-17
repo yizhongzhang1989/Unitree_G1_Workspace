@@ -4,6 +4,7 @@
 现场很难当场认出来，所以在这里机械核对。
 """
 
+import ast
 import glob
 import os
 
@@ -61,3 +62,32 @@ def test_backend_config_loads(path):
 def test_common_config_covers_the_node_parameters():
     """``vla_backend`` 必须在通用那份里——launch 要靠它决定加载哪个 backend yaml。"""
     assert load(COMMON)['vla_backend'] in BACKEND_MODULES
+
+
+def test_default_execution_is_thirty_hz_with_ten_hz_predictions():
+    params = load(COMMON)
+    assert params['execution_rate_hz'] == 30.0
+    assert params['action_rate_hz'] == params['observation_rate_hz'] == 10.0
+    assert 'dry_run' not in params
+    assert not params['cartesian_limit_enabled']
+    assert params['execution_mode'] == 'manual'
+    assert params['debug_image_dir'] == ''
+
+
+def test_python_rate_defaults_match_yaml_without_overrides():
+    from g1_vla_bridge.record_observation import ObservationBuffer
+
+    with open(os.path.join(PACKAGE, 'g1_vla_bridge', 'vla_node.py'), encoding='utf-8') as handle:
+        tree = ast.parse(handle.read())
+    defaults = {
+        call.args[0].value: call.args[1]
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        and call.func.id == 'p' and len(call.args) >= 2
+        and isinstance(call.args[0], ast.Constant)
+    }
+    params = load(COMMON)
+    for name in ('action_rate_hz', 'observation_rate_hz'):
+        assert ast.literal_eval(defaults[name]) == params[name] == 10.0
+    assert ast.literal_eval(defaults['execution_rate_hz']) == params['execution_rate_hz'] == 30.0
+    assert ObservationBuffer(()).rate == 10.0

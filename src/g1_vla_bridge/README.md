@@ -1,5 +1,8 @@
 # g1_vla_bridge
 
+> **histro15_10hz 分支：适配 CogACT 10Hz、30步、双路15条含夹爪历史。**
+> 保留原有 start/home、模式切换和可选限幅，默认 manual；没有新增 dry_run 运行参数。
+
 VLA 推理服务与 `g1_motion_control` 之间的桥。**流程是固定的，VLA 是可换的**：
 
 ```
@@ -49,11 +52,51 @@ flowchart LR
 推理和下发是两条线程（一轮推理几百毫秒且抖动大，放回调里会堵死执行器）。默认是手动模式：
 每次请求得到一个完整 chunk，下发定时器按 `execution_rate_hz` 从第 0 点播到最后一点，中途绝不
 替换；播完停在最后一点，等待下一次请求。`execution_mode:=continuous` 则播完后自动请求下一段。
-默认 `cartesian_limit_enabled: false`，VLA 不裁剪位置和姿态，按下发频率原样下发 waypoint；
+默认 `cartesian_limit_enabled: false`，VLA 不裁剪位置和姿态，按下发频率插值下发 waypoint；
 motion_control 的关节限速和 IK 保护仍保留。设置该参数为 `true` 可恢复 VLA 限速。
 开启时，最后一点若被限速截断，会继续下发到指令达到末点后才结束；这不代表实机反馈已经到位。
 任何一轮推理失败都只是这一轮作废，手臂保持当前目标；manual 模式等待下一次 Enter，
 continuous 模式在 `retry_delay_s` 后自动重试。`async` 模式见下方。
+
+### CogACT 10Hz 成对历史
+
+启动依次调用 GET `/api/health` 和 `/api/config`，失败或配置不匹配即停止。
+当前 state 和两路历史均含 LEFT/RIGHT 的 TRANS、ROT_MAT、GRIPPER 六字段。
+历史按 10Hz 保留最近 15 对真实动作和反馈，旧到新排列；30Hz 插值仅用于执行。
+以 episode 首次下发时间为原点，每个 100ms 时间格选第一条实际发布并完成配对的记录。
+连续执行时 15 条对应约 1.5 秒历史（首末间隔约 1.4 秒），无动作的时间格不补造记录。
+每次发布位姿和夹爪命令后，将实际 action 加入待配对 FIFO 队列，不阻塞后续下发。
+每条 JointState 到达后从队头依次匹配：`state.stamp >= action.stamp` 就出队配对，
+直到队列为空或 state 早于队头 action。同一条 state 可以满足多个 action。
+没有符合条件的 state 时队列继续保留，不设置等待超时或丢弃期限。
+每条用于配对的 state 只计算一次双臂 FK 和实测夹爪，供本次出队的 action 共享；
+状态使用原始 JointState 时间戳，命令使用发布后、FK 前记录的时间戳，FK 耗时不计入数据时间。
+随后将这次测量和限幅、融合、冻结后的实际命令作为一对入缓存。
+FK 在 JointState 回调中计算；计算异常仍走原有错误处理，停止或换任务会取消待配对记录。
+观测、图像和历史配对均不按年龄或处理耗时拒绝数据；无反馈时待配对队列可能持续增长。
+这不是底层执行器接收确认，也不是相机曝光同步保证。
+ControlHistory 保留当前 episode 的全部 10Hz 配对记录，支持延迟观测回查，无 64 窗口期限；
+内存占用随 episode 时长增长。请求仅深拷贝当前实测观测之前的最近 15 对，不回算历史 FK。
+只有命令和实测样本均早于当前观测的记录才能进入历史；当前 state 单独取当前观测。
+等待不新增、不复制保持目标、不因时间流逝丢历史；不足 15 对只发已有记录，首次为 null。
+停止、start、任务切换、reset 清空两路本地缓存；reset 不调用服务器。
+start 时冻结或禁用侧夹爪保持观测实测值，活动侧保留原有张开起步行为。
+关节时间戳回退，或发令时钟回退/重复时停止本次执行、清空 pending/history 并作废在途响应，
+需重新 start；这是时间顺序检查，不是数据年龄或等待超时门限。
+
+位姿使用 torso_link / 米 / pose_unified；夹爪遵循本仓库 YB 导出器的显式换算，
+不是模型统计预归一化。图片完整缩放至 640x360 后 JPEG 编码，无裁剪。
+内参与原图几何严格匹配后归一化，因此完整缩放不改变归一化 K；外参是实时 T_robot<-camera。
+请求、图像和响应不落盘。纯内存只读探针：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /workspace/install/setup.bash
+PYTHONPATH=/workspace/src/g1_vla_bridge:$PYTHONPATH python3 src/g1_vla_bridge/test/dry_run_10hz.py
+```
+
+async 模式下，第0行目标对应观测 t+0.1s，末行为 t+3s；丢弃过期行，单worker异步推理。
+上述测试脚本独立隔离控制发布，不改变业务节点的 start/home 或运行模式。
 
 ### 异步执行
 
@@ -65,18 +108,16 @@ continuous 模式在 `retry_delay_s` 后自动重试。`async` 模式见下方�
 位置按 `(1-alpha)*旧预测 + alpha*新预测` 更新，旋转使用 SLERP；夹爪直接采用新预测，
 不平均开闭决策。非重叠部分直接追加。
 
-时间约定：第 0 个动作对应选中观测的获取时刻，不是 HTTP 请求开始或返回时刻。
+时间约定：本分支 CogACT 第 0 个动作对应选中观测时刻后 0.1 秒，不是 HTTP 请求开始或返回时刻。
 取下面公共观测时间格的时刻 T，按同次采样的 ROS 时钟与单调时钟
-映射为 `acquired_monotonic`；第 k 个动作对应 `T + k/action_rate_hz`。
+映射为 `acquired_monotonic`；第 k 个动作对应 `T + (k+1)/action_rate_hz`。
 因此已计入修正后的观测年龄、本轮观测处理、编码、网络及推理耗时。
 `action_rate_hz` 必须与训练动作时间间隔匹配，
-不是模型自报频率；当前按 30 Hz 解释。非整数拍的请求起点通过位置插值与旋转 SLERP
+当前固定模型契约为 10 Hz，执行网格默认 30 Hz。非整数拍的请求起点通过位置插值与旋转 SLERP
 映射到统一执行网格，夹爪取前一采样值。迟到的控制 tick 不补播历史动作。
 
-例如 0 s 请求 30 个动作、0.2 s 返回，只保留 24 个未来动作并立即请求下一段；
-0.4 s 再次返回时，18 个未来重叠动作融合、6 个更远期动作追加，已执行动作不修改。
-以上假设图像在请求时刻获取；若图像为 0 s 获取、0.1 s 请求、0.3 s 返回，则丢弃
-前 9 个动作，只保留 21 个，不能只按 0.2 s 推理时间丢 6 个。
+例如观测时刻为 0 s、返回时刻为 0.37 s，执行网格也以 0 s 为原点时，
+保留 0.4～3.0 s 的 27 个目标。裁剪按观测时刻计算，不能只减去 HTTP 推理耗时。
 
 ### 与 record 的观测对齐
 
@@ -85,27 +126,31 @@ continuous 模式在 `retry_delay_s` 后自动重试。`async` 模式见下方�
 - 腕图直接通过 PyAV/libavformat 读取 RTSP，使用与 record 相同的 TCP、low_delay、
   `use_wallclock_as_timestamps=1`。保留解码帧的绝对 PTS，不用读出帧时的当前时间；
   缺 PTS 的启动帧跳过。默认 stream0 原分辨率，不额外限帧或缩放。
-- 复用 record 的 `fitted_pts` 和 `CAMERA_DELAY_S`：腕图拟合后减 110 ms，
-  头图保留 RealSense header。在线拟合用最近最多 900 个已到达的帧，图像仅缓存 32 帧；
+- 腕图使用原始 PTS 减 record 的 `CAMERA_DELAY_S`（110 ms），头图保留 RealSense header。
+  不再在线使用离线 `fitted_pts`，避免停顿或突发收包使滑动拟合向过去或未来偏移；
+  每帧时间固定，后续帧不改写旧帧时间，保留收包抖动。图像缓存 32 帧。
   解码持续取流，推理只转换选中的帧。断流清空对应缓存并重连。
-- `observation_rate_hz=30`，从首个可用公共时刻建立固定时间格。
+- `observation_rate_hz=10`，从首个可用公共时刻建立固定时间格。
   T 不晚于任何输入的最新时刻，也不晚于头部 TF 的最新可用时刻。
   图像和 `/joint_states` 均选最后一条时间戳不大于 T 的记录，不插值。
-  `observation_sample_max_age_s=0.1` 与导出默认值一致，限制每条记录相对 T 的年龄。
+  不限制每条记录相对 T 的年龄；找不到 T 之前的样本才拒绝本轮。
 - 双臂末端与腕相机外参复用 record FK，由**同一条实测关节记录**计算；
   夹爪也来自这条记录的 eccentric 轴，不再使用指令值。
   模型读取实际 `/robot_description`，只解析顶层运动学关节，保留运行中的标定。
   腕内参从 `observation_calibration_file` 按真实分辨率精确匹配，默认是已安装的
   camera_calibration/config/calibration.yaml，不使用别的档位缩放代替。
 
-`observation_max_age_s=0.5` 限制公共观测到当前的总年龄；解码处理后再次检查。
-缺关节、缺图、过期或缺历史 TF 均拒绝本轮，async 仅继续已有有效预测，断供超时停止。
+不设置公共观测年龄、图像到达年龄、处理耗时或时钟偏差门限，相关参数已移除。
+缺关节、缺图或缺历史 TF 仍拒绝本轮，async 继续已有有效预测；队列空时保持最后目标并继续重试。
+HTTP/RTSP 网络 I/O 超时仍用于连接故障处理；它们不是观测有效性校验。
 状态的 `observation_sample_age_s` 是选中图像/关节各自的修正年龄，
 `observation_skew_s` 是它们的时间差，`observation_age_s` 是公共观测年龄；
-`wrist_stream_errors` 显示直连流是否异常。不支持 ROS 仿真时钟或运行中的时钟跳变。
+`wrist_stream_errors` 显示直连流是否异常。不支持 ROS 仿真时钟与真实相机时钟混用。
+头图、关节或腕流时间戳回退时清空对应流旧缓存并重置观测格原点；关节回退另停止执行。
+不使用回退幅度门限，单条乱序包也按该规则处理。
 
-**一致性的边界：** 离线导出使用整段视频拟合，在线无法使用未来帧；公式和延迟补偿相同，
-但拟合窗口与时间格起点不同，不能承诺逐帧编号完全相同。110 ms 是既有标定而非本次重测，
+**一致性的边界：** 离线导出使用整段视频拟合，在线使用未拟合的原始 PTS；
+延迟补偿相同，但时间重建及时间格起点不同，不能承诺逐帧编号完全相同。110 ms 是既有标定而非本次重测，
 编码设置变化须重新标定。当前新增的可动头部仅发布 TF、不发布 JointState，record 导出仍
 将头部当静态链；在线头部因此使用 T 时刻的历史 TF。动态头部训练/导出尚未闭合，
 本改动不宣称与旧静态头部数据完全一致，也没有验证真实模型的闭环效果。
@@ -124,22 +169,27 @@ ROS 裸图。原相机预览与标定节点不受修改，但同时开多路解�
 
 ### 异步参数与切换
 
-`execution_rate_hz` 单独控制目标下发定时器，当前本地配置暂设为 **10 Hz**；
-`action_rate_hz` 保持 **30 Hz**，仍表示模型预测点的训练时间间隔。
-async 在每个 100 ms tick 取对应的预测点，跳过期间的旧点，不把一秒预测拉长为三秒。
-manual/continuous 仍逐点播放，因此在 10 Hz 下 30 点需要约三秒。
+`execution_rate_hz` 单独控制目标下发定时器和插值网格，默认 **30 Hz**；
+`action_rate_hz` 默认 **10 Hz**，表示模型预测点的训练时间间隔。
+位置和夹爪角度线性插值，姿态使用四元数 SLERP；相邻 10Hz 点之间补两个目标。
+async 在每个约 33.3 ms tick 取对应的插值目标，跳过期间的旧点，不延长预测三秒的时域。
+history 模型首点仍在观测后 0.1 秒，不凭空添加观测到首点之间的轨迹。
+manual/continuous 以 90 个执行 tick 播完 30 个预测点，仍约三秒，不把动作加速三倍。
 降低下发频率不是限速或平滑，单次目标变化可能更大，不能保证减轻跳动。
 此参数在启动时读取，修改后需要停止并重新启动 VLA 节点；不要同时启动两个桥。
-保留原有 proxy、server_url 等启动参数，另加 `execution_rate_hz:=10.0`；
-恢复原频率用 `execution_rate_hz:=30.0`。状态中会显示实际 `execution_rate_hz`。
+保留原有 proxy、server_url 等启动参数，不传频率参数即使用 30 Hz 执行；
+也可显式指定 `execution_rate_hz:=30.0`。状态中会显示实际 `execution_rate_hz`。
+直接运行节点、不加载 YAML 时也相同：观测和模型预测 10 Hz，执行插值 30 Hz。
 
 参数 `async_ema_alpha` 默认 0.5，范围 `(0, 1]`，1 表示直接采用新预测。
 `async_min_overlap_actions` 默认 7：若新旧预测的实际重合少于该数目，会重复最后一个
 旧 target 补足后再按 `async_ema_alpha` 融合；完全没有旧 target 时，改为重复当前命令目标。
-`async_hold_timeout_s` 默认 1 秒：队列耗尽后保持最后目标，超过此时间停止 VLA 下发，
-首次启动则从启动时刻计算等待超时。全部过期的响应不会延长等待期限。
-停止不等于卸力；卸力仍需 `/estop`。状态提供 `async_pending`、`async_buffer_s`、
-`async_ema_alpha` 和 `async_hold_timeout_s`，超时原因保留在 `error`。
+队列耗尽后保持最后目标并继续请求，不因断供自动停止；首次启动也持续等待有效预测。
+新结果有未来重合点才做融合，没有重合则直接接入有效的未来目标，如同首次接入。
+全部过期的响应不执行，继续请求下一段；不重置时间轴、不补播过期动作。
+`async_hold_timeout_s` 已移除，无需再传此参数。手动 `/stop` 和手臂接管检查仍有效。
+停止不等于卸力；卸力仍需 `/estop`。状态提供 `async_pending`、`async_buffer_s` 和
+`async_ema_alpha`，错误原因保留在 `error`。
 
 async 仅支持绝对位姿，要求 `delta_position=false`、`delta_rotation=false`、
 `skip_intermediate_waypoints=false`。`action_horizon` 仍限制每次预测使用的前缀长度。
@@ -147,7 +197,7 @@ EMA 不保证轨迹可达或避障，也不能证明跳过的动作已经物理�
 
 ```bash
 ros2 launch g1_vla_bridge vla_bridge.launch.py execution_mode:=async \
-  async_ema_alpha:=0.5 async_min_overlap_actions:=7 async_hold_timeout_s:=1.0
+  async_ema_alpha:=0.5 async_min_overlap_actions:=7
 ros2 run g1_vla_bridge vla_cli
 ```
 
@@ -294,8 +344,6 @@ right: [0.143762115, -0.256049887, 0.264313750, 0.197254737, 0.847427008, 0.4396
 |---|---|---|
 | 可选单帧限速 | `cartesian_limit_enabled` / `max_step_pos` / `max_step_ori` | 默认关闭；开启后裁剪笛卡尔单帧步长 |
 | 跳过中间点 | `skip_intermediate_waypoints` | 默认关闭；开启后每个 chunk 直接以最后一个有效 waypoint 为目标 |
-| 图像到达活性 | `image_timeout_s` | 限制选中图像到达距今时间，不代表曝光年龄 |
-| 观测时间门限 | `observation_max_age_s` / `observation_sample_max_age_s` | 限制公共观测年龄和样本相对公共时刻的年龄，不保证曝光同步 |
 | 接管检查 | — | `arms_live` 掉了自动 `stop` |
 | 只记录不拦截 | `~/status` 的 `jump` / `lead` | manual/continuous 的首点距实测、指令领先实测；async 为 null |
 
@@ -364,7 +412,8 @@ out[k].R = poses[k].R · poses[0].Rᵀ · anchor.R
 它是开合量不是位姿。
 
 **锚点必须是「上一段留下的指令值」，不是实测值**（2026-08-17 踩过，锚在实测上机器人只
-在原地抖）：推理一轮约 250 ms，30 Hz 下只播得完 30 个 waypoint 里的前 8 个，实测在这
+在原地抖）：当时实验为 30 Hz（非本分支当前默认的 10 Hz），推理一轮约 250 ms，
+只播得完 30 个 waypoint 里的前 8 个，实测在这
 250 ms 里几乎没动，锚回去就把走过的一截抹掉，再叠上模型噪声就是以约 4 Hz 抖 ±4 cm。
 代价是指令可能跑在实测前面，`~/status` 的 `lead` 就是这个领先量。与 `vr_teleop` 的离合
 锚点同一套取舍：**绝不拿可达性反馈去修锚点**。

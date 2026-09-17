@@ -1,6 +1,7 @@
 """Exercise the actual callbacks without ROS nodes or hardware publishers."""
 
 import threading
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,11 +24,13 @@ def executor_fixture(mode='manual'):
         _active={side: True for side in SIDES},
         _horizon=0, _cursor=0, _max_step_pos=0.02, _max_step_ori=0.1,
         _skip_intermediate=False,
+        _action_rate=10., _execution_rate=10.,
         _cartesian_limit_enabled=True,
         _publisher=Mock(), _arms_ready=lambda: '', _execution_mode=mode,
         _request_inference=Mock(),
         _generation=0, _infer_requested=threading.Event(), _inference_active=False,
-        _delta=False, _spec=SPEC, _timed=None,
+    _delta=False, _spec=SPEC, _timed=None, _history=None, _pending_control=deque(),
+    _last_control_stamp=None,
         _continuous_next_delay=0.5, _continuous_next_at=None,
         _task='pick up the basketball', _async_alpha=.5, _async_min_overlap=7,
         _async_step={}, _async_merge={}, _async_last_publish=None, _error='',
@@ -37,6 +40,7 @@ def executor_fixture(mode='manual'):
     node._set_execution_mode = lambda mode: VlaBridgeNode._set_execution_mode(node, mode)
     node._running.set()
     node._limit = lambda current, target: VlaBridgeNode._limit(node, current, target)
+    node._publish_control = lambda *args: VlaBridgeNode._publish_control(node, *args)
     poses = np.tile(pose, (30, 1))
     poses[-1, 0] = 0.1
     node._chunk = ActionChunk(
@@ -56,6 +60,38 @@ def test_limited_final_target_is_not_discarded():
     assert np.isclose(node._command['left'][0], 0.1)
     assert node._chunk is None
     node._request_inference.assert_not_called()
+
+
+@pytest.mark.parametrize('mode', ['manual', 'continuous'])
+def test_thirty_hz_playback_interpolates_without_speeding_up(mode, monkeypatch):
+    from g1_vla_bridge import vla_node
+
+    now = [10.]
+    monkeypatch.setattr(vla_node.time, 'monotonic', lambda: now[0])
+    node = executor_fixture(mode)
+    node._execution_rate = 30.
+    node._cartesian_limit_enabled = False
+    for side in SIDES:
+        node._chunk.poses[side][:, 0] = np.arange(30)
+        node._chunk.grippers[side][:] = np.arange(30) / 30.
+        node._chunk.poses[side][1, 3:] = [0., 0., 1., 0.]
+    for _ in range(89):
+        VlaBridgeNode._on_tick(node)
+    assert node._chunk is not None
+    node._request_inference.assert_not_called()
+    VlaBridgeNode._on_tick(node)
+    assert node._chunk is None
+    sent = [call.args[0].data for call in node._publisher.publish.call_args_list]
+    arms = np.array(sent[::2])
+    grips = np.array(sent[1::2])
+    np.testing.assert_allclose(arms[:, 0], np.minimum(np.arange(90) / 3., 29.))
+    np.testing.assert_allclose(grips[:, 0], np.minimum(np.arange(90) / 3., 29.) / 30.)
+    np.testing.assert_allclose(arms[1, 3:7], [0., 0., .5, np.sqrt(3) / 2.], atol=1e-12)
+    assert node._request_inference.call_count == 0
+    if mode == 'continuous':
+        now[0] = 10.5
+        VlaBridgeNode._on_tick(node)
+        node._request_inference.assert_called_once()
 
 
 def test_disabled_limit_preserves_position_and_orientation():
@@ -195,11 +231,11 @@ def test_returned_unified_poses_recover_raw_commands():
         rotation = Rotation.from_euler('xyz', [0.4, -0.2, index + 0.3])
         position = np.array([0.25, 0.2 - 0.4 * index, 0.1])
         expected[side] = np.r_[position, rotation.as_quat()]
-        body[f'ROBOT_{side.upper()}_TRANS'] = [position.tolist()]
-        body[f'ROBOT_{side.upper()}_ROT_MAT'] = [(rotation.as_matrix() @ fix_rotation).tolist()]
-        body[f'ROBOT_{side.upper()}_GRIPPER'] = [float(index)]
+        body[f'ROBOT_{side.upper()}_TRANS'] = [position.tolist()] * 30
+        body[f'ROBOT_{side.upper()}_ROT_MAT'] = [(rotation.as_matrix() @ fix_rotation).tolist()] * 30
+        body[f'ROBOT_{side.upper()}_GRIPPER'] = [[float(index)]] * 30
     try:
-        chunk = backend._to_chunk(parse_action(body))
+        chunk = backend._to_chunk(parse_action({'action': body, 'action_type_info': {'type': 'abs'}}))
         command = join_command(left=chunk.poses['left'][0], right=chunk.poses['right'][0])
         decoded = split_command(command)
         for side in SIDES:
@@ -249,8 +285,8 @@ def test_worker_response_matches_all_30_commands_and_grippers():
         expected[side] = np.column_stack((positions, rotations.as_quat()))
         body[f'ROBOT_{side.upper()}_TRANS'] = positions.tolist()
         body[f'ROBOT_{side.upper()}_ROT_MAT'] = (rotations.as_matrix() @ fix).tolist()
-        body[f'ROBOT_{side.upper()}_GRIPPER'] = np.linspace(side_index, 1 - side_index, 30).tolist()
-    chunk = backend._to_chunk(parse_action(body))
+        body[f'ROBOT_{side.upper()}_GRIPPER'] = np.linspace(side_index, 1 - side_index, 30)[:, None].tolist()
+    chunk = backend._to_chunk(parse_action({'action': body, 'action_type_info': {'type': 'abs'}}))
     backend.close()
     node._backend = Mock()
     node._backend.infer.return_value = chunk
@@ -276,7 +312,7 @@ def test_worker_response_matches_all_30_commands_and_grippers():
             for side_index, side in enumerate(SIDES):
                 assert np.allclose(arms[side][:3], expected[side][index, :3], atol=1e-12)
                 assert quat_angle(arms[side][3:], expected[side][index, 3:]) < 1e-7
-                expected_grip = (1 - body[f'ROBOT_{side.upper()}_GRIPPER'][index]) * node._spec.gripper.robot_open_rad
+                expected_grip = (1 - body[f'ROBOT_{side.upper()}_GRIPPER'][index][0]) * node._spec.gripper.robot_open_rad
                 assert grips[side_index] == pytest.approx(expected_grip)
         assert node._chunk is None
         VlaBridgeNode._on_tick(node)
