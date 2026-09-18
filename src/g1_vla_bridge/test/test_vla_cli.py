@@ -14,6 +14,7 @@ from g1_vla_bridge.vla_cli import VlaCli, input_action, mode_command, switch_com
     ('pick up the cup', ('task', 'pick up the cup')),
     ('  pick up the cup  ', ('task', 'pick up the cup')),
     ('/estop', ('command', '/estop')),
+    ('/home', ('command', '/home')),
 ))
 def test_input_action(line, expected):
     assert input_action(line) == expected
@@ -149,3 +150,20 @@ def test_auto_rejection_never_starts_bridge():
         call_bool=MagicMock(return_value=False), call=MagicMock())
     VlaCli.set_auto(cli, True)
     cli.call.assert_not_called()
+
+
+def test_home_cli_calls_service_without_start_or_inference(monkeypatch):
+    from g1_vla_bridge import vla_cli
+
+    cli = MagicMock()
+    inputs = iter(['/home', '/quit'])
+    monkeypatch.setattr(vla_cli, 'VlaCli', lambda: cli)
+    monkeypatch.setattr('builtins.input', lambda prompt: next(inputs))
+    monkeypatch.setattr(vla_cli.rclpy, 'init', MagicMock())
+    monkeypatch.setattr(vla_cli.rclpy, 'ok', lambda: True)
+    monkeypatch.setattr(vla_cli.rclpy, 'shutdown', MagicMock())
+    vla_cli.main()
+    cli.call.assert_called_once_with(cli._home, '复位')
+    cli.execute_one.assert_not_called()
+    cli.set_task.assert_not_called()
+    cli.destroy_node.assert_called_once()

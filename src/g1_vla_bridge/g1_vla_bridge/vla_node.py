@@ -78,6 +78,15 @@ CAMERA_FRAMES = (
     ('right_wrist', 'right_camera_frame', 'camera_right'),
 )
 
+HOME_POSES = {
+    'left': (0.1437621148443544, 0.25604988661056305, 0.2643137496140854,
+             0.847427008204095, 0.19725473729949394, 0.22281052243154353,
+             0.4396743175043852),
+    'right': (0.1437621148443544, -0.25604988661056305, 0.2643137496140854,
+              0.19725473729949394, 0.847427008204095, 0.4396743175043852,
+              0.22281052243154353),
+}
+
 
 # 编码 -> (每像素字节数, 转 BGR 的 cv2 code)。bgr8 已经是目标格式，不用转。
 _BGR_FROM = {'bgr8': (3, None),
@@ -296,6 +305,7 @@ class VlaBridgeNode(Node):
         self.create_service(Trigger, '~/start', self._on_start, callback_group=control)
         self.create_service(Trigger, '~/next', self._on_next, callback_group=control)
         self.create_service(Trigger, '~/stop', self._on_stop, callback_group=control)
+        self.create_service(Trigger, '~/home', self._on_home, callback_group=control)
         self.create_service(SetBool, '~/set_auto', self._on_set_auto, callback_group=control)
         self.create_service(SetBool, '~/set_async', self._on_set_async, callback_group=control)
         self.create_service(SetBool, '~/set_skip_intermediate',
@@ -810,6 +820,35 @@ class VlaBridgeNode(Node):
         response.success = self._running.is_set()
         response.message = '已停止' if response.success else '本来就没在跑'
         self._stop('收到 ~/stop')
+        return response
+
+    def _on_home(self, request, response):
+        with self._lock:
+            reason = self._arms_ready()
+            if not reason and (self._base_frame != 'torso_link' or self._tip_frames != {
+                    'left': 'left_gripper_base', 'right': 'right_gripper_base'}):
+                reason = 'home 固定位姿需要 torso_link 和左右 gripper_base 坐标系'
+            if reason:
+                response.success, response.message = False, reason
+                return response
+        self._stop('收到 ~/home')
+        with self._lock:
+            self._generation += 1
+            self._running.clear()
+            self._infer_requested.clear()
+            self._chunk, self._cursor, self._inference_active = None, 0, False
+            self._timed = None
+            command = {side: np.array(HOME_POSES[side]) for side in SIDES}
+            try:
+                self._publisher.publish(Float64MultiArray(data=join_command(**command)))
+            except Exception as error:
+                self._error = f'home 下发失败: {error}'
+                response.success, response.message = False, self._error
+                return response
+            self._command = command
+            self._error = ''
+        response.success = True
+        response.message = '已停止 VLA 并下发双臂 home IK 目标，夹爪保持不变（未确认到位）'
         return response
 
     def _stop(self, reason: str) -> None:

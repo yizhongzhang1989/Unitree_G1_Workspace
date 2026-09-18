@@ -53,6 +53,7 @@ class VlaCli(Node):
         self._start = self.create_client(Trigger, '/vla_bridge/start')
         self._next = self.create_client(Trigger, '/vla_bridge/next')
         self._stop = self.create_client(Trigger, '/vla_bridge/stop')
+        self._home = self.create_client(Trigger, '/vla_bridge/home')
         self._set_auto = self.create_client(SetBool, '/vla_bridge/set_auto')
         self._set_async = self.create_client(SetBool, '/vla_bridge/set_async')
         self._set_skip = self.create_client(SetBool, '/vla_bridge/set_skip_intermediate')
@@ -168,6 +169,7 @@ def main(args=None) -> None:
         print('输入文字：更新任务    /engage：使能    /estop：急停卸力')
         print('/auto [on|off]：自动连续执行    /skip [on|off]：跳过中间点')
         print('/mode manual|continuous|async：选择模式（切换前先 /stop，再 /start）')
+        print('/home：停止 VLA 并立即更换双臂 IK 为复位目标，夹爪不动')
         print('/start：进入待命    /stop：停止 VLA    /quit：退出 CLI')
         while rclpy.ok():
             try:
@@ -185,6 +187,8 @@ def main(args=None) -> None:
                 cli.call(cli._start, '启动')
             elif value == '/stop':
                 cli.call(cli._stop, '停止')
+            elif value == '/home':
+                cli.call(cli._home, '复位')
             elif value == '/quit':
                 break
             elif action == 'command':
