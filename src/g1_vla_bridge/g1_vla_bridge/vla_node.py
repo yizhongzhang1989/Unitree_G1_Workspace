@@ -191,10 +191,9 @@ class VlaBridgeNode(Node):
         self._execution_rate = float(p('execution_rate_hz', 30.0).value)
         if not math.isfinite(self._execution_rate) or self._execution_rate <= 0:
             raise ValueError('execution_rate_hz 必须是有限正数')
-        self._async_alpha = float(p('async_ema_alpha', 0.5).value)
         self._async_min_overlap = p('async_min_overlap_actions', 7) \
             .get_parameter_value().integer_value
-        TimedActions(rate, self._async_alpha, 0.0, self._async_min_overlap,
+        TimedActions(rate, 0.0, self._async_min_overlap,
                  execution_rate=self._execution_rate)
         self._execution_mode = p('execution_mode', 'manual') \
             .get_parameter_value().string_value
@@ -303,8 +302,9 @@ class VlaBridgeNode(Node):
         self._tf_listener = TransformListener(self._tf, self)
 
         control = MutuallyExclusiveCallbackGroup()
+        status = MutuallyExclusiveCallbackGroup()
         self.create_timer(1.0 / self._execution_rate, self._on_tick, callback_group=control)
-        self.create_timer(0.2, self._publish_status, callback_group=control)
+        self.create_timer(0.2, self._publish_status, callback_group=status)
         self.create_service(Trigger, '~/start', self._on_start, callback_group=control)
         self.create_service(Trigger, '~/next', self._on_next, callback_group=control)
         self.create_service(Trigger, '~/stop', self._on_stop, callback_group=control)
@@ -402,8 +402,9 @@ class VlaBridgeNode(Node):
                 self._chunk, self._cursor, self._inference_active = None, 0, False
                 self._continuous_next_at = None
                 self._timed = (TimedActions(
-                    self._action_rate, self._async_alpha, time.monotonic(),
-                    self._async_min_overlap)
+                    self._action_rate, time.monotonic(), self._async_min_overlap,
+                    first_offset_steps=1 if self._history is not None else 0,
+                    execution_rate=self._execution_rate)
                     if self._execution_mode == 'async' else None)
                 self._async_step = {}
                 self._async_merge = {}
@@ -768,7 +769,6 @@ class VlaBridgeNode(Node):
                 'cartesian_limit_enabled': self._cartesian_limit_enabled,
                 'running': self._running.is_set(),
                 'inference_active': self._inference_active,
-                'async_ema_alpha': self._async_alpha,
                 'async_min_overlap_actions': self._async_min_overlap,
                 'async_pending': len(self._timed.samples) if self._timed else 0,
                 'async_merge': self._async_merge,
@@ -848,7 +848,7 @@ class VlaBridgeNode(Node):
             self._async_step = {}
             self._async_merge = {}
             self._async_last_publish = None
-            self._timed = (TimedActions(self._action_rate, self._async_alpha, time.monotonic(),
+            self._timed = (TimedActions(self._action_rate, time.monotonic(),
                                         self._async_min_overlap,
                                         first_offset_steps=1 if self._history is not None else 0,
                                         execution_rate=self._execution_rate)
@@ -1004,6 +1004,9 @@ class VlaBridgeNode(Node):
             reader.close()
         self._infer_requested.set()
         self._worker.join(timeout=2.0)
+        if self._worker.is_alive():
+            self.get_logger().warning('等待正在进行的推理退出，再释放 backend')
+            self._worker.join()
         self._backend.close()
 
 

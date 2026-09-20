@@ -69,7 +69,7 @@ def main():
         chunk = node._backend.infer(observation)
         finished = time.monotonic()
         queue = TimedActions(
-            node._action_rate, node._async_alpha, observation.acquired_monotonic,
+            node._action_rate, observation.acquired_monotonic,
             first_offset_steps=1, execution_rate=node._execution_rate)
         accepted = queue.merge(chunk, observation.acquired_monotonic, finished)
         print(json.dumps({

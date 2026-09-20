@@ -220,6 +220,21 @@ def test_continuous_task_change_discards_old_chunk_and_requests_new_task():
     node._request_inference.assert_called_once_with(1)
 
 
+def test_async_task_change_recreates_timed_queue_without_legacy_alpha():
+    node = executor_fixture('async')
+    node._history = Mock()
+    del node._async_alpha
+
+    VlaBridgeNode._on_task(node, SimpleNamespace(data='place the basketball on the table'))
+
+    assert node._running.is_set()
+    assert node._timed is not None
+    assert node._timed.rate == node._action_rate
+    assert node._timed.execution_rate == node._execution_rate
+    assert node._timed.first_offset_steps == 1
+    node._request_inference.assert_called_once_with(1)
+
+
 def test_returned_unified_poses_recover_raw_commands():
     from scipy.spatial.transform import Rotation
 
@@ -383,3 +398,35 @@ def test_stop_restart_discards_late_response_without_new_next():
         node._infer_requested.set()
         worker.join(2)
         assert not worker.is_alive()
+
+
+def test_shutdown_waits_for_inference_before_closing_backend():
+    node = worker_fixture()
+    entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+    def infer(observation):
+        entered.set()
+        assert release.wait(3)
+        return executor_fixture()._chunk
+
+    node._backend = SimpleNamespace(infer=infer, close=closed.set)
+    node._readers = {}
+    node._stop = lambda reason: VlaBridgeNode._stop(node, reason)
+    node._worker = threading.Thread(target=VlaBridgeNode._infer_loop, args=(node,))
+    node._request_inference()
+    node._worker.start()
+    try:
+        assert entered.wait(2)
+        shutdown = threading.Thread(target=VlaBridgeNode.shutdown, args=(node,))
+        shutdown.start()
+        assert not closed.wait(.1)
+        release.set()
+        shutdown.join(2)
+        assert not shutdown.is_alive()
+        assert closed.is_set()
+    finally:
+        release.set()
+        node._alive = False
+        node._running.clear()
+        node._infer_requested.set()
+        node._worker.join(2)

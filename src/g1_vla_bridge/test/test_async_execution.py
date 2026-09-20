@@ -25,7 +25,7 @@ def prediction(position=0.):
 
 
 def test_ten_hz_execution_preserves_thirty_hz_prediction_time():
-    queue = TimedActions(30., .5, 0.)
+    queue = TimedActions(30., 0.)
     chunk = prediction()
     for side in SIDES:
         chunk.poses[side][:, 0] = np.arange(30)
@@ -46,13 +46,13 @@ def bridge(monkeypatch):
     node = SimpleNamespace(
         _lock=threading.Lock(), _running=threading.Event(), _infer_requested=threading.Event(),
         _inference_active=False, _generation=0, _execution_mode='async', _chunk=None,
-        _cursor=0, _timed=TimedActions(30., .5, 0.), _horizon=0,
+        _cursor=0, _timed=TimedActions(30., 0.), _horizon=0,
         _command={side: np.array([0., 0., 0., 0., 0., 0., 1.]) for side in SIDES},
         _grip_command={side: 0. for side in SIDES}, _active={side: True for side in SIDES},
         _publisher=Mock(), _arms_ready=lambda: '', _cartesian_limit_enabled=False,
         _delta=False, _spec=SPEC, _skip_intermediate=False, _error='',
         _max_step_pos=.02, _max_step_ori=.1, get_logger=Mock(return_value=Mock()),
-        _retry_delay=0., _action_rate=30., _execution_rate=30., _async_alpha=.5, _task='test',
+        _retry_delay=0., _action_rate=30., _execution_rate=30., _task='test',
         _async_min_overlap=7,
         _observe=lambda: SimpleNamespace(grippers={'left': .7, 'right': .8}),
         _alive=True, _history=None, _pending_control=deque(), _last_control_stamp=None)
@@ -85,7 +85,7 @@ def test_start_preserves_inactive_gripper_through_publication(bridge, held):
     assert published[SIDES.index(held)] == measured
 
 
-def test_accept_requests_again_before_playback_and_tick_uses_ema(bridge):
+def test_accept_requests_again_before_playback_and_tick_uses_ramp(bridge):
     node, clock = bridge
     clock.now = .2
     node._accept(prediction(0.), 200., 0, requested_at=0.)
@@ -96,7 +96,7 @@ def test_accept_requests_again_before_playback_and_tick_uses_ema(bridge):
     clock.now = .4
     node._accept(prediction(4.), 200., 0, requested_at=.2)
     VlaBridgeNode._on_tick(node)
-    assert node._command['left'][0] == 2.
+    assert node._command['left'][0] == pytest.approx(4. / 19.)
     assert node._grip_command['left'] == 1.
     assert node._publisher.publish.call_count == 2
     assert node._inference_active
@@ -151,13 +151,18 @@ def test_async_thirty_hz_publications_and_history(bridge):
         chunk.grippers[side][:] = np.arange(1, 31) / 30.
     clock.now = .2
     node._accept(chunk, 200., node._generation, requested_at=0.)
+    expected_actions = TimedActions(
+        10., 0., minimum_overlap_actions=7, first_offset_steps=1,
+        execution_rate=30.)
+    expected_actions.merge(chunk, 0., .2, fallback_poses={
+        side: np.array([0., 0., 0., 0., 0., 0., 1.]) for side in SIDES})
+    expected = []
     for tick in range(6, 91):
         clock.now = tick / 30.
         VlaBridgeNode._on_tick(node)
         deliver_state(node, clock.now + .001)
+        expected.append(expected_actions.take(clock.now)[0]['left'][0])
     sent = [call.args[0].data for call in node._publisher.publish.call_args_list]
-    expected = np.arange(6, 91) / 3.
-    expected[:7] *= .5
     np.testing.assert_allclose(np.array(sent[::2])[:, 0], expected)
     np.testing.assert_allclose(np.array(sent[1::2])[:, 0], np.arange(6, 91) / 90.)
     rows = node._history.snapshot()
@@ -173,7 +178,7 @@ def test_async_thirty_hz_publications_and_history(bridge):
 @pytest.mark.parametrize('prior_chunk', [False, True])
 def test_empty_queue_holds_and_accepts_nonoverlapping_response(bridge, prior_chunk):
     node, clock = bridge
-    node._timed = TimedActions(10., .5, 0., first_offset_steps=1)
+    node._timed = TimedActions(10., 0., first_offset_steps=1)
     if prior_chunk:
         clock.now = .2
         node._accept(prediction(1.), 200., 0, requested_at=0.)
@@ -296,7 +301,7 @@ def test_worker_immediately_observes_again_without_ticks(bridge):
     VlaBridgeNode._infer_loop(node)
     assert observed == [0., .2]
     assert len(node._timed.samples) == 24
-    assert node._timed.samples[12][0]['left'][0] == 1.5
+    assert node._timed.samples[12][0]['left'][0] == pytest.approx(1. + 1. / 19.)
     node._publisher.publish.assert_not_called()
 
 

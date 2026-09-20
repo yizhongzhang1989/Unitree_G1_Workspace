@@ -100,23 +100,27 @@ async 模式下，第0行目标对应观测 t+0.1s，末行为 t+3s；丢弃过�
 
 ### 异步执行
 
-顿挫与振幅增长的检查结果见 [Async 审查](ASYNC_AUDIT.md)。时间对齐和 EMA 不保证闭环
+顿挫与振幅增长的检查结果见 [Async 审查](ASYNC_AUDIT.md)。时间对齐和加权融合不保证闭环
 稳定；长延迟下可能只执行预测尾部、随后断供，当前尚未验证真机闭环稳定性。
 
 `execution_mode:=async` 让推理与动作执行并行，始终最多一个 HTTP 推理在途。
 每次响应合并进未来动作队列后，立即采最新观测并请求下一段，不等队列播完。
-位置按 `(1-alpha)*旧预测 + alpha*新预测` 更新，旋转使用 SLERP；夹爪直接采用新预测，
-不平均开闭决策。非重叠部分直接追加。
+融合层输入两段 10Hz chunk，输出 10Hz 动作；执行层输入融合后的 10Hz 动作，输出 30Hz 插值目标。
+若未来重合部分有 x 个 **10Hz 动作点**，第 k 点（k=1..x）的新预测权重为 `k/(x+1)`，
+旧预测权重为 `1-k/(x+1)`。位置按此线性加权，旋转按同一权重 SLERP。
+夹爪不做跨 chunk 加权，重合点直接用新预测覆盖；执行层的 30Hz 夹爪插值保持不变。
+前段偏向旧 chunk，后段偏向新 chunk；非重合部分直接接入新预测。
 
 时间约定：本分支 CogACT 第 0 个动作对应选中观测时刻后 0.1 秒，不是 HTTP 请求开始或返回时刻。
 取下面公共观测时间格的时刻 T，按同次采样的 ROS 时钟与单调时钟
 映射为 `acquired_monotonic`；第 k 个动作对应 `T + (k+1)/action_rate_hz`。
 因此已计入修正后的观测年龄、本轮观测处理、编码、网络及推理耗时。
 `action_rate_hz` 必须与训练动作时间间隔匹配，
-当前固定模型契约为 10 Hz，执行网格默认 30 Hz。非整数拍的请求起点通过位置插值与旋转 SLERP
-映射到统一执行网格，夹爪取前一采样值。迟到的控制 tick 不补播历史动作。
+当前固定模型契约为 10 Hz。非整数拍的请求起点先以位置/夹爪线性插值与姿态 SLERP
+对齐到统一的 10Hz 模型时间格，再融合。重合数和权重不按 30Hz 执行点计算。
+执行取样器仅在下发时将融合结果插值到默认 30Hz 网格；迟到的控制 tick 不补播历史动作。
 
-例如观测时刻为 0 s、返回时刻为 0.37 s，执行网格也以 0 s 为原点时，
+例如观测时刻为 0 s、返回时刻为 0.37 s，模型时间格也以 0 s 为原点时，
 保留 0.4～3.0 s 的 27 个目标。裁剪按观测时刻计算，不能只减去 HTTP 推理耗时。
 
 ### 与 record 的观测对齐
@@ -181,23 +185,23 @@ manual/continuous 以 90 个执行 tick 播完 30 个预测点，仍约三秒，
 也可显式指定 `execution_rate_hz:=30.0`。状态中会显示实际 `execution_rate_hz`。
 直接运行节点、不加载 YAML 时也相同：观测和模型预测 10 Hz，执行插值 30 Hz。
 
-参数 `async_ema_alpha` 默认 0.5，范围 `(0, 1]`，1 表示直接采用新预测。
 `async_min_overlap_actions` 默认 7：若新旧预测的实际重合少于该数目，会重复最后一个
-旧 target 补足后再按 `async_ema_alpha` 融合；完全没有旧 target 时，改为重复当前命令目标。
+旧 target 补足；完全没有旧 target 时，改为重复当前命令目标。补齐后的第 $k$ 个
+10 Hz 点使用权重 $k/(L+1)$，其中 $L$ 是本次实际融合长度。
 队列耗尽后保持最后目标并继续请求，不因断供自动停止；首次启动也持续等待有效预测。
 新结果有未来重合点才做融合，没有重合则直接接入有效的未来目标，如同首次接入。
 全部过期的响应不执行，继续请求下一段；不重置时间轴、不补播过期动作。
 `async_hold_timeout_s` 已移除，无需再传此参数。手动 `/stop` 和手臂接管检查仍有效。
-停止不等于卸力；卸力仍需 `/estop`。状态提供 `async_pending`、`async_buffer_s` 和
-`async_ema_alpha`，错误原因保留在 `error`。
+停止不等于卸力；卸力仍需 `/estop`。状态提供 `async_pending` 和 `async_buffer_s`，
+前者统计缓存中的 10Hz 模型点（可能含一个执行插值左端点）；错误原因保留在 `error`。
 
 async 仅支持绝对位姿，要求 `delta_position=false`、`delta_rotation=false`、
 `skip_intermediate_waypoints=false`。`action_horizon` 仍限制每次预测使用的前缀长度。
-EMA 不保证轨迹可达或避障，也不能证明跳过的动作已经物理完成；限速仍遵循原有配置。
+加权融合不保证轨迹可达或避障，也不能证明跳过的动作已经物理完成；限速仍遵循原有配置。
 
 ```bash
 ros2 launch g1_vla_bridge vla_bridge.launch.py execution_mode:=async \
-  async_ema_alpha:=0.5 async_min_overlap_actions:=7
+  async_min_overlap_actions:=7
 ros2 run g1_vla_bridge vla_cli
 ```
 
