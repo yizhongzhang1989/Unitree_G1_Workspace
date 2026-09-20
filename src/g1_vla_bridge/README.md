@@ -134,6 +134,8 @@ manual/continuous 仍逐点播放，因此在 10 Hz 下 30 点需要约三秒。
 恢复原频率用 `execution_rate_hz:=30.0`。状态中会显示实际 `execution_rate_hz`。
 
 参数 `async_ema_alpha` 默认 0.5，范围 `(0, 1]`，1 表示直接采用新预测。
+`async_min_overlap_actions` 默认 7：若新旧预测的实际重合少于该数目，会重复最后一个
+旧 target 补足后再按 `async_ema_alpha` 融合；完全没有旧 target 时，改为重复当前命令目标。
 `async_hold_timeout_s` 默认 1 秒：队列耗尽后保持最后目标，超过此时间停止 VLA 下发，
 首次启动则从启动时刻计算等待超时。全部过期的响应不会延长等待期限。
 停止不等于卸力；卸力仍需 `/estop`。状态提供 `async_pending`、`async_buffer_s`、
@@ -145,7 +147,7 @@ EMA 不保证轨迹可达或避障，也不能证明跳过的动作已经物理�
 
 ```bash
 ros2 launch g1_vla_bridge vla_bridge.launch.py execution_mode:=async \
-  async_ema_alpha:=0.5 async_hold_timeout_s:=1.0
+  async_ema_alpha:=0.5 async_min_overlap_actions:=7 async_hold_timeout_s:=1.0
 ros2 run g1_vla_bridge vla_cli
 ```
 

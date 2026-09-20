@@ -95,6 +95,47 @@ def test_rotation_uses_shortest_arc():
                        [0., 0., 2 ** -0.5, 2 ** -0.5])
 
 
+def test_minimum_overlap_repeats_last_existing_target():
+    queue = TimedActions(10., .5, 0., minimum_overlap_actions=10)
+    current = {side: np.array([2., 0., 0., 0., 0., 0., 1.]) for side in SIDES}
+    queue.merge(chunk(2.), 0., 0., fallback_poses=current)
+    short_chunk = ActionChunk(
+        poses={side: np.tile([6., 0., 0., 0., 0., 0., 1.], (15, 1)) for side in SIDES},
+        grippers={side: np.zeros(15) for side in SIDES})
+    queue.merge(short_chunk, 2.5, 2.5)
+    assert queue.last_merge['accepted'] == 15
+    assert queue.last_merge['overlap'] == 5
+    assert queue.last_merge['blended'] == 10
+    for tick in range(25, 35):
+        assert queue.samples[tick][0]['left'][0] == pytest.approx(4.)
+    for tick in range(35, 40):
+        assert queue.samples[tick][0]['left'][0] == 6.
+
+
+def test_minimum_overlap_uses_current_pose_when_no_target_remains():
+    queue = TimedActions(10., .5, 0., minimum_overlap_actions=3)
+    current = {side: np.array([2., 0., 0., 0., 0., 0., 1.]) for side in SIDES}
+    queue.merge(chunk(6.), 0., 0., fallback_poses=current)
+    assert queue.last_merge['overlap'] == 0
+    assert queue.last_merge['blended'] == 3
+    for tick in range(3):
+        assert queue.samples[tick][0]['left'][0] == pytest.approx(4.)
+    assert queue.samples[3][0]['left'][0] == 6.
+
+
+def test_minimum_overlap_is_limited_by_new_action_count():
+    queue = TimedActions(10., .5, 0., minimum_overlap_actions=10)
+    current = {side: np.array([2., 0., 0., 0., 0., 0., 1.]) for side in SIDES}
+    short_chunk = ActionChunk(
+        poses={side: np.tile([6., 0., 0., 0., 0., 0., 1.], (3, 1)) for side in SIDES},
+        grippers={side: np.zeros(3) for side in SIDES})
+    queue.merge(short_chunk, 0., 0., fallback_poses=current)
+    assert queue.last_merge['accepted'] == 3
+    assert queue.last_merge['blended'] == 3
+    for tick in range(3):
+        assert queue.samples[tick][0]['left'][0] == pytest.approx(4.)
+
+
 @pytest.mark.parametrize(('rate', 'alpha'), [
     (0., .5), (30., 0.), (30., 1.1), (float('nan'), .5), (30., float('nan'))])
 def test_invalid_configuration(rate, alpha):

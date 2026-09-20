@@ -60,12 +60,14 @@
     command_topic: /motion_control/command
     status_topic: /motion_control/status
     action_rate_hz: 30.0
-    execution_rate_hz: 10.0
-    # manual：~/start 只进入待命，每次 ~/next 请求并完整执行一个 chunk。
-    # continuous：完整执行当前 chunk 后自动请求下一段。
+    execution_rate_hz: 30.0
+    # manual：~/start 只进入待命，每次 ~/next 只请求并执行一个 chunk。
+    # continuous：完整执行当前 chunk 后，延迟自动请求下一段。
     # async：请求时刻起算，丢弃过期动作，未来重叠部分融合，返回后立即请求下一段。
     execution_mode: manual
+    continuous_next_delay_s: 0.5
     async_ema_alpha: 0.5
+    async_min_overlap_actions: 7
     async_hold_timeout_s: 1.0
 
     # 增量控制：只取模型整段的**形状**，叠到上一段留下的指令值上。位置和姿态分开选：

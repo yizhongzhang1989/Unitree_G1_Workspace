@@ -195,14 +195,21 @@ class VlaBridgeNode(Node):
         if not math.isfinite(self._execution_rate) or self._execution_rate <= 0:
             raise ValueError('execution_rate_hz 必须是有限正数')
         self._async_alpha = float(p('async_ema_alpha', 0.5).value)
+        self._async_min_overlap = p('async_min_overlap_actions', 7) \
+            .get_parameter_value().integer_value
         self._async_timeout = float(p('async_hold_timeout_s', 1.0).value)
-        TimedActions(rate, self._async_alpha, 0.0)
+        TimedActions(rate, self._async_alpha, 0.0, self._async_min_overlap)
         if not math.isfinite(self._async_timeout) or self._async_timeout <= 0:
             raise ValueError('async_hold_timeout_s 必须是有限正数')
         self._execution_mode = p('execution_mode', 'manual') \
             .get_parameter_value().string_value
         if self._execution_mode not in ('continuous', 'manual', 'async'):
             raise ValueError("execution_mode 只能是 'continuous'、'manual' 或 'async'")
+        self._continuous_next_delay = float(
+            p('continuous_next_delay_s', 0.5).get_parameter_value().double_value)
+        if not math.isfinite(self._continuous_next_delay) or self._continuous_next_delay < 0.0:
+            raise ValueError('continuous_next_delay_s 必须是有限非负数')
+        self._continuous_next_at: float | None = None
         # 位置和姿态分开选：位置的标定（frame.origin_in_base）不确定，姿态的
         # （tool_rotation_rpy）是确定的。
         self._delta_pos = p('delta_position', False).get_parameter_value().bool_value
@@ -356,9 +363,28 @@ class VlaBridgeNode(Node):
             self._status = status
 
     def _on_task(self, msg: String) -> None:
+        request_generation = None
         with self._lock:
+            changed = msg.data != self._task
             self._task = msg.data
+            if changed and self._running.is_set():
+                self._generation += 1
+                request_generation = self._generation
+                self._infer_requested.clear()
+                self._chunk, self._cursor, self._inference_active = None, 0, False
+                self._continuous_next_at = None
+                self._timed = (TimedActions(
+                    self._action_rate, self._async_alpha, time.monotonic(),
+                    self._async_min_overlap)
+                    if self._execution_mode == 'async' else None)
+                self._async_step = {}
+                self._async_merge = {}
+                self._async_last_publish = None
+                self._error = ''
         self.get_logger().info(f'任务指令更新为: {msg.data!r}')
+        if (request_generation is not None
+                and self._execution_mode in ('continuous', 'async')):
+            self._request_inference(request_generation)
 
     def _make_camera_info_callback(self, slot: str):
         def callback(msg: CameraInfo) -> None:
@@ -521,7 +547,9 @@ class VlaBridgeNode(Node):
                 prediction = ActionChunk(
                     poses={side: chunk.poses[side][:limit] for side in SIDES},
                     grippers={side: chunk.grippers[side][:limit] for side in SIDES})
-                accepted = self._timed.merge(prediction, requested_at, now)
+                anchor = {side: self._command[side].copy() for side in SIDES}
+                accepted = self._timed.merge(
+                    prediction, requested_at, now, fallback_poses=anchor)
                 self._async_merge = dict(self._timed.last_merge)
                 self._inference_active = False
                 self._infer_ms = elapsed_ms
@@ -578,6 +606,7 @@ class VlaBridgeNode(Node):
         if self._execution_mode == 'async':
             self._on_async_tick()
             return
+        request_next = False
         with self._lock:
             reason = self._arms_ready()
             chunk, cursor = self._chunk, self._cursor
@@ -589,10 +618,17 @@ class VlaBridgeNode(Node):
                     cursor, limit, self._skip_intermediate)
             else:
                 index, finished = 0, False
+            if (chunk is None and self._execution_mode == 'continuous'
+                    and self._continuous_next_at is not None
+                    and time.monotonic() >= self._continuous_next_at):
+                self._continuous_next_at = None
+                request_next = True
         if reason:
             self._stop(f'手臂不可用: {reason}')
             return
         if chunk is None:
+            if request_next:
+                self._request_inference()
             return
 
         for side in SIDES:
@@ -617,8 +653,9 @@ class VlaBridgeNode(Node):
             if finished and self._chunk is chunk:
                 self._chunk = None
                 self._cursor = 0
-        if finished and self._execution_mode == 'continuous':
-            self._request_inference()
+                if self._execution_mode == 'continuous':
+                    self._continuous_next_at = (
+                        time.monotonic() + self._continuous_next_delay)
 
     def _on_async_tick(self) -> None:
         now = time.monotonic()
@@ -671,6 +708,7 @@ class VlaBridgeNode(Node):
                 'running': self._running.is_set(),
                 'inference_active': self._inference_active,
                 'async_ema_alpha': self._async_alpha,
+                'async_min_overlap_actions': self._async_min_overlap,
                 'async_hold_timeout_s': self._async_timeout,
                 'async_pending': len(self._timed.samples) if self._timed else 0,
                 'async_merge': self._async_merge,
@@ -741,11 +779,13 @@ class VlaBridgeNode(Node):
             opened = float(self._spec.gripper.to_robot(self._spec.gripper.model_open))
             self._grip_command = {s: opened for s in SIDES}
             self._chunk, self._cursor, self._error = None, 0, ''
+            self._continuous_next_at = None
             self._observation_timing = None
             self._async_step = {}
             self._async_merge = {}
             self._async_last_publish = None
-            self._timed = (TimedActions(self._action_rate, self._async_alpha, time.monotonic())
+            self._timed = (TimedActions(self._action_rate, self._async_alpha, time.monotonic(),
+                                        self._async_min_overlap)
                            if self._execution_mode == 'async' else None)
             self._generation += 1
             self._running.set()
@@ -766,6 +806,9 @@ class VlaBridgeNode(Node):
             response.success, response.message = False, reason
             return response
         reason = self._request_inference()
+        if not reason:
+            with self._lock:
+                self._continuous_next_at = None
         response.success = not reason
         response.message = reason or '已请求下一段'
         return response
@@ -801,6 +844,7 @@ class VlaBridgeNode(Node):
             self._generation += 1
             self._infer_requested.clear()
             self._chunk, self._cursor, self._inference_active = None, 0, False
+            self._continuous_next_at = None
             self._timed = None
             self._execution_mode = mode
         return ''
@@ -837,6 +881,7 @@ class VlaBridgeNode(Node):
             self._running.clear()
             self._infer_requested.clear()
             self._chunk, self._cursor, self._inference_active = None, 0, False
+            self._continuous_next_at = None
             self._timed = None
             command = {side: np.array(HOME_POSES[side]) for side in SIDES}
             try:
@@ -859,6 +904,7 @@ class VlaBridgeNode(Node):
             self._running.clear()
             self._infer_requested.clear()
             self._chunk, self._cursor, self._inference_active = None, 0, False
+            self._manual_next_at = None
             self._timed = None
             self._error = reason
         # 停止只是不再发新目标，手臂保持在最后一帧；卸力要走 motion_control 的 ~/estop。

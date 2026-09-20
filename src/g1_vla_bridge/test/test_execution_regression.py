@@ -28,6 +28,10 @@ def executor_fixture(mode='manual'):
         _request_inference=Mock(),
         _generation=0, _infer_requested=threading.Event(), _inference_active=False,
         _delta=False, _spec=SPEC, _timed=None,
+        _continuous_next_delay=0.5, _continuous_next_at=None,
+        _task='pick up the basketball', _async_alpha=.5, _async_min_overlap=7,
+        _async_step={}, _async_merge={}, _async_last_publish=None, _error='',
+        get_logger=Mock(return_value=Mock()),
     )
     node._mode_error = lambda mode: VlaBridgeNode._mode_error(node, mode)
     node._set_execution_mode = lambda mode: VlaBridgeNode._set_execution_mode(node, mode)
@@ -126,14 +130,58 @@ def test_set_skip_intermediate_keeps_current_chunk():
     assert node._chunk is chunk
 
 
-def test_continuous_does_not_request_before_final_target_sent():
-    node = executor_fixture('continuous')
-    for _ in range(30):
+def test_manual_never_requests_next_chunk_automatically():
+    node = executor_fixture()
+    node._cartesian_limit_enabled = False
+    node._skip_intermediate = True
+    VlaBridgeNode._on_tick(node)
+    assert node._chunk is None
+    for _ in range(3):
         VlaBridgeNode._on_tick(node)
     node._request_inference.assert_not_called()
-    for _ in range(5):
-        VlaBridgeNode._on_tick(node)
+
+
+def test_continuous_requests_next_chunk_after_configured_delay(monkeypatch):
+    from g1_vla_bridge import vla_node
+
+    now = [10.0]
+    monkeypatch.setattr(vla_node.time, 'monotonic', lambda: now[0])
+    node = executor_fixture('continuous')
+    node._cartesian_limit_enabled = False
+    node._skip_intermediate = True
+    VlaBridgeNode._on_tick(node)
+    assert node._chunk is None
+    assert node._continuous_next_at == 10.5
+    node._request_inference.assert_not_called()
+    now[0] = 10.49
+    VlaBridgeNode._on_tick(node)
+    node._request_inference.assert_not_called()
+    now[0] = 10.5
+    VlaBridgeNode._on_tick(node)
     node._request_inference.assert_called_once()
+    VlaBridgeNode._on_tick(node)
+    node._request_inference.assert_called_once()
+
+
+def test_continuous_task_change_discards_old_chunk_and_requests_new_task():
+    node = executor_fixture('continuous')
+    old_chunk = node._chunk
+    node._inference_active = True
+    node._infer_requested.set()
+    node._continuous_next_at = 123.
+
+    VlaBridgeNode._on_task(node, SimpleNamespace(data='place the basketball on the table'))
+
+    assert node._running.is_set()
+    assert node._generation == 1
+    assert node._task == 'place the basketball on the table'
+    assert node._chunk is None
+    assert node._chunk is not old_chunk
+    assert node._cursor == 0
+    assert not node._inference_active
+    assert not node._infer_requested.is_set()
+    assert node._continuous_next_at is None
+    node._request_inference.assert_called_once_with(1)
 
 
 def test_returned_unified_poses_recover_raw_commands():

@@ -49,6 +49,7 @@ def bridge(monkeypatch):
         _delta=False, _spec=SPEC, _skip_intermediate=False, _error='',
         _max_step_pos=.02, _max_step_ori=.1, get_logger=Mock(return_value=Mock()),
         _retry_delay=0., _action_rate=30., _async_alpha=.5, _task='test',
+        _async_min_overlap=10,
         _observe=lambda: object(), _alive=True)
     node._running.set()
     node._measured_pose = lambda side: node._command[side].copy()
