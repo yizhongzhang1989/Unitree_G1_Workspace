@@ -92,7 +92,7 @@ def test_two_nodes_have_isolated_histories():
     assert second._history.snapshot() == ()
 
 
-def test_thirty_actual_ticks_keep_last_fifteen_pairs_and_wait_does_not_append():
+def test_thirty_actual_ticks_keep_last_sixteen_pairs_and_wait_does_not_append():
     node = node_with_history()
     node._cartesian_limit_enabled = False
     for index in range(30):
@@ -107,10 +107,10 @@ def test_thirty_actual_ticks_keep_last_fifteen_pairs_and_wait_does_not_append():
         deliver_state(node, stamp + .02)
     assert node._chunk is None
     rows = node._history.snapshot()
-    assert len(rows) == 15
-    np.testing.assert_allclose([row.state['left'][0] for row in rows], np.arange(15, 30))
-    np.testing.assert_allclose([row.action['left'][0] for row in rows], np.arange(115, 130))
-    np.testing.assert_allclose([row.state_grippers['left'] for row in rows], np.arange(15, 30) / 100)
+    assert len(rows) == 16
+    np.testing.assert_allclose([row.state['left'][0] for row in rows], np.arange(14, 30))
+    np.testing.assert_allclose([row.action['left'][0] for row in rows], np.arange(114, 130))
+    np.testing.assert_allclose([row.state_grippers['left'] for row in rows], np.arange(14, 30) / 100)
     for _ in range(20):
         VlaBridgeNode._on_tick(node)
     assert node._publisher.publish.call_count == 60

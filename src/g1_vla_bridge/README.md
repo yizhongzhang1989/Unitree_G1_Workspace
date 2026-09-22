@@ -1,6 +1,6 @@
 # g1_vla_bridge
 
-> **histro15_10hz 分支：适配 CogACT 10Hz、30步、双路15条含夹爪历史。**
+> **history15_10hz_delta 分支：适配 CogACT 10Hz、30步、双路含夹爪历史，数量可配置（默认16条）。**
 > 保留原有 start/home、模式切换和可选限幅，默认 manual；没有新增 dry_run 运行参数。
 
 VLA 推理服务与 `g1_motion_control` 之间的桥。**流程是固定的，VLA 是可换的**：
@@ -61,10 +61,14 @@ continuous 模式在 `retry_delay_s` 后自动重试。`async` 模式见下方�
 ### CogACT 10Hz 成对历史
 
 启动依次调用 GET `/api/health` 和 `/api/config`，失败或配置不匹配即停止。
+历史数量由 [config/backends/cogact_unitree.yaml](config/backends/cogact_unitree.yaml) 的
+`history_length` 配置（正整数，默认 16），也可启动时传 `history_length:=30` 覆盖；修改后需重启节点。
+服务端 `history_action` 和 `history_state` 的 `num_tokens` 均须与 `history_length` 一致。
+同一配置用于历史截取、请求长度上限和服务端配置校验，`~/status` 中也会显示该值。
 当前 state 和两路历史均含 LEFT/RIGHT 的 TRANS、ROT_MAT、GRIPPER 六字段。
-历史按 10Hz 保留最近 15 对真实动作和反馈，旧到新排列；30Hz 插值仅用于执行。
+历史按 10Hz 取最近 `history_length` 对真实动作和反馈，旧到新排列；30Hz 插值仅用于执行。
 以 episode 首次下发时间为原点，每个 100ms 时间格选第一条实际发布并完成配对的记录。
-连续执行时 15 条对应约 1.5 秒历史（首末间隔约 1.4 秒），无动作的时间格不补造记录。
+默认连续执行时 16 条对应约 1.6 秒历史（首末间隔约 1.5 秒），无动作的时间格不补造记录。
 每次发布位姿和夹爪命令后，将实际 action 加入待配对 FIFO 队列，不阻塞后续下发。
 每条 JointState 到达后从队头依次匹配：`state.stamp >= action.stamp` 就出队配对，
 直到队列为空或 state 早于队头 action。同一条 state 可以满足多个 action。
@@ -76,9 +80,9 @@ FK 在 JointState 回调中计算；计算异常仍走原有错误处理，停�
 观测、图像和历史配对均不按年龄或处理耗时拒绝数据；无反馈时待配对队列可能持续增长。
 这不是底层执行器接收确认，也不是相机曝光同步保证。
 ControlHistory 保留当前 episode 的全部 10Hz 配对记录，支持延迟观测回查，无 64 窗口期限；
-内存占用随 episode 时长增长。请求仅深拷贝当前实测观测之前的最近 15 对，不回算历史 FK。
+内存占用随 episode 时长增长。请求仅深拷贝当前实测观测之前的最近 `history_length` 对，不回算历史 FK。
 只有命令和实测样本均早于当前观测的记录才能进入历史；当前 state 单独取当前观测。
-等待不新增、不复制保持目标、不因时间流逝丢历史；不足 15 对只发已有记录，首次为 null。
+等待不新增、不复制保持目标、不因时间流逝丢历史；不足配置数量只发已有记录，首次为 null。
 停止、start、任务切换、reset 清空两路本地缓存；reset 不调用服务器。
 start 时冻结或禁用侧夹爪保持观测实测值，活动侧保留原有张开起步行为。
 关节时间戳回退，或发令时钟回退/重复时停止本次执行、清空 pending/history 并作废在途响应，

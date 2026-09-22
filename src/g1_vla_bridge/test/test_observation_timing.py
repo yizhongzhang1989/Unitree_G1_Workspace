@@ -143,11 +143,11 @@ def test_observe_copies_execution_history_without_resampling(observation_node, m
     observation = VlaBridgeNode._observe(node)
     compute.assert_called_once()
     assert observation.poses['left'][0] == .4
-    assert len(observation.history) == 15
+    assert len(observation.history) == 16
     np.testing.assert_allclose([row.state_stamp for row in observation.history],
-                               np.arange(15, 30) / 10)
+                               np.arange(14, 30) / 10)
     np.testing.assert_allclose([row.action_stamp for row in observation.history],
-                               np.arange(15, 30) / 10 + .01)
+                               np.arange(14, 30) / 10 + .01)
     assert observation.history[-1].state['left'][0] == 29
     assert observation.history[-1].action['left'][0] == 129
     assert observation.history[-1].state_grippers['left'] == .2

@@ -31,7 +31,7 @@ from launch_ros.actions import Node
 # 只暴露现场最常改的这几个，其余走 config/*.yaml。
 _ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'execution_mode',
               'skip_intermediate_waypoints',
-              'async_min_overlap_actions', 'execution_rate_hz')
+              'async_min_overlap_actions', 'execution_rate_hz', 'history_length')
 
 
 def _node(context):
@@ -51,7 +51,7 @@ def _node(context):
                 overrides[name] = normalized == 'true'
             elif name == 'execution_rate_hz':
                 overrides[name] = float(value)
-            elif name == 'async_min_overlap_actions':
+            elif name in ('async_min_overlap_actions', 'history_length'):
                 overrides[name] = int(value)
             else:
                 overrides[name] = value

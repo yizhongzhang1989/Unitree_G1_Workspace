@@ -39,7 +39,8 @@ def test_finite_and_real_extrinsics():
         build_payload(current, SPEC.frame.transform())
 
 
-def test_empty_short_full_over_real_local_http():
+@pytest.mark.parametrize('history_length', [1, 15, 16, 30])
+def test_empty_short_full_over_real_local_http(history_length):
     received = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -56,7 +57,7 @@ def test_empty_short_full_over_real_local_http():
 
         def do_GET(self):
             self.reply({'model': 'CogACT', 'status': 'healthy'}
-                       if self.path == '/api/health' else history_config())
+                       if self.path == '/api/health' else history_config(history_length=history_length))
 
         def do_POST(self):
             assert self.path == '/api/inference'
@@ -74,13 +75,14 @@ def test_empty_short_full_over_real_local_http():
     server = HTTPServer(('127.0.0.1', 0), Handler)
     worker = threading.Thread(target=server.serve_forever)
     worker.start()
-    backend = CogACTUnitreeBackend(f'http://127.0.0.1:{server.server_port}/api/inference')
+    backend = CogACTUnitreeBackend(
+        f'http://127.0.0.1:{server.server_port}/api/inference', history_length=history_length)
     backend._session.trust_env = False
     try:
         backend.configure()
         current = _observation()
-        for count in (0, 3, 30):
-            history = ControlHistory()
+        for count in (0, 3, history_length, history_length + 7):
+            history = ControlHistory(history_length=backend.history_length)
             for index in range(count):
                 measured = {side: pose.copy() for side, pose in current.poses.items()}
                 command = {side: pose.copy() for side, pose in current.poses.items()}
@@ -94,10 +96,10 @@ def test_empty_short_full_over_real_local_http():
             for field, offset in (('history_state', 0), ('history_action', 100)):
                 if count:
                     assert len(received[-1][field]) == 6
-                    assert all(len(value) == min(count, 15) for value in received[-1][field].values())
+                    assert all(len(value) == min(count, history_length) for value in received[-1][field].values())
                     for side in ('LEFT', 'RIGHT'):
                         positions = np.asarray(received[-1][field][f'ROBOT_{side}_TRANS'])[:, 0]
-                        np.testing.assert_allclose(positions, np.arange(max(0, count - 15), count) + offset)
+                        np.testing.assert_allclose(positions, np.arange(max(0, count - history_length), count) + offset)
                 else:
                     assert received[-1][field] is None
     finally:

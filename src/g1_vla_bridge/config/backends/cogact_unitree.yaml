@@ -3,3 +3,4 @@
     server_url: http://10.172.148.45:5500/api/inference
     request_timeout_s: 30.0
     proxy: ''
+    history_length: 16

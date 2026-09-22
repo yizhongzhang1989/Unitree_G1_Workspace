@@ -157,7 +157,9 @@ class VlaBridgeNode(Node):
                   for key, default in backend_parameters(name).items()}
         self._backend = load_backend(name, params)
         self._spec = self._backend.spec
-        self._history = ControlHistory() if self._backend.history_enabled else None
+        self._history = (
+            ControlHistory(history_length=self._backend.history_length)
+            if self._backend.history_enabled else None)
         # 把实际发出去的图落盘，用来人工核对"模型到底看到了什么"。置空关掉。
         self._backend.debug_dir = p('debug_image_dir', '') \
             .get_parameter_value().string_value

@@ -235,6 +235,10 @@ class VlaBackend(abc.ABC):
     def history_enabled(self) -> bool:
         return False
 
+    @property
+    def history_length(self) -> int:
+        return 0
+
     def reset(self) -> None:
         """Reset server episode state, when supported by the backend."""
 

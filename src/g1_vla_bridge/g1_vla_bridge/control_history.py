@@ -7,6 +7,15 @@ import threading
 import numpy as np
 
 
+DEFAULT_HISTORY_LENGTH = 16
+
+
+def validate_history_length(value):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError('history_length must be a positive integer')
+    return value
+
+
 @dataclass(frozen=True)
 class ControlStep:
     stamp: float
@@ -40,9 +49,10 @@ def copy_poses(poses):
 
 
 class ControlHistory:
-    """Return the latest 15 causal pairs from a ten-Hz episode archive."""
+    """Return a configurable number of causal pairs from a ten-Hz episode archive."""
 
-    def __init__(self):
+    def __init__(self, history_length=DEFAULT_HISTORY_LENGTH):
+        self._history_length = validate_history_length(history_length)
         self._steps = []
         self._ready = []
         self._origin = None
@@ -83,7 +93,7 @@ class ControlHistory:
     def snapshot(self, before=float('inf')):
         with self._lock:
             stop = bisect_left(self._ready, before)
-            steps = self._steps[max(0, stop - 15):stop]
+            steps = self._steps[max(0, stop - self._history_length):stop]
             return tuple(ControlStep(step.stamp, copy_poses(step.action), copy_poses(step.state),
                                      copy_grippers(step.action_grippers), copy_grippers(step.state_grippers),
                                      step.state_stamp)

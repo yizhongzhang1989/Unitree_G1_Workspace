@@ -7,6 +7,9 @@
 import ast
 import glob
 import os
+import runpy
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -57,6 +60,49 @@ def test_backend_config_loads(path):
     params = dict(backend_parameters(name_of(path)))
     params.update(load(path))
     load_backend(name_of(path), params).close()
+
+
+@pytest.mark.parametrize('override', ['', '15', '30'])
+def test_history_length_launch_override(monkeypatch, override):
+    import ament_index_python.packages
+    from launch import LaunchContext
+    import launch_ros.actions
+
+    monkeypatch.setattr(ament_index_python.packages, 'get_package_share_directory', lambda name: PACKAGE)
+    node_factory = Mock()
+    monkeypatch.setattr(launch_ros.actions, 'Node', node_factory)
+    module = runpy.run_path(os.path.join(PACKAGE, 'launch', 'vla_bridge.launch.py'))
+    context = LaunchContext()
+    context.launch_configurations.update({name: '' for name in module['_ARGUMENTS']})
+    context.launch_configurations['history_length'] = override
+    module['_node'](context)
+    common, backend, overrides = node_factory.call_args.kwargs['parameters']
+    assert common == COMMON
+    assert backend == os.path.join(PACKAGE, 'config', 'backends', 'cogact_unitree.yaml')
+    assert load(backend)['history_length'] == backend_parameters('cogact_unitree')['history_length']
+    if override:
+        assert overrides['history_length'] == int(override)
+    else:
+        assert 'history_length' not in overrides
+
+
+@pytest.mark.parametrize('history_length', [1, 15, 16, 30])
+def test_node_initializes_history_with_backend_length(monkeypatch, history_length):
+    from g1_vla_bridge import vla_node
+
+    class HistoryInitialized(Exception):
+        pass
+
+    backend = SimpleNamespace(spec=None, history_enabled=True, history_length=history_length)
+    monkeypatch.setattr(vla_node.Node, '__init__', lambda self, name: None)
+    monkeypatch.setattr(vla_node.Node, 'declare_parameter', lambda self, name, default: SimpleNamespace(
+        value=default, get_parameter_value=lambda: SimpleNamespace(string_value=default)))
+    monkeypatch.setattr(vla_node, 'load_backend', lambda name, params: backend)
+    history_factory = Mock(side_effect=HistoryInitialized)
+    monkeypatch.setattr(vla_node, 'ControlHistory', history_factory)
+    with pytest.raises(HistoryInitialized):
+        vla_node.VlaBridgeNode()
+    history_factory.assert_called_once_with(history_length=history_length)
 
 
 def test_common_config_covers_the_node_parameters():

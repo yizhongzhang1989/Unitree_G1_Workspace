@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import requests
 
+from g1_vla_bridge.control_history import DEFAULT_HISTORY_LENGTH, validate_history_length
 from g1_vla_bridge.vla_backend import (
     SIDES,
     ActionChunk,
@@ -45,6 +46,7 @@ PARAMETERS: dict[str, Any] = {
     'server_url': 'http://10.172.148.45:5500/api/inference',
     'request_timeout_s': 30.0,
     'proxy': '',
+    'history_length': DEFAULT_HISTORY_LENGTH,
 }
 
 
@@ -75,9 +77,11 @@ def normalized_intrinsic(calibration, image: np.ndarray) -> list[list[float]]:
             [0.0, 0.0, 1.0]]
 
 
-def build_payload(observation: Observation, frame) -> dict[str, Any]:
+def build_payload(observation: Observation, frame,
+                  history_length=DEFAULT_HISTORY_LENGTH) -> dict[str, Any]:
     """构造 CogACT RayPE 请求；外参与训练数据同为 ``base_T_cam``。"""
     slots = SPEC.images.slots
+    history_length = validate_history_length(history_length)
     missing_calibration = [slot for slot in slots if slot not in observation.calibrations]
     missing_pose = [slot for slot in slots if slot not in observation.camera_poses]
     if missing_calibration or missing_pose:
@@ -106,8 +110,8 @@ def build_payload(observation: Observation, frame) -> dict[str, Any]:
         'task_description': str(observation.task),
         'return_dict': True,
         'state': state,
-        'history_state': history_payload(observation.history, frame, 'state'),
-        'history_action': history_payload(observation.history, frame, 'action'),
+        'history_state': history_payload(observation.history, frame, 'state', history_length),
+        'history_action': history_payload(observation.history, frame, 'action', history_length),
         'image_types': list(IMAGE_TYPES),
         'intrinsics_per_view': [
             normalized_intrinsic(observation.calibrations[slot], observation.images[slot])
@@ -156,11 +160,11 @@ def model_gripper(radians):
     return float(np.clip(SPEC.gripper.to_model(radians), 0., 1.))
 
 
-def history_payload(steps, frame, field):
+def history_payload(steps, frame, field, history_length=DEFAULT_HISTORY_LENGTH):
     if not steps:
         return None
-    if len(steps) > 15:
-        raise ValueError('history exceeds 15 control steps')
+    if len(steps) > history_length:
+        raise ValueError(f'history exceeds {history_length} control steps')
     result = {key: [] for key in _TRANS + _ROT + _GRIP}
     for step in steps:
         for side, trans_key, rot_key, grip_key in zip(SIDES, _TRANS, _ROT, _GRIP):
@@ -175,8 +179,10 @@ def history_payload(steps, frame, field):
 
 class CogACTUnitreeBackend(VlaBackend):
 
-    def __init__(self, url: str, timeout: float = 30.0, proxy: str = '') -> None:
+    def __init__(self, url: str, timeout: float = 30.0, proxy: str = '',
+                 history_length=DEFAULT_HISTORY_LENGTH) -> None:
         super().__init__(SPEC)
+        self._history_length = validate_history_length(history_length)
         self.url = url
         self.timeout = float(timeout)
         self._frame = SPEC.frame.transform()
@@ -205,9 +211,10 @@ class CogACTUnitreeBackend(VlaBackend):
         histories = [config.get(key) or {} for key in ('history_action', 'history_state')]
         if any(not isinstance(item, dict) for item in histories):
             raise ValueError('invalid history configuration')
-        if not all(item.get('enabled') is True and item.get('num_tokens') == 15
+        if not all(item.get('enabled') is True and item.get('num_tokens') == self.history_length
                    and item.get('pose_only') is False for item in histories):
-            raise ValueError('CogACT history requires both enabled=true, num_tokens=15, pose_only=false')
+            raise ValueError('CogACT history requires both enabled=true, '
+                             f'num_tokens={self.history_length}, pose_only=false')
         expected = {
             'action_chunk_size': 30, 'action_fps': 10., 'action_horizon_seconds': 3.,
             'history_fps': 10., 'history_sample_interval_seconds': .1,
@@ -230,8 +237,13 @@ class CogACTUnitreeBackend(VlaBackend):
     def history_enabled(self):
         return self._history_enabled
 
+    @property
+    def history_length(self):
+        return self._history_length
+
     def stats(self):
         return {'history_enabled': self.history_enabled,
+                'history_length': self.history_length,
                 'history_action_config': self._config.get('history_action'),
                 'history_state_config': self._config.get('history_state'),
                 'rotation_type': self._config.get('rotation_type')}
@@ -246,7 +258,7 @@ class CogACTUnitreeBackend(VlaBackend):
         for slot in self.spec.images.slots:
             resized = cv2.resize(observation.images[slot], (640, 360), interpolation=cv2.INTER_AREA)
             images.append(encode_jpeg(resized, self.spec.images.jpeg_quality))
-        payload = build_payload(observation, self._frame)
+        payload = build_payload(observation, self._frame, self.history_length)
         files = [(part, (filename, data, 'image/jpeg'))
                  for (part, filename), data in zip(IMAGE_PARTS, images)]
         encoded_query = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -281,7 +293,8 @@ def create(params: Mapping[str, Any]) -> CogACTUnitreeBackend:
     backend = CogACTUnitreeBackend(
         url,
         timeout=float(params.get('request_timeout_s') or 30.0),
-        proxy=str(params.get('proxy') or ''))
+        proxy=str(params.get('proxy') or ''),
+        history_length=params.get('history_length', PARAMETERS['history_length']))
     try:
         backend.configure()
     except Exception:

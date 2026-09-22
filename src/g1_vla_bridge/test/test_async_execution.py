@@ -166,8 +166,8 @@ def test_async_thirty_hz_publications_and_history(bridge):
     np.testing.assert_allclose(np.array(sent[::2])[:, 0], expected)
     np.testing.assert_allclose(np.array(sent[1::2])[:, 0], np.arange(6, 91) / 90.)
     rows = node._history.snapshot()
-    assert len(rows) == 15
-    np.testing.assert_allclose([row.action['left'][0] for row in rows], np.arange(48, 91, 3) / 3.)
+    assert len(rows) == 16
+    np.testing.assert_allclose([row.action['left'][0] for row in rows], np.arange(45, 91, 3) / 3.)
     np.testing.assert_allclose(np.diff([row.action_stamp for row in rows]), .1, atol=1e-9)
     clock.now = 10.
     VlaBridgeNode._on_tick(node)
