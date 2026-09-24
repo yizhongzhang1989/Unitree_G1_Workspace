@@ -60,11 +60,11 @@ continuous 模式在 `retry_delay_s` 后自动重试。`async` 模式见下方�
 
 ### CogACT 10Hz 成对历史
 
-启动依次调用 GET `/api/health` 和 `/api/config`，失败或配置不匹配即停止。
+启动依次调用 GET `/api/health` 和 `/api/config`，健康检查或 HTTP 请求失败即停止；
+服务端配置用于状态展示。
 历史数量由 [config/backends/cogact_unitree.yaml](config/backends/cogact_unitree.yaml) 的
 `history_length` 配置（正整数，默认 16），也可启动时传 `history_length:=30` 覆盖；修改后需重启节点。
-服务端 `history_action` 和 `history_state` 的 `num_tokens` 均须与 `history_length` 一致。
-同一配置用于历史截取、请求长度上限和服务端配置校验，`~/status` 中也会显示该值。
+同一配置用于历史截取和请求长度上限，`~/status` 中也会显示该值。
 当前 state 和两路历史均含 LEFT/RIGHT 的 TRANS、ROT_MAT、GRIPPER 六字段。
 历史按 10Hz 取最近 `history_length` 对真实动作和反馈，旧到新排列；30Hz 插值仅用于执行。
 以 episode 首次下发时间为原点，每个 100ms 时间格选第一条实际发布并完成配对的记录。

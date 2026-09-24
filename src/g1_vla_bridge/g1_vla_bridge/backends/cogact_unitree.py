@@ -205,32 +205,7 @@ class CogACTUnitreeBackend(VlaBackend):
             raise ValueError('CogACT health check failed')
         response = self._session.get(self._endpoint('config'), timeout=self.timeout)
         response.raise_for_status()
-        config = response.json()
-        if not isinstance(config, dict):
-            raise ValueError('/api/config must return an object')
-        histories = [config.get(key) or {} for key in ('history_action', 'history_state')]
-        if any(not isinstance(item, dict) for item in histories):
-            raise ValueError('invalid history configuration')
-        if not all(item.get('enabled') is True and item.get('num_tokens') == self.history_length
-                   and item.get('pose_only') is False for item in histories):
-            raise ValueError('CogACT history requires both enabled=true, '
-                             f'num_tokens={self.history_length}, pose_only=false')
-        expected = {
-            'action_chunk_size': 30, 'action_fps': 10., 'action_horizon_seconds': 3.,
-            'history_fps': 10., 'history_sample_interval_seconds': .1,
-            'history_managed_by': 'client', 'history_resampling': 'client',
-            'history_order': 'oldest_first', 'state_include_gripper': True,
-            'state_space': 'robot', 'action_space': 'robot', 'rotation_type': '6d',
-            'translation_action_from_state_type': 'abs',
-            'rotation_action_from_state_type': 'abs', 'view_number': 3,
-            'training_source_image_size': [640, 360], 'resize_short_edge': 256,
-            'history_pairing': 'past_observation_and_corresponding_training_action',
-        }
-        mismatches = {key: (config.get(key), value) for key, value in expected.items()
-                      if config.get(key) != value}
-        if mismatches:
-            raise ValueError(f'CogACT 10Hz config mismatch (actual, expected): {mismatches}')
-        self._config = config
+        self._config = response.json()
         self._history_enabled = True
 
     @property

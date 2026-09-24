@@ -170,26 +170,6 @@ def test_multipart_history_real_steps_only(monkeypatch, count):
             np.testing.assert_allclose(rotations[0], original['state'][f'ROBOT_{side}_ROT_MAT'])
 
 
-@pytest.mark.parametrize('config,status', [({}, 200), ({}, 404), ({}, 405),
-                         ({'history_action': {'enabled': False},
-                           'history_state': {'enabled': False}}, 200)])
-def test_old_server_is_rejected(monkeypatch, config, status):
-    with pytest.raises(ValueError):
-        configured_backend(monkeypatch, config, status)
-
-
-@pytest.mark.parametrize('history_field', ['history_action', 'history_state'])
-@pytest.mark.parametrize('field,value', [
-    ('enabled', False), ('num_tokens', 15), ('num_tokens', 17),
-    ('num_tokens', 30), ('pose_only', True),
-])
-def test_rejects_mismatched_history_contract(monkeypatch, history_field, field, value):
-    config = history_config()
-    config[history_field][field] = value
-    with pytest.raises(ValueError, match='requires both'):
-        configured_backend(monkeypatch, config)
-
-
 @pytest.mark.parametrize('history_length', [1, 15, 16, 30])
 def test_configured_length_controls_factory_and_inference(monkeypatch, history_length):
     backend, session = configured_backend(
@@ -245,14 +225,3 @@ def test_reset_does_not_modify_server(monkeypatch):
     assert isinstance(backend, CogACTUnitreeBackend)
     backend.reset()
     session.post.assert_not_called()
-
-
-@pytest.mark.parametrize('field,value', [('action_fps', 30.), ('history_fps', 30.),
-                         ('action_chunk_size', 29), ('action_horizon_seconds', 1.),
-                         ('history_order', 'newest_first'), ('state_include_gripper', False),
-                         ('rotation_action_from_state_type', 'delta')])
-def test_config_mismatch_stops(monkeypatch, field, value):
-    config = history_config()
-    config[field] = value
-    with pytest.raises(ValueError, match='config mismatch'):
-        configured_backend(monkeypatch, config)
