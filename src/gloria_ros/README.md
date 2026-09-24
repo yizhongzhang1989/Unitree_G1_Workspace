@@ -78,7 +78,7 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ros2 launch robot_bringup whole_body_dashboard.launch.py
 ```
 
-当前 active 的 `forward_position_controller` 或 `joint_trajectory_controller` claim 两只 Gloria interface，hardware interface 以 100 Hz 发布 `MitCommand`。hardware interface 使用 `0.75 s` 夹爪 freshness 阈值，独立于 G1 的 `0.25 s`；本驱动仍以自己的 `feedback_timeout_s=0.5 s` 先行失能故障侧。8770 末端 Dashboard 默认只监视；只有纯末端模式显式设置 `allow_gripper_control:=true` 时才恢复其直接 MIT publisher。
+当前 active 的 `forward_position_controller` claim 两只 Gloria interface，hardware interface 以 100 Hz 发布 `MitCommand`。hardware interface 使用 `0.75 s` 夹爪 freshness 阈值，独立于 G1 的 `0.25 s`；本驱动仍以自己的 `feedback_timeout_s=0.5 s` 先行失能故障侧。8770 末端 Dashboard 默认只监视；只有纯末端模式显式设置 `allow_gripper_control:=true` 时才恢复其直接 MIT publisher。
 
 仅启动原有末端设备体系，不加载 ros2_control：
 

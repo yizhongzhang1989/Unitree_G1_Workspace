@@ -45,9 +45,6 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     forward_config = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "forward_position_controller.yaml").read_text(
             encoding="utf-8"))
-    trajectory_config = yaml.safe_load(
-        (PACKAGE_ROOT / "config" / "joint_trajectory_controller.yaml").read_text(
-            encoding="utf-8"))
     gain_document = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "default_31dof_param.yaml").read_text(
             encoding="utf-8"))
@@ -56,10 +53,7 @@ def test_default_controller_claims_g1_body_and_both_grippers():
 
     forward_parameters = forward_config[
         "/forward_position_controller"]["ros__parameters"]
-    trajectory_parameters = trajectory_config[
-        "/joint_trajectory_controller"]["ros__parameters"]
     assert "joints" not in forward_parameters
-    assert "joints" not in trajectory_parameters
     assert joints[29:] == [
         "left_eccentric_joint",
         "right_eccentric_joint",
@@ -110,45 +104,25 @@ def test_default_controller_claims_g1_body_and_both_grippers():
     assert forward_parameters["adaptive_stiffness_scale"] >= 0.0
     assert forward_parameters["adaptive_stiffness_b"] > 0.0
     assert forward_parameters["adaptive_stiffness_power"] > 0.0
-    assert trajectory_parameters["command_interfaces"] == ["position"]
-    assert trajectory_parameters["state_interfaces"] == ["position", "velocity"]
-    # Humble 的 JTC 没有“不发布状态”这个概念（校验下限 0.1 Hz），也没有理由
-    # 偏离默认值，所以干脆不覆盖。
-    assert "state_publish_rate" not in trajectory_parameters
-    assert trajectory_parameters["allow_nonzero_velocity_at_trajectory_end"] is False
-    assert trajectory_parameters["allow_partial_joints_goal"] is True
-    # 轨迹点也是绝对位置，所以它拿到与 FPC 完全相同的一套重力前馈参数。
-    assert trajectory_parameters["gravity_table"] == \
-        forward_parameters["gravity_table"]
-    assert trajectory_parameters["compensation_scale"] == 1.0
-    assert trajectory_parameters["open_loop_control"] is False
-    constraints = trajectory_parameters["constraints"]
-    assert constraints["goal_time"] == 2.0
-    assert constraints["stopped_velocity_tolerance"] == 0.05
-    assert set(constraints) == {"goal_time", "stopped_velocity_tolerance", *joints}
-    assert all(constraints[joint]["goal"] == 0.05 for joint in joints)
 
 
-def test_controller_manager_registers_mutually_exclusive_fpc_and_jtc():
+def test_controller_manager_registers_fpc():
     manager_config = yaml.safe_load(
         (PACKAGE_ROOT / "config" / "controllers.yaml").read_text(
             encoding="utf-8"))["controller_manager"]["ros__parameters"]
 
     assert manager_config["forward_position_controller"]["type"] == \
         "unitree_g1_forward_command_controller/ForwardCommandController"
-    assert manager_config["joint_trajectory_controller"]["type"] == \
-        "unitree_g1_joint_trajectory_controller/JointTrajectoryController"
-    # 重力补偿已并入两个运动控制器，不再是独立 controller。
+    # 重力补偿已并入 FPC，不再是独立 controller。
     assert "arm_gravity_compensation" not in manager_config
 
 
 def test_plugin_names_stay_recognisable_to_the_test_dashboard():
-    # dashboard_node.classify_controller() 靠这两个后缀/子串归类；改名会让页面
-    # 把它们当成 "other"，Engage 按钮和关节面板都会消失。
+    # dashboard_node.classify_controller() 靠这个子串归类；改名会让页面
+    # 把它当成 "other"，Engage 按钮和关节面板都会消失。
     plugins = ElementTree.parse(PACKAGE_ROOT / "controller_plugins.xml").getroot()
     names = {element.get("name").lower() for element in plugins.findall("class")}
 
-    assert any(name.endswith("jointtrajectorycontroller") for name in names)
     assert any("forward_command_controller" in name for name in names)
 
 
@@ -199,7 +173,7 @@ def test_gripper_gains_only_come_from_gain_file():
     assert "gripper_kd" not in parameters
 
 
-def test_control_launch_loads_both_motion_controllers_inactive():
+def test_control_launch_loads_fpc_inactive():
     module = _load_control_launch()
     nodes = module._control_nodes(_context(module))
     spawners = {
@@ -217,11 +191,8 @@ def test_control_launch_loads_both_motion_controllers_inactive():
         ]
 
     assert "--inactive" in spawners["forward_position_controller"]
-    assert "--inactive" in spawners["joint_trajectory_controller"]
     assert parameter_files(spawners["forward_position_controller"]) == [
         "default_31dof_param.yaml", "forward_position_controller.yaml"]
-    assert parameter_files(spawners["joint_trajectory_controller"]) == [
-        "default_31dof_param.yaml", "joint_trajectory_controller.yaml"]
     assert "arm_gravity_compensation" not in spawners
 
 

@@ -38,10 +38,6 @@ setup(
             'robot_bringup.exit_debug_mode:main',
             'gravity_float_demo = '
             'robot_bringup.gravity_float_demo:main',
-            'ikt_pose_commander = '
-            'robot_bringup.ikt_pose_commander_compat:main',
-            'ikt_pose_commander_dashboard = '
-            'robot_bringup.ikt_pose_commander_compat:dashboard_main',
             'lowlevel_dashboard = '
             'robot_bringup.lowlevel.dashboard_node:main',
             'whole_body_dashboard = '

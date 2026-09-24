@@ -10,7 +10,7 @@
 组一次约 1 KiB 的 JSON。电机全字段（力矩 / 电压 / 温度 / 故障码）看
 ``robot_bringup`` 的底层监控页，两页职责不重叠。
 
-刻意省掉的三件事（和 ``ikt_pose_commander`` 的 dashboard 比）：
+刻意省掉的三件事：
 
 * **后端不算正运动学、不依赖 pinocchio**。URDF 解析一次后把关节树发给前端，
   three.js 的 ``Object3D`` 嵌套本来就在算矩阵，再算一遍是白花钱。于是每次轮询

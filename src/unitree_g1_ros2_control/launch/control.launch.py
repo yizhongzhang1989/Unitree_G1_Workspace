@@ -180,8 +180,6 @@ def _control_nodes(context):
         package_share / "config" / "default_31dof_param.yaml")
     forward_position_parameters = str(
         package_share / "config" / "forward_position_controller.yaml")
-    joint_trajectory_parameters = str(
-        package_share / "config" / "joint_trajectory_controller.yaml")
     imu_parameters = str(
         package_share / "config" / "pelvis_imu_broadcaster.yaml")
     joint_state_parameters = str(
@@ -250,19 +248,6 @@ def _control_nodes(context):
                 "forward_position_controller",
                 "--param-file", common_controller_parameters,
                 "--param-file", forward_position_parameters,
-                "--inactive",
-                "--controller-manager", controller_manager,
-                "--controller-manager-timeout", "30",
-            ],
-            output="screen",
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=[
-                "joint_trajectory_controller",
-                "--param-file", common_controller_parameters,
-                "--param-file", joint_trajectory_parameters,
                 "--inactive",
                 "--controller-manager", controller_manager,
                 "--controller-manager-timeout", "30",

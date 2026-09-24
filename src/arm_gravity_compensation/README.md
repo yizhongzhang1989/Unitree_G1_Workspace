@@ -69,7 +69,7 @@ $$q_{\text{other}} = [\,+1,\ -1,\ -1,\ +1,\ -1,\ +1,\ -1\,] \odot q_{\text{sourc
 ## 第二步：自动标定
 执行前必须满足：
 - 机械臂得到可靠支撑，周围无人且运动范围无障碍物。
-- ros2_control 的 FPC/JTC 都是 inactive，不存在其他 `/lowcmd` publisher。
+- ros2_control 的 FPC 是 inactive，不存在其他 `/lowcmd` publisher。
 - `/lowstate` 新鲜，`mode_pr == 0`。
 - 已记录足够多且分布不同的姿态。页面会显示回归 rank/nullity 和条件数；姿态越多、分布越分散，可观测子空间越完整。
 
@@ -154,7 +154,7 @@ ros2 param set /payload_estimator estimation_enabled true
 ros2 param set /payload_estimator estimation_enabled false
 ```
 
-开启和关闭时均清空历史，重新开启从新样本开始。关闭时立即发布零负载，之后默认以 10 Hz 持续发布，不依赖力传感器或重力方向输入是否到达；FPC/JTC 仍按自身 `payload_filter_tau_s`（默认 1 秒）平滑淡出已施加的额外补偿，**不是瞬时卸力或急停**。`~/reset` 和 `~/reload_calibration` 清理估计，但不改变开关；重启节点默认重新关闭，除非显式传入启动参数 `estimation_enabled:=true`。旧版运行进程需要在安全停机窗口重启负载节点一次才具备这个参数，修改源码不会更新已运行的 Python 对象。
+开启和关闭时均清空历史，重新开启从新样本开始。关闭时立即发布零负载，之后默认以 10 Hz 持续发布，不依赖力传感器或重力方向输入是否到达；FPC 仍按自身 `payload_filter_tau_s`（默认 1 秒）平滑淡出已施加的额外补偿，**不是瞬时卸力或急停**。`~/reset` 和 `~/reload_calibration` 清理估计，但不改变开关；重启节点默认重新关闭，除非显式传入启动参数 `estimation_enabled:=true`。旧版运行进程需要在安全停机窗口重启负载节点一次才具备这个参数，修改源码不会更新已运行的 Python 对象。
 
 开启后，不满足接收条件的读数不会更新估计，但仍会发布历史估计，因此不能靠“松手”或“转动手臂”自动清除误判的负载；需要明确关闭开关。
 
@@ -164,7 +164,7 @@ ros2 param set /payload_estimator estimation_enabled false
 
 ### whole_body 下独立自动标定
 
-已有 whole_body 和双侧力补偿节点时直接运行。两手空载、机器人可靠支撑、运动路径无障碍，停止 float/遥操作等 FPC 命令源；`estimation_enabled` 保持关闭。脚本不操作 float、不使用 JTC，也不直发 LowCmd。
+已有 whole_body 和双侧力补偿节点时直接运行。两手空载、机器人可靠支撑、运动路径无障碍，停止 float/遥操作等 FPC 命令源；`estimation_enabled` 保持关闭。脚本不操作 float，也不直发 LowCmd。
 
 ```bash
 ros2 run arm_gravity_compensation auto_ft_calibration

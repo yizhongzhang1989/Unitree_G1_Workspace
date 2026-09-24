@@ -11,7 +11,6 @@
         "${workspaceFolder}/src/gloria_ros",
         "${workspaceFolder}/src/kwr57_ros",
         "${workspaceFolder}/src/robot_bringup",
-        "${workspaceFolder}/src/inverse_kinematics_toolkit/ikt_pose_commander",
 
         "${workspaceFolder}/sdk/CAN-SDK",
         "${workspaceFolder}/sdk/KWR57-SDK",

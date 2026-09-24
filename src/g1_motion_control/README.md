@@ -882,7 +882,7 @@ CPU 闭环重跑里手臂写 0 并**没有**让下肢站不住，所以这一项
 | **手臂翻到了肩后、后续怎么发指令都跟不上** | 落进了肩的镜像解支（`shoulder_pitch≈+2.41`、`shoulder_roll` 顶死限位）。确认 `ik_rescue_err` 没被设成 0；应该是 0.01。看 `~/status` 的 `ik_pos_err` 是不是长期 > 0.01 但不下降。见第 5 节 |
 | **手腕突然翻 180 度** | `arm_rate_limit` 被调得太大或没生效。多解支是固有属性（同一末端位姿不同种子差 2.67 rad），只能靠限速摊开。改回 10，嫌快就 5。见第 5 节 |
 | `~/engage` 返回 `/joint_states 超时` | 控制栈没起，或 `scope:=whole_body` 忘了写 |
-| `~/engage` 返回 `switch_controller 拒绝激活` | FPC 被别的控制节点占着（IKT Pose Commander / JTC），先把它们停掉；只读 dashboard 不占控制器 |
+| `~/engage` 返回 `switch_controller 拒绝激活` | FPC 被别的控制节点占着（如 8200 面板 Engage 了），先把它停掉；只读 dashboard 不占控制器 |
 | `~/start` 返回 `站立插值还没走完` | 等满 `stand_s` 再按 `Enter` |
 | `~/home_left` / `~/home_right` 返回 `手臂还没接管` | 归位要求 `arms_live`：先 `~/engage` 并等满 `stand_s` |
 | 归位走完手臂马上又跑回去了 | 上层在 50 Hz 发归位前那个旧目标。策略层走完会重播种自己的缓存，但**拦不住别人接着发**。归位期间发布方要么停发、要么跟随 `limited_pose`（`vr_teleop` 走的是后者） |
