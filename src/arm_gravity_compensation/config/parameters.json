@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "created_at": "2026-07-27T03:02:10.915702Z",
-  "updated_at": "2026-08-19T06:42:47.144354Z",
+  "updated_at": "2026-09-24T05:55:43.685365Z",
   "source_urdf": {
     "path": "/workspace/src/unitree_g1_description/model/final.urdf",
     "sha256": "2f5c56aa500199bbf2390578b382a7387ed5eba663e5d26ea5e3ed466be2d110",
@@ -16656,716 +16656,544 @@
     "samples": [
       {
         "id": 1,
-        "captured_at": "2026-08-19T04:52:42.430092Z",
-        "source": "manual",
         "side": "left",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:20.719910Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.1410251622433429,
-          "left_shoulder_roll_joint": 0.011949487772959096,
-          "left_shoulder_yaw_joint": 0.22936805775323948,
-          "left_elbow_joint": 1.1783802805247006,
-          "left_wrist_roll_joint": 0.20489249737946302,
-          "left_wrist_pitch_joint": -1.1214910541381036,
-          "left_wrist_yaw_joint": 0.035206383602185684,
-          "right_shoulder_pitch_joint": -0.350593068070345,
-          "right_shoulder_roll_joint": -0.25124237170586217,
-          "right_shoulder_yaw_joint": -1.0866692591380407,
-          "right_elbow_joint": 1.5505165807850712,
-          "right_wrist_roll_joint": -0.8641656324579999,
-          "right_wrist_pitch_joint": -1.3891249132323098,
-          "right_wrist_yaw_joint": 0.223558303620015
+          "left_shoulder_pitch_joint": 0.006454600587046595,
+          "left_shoulder_roll_joint": -0.00640034930960786,
+          "left_shoulder_yaw_joint": -0.0045954992453898155,
+          "left_elbow_joint": 0.015386972396123794,
+          "left_wrist_roll_joint": -1.5695197351517216,
+          "left_wrist_pitch_joint": -0.004384422404391151,
+          "left_wrist_yaw_joint": 0.003260095909197805,
+          "right_shoulder_pitch_joint": 0.010457331615109597,
+          "right_shoulder_roll_joint": -0.00992164979138041,
+          "right_shoulder_yaw_joint": 0.0009427590399569962,
+          "right_elbow_joint": 0.01655021496117115,
+          "right_wrist_roll_joint": 1.570876140748301,
+          "right_wrist_pitch_joint": 0.0015842372724305719,
+          "right_wrist_yaw_joint": -0.0031015948863119206
         },
         "gravity": [
-          0.5591668002891643,
-          0.03576557724122086,
-          -9.79398556834443
+          0.3091519292005656,
+          -0.18098722114319238,
+          -9.80345621042674
         ],
         "wrench": [
-          -10.394352388381957,
-          12.262420463562012,
-          -0.26211626986041664,
-          0.4826743096113205,
-          0.03008201317861676,
-          0.7097948908805847
+          13.369603075006957,
+          7.68200631295481,
+          2.925830441136514,
+          0.032313351389220965,
+          0.3147247228571164,
+          0.35362245478937704
         ],
         "wrench_std": [
-          0.20810801424267886,
-          0.17327232801122908,
-          0.2011244163931387,
-          0.005088422868448062,
-          0.004941230725319342,
-          0.004868360164257591
+          0.24726950316428847,
+          0.21861272257577827,
+          0.2554331300136284,
+          0.00559338978666126,
+          0.005739369215141826,
+          0.004214098791218865
         ]
       },
       {
         "id": 2,
-        "captured_at": "2026-08-19T04:52:42.516022Z",
-        "source": "manual",
         "side": "right",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:20.719910Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.1410251622433429,
-          "left_shoulder_roll_joint": 0.011949487772959096,
-          "left_shoulder_yaw_joint": 0.22936805775323948,
-          "left_elbow_joint": 1.1783802805247006,
-          "left_wrist_roll_joint": 0.20489249737946302,
-          "left_wrist_pitch_joint": -1.1214910541381036,
-          "left_wrist_yaw_joint": 0.035206383602185684,
-          "right_shoulder_pitch_joint": -0.350593068070345,
-          "right_shoulder_roll_joint": -0.25124237170586217,
-          "right_shoulder_yaw_joint": -1.0866692591380407,
-          "right_elbow_joint": 1.5505165807850712,
-          "right_wrist_roll_joint": -0.8641656324579999,
-          "right_wrist_pitch_joint": -1.3891249132323098,
-          "right_wrist_yaw_joint": 0.223558303620015
+          "left_shoulder_pitch_joint": 0.0064547294500454135,
+          "left_shoulder_roll_joint": -0.006400607035605497,
+          "left_shoulder_yaw_joint": -0.004595628108388634,
+          "left_elbow_joint": 0.01538735898512025,
+          "left_wrist_roll_joint": -1.5695202504434893,
+          "left_wrist_pitch_joint": -0.004384937846372204,
+          "left_wrist_yaw_joint": 0.003259967046198986,
+          "right_shoulder_pitch_joint": 0.010458104763059847,
+          "right_shoulder_roll_joint": -0.009922422969373323,
+          "right_shoulder_yaw_joint": 0.0009421147268405685,
+          "right_elbow_joint": 0.016549957235173513,
+          "right_wrist_roll_joint": 1.570875625456533,
+          "right_wrist_pitch_joint": 0.001584108409431753,
+          "right_wrist_yaw_joint": -0.0031017237493107396
         },
         "gravity": [
-          0.5591668002891643,
-          0.03576557724122086,
-          -9.79398556834443
+          0.3091663264063993,
+          -0.18096769934663928,
+          -9.803456160948238
         ],
         "wrench": [
-          38.38379342215402,
-          -0.8904362931137993,
-          -1.1542771487008958,
-          0.42594991411481586,
-          -0.3319635930515471,
-          0.20866657225858598
+          27.703680797289778,
+          9.775675096819478,
+          0.5712852236083759,
+          0.023904767318037888,
+          -0.8478128967746612,
+          0.2491099355361795
         ],
         "wrench_std": [
-          0.1799585129036331,
-          0.20107961069864813,
-          0.2605748537565254,
-          0.004790124519185734,
-          0.003912512221305947,
-          0.0050555409329736435
+          0.2705997365851626,
+          0.24152436652840817,
+          0.20381725798780456,
+          0.004988792361659027,
+          0.006085250426461077,
+          0.004765679664580687
         ]
       },
       {
         "id": 3,
-        "captured_at": "2026-08-19T04:53:07.128993Z",
-        "source": "manual",
         "side": "left",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:23.893897Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.19827292182656117,
-          "left_shoulder_roll_joint": 0.05009062032359256,
-          "left_shoulder_yaw_joint": 0.347496113848611,
-          "left_elbow_joint": 0.8888779752638062,
-          "left_wrist_roll_joint": -1.335171025634188,
-          "left_wrist_pitch_joint": 0.013790213564639964,
-          "left_wrist_yaw_joint": -0.8675973546993845,
-          "right_shoulder_pitch_joint": -0.27070342140618936,
-          "right_shoulder_roll_joint": -0.6876839916412762,
-          "right_shoulder_yaw_joint": -0.8913583048510627,
-          "right_elbow_joint": 0.5694857245364023,
-          "right_wrist_roll_joint": -1.1455199718475342,
-          "right_wrist_pitch_joint": -1.1566450212280082,
-          "right_wrist_yaw_joint": 0.11570259002669
+          "left_shoulder_pitch_joint": 0.006450445440776171,
+          "left_shoulder_roll_joint": -0.005795775288517805,
+          "left_shoulder_yaw_joint": -0.004566754690034592,
+          "left_elbow_joint": 0.015385833192378916,
+          "left_wrist_roll_joint": -0.00011703743447024534,
+          "left_wrist_pitch_joint": -0.0056713434491068755,
+          "left_wrist_yaw_joint": 0.0009162832674461397,
+          "right_shoulder_pitch_joint": 0.010445144929071056,
+          "right_shoulder_roll_joint": -0.01026181153398245,
+          "right_shoulder_yaw_joint": 0.0010797277023579846,
+          "right_elbow_joint": 0.016537975718049294,
+          "right_wrist_roll_joint": 0.00030942249763261606,
+          "right_wrist_pitch_joint": 0.00035366212653164614,
+          "right_wrist_yaw_joint": -0.0014036842473247584
         },
         "gravity": [
-          0.5432391307772382,
-          -0.1981821259122475,
-          -9.79294210601499
+          0.3028949436388888,
+          -0.1815694130649731,
+          -9.803641487101267
         ],
         "wrench": [
-          -0.9375497415661812,
-          19.27960262298584,
-          -0.7492895774543286,
-          0.1265333242714405,
-          0.4442025080323219,
-          0.678979617357254
+          4.9263492239282485,
+          -0.9761994198915807,
+          2.9836707368810127,
+          0.4443471165413552,
+          -0.08351746193589048,
+          0.3871050698960081
         ],
         "wrench_std": [
-          0.28800447213322344,
-          0.23320262587486243,
-          0.25541675684086795,
-          0.004067018546111073,
-          0.006329677982172491,
-          0.005575674396592826
+          0.22463973889882125,
+          0.23118923617471132,
+          0.19318952896348893,
+          0.004853777710072593,
+          0.005170115474024743,
+          0.004978532868755338
         ]
       },
       {
         "id": 4,
-        "captured_at": "2026-08-19T04:53:07.229681Z",
-        "source": "manual",
         "side": "right",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:23.893897Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.19827292182656117,
-          "left_shoulder_roll_joint": 0.05009062032359256,
-          "left_shoulder_yaw_joint": 0.347496113848611,
-          "left_elbow_joint": 0.8888779752638062,
-          "left_wrist_roll_joint": -1.335171025634188,
-          "left_wrist_pitch_joint": 0.013790213564639964,
-          "left_wrist_yaw_joint": -0.8675973546993845,
-          "right_shoulder_pitch_joint": -0.27070342140618936,
-          "right_shoulder_roll_joint": -0.6876839916412762,
-          "right_shoulder_yaw_joint": -0.8913583048510627,
-          "right_elbow_joint": 0.5694857245364023,
-          "right_wrist_roll_joint": -1.1455199718475342,
-          "right_wrist_pitch_joint": -1.1566450212280082,
-          "right_wrist_yaw_joint": 0.11570259002669
+          "left_shoulder_pitch_joint": 0.006450666874451072,
+          "left_shoulder_roll_joint": -0.00579557130113244,
+          "left_shoulder_yaw_joint": -0.004566998941529738,
+          "left_elbow_joint": 0.01538610562290016,
+          "left_wrist_roll_joint": -0.0001171931088289344,
+          "left_wrist_pitch_joint": -0.005670935474336147,
+          "left_wrist_yaw_joint": 0.0009143333140711643,
+          "right_shoulder_pitch_joint": 0.010444820172300464,
+          "right_shoulder_roll_joint": -0.010261398191122633,
+          "right_shoulder_yaw_joint": 0.0010794633239703743,
+          "right_elbow_joint": 0.016537599951813097,
+          "right_wrist_roll_joint": 0.00030868841322923175,
+          "right_wrist_pitch_joint": 0.0003541023087516231,
+          "right_wrist_yaw_joint": -0.0014039204431403624
         },
         "gravity": [
-          0.5432391307772382,
-          -0.1981821259122475,
-          -9.79294210601499
+          0.30289338984653075,
+          -0.18154934478829093,
+          -9.803641886429395
         ],
         "wrench": [
-          45.34200649261474,
-          7.74268536567688,
-          -0.7825719326734543,
-          0.01934722885489464,
-          -0.0034596546595821566,
-          0.1465078555047512
+          35.9479452434339,
+          1.4829036198164287,
+          0.9813294667946665,
+          0.43315625159363996,
+          -0.44535406765184904,
+          0.20431289170917713
         ],
         "wrench_std": [
-          0.18629518465701547,
-          0.20459998407270258,
-          0.2023512643254659,
-          0.003932767829301731,
-          0.003572666622754831,
-          0.0033610321939163564
+          0.19016076641680066,
+          0.21397347918191534,
+          0.23582206103139575,
+          0.005344046225059627,
+          0.004657348305380605,
+          0.004198632298095422
         ]
       },
       {
         "id": 5,
-        "captured_at": "2026-08-19T04:53:33.063418Z",
-        "source": "manual",
         "side": "left",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:27.174449Z",
         "positions": {
-          "left_shoulder_pitch_joint": -1.665016936498975,
-          "left_shoulder_roll_joint": -0.1440106679522802,
-          "left_shoulder_yaw_joint": 1.352425798158797,
-          "left_elbow_joint": 0.6483457281475975,
-          "left_wrist_roll_joint": -1.9526261957864912,
-          "left_wrist_pitch_joint": -0.3009821429139092,
-          "left_wrist_yaw_joint": 1.166789090065729,
-          "right_shoulder_pitch_joint": -0.3884548848583585,
-          "right_shoulder_roll_joint": -0.6815853045100257,
-          "right_shoulder_yaw_joint": -0.571440144947597,
-          "right_elbow_joint": -0.7541917358125959,
-          "right_wrist_roll_joint": -1.7667893496770708,
-          "right_wrist_pitch_joint": -1.0766203551065354,
-          "right_wrist_yaw_joint": 0.35002935500372023
+          "left_shoulder_pitch_joint": 0.0064165860023950375,
+          "left_shoulder_roll_joint": -0.005804875209647161,
+          "left_shoulder_yaw_joint": -0.004563283675941088,
+          "left_elbow_joint": 0.013196822456134263,
+          "left_wrist_roll_joint": -0.000347413665925463,
+          "left_wrist_pitch_joint": -1.5704186590768958,
+          "left_wrist_yaw_joint": 0.0008432771128061558,
+          "right_shoulder_pitch_joint": 0.010451146421493382,
+          "right_shoulder_roll_joint": -0.010293418611650186,
+          "right_shoulder_yaw_joint": 0.0011341200718375784,
+          "right_elbow_joint": 0.015753843491115877,
+          "right_wrist_roll_joint": 0.00021983965713736071,
+          "right_wrist_pitch_joint": -1.5670258498960925,
+          "right_wrist_yaw_joint": 0.00036532556956073126
         },
         "gravity": [
-          0.9811208858756918,
-          -0.17818998971706287,
-          -9.759187985424973
+          0.20409526610060652,
+          -0.17755044445122067,
+          -9.806269248886428
         ],
         "wrench": [
-          -9.734287625267392,
-          28.919282186599006,
-          0.13586367158928797,
-          -0.3553881503286816,
-          -0.00458662696127292,
-          0.7388129830360413
+          5.2007117168877715,
+          6.7382572850873395,
+          -6.4697053970829135,
+          0.011924411526941243,
+          -0.04884208009768558,
+          0.3825134564471501
         ],
         "wrench_std": [
-          0.16456137303265117,
-          0.20243473392213726,
-          0.20510766435460018,
-          0.004040042911964318,
-          0.004371821041896143,
-          0.004317566016380729
+          0.22745328612886634,
+          0.22384531820140016,
+          0.24726524151129406,
+          0.005224625202161151,
+          0.005067238206531594,
+          0.0050121781267333885
         ]
       },
       {
         "id": 6,
-        "captured_at": "2026-08-19T04:53:33.213932Z",
-        "source": "manual",
         "side": "right",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:27.174449Z",
         "positions": {
-          "left_shoulder_pitch_joint": -1.665016936498975,
-          "left_shoulder_roll_joint": -0.1440106679522802,
-          "left_shoulder_yaw_joint": 1.352425798158797,
-          "left_elbow_joint": 0.6483457281475975,
-          "left_wrist_roll_joint": -1.9526261957864912,
-          "left_wrist_pitch_joint": -0.3009821429139092,
-          "left_wrist_yaw_joint": 1.166789090065729,
-          "right_shoulder_pitch_joint": -0.3884548848583585,
-          "right_shoulder_roll_joint": -0.6815853045100257,
-          "right_shoulder_yaw_joint": -0.571440144947597,
-          "right_elbow_joint": -0.7541917358125959,
-          "right_wrist_roll_joint": -1.7667893496770708,
-          "right_wrist_pitch_joint": -1.0766203551065354,
-          "right_wrist_yaw_joint": 0.35002935500372023
+          "left_shoulder_pitch_joint": 0.006416714865393857,
+          "left_shoulder_roll_joint": -0.005804359757651885,
+          "left_shoulder_yaw_joint": -0.00456405684391978,
+          "left_elbow_joint": 0.013196693593135444,
+          "left_wrist_roll_joint": -0.0003475425286113375,
+          "left_wrist_pitch_joint": -1.5704185321766844,
+          "left_wrist_yaw_joint": 0.0008432771121802669,
+          "right_shoulder_pitch_joint": 0.010450888705509965,
+          "right_shoulder_roll_joint": -0.010293805200646641,
+          "right_shoulder_yaw_joint": 0.0011345066595822573,
+          "right_elbow_joint": 0.01575345690211942,
+          "right_wrist_roll_joint": 0.00021971079429501406,
+          "right_wrist_pitch_joint": -1.5670264946517123,
+          "right_wrist_yaw_joint": 0.0003654544322466057
         },
         "gravity": [
-          0.9811208858756918,
-          -0.17818998971706287,
-          -9.759187985424973
+          0.20413612814150567,
+          -0.17758157415852474,
+          -9.806267859652579
         ],
         "wrench": [
-          38.102162742614745,
-          15.893461322784423,
-          0.19817270282655955,
-          -0.37025178521871566,
-          -0.39822544902563095,
-          0.20983068346977235
+          36.414933071341565,
+          9.010957994768697,
+          -9.334989814348118,
+          -0.016966887724695987,
+          -0.394108626791226,
+          0.1774112037433091
         ],
         "wrench_std": [
-          0.20830088215550183,
-          0.19846744135269434,
-          0.23296165219655154,
-          0.00454742559828394,
-          0.007529195931608289,
-          0.004879573382964153
+          0.20760437483245733,
+          0.19125717808475315,
+          0.2670095172711445,
+          0.0050421645650507545,
+          0.005334141116424801,
+          0.005086142095077556
         ]
       },
       {
         "id": 7,
-        "captured_at": "2026-08-19T04:53:54.775366Z",
-        "source": "manual",
         "side": "left",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:31.110649Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.8918883162831504,
-          "left_shoulder_roll_joint": 0.9527797642208281,
-          "left_shoulder_yaw_joint": -1.3101953748672728,
-          "left_elbow_joint": -0.605053935164497,
-          "left_wrist_roll_joint": -0.02381147595625075,
-          "left_wrist_pitch_joint": 1.321003142235771,
-          "left_wrist_yaw_joint": 0.744408396879832,
-          "right_shoulder_pitch_joint": -0.32826368042400905,
-          "right_shoulder_roll_joint": -1.888024972733997,
-          "right_shoulder_yaw_joint": -0.37834907476864166,
-          "right_elbow_joint": -1.035043309983753,
-          "right_wrist_roll_joint": -1.9716118699028378,
-          "right_wrist_pitch_joint": -1.2295825337606763,
-          "right_wrist_yaw_joint": 0.48758810153083193
+          "left_shoulder_pitch_joint": 0.4820128579934438,
+          "left_shoulder_roll_joint": 0.28746933341026304,
+          "left_shoulder_yaw_joint": 0.11166168509258165,
+          "left_elbow_joint": -0.49129024942715965,
+          "left_wrist_roll_joint": -0.16669271737337113,
+          "left_wrist_pitch_joint": -0.9901808778444926,
+          "left_wrist_yaw_joint": -0.42516929540369247,
+          "right_shoulder_pitch_joint": 0.483568008740743,
+          "right_shoulder_roll_joint": -0.2906254529953003,
+          "right_shoulder_yaw_joint": -0.10736960470676422,
+          "right_elbow_joint": -0.49020315408706666,
+          "right_wrist_roll_joint": 0.157311997976568,
+          "right_wrist_pitch_joint": -0.988430651028951,
+          "right_wrist_yaw_joint": 0.4238535503546397
         },
         "gravity": [
-          0.7195098266556197,
-          0.02075478648586337,
-          -9.783556349721911
+          -0.12376438508586242,
+          -0.1739705617248146,
+          -9.807676285916177
         ],
         "wrench": [
-          -18.130533504486085,
-          21.364256572723388,
-          -0.7239903330802917,
-          0.020326084829866885,
-          -0.3834895521402359,
-          0.7971240401268005
+          0.7726499795913696,
+          2.85660416815016,
+          -3.719057880507575,
+          0.21770330518484116,
+          -0.2766683495706982,
+          0.4164668060011334
         ],
         "wrench_std": [
-          0.26826843919230503,
-          0.1566253883580673,
-          0.15426309268864966,
-          0.004363936811868066,
-          0.006511854833382133,
-          0.004507894745914651
+          0.22656970892660294,
+          0.2557755970348762,
+          0.2178865552212478,
+          0.005914774227411169,
+          0.004895801193892774,
+          0.005439852264942001
         ]
       },
       {
         "id": 8,
-        "captured_at": "2026-08-19T04:53:54.877411Z",
-        "source": "manual",
         "side": "right",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:31.110649Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.8918883162831504,
-          "left_shoulder_roll_joint": 0.9527797642208281,
-          "left_shoulder_yaw_joint": -1.3101953748672728,
-          "left_elbow_joint": -0.605053935164497,
-          "left_wrist_roll_joint": -0.02381147595625075,
-          "left_wrist_pitch_joint": 1.321003142235771,
-          "left_wrist_yaw_joint": 0.744408396879832,
-          "right_shoulder_pitch_joint": -0.32826368042400905,
-          "right_shoulder_roll_joint": -1.888024972733997,
-          "right_shoulder_yaw_joint": -0.37834907476864166,
-          "right_elbow_joint": -1.035043309983753,
-          "right_wrist_roll_joint": -1.9716118699028378,
-          "right_wrist_pitch_joint": -1.2295825337606763,
-          "right_wrist_yaw_joint": 0.48758810153083193
+          "left_shoulder_pitch_joint": 0.4820124798200347,
+          "left_shoulder_roll_joint": 0.28746887330304494,
+          "left_shoulder_yaw_joint": 0.11166151866994121,
+          "left_elbow_joint": -0.49129017984325235,
+          "left_wrist_roll_joint": -0.16669335588812828,
+          "left_wrist_pitch_joint": -0.9901814738457854,
+          "left_wrist_yaw_joint": -0.4251691350205378,
+          "right_shoulder_pitch_joint": 0.48356838388876483,
+          "right_shoulder_roll_joint": -0.2906256345185367,
+          "right_shoulder_yaw_joint": -0.10736953500996936,
+          "right_elbow_joint": -0.49020329930565576,
+          "right_wrist_roll_joint": 0.15731297518042,
+          "right_wrist_pitch_joint": -0.9884301457892765,
+          "right_wrist_yaw_joint": 0.4238535836338997
         },
         "gravity": [
-          0.7195098266556197,
-          0.02075478648586337,
-          -9.783556349721911
+          -0.12376107185612185,
+          -0.1739792963406382,
+          -9.807676171269632
         ],
         "wrench": [
-          28.14388132095337,
-          8.679430961608887,
-          0.07034427970647812,
-          -0.0035721680091228337,
-          -0.8638539254665375,
-          0.279339437186718
+          39.78106875853105,
+          5.717063307762146,
+          -5.3879138935696,
+          0.19656564430757004,
+          -0.22374849885024808,
+          0.17579606361687183
         ],
         "wrench_std": [
-          0.21974381241110244,
-          0.2043087542789946,
-          0.19648842088872076,
-          0.00503488102442775,
-          0.003680402388360892,
-          0.0038793431811423532
+          0.2009170323444755,
+          0.2199577852917366,
+          0.24132789358805867,
+          0.004981443975690935,
+          0.004418419394317732,
+          0.0053553897664366246
         ]
       },
       {
         "id": 9,
-        "captured_at": "2026-08-19T04:54:12.459753Z",
-        "source": "manual",
         "side": "left",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:34.680750Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.6065638906016023,
-          "left_shoulder_roll_joint": 0.7500765929392961,
-          "left_shoulder_yaw_joint": -1.172486570448363,
-          "left_elbow_joint": 0.2600472291828367,
-          "left_wrist_roll_joint": -0.9801635992643499,
-          "left_wrist_pitch_joint": 0.963632493919969,
-          "left_wrist_yaw_joint": 0.03550492543787832,
-          "right_shoulder_pitch_joint": -0.0034174951080062975,
-          "right_shoulder_roll_joint": -0.7200777717056026,
-          "right_shoulder_yaw_joint": 0.520547535403932,
-          "right_elbow_joint": 0.4606657244677652,
-          "right_wrist_roll_joint": -1.6103921169566797,
-          "right_wrist_pitch_joint": -0.7030729070936818,
-          "right_wrist_yaw_joint": 0.47784201475618715
+          "left_shoulder_pitch_joint": -0.2572500507036845,
+          "left_shoulder_roll_joint": -0.029434988937444156,
+          "left_shoulder_yaw_joint": 0.07286315941148334,
+          "left_elbow_joint": -0.6468054294586182,
+          "left_wrist_roll_joint": -0.43193984892633225,
+          "left_wrist_pitch_joint": -1.1456260098351372,
+          "left_wrist_yaw_joint": 0.03493441728254159,
+          "right_shoulder_pitch_joint": -0.2534900625546773,
+          "right_shoulder_roll_joint": 0.02737476726373037,
+          "right_shoulder_yaw_joint": -0.0690256738000446,
+          "right_elbow_joint": -0.6486756053235796,
+          "right_wrist_roll_joint": 0.4314085364341736,
+          "right_wrist_pitch_joint": -1.1413702792591518,
+          "right_wrist_yaw_joint": -0.03690595357782311
         },
         "gravity": [
-          0.3983441275508075,
-          0.02234247483758126,
-          -9.801883633764684
+          0.042070261326994235,
+          -0.16642090648455835,
+          -9.808498023308898
         ],
         "wrench": [
-          -9.45514170328776,
-          20.326906022571382,
-          8.345640977223715,
-          0.12917091200749078,
-          0.04036948386402357,
-          0.736395293758029
+          7.833707502153184,
+          11.299030664232042,
+          -4.562217066023085,
+          -0.20433689769771363,
+          0.038661976779500645,
+          0.3848013357983695
         ],
         "wrench_std": [
-          0.16306910780941908,
-          0.2775200163439391,
-          0.22254013564271277,
-          0.004827755476295394,
-          0.005311717368260757,
-          0.004242171781050539
+          0.21372298597467831,
+          0.23671980320760197,
+          0.23531940052249362,
+          0.0050572988911329305,
+          0.004968996971076967,
+          0.00489988466883091
         ]
       },
       {
         "id": 10,
-        "captured_at": "2026-08-19T04:54:12.569359Z",
-        "source": "manual",
         "side": "right",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:34.680750Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.6065638906016023,
-          "left_shoulder_roll_joint": 0.7500765929392961,
-          "left_shoulder_yaw_joint": -1.172486570448363,
-          "left_elbow_joint": 0.2600472291828367,
-          "left_wrist_roll_joint": -0.9801635992643499,
-          "left_wrist_pitch_joint": 0.963632493919969,
-          "left_wrist_yaw_joint": 0.03550492543787832,
-          "right_shoulder_pitch_joint": -0.0034174951080062975,
-          "right_shoulder_roll_joint": -0.7200777717056026,
-          "right_shoulder_yaw_joint": 0.520547535403932,
-          "right_elbow_joint": 0.4606657244677652,
-          "right_wrist_roll_joint": -1.6103921169566797,
-          "right_wrist_pitch_joint": -0.7030729070936818,
-          "right_wrist_yaw_joint": 0.47784201475618715
+          "left_shoulder_pitch_joint": -0.25724999282671057,
+          "left_shoulder_roll_joint": -0.029434821042029755,
+          "left_shoulder_yaw_joint": 0.07286330984662408,
+          "left_elbow_joint": -0.646805715949639,
+          "left_wrist_roll_joint": -0.4319393621838611,
+          "left_wrist_pitch_joint": -1.1456252284671948,
+          "left_wrist_yaw_joint": 0.034934148070928844,
+          "right_shoulder_pitch_joint": -0.2534895474496095,
+          "right_shoulder_roll_joint": 0.027374315682960594,
+          "right_shoulder_yaw_joint": -0.06902627015243405,
+          "right_elbow_joint": -0.6486754864454269,
+          "right_wrist_roll_joint": 0.4314086579758188,
+          "right_wrist_pitch_joint": -1.1413704364196113,
+          "right_wrist_yaw_joint": -0.03690581173514542
         },
         "gravity": [
-          0.3983441275508075,
-          0.02234247483758126,
-          -9.801883633764684
+          0.04207391123028122,
+          -0.16643932618866142,
+          -9.808497689546522
         ],
         "wrench": [
-          37.095681508382164,
-          7.826179186503093,
-          8.110510985056559,
-          0.08303423580669221,
-          -0.4151281075818198,
-          0.20655953316461473
+          33.48253113290538,
+          13.812458867612092,
+          -7.073720102724821,
+          -0.22327514624466066,
+          -0.5589484047630559,
+          0.20990420586389044
         ],
         "wrench_std": [
-          0.1863698224329275,
-          0.26318582894287335,
-          0.2286388347073444,
-          0.006454627618166845,
-          0.004811101096814566,
-          0.004531564552564833
+          0.2352243297303402,
+          0.23252874364881615,
+          0.22120704003982186,
+          0.004221797784348625,
+          0.004988934148868735,
+          0.005514276648290254
         ]
       },
       {
         "id": 11,
-        "captured_at": "2026-08-19T04:54:32.089733Z",
-        "source": "manual",
         "side": "left",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:38.071025Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.6133065032958984,
-          "left_shoulder_roll_joint": 0.16988550126552582,
-          "left_shoulder_yaw_joint": -0.6008886223572951,
-          "left_elbow_joint": 0.02394031537266878,
-          "left_wrist_roll_joint": -0.6575974899071914,
-          "left_wrist_pitch_joint": -1.2411311340332032,
-          "left_wrist_yaw_joint": -0.22846151622442099,
-          "right_shoulder_pitch_joint": -0.22492370261595798,
-          "right_shoulder_roll_joint": -1.0402573640529926,
-          "right_shoulder_yaw_joint": -0.06928205960072004,
-          "right_elbow_joint": -0.4520470400956961,
-          "right_wrist_roll_joint": -1.9707139352651744,
-          "right_wrist_pitch_joint": 1.2351605987548828,
-          "right_wrist_yaw_joint": -0.11142217461879436
+          "left_shoulder_pitch_joint": 0.629781268772326,
+          "left_shoulder_roll_joint": 0.2072720954292699,
+          "left_shoulder_yaw_joint": -0.4036439663485477,
+          "left_elbow_joint": -0.3621033728122711,
+          "left_wrist_roll_joint": -0.9894551252063952,
+          "left_wrist_pitch_joint": -0.5193089102443896,
+          "left_wrist_yaw_joint": 0.9389855077392176,
+          "right_shoulder_pitch_joint": 0.6329694227168434,
+          "right_shoulder_roll_joint": -0.2093121908212963,
+          "right_shoulder_yaw_joint": 0.40602820609745227,
+          "right_elbow_joint": -0.3593206286430359,
+          "right_wrist_roll_joint": 0.9832490262232328,
+          "right_wrist_pitch_joint": -0.5161425163871364,
+          "right_wrist_yaw_joint": -0.9389292158578572
         },
         "gravity": [
-          0.5805565594947699,
-          -0.3368364644285654,
-          -9.787011560096312
+          -0.2651692953773046,
+          -0.17298008967311956,
+          -9.804889371756524
         ],
         "wrench": [
-          -9.981639180864606,
-          19.909440540132067,
-          -8.374046711694627,
-          0.05045769310423306,
-          0.043041809861149104,
-          0.7179015080134074
+          7.905622873808208,
+          2.856605153334768,
+          8.036769907098067,
+          0.28340916131672106,
+          0.060463891413651015,
+          0.38929930643031474
         ],
         "wrench_std": [
-          0.26147654933327025,
-          0.1674710272742466,
-          0.22420874481254502,
-          0.004512789705799595,
-          0.005037842754094941,
-          0.004835426333367526
+          0.20895750309037145,
+          0.2923925960778242,
+          0.22609730098950057,
+          0.004941416608563822,
+          0.004700154882033982,
+          0.005653928088637092
         ]
       },
       {
         "id": 12,
-        "captured_at": "2026-08-19T04:54:32.197156Z",
-        "source": "manual",
         "side": "right",
+        "source": "automatic_ft",
+        "captured_at": "2026-09-24T05:55:38.071025Z",
         "positions": {
-          "left_shoulder_pitch_joint": -0.6133065032958984,
-          "left_shoulder_roll_joint": 0.16988550126552582,
-          "left_shoulder_yaw_joint": -0.6008886223572951,
-          "left_elbow_joint": 0.02394031537266878,
-          "left_wrist_roll_joint": -0.6575974899071914,
-          "left_wrist_pitch_joint": -1.2411311340332032,
-          "left_wrist_yaw_joint": -0.22846151622442099,
-          "right_shoulder_pitch_joint": -0.22492370261595798,
-          "right_shoulder_roll_joint": -1.0402573640529926,
-          "right_shoulder_yaw_joint": -0.06928205960072004,
-          "right_elbow_joint": -0.4520470400956961,
-          "right_wrist_roll_joint": -1.9707139352651744,
-          "right_wrist_pitch_joint": 1.2351605987548828,
-          "right_wrist_yaw_joint": -0.11142217461879436
+          "left_shoulder_pitch_joint": 0.629781520994086,
+          "left_shoulder_roll_joint": 0.20727171678292125,
+          "left_shoulder_yaw_joint": -0.4036437141267877,
+          "left_elbow_joint": -0.3621033728122711,
+          "left_wrist_roll_joint": -0.9894551252063952,
+          "left_wrist_pitch_joint": -0.5193089102443896,
+          "left_wrist_yaw_joint": 0.9389856338500977,
+          "right_shoulder_pitch_joint": 0.6329687921624435,
+          "right_shoulder_roll_joint": -0.2093120647104163,
+          "right_shoulder_yaw_joint": 0.4060280796728636,
+          "right_elbow_joint": -0.3593208808647959,
+          "right_wrist_roll_joint": 0.9832491529615301,
+          "right_wrist_pitch_joint": -0.5161423902762564,
+          "right_wrist_yaw_joint": -0.9389293419687371
         },
         "gravity": [
-          0.5805565594947699,
-          -0.3368364644285654,
-          -9.787011560096312
+          -0.26516991303341714,
+          -0.17298365499797108,
+          -9.804889295764664
         ],
         "wrench": [
-          36.39870471046085,
-          7.161138262067523,
-          -8.647267296200706,
-          0.003315342753748631,
-          -0.43620528209777104,
-          0.22110767662525177
+          32.83424674586246,
+          4.472773795378836,
+          2.118582874850223,
+          0.22525895943767146,
+          -0.5520499950961063,
+          0.18228290143765902
         ],
         "wrench_std": [
-          0.2052623184561173,
-          0.1838565904112775,
-          0.2181319725376181,
-          0.005278991336682021,
-          0.004541123692710374,
-          0.004834396516421926
-        ]
-      },
-      {
-        "id": 13,
-        "captured_at": "2026-08-19T04:54:46.932372Z",
-        "source": "manual",
-        "side": "left",
-        "positions": {
-          "left_shoulder_pitch_joint": -0.6088345287651415,
-          "left_shoulder_roll_joint": 0.1721730802134173,
-          "left_shoulder_yaw_joint": -0.9465610996776859,
-          "left_elbow_joint": 0.3880187071711812,
-          "left_wrist_roll_joint": -0.8742136750000202,
-          "left_wrist_pitch_joint": -0.8788048399994705,
-          "left_wrist_yaw_joint": -0.1191370500041949,
-          "right_shoulder_pitch_joint": -0.09526364011875052,
-          "right_shoulder_roll_joint": -1.0408352992392533,
-          "right_shoulder_yaw_joint": 0.5279937110199834,
-          "right_elbow_joint": -0.4800711951113695,
-          "right_wrist_roll_joint": -1.9628772171127875,
-          "right_wrist_pitch_joint": 1.019305844575364,
-          "right_wrist_yaw_joint": -0.7185650813263773
-        },
-        "gravity": [
-          0.6568518615763455,
-          -0.2746262036774539,
-          -9.784131340093376
-        ],
-        "wrench": [
-          -7.641738709949312,
-          14.209885960533505,
-          -4.791765326545352,
-          0.3585664800235203,
-          0.14799926181634268,
-          0.7073987410182044
-        ],
-        "wrench_std": [
-          0.24900297820952913,
-          0.30501564768355444,
-          0.18220922976781392,
-          0.005722580605916377,
-          0.0066878504926875994,
-          0.005769645208164115
-        ]
-      },
-      {
-        "id": 14,
-        "captured_at": "2026-08-19T04:54:47.024167Z",
-        "source": "manual",
-        "side": "right",
-        "positions": {
-          "left_shoulder_pitch_joint": -0.6088345287651415,
-          "left_shoulder_roll_joint": 0.1721730802134173,
-          "left_shoulder_yaw_joint": -0.9465610996776859,
-          "left_elbow_joint": 0.3880187071711812,
-          "left_wrist_roll_joint": -0.8742136750000202,
-          "left_wrist_pitch_joint": -0.8788048399994705,
-          "left_wrist_yaw_joint": -0.1191370500041949,
-          "right_shoulder_pitch_joint": -0.09526364011875052,
-          "right_shoulder_roll_joint": -1.0408352992392533,
-          "right_shoulder_yaw_joint": 0.5279937110199834,
-          "right_elbow_joint": -0.4800711951113695,
-          "right_wrist_roll_joint": -1.9628772171127875,
-          "right_wrist_pitch_joint": 1.019305844575364,
-          "right_wrist_yaw_joint": -0.7185650813263773
-        },
-        "gravity": [
-          0.6568518615763455,
-          -0.2746262036774539,
-          -9.784131340093376
-        ],
-        "wrench": [
-          34.95575459798177,
-          12.502610115777879,
-          -6.741471404121036,
-          -0.2724677097229731,
-          -0.5169384905270168,
-          0.22603465616703033
-        ],
-        "wrench_std": [
-          0.24523467589395387,
-          0.20087972042725152,
-          0.3021573248504224,
-          0.004520729836425795,
-          0.004640128682684432,
-          0.004873965218516655
-        ]
-      },
-      {
-        "id": 15,
-        "captured_at": "2026-08-19T04:55:02.182946Z",
-        "source": "manual",
-        "side": "left",
-        "positions": {
-          "left_shoulder_pitch_joint": -0.47660072377094853,
-          "left_shoulder_roll_joint": 0.28567915982924974,
-          "left_shoulder_yaw_joint": -1.2656646898159614,
-          "left_elbow_joint": 1.0431438822012682,
-          "left_wrist_roll_joint": -0.8543035175937873,
-          "left_wrist_pitch_joint": -0.3439974392262789,
-          "left_wrist_yaw_joint": -0.20645263423331273,
-          "right_shoulder_pitch_joint": -0.0555502252581601,
-          "right_shoulder_roll_joint": -1.3869260790256353,
-          "right_shoulder_yaw_joint": 1.120556306380492,
-          "right_elbow_joint": 0.33531539944502026,
-          "right_wrist_roll_joint": -1.962559000421793,
-          "right_wrist_pitch_joint": 0.4145852778202448,
-          "right_wrist_yaw_joint": -0.7403422525295844
-        },
-        "gravity": [
-          0.4641236126776636,
-          -0.36835709556875396,
-          -9.792088761970001
-        ],
-        "wrench": [
-          -9.683039120265416,
-          14.24825768243699,
-          5.408622378394718,
-          0.4127659471262069,
-          0.057349743942419686,
-          0.7246826433000111
-        ],
-        "wrench_std": [
-          0.2120010466561615,
-          0.2129576489608071,
-          0.28037423172248704,
-          0.0040311317046611604,
-          0.003740144953443867,
-          0.003894776038949966
-        ]
-      },
-      {
-        "id": 16,
-        "captured_at": "2026-08-19T04:55:02.268953Z",
-        "source": "manual",
-        "side": "right",
-        "positions": {
-          "left_shoulder_pitch_joint": -0.47660072377094853,
-          "left_shoulder_roll_joint": 0.28567915982924974,
-          "left_shoulder_yaw_joint": -1.2656646898159614,
-          "left_elbow_joint": 1.0431438822012682,
-          "left_wrist_roll_joint": -0.8543035175937873,
-          "left_wrist_pitch_joint": -0.3439974392262789,
-          "left_wrist_yaw_joint": -0.20645263423331273,
-          "right_shoulder_pitch_joint": -0.0555502252581601,
-          "right_shoulder_roll_joint": -1.3869260790256353,
-          "right_shoulder_yaw_joint": 1.120556306380492,
-          "right_elbow_joint": 0.33531539944502026,
-          "right_wrist_roll_joint": -1.962559000421793,
-          "right_wrist_pitch_joint": 0.4145852778202448,
-          "right_wrist_yaw_joint": -0.7403422525295844
-        },
-        "gravity": [
-          0.4641236126776636,
-          -0.36835709556875396,
-          -9.792088761970001
-        ],
-        "wrench": [
-          39.35776844024658,
-          13.579879188537598,
-          5.31327862739563,
-          -0.22387031316757203,
-          -0.30015990883111954,
-          0.18983700200915338
-        ],
-        "wrench_std": [
-          0.20236114058010307,
-          0.21211052652490714,
-          0.18195917457407418,
-          0.005453474816546672,
-          0.00462432180095994,
-          0.004807655381794595
+          0.19294075539870417,
+          0.22732823610146838,
+          0.2443664355763789,
+          0.005374474647779182,
+          0.004259477889005862,
+          0.005092237256436862
         ]
       }
     ],
     "left": {
-      "calibrated_at": "2026-08-19T04:55:36.363195Z",
+      "calibrated_at": "2026-09-24T05:55:43.677626Z",
       "calibration": {
         "force_bias": [
-          -9.559931732936196,
-          20.766266052796965,
-          0.1203087369901133
+          4.881600175719205,
+          7.425490705078296,
+          2.3834946873195526
         ],
         "torque_bias": [
-          0.05729379205881496,
-          0.04328668701775259,
-          0.7294896363573149
+          0.03032024175072085,
+          -0.09147153080856597,
+          0.40036401585447623
         ],
-        "tool_mass": 0.8621297371821984,
+        "tool_mass": 0.8613754120664814,
         "tool_com": [
-          -6.317953642237702e-07,
-          -0.0004405121282793842,
-          0.10153610702181265
+          0.0014899792873967297,
+          -0.0013908917814645745,
+          0.0992865606512749
         ],
         "tool_first_moment": [
-          -5.446895713111703e-07,
-          -0.00037977860537907634,
-          0.08753729726121891
+          0.0012834315226518804,
+          -0.0011980799813989301,
+          0.08552300209365561
         ],
         "rotation": [
           1.0,
@@ -17386,25 +17214,25 @@
         ]
       },
       "diagnostics": {
-        "sample_count": 8,
+        "sample_count": 6,
         "coverage": {
-          "count": 8,
+          "count": 6,
           "singular_values": [
-            0.6420505849484689,
-            0.5883903369949708,
-            0.4914955317175055
+            0.6939589129397555,
+            0.5547586882236601,
+            0.45898129045946584
           ],
-          "spread": 0.7655090474794178
+          "spread": 0.6613954830771246
         },
-        "force_residual_rms": 0.24577428690767747,
-        "torque_residual_rms": 0.01609226958627354,
-        "force_condition": 10.092581003015214,
-        "torque_condition": 8.93109697656727,
+        "force_residual_rms": 0.398351581935084,
+        "torque_residual_rms": 0.015193950643438864,
+        "force_condition": 11.067246876918453,
+        "torque_condition": 11.290426925228648,
         "inlier_fraction": 0.99,
         "first_moment": [
-          0.0012162739495759527,
-          0.004637025800073191,
-          0.042932739193499894
+          0.0024991854996941325,
+          0.003814334943676473,
+          0.040957471027297104
         ],
         "measurement_origin": [
           -0.001411410123868755,
@@ -17412,52 +17240,41 @@
           0.05173764010681898
         ],
         "orientation_estimated": false,
-        "orientation_probability": 0.6115732574419942,
-        "free_force_residual_rms": 0.19831242861367718,
-        "free_mass": 0.8643515228330901,
+        "orientation_probability": 0.019493681086118212,
+        "free_force_residual_rms": 0.1307998996569781,
+        "free_mass": 0.9291865402095462,
         "principal_gains": [
-          1.0339291821918701,
-          0.9894921644973177,
-          0.9765786533108123
+          1.1694231551303567,
+          0.9194860464332321,
+          0.9110907984364116
         ],
-        "shape_error": 0.03392918219187013,
-        "misalignment_deg": 1.4942015022286503,
-        "modelled_tool_mass": 0.6277554447860765,
-        "modelled_tool_com": [
-          -6.317953642237506e-07,
-          -0.000440512128279384,
-          0.10153610702181265
-        ],
-        "suggested_origin": [
-          -0.001411410123868755,
-          -0.005819082893311729,
-          0.05173764010681898
-        ]
+        "shape_error": 0.16942315513035666,
+        "misalignment_deg": 6.815426232753323
       }
     },
     "right": {
-      "calibrated_at": "2026-08-19T04:55:36.553236Z",
+      "calibrated_at": "2026-09-24T05:55:43.685268Z",
       "calibration": {
         "force_bias": [
-          36.84746931453395,
-          7.5706549405902,
-          -0.0021544271895927642
+          36.12659408606985,
+          9.50902434537682,
+          -0.7512783259569908
         ],
         "torque_bias": [
-          0.028567785856260706,
-          -0.42230480873227105,
-          0.2130849426997901
+          0.0038205201380524835,
+          -0.4077456038855471,
+          0.18961389339013457
         ],
-        "tool_mass": 0.8672516870886823,
+        "tool_mass": 0.7929586465138749,
         "tool_com": [
-          -6.317953642249628e-07,
-          -0.0004405121282793833,
-          0.10153610702181246
+          -0.0014537683968443259,
+          -0.0036452823495245765,
+          0.1056848190823882
         ],
         "tool_first_moment": [
-          -5.479255955189075e-07,
-          -0.00038203488643332123,
-          0.08805736011508385
+          -0.0011527782203063224,
+          -0.0028905581580399263,
+          0.0838036910966343
         ],
         "rotation": [
           1.0,
@@ -17478,25 +17295,25 @@
         ]
       },
       "diagnostics": {
-        "sample_count": 8,
+        "sample_count": 6,
         "coverage": {
-          "count": 8,
+          "count": 6,
           "singular_values": [
-            0.633320567215798,
-            0.596031132747229,
-            0.49361113028123105
+            0.6916641820374316,
+            0.5554181545439835,
+            0.4616398302675437
           ],
-          "spread": 0.7794017056026505
+          "spread": 0.6674334774828062
         },
-        "force_residual_rms": 0.28340872458998123,
-        "torque_residual_rms": 0.014058683507912334,
-        "force_condition": 9.99256478544548,
-        "torque_condition": 8.802694165265857,
-        "inlier_fraction": 0.8700694883009832,
+        "force_residual_rms": 0.7578585440260587,
+        "torque_residual_rms": 0.023892650300025083,
+        "force_condition": 11.073027825837876,
+        "torque_condition": 11.261047147466071,
+        "inlier_fraction": 0.99,
         "first_moment": [
-          0.0002507444730089706,
-          0.006567656676020723,
-          0.04221715792338446
+          -0.00092301276323865,
+          0.0034637886793262573,
+          0.04189038585086964
         ],
         "measurement_origin": [
           -0.0002897571746998437,
@@ -17504,27 +17321,16 @@
           0.05285686136349012
         ],
         "orientation_estimated": false,
-        "orientation_probability": 0.6851972255108606,
-        "free_force_residual_rms": 0.23388220244987534,
-        "free_mass": 0.8715419334006316,
+        "orientation_probability": 0.8712427965192029,
+        "free_force_residual_rms": 0.6062183650086174,
+        "free_mass": 0.7693372337442437,
         "principal_gains": [
-          1.0397860445660754,
-          0.9963307945493471,
-          0.9638831608845776
+          1.3456797993151262,
+          1.0909574923196714,
+          0.5633627083652025
         ],
-        "shape_error": 0.039786044566075374,
-        "misalignment_deg": 1.1903108518516552,
-        "modelled_tool_mass": 0.607884193712766,
-        "modelled_tool_com": [
-          -6.317953642249439e-07,
-          -0.00044051212827938326,
-          0.10153610702181246
-        ],
-        "suggested_origin": [
-          -0.0002897571746998437,
-          -0.00801346560164534,
-          0.05285686136349012
-        ]
+        "shape_error": 0.4366372916347975,
+        "misalignment_deg": 19.92908309182712
       }
     }
   }

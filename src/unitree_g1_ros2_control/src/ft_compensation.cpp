@@ -85,12 +85,28 @@ bool FtCalibration::load(
         throw std::runtime_error(side + " polarity must be +1 or -1");
     }
     const YAML::Node rotation = entry["rotation"];
+    calibration.rotation = Matrix3{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
     if (rotation) {
         if (!rotation.IsSequence() || rotation.size() != 9) {
             throw std::runtime_error(side + " rotation must hold nine values");
         }
         for (std::size_t index = 0; index < 9; ++index) {
             calibration.rotation[index] = rotation[index].as<double>();
+            if (!std::isfinite(calibration.rotation[index])) {
+                throw std::runtime_error(side + " rotation holds a non-finite value");
+            }
+        }
+    }
+    for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t column = 0; column < 3; ++column) {
+            double product = 0.0;
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                product += calibration.rotation[3 * row + axis] *
+                           calibration.rotation[3 * column + axis];
+            }
+            if (std::abs(product - (row == column ? 1.0 : 0.0)) > 1e-6) {
+                throw std::runtime_error(side + " rotation must be orthonormal");
+            }
         }
     }
     calibration.frame = entry["frame"] ? entry["frame"].as<std::string>() : side;

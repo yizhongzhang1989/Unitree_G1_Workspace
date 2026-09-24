@@ -174,6 +174,16 @@ ros2 launch robot_bringup end_effector_load.launch.py
 
 **只在 `whole_body` 下有意义**：补偿节点要关节角和躯干 IMU。它依赖仓库里已导出的 `ft_calibration.yaml`；该文件缺失或不合法时只有这两个节点退出，整机栈照常跑，重力补偿在 `payload_timeout_s` 后退回标称工具重量。起来后 8770 页面会自动多画一组净力六轴条。
 
+**启动负载节点不等于开始估计**：`payload_estimator.estimation_enabled` 默认 `false`，两侧持续输出零负载；净力 `wrench_net` 和手臂自身重力补偿照常工作。只有显式开启后才实时估计，浮动手拉与传感器未校准时保持关闭。
+
+```bash
+ros2 param get /payload_estimator estimation_enabled
+ros2 param set /payload_estimator estimation_enabled true   # 开启实时估计
+ros2 param set /payload_estimator estimation_enabled false  # 禁止估计并清空历史
+```
+
+关闭会清空估计并持续发布零负载，控制器平滑淡出额外补偿；重启默认关闭。不能用 `compensation_scale=0` 代替，那会连手臂自重补偿一起关闭。
+
 ## 双手 Web 联调
 先启数据再启网页，`topology` 必须一致：
 ```bash

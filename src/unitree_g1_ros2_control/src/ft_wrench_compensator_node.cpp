@@ -122,6 +122,30 @@ public:
                    std_srvs::srv::Trigger::Response::SharedPtr response) {
                 on_rezero(*response);
             });
+        reload_ = create_service<std_srvs::srv::Trigger>(
+            "~/reload_calibration",
+            [this](std_srvs::srv::Trigger::Request::ConstSharedPtr,
+                   std_srvs::srv::Trigger::Response::SharedPtr response) {
+                try {
+                    const auto path = get_parameter("ft_calibration").as_string();
+                    auto replacement = calibration_;
+                    for (std::size_t side = 0; side < GravityTable::kSideCount; ++side) {
+                        if (!active_[side]) continue;
+                        if (!FtCalibration::load(
+                                path, GravityTable::side_names()[side], replacement[side])) {
+                            throw std::runtime_error(
+                                std::string("missing calibration for ") +
+                                GravityTable::side_names()[side]);
+                        }
+                    }
+                    calibration_ = replacement;
+                    response->success = true;
+                    response->message = "calibration reloaded from " + path;
+                } catch (const std::exception& error) {
+                    response->success = false;
+                    response->message = error.what();
+                }
+            });
 
         // The driver keeps its own software tare, and a stale one would shift
         // every reading out from under a calibration that was captured
@@ -300,6 +324,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_;
     rclcpp::Subscription<unitree_hg::msg::IMUState>::SharedPtr imu_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr rezero_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reload_;
     std::array<rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr,
                GravityTable::kSideCount> tare_clients_;
     // 发完也要握着 client，否则请求还没出去就跟着它一起析了。
