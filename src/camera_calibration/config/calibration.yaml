@@ -245,16 +245,16 @@ urdf_overrides:
     parent: head_mount_link
     child: d435_link
     xyz:
-    - 0.04319325554787227
-    - 0.020725227398352163
-    - 0.12533086808625643
+    - 0.054
+    - 0.018
+    - 0.123
     rpy:
-    - -0.025252522603556767
-    - 0.845550215052385
-    - 0.01327044851519366
+    - 0.0
+    - 0.86
+    - 0.0
     calibrated_frame: camera_color_optical_frame
     source: head_mount_imu_zero pose_00 pose_01 equal wrist weighting
-    stamp: '2026-09-14'
+    stamp: '2026-09-28'
     zero_reference: head_straight_imu_reference_20260911
     validation_status: experimental
     heldout_translation_mm: [5.725335981947502, 17.026061020896048]
