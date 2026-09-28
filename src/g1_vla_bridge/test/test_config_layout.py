@@ -53,10 +53,12 @@ def test_common_config_does_not_shadow_backend_parameters(path):
 
 
 @pytest.mark.parametrize('path', BACKEND_CONFIGS, ids=name_of)
-def test_backend_config_loads(path):
+def test_backend_config_loads(path, monkeypatch):
     """真的能造出 backend 来，顺便挡住写错类型/长度的标定值。"""
+    from g1_vla_bridge.backends.cogact_unitree import CogACTUnitreeBackend
     from g1_vla_bridge.vla_backend import load_backend
 
+    monkeypatch.setattr(CogACTUnitreeBackend, 'configure', lambda self: None)
     params = dict(backend_parameters(name_of(path)))
     params.update(load(path))
     load_backend(name_of(path), params).close()

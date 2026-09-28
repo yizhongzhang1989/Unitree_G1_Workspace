@@ -6,7 +6,7 @@
 import numpy as np
 import pytest
 
-from g1_vla_bridge.backends.a2d_omnipicker import SPEC as A2D
+from g1_vla_bridge.backends.cogact_unitree import SPEC as COGACT
 from g1_vla_bridge.transforms import invert_pose, pose_matrix, rpy_to_mat, solve_base_frame
 from g1_vla_bridge.vla_backend import (
     SIDES,
@@ -19,10 +19,6 @@ from g1_vla_bridge.vla_backend import (
 )
 
 IDENTITY_QUAT = [0.0, 0.0, 0.0, 1.0]
-# 我方头部相机在 torso_link 下的位置（final.urdf 的 torso->d435 串上 D435 光心偏移），
-# 与训练相机在训练系里的位置（A2D URDF 正解，lift=0.28 / body_pitch=30° / head_pitch=0）。
-OUR_CAMERA_IN_TORSO = np.array([0.0571, 0.0328, 0.4305])
-TRAIN_CAMERA_IN_MODEL = np.array([0.5204, -0.018, 1.0269])
 
 
 def _pose(xyz):
@@ -43,24 +39,8 @@ def test_origin_in_base_holds_with_rotation():
     assert np.allclose(trans, 0.0, atol=1e-12)
 
 
-def test_a2d_origin_lands_our_camera_on_theirs():
-    """这个 VLA 泛化差、对相机位置极敏感，原点就是拿来把两台相机摹在一起的。
-
-    改了 origin 却没重跑 calibrate_frame，这条会拦下来。
-    """
-    camera = np.eye(4)
-    camera[:3, 3] = OUR_CAMERA_IN_TORSO
-    landed = A2D.frame.transform().base_to_model(camera)[:3, 3]
-    assert np.allclose(landed, TRAIN_CAMERA_IN_MODEL, atol=1e-3)
-
-
-def test_a2d_frame_stays_level():
-    """只挪原点不掃坐标系：模型系必须跟 base_frame 同朝向，否则重力方向就错了。"""
-    assert A2D.frame.rotation_rpy == (0.0, 0.0, 0.0)
-
-
 def test_from_solution_matches_calibration():
-    """``calibrate_frame`` 解出的变换，转成声明式字段后必须还是同一个变换。"""
+    """解出的变换转成声明式字段后必须还是同一个变换。"""
     model_from_base = np.eye(4)
     model_from_base[:3, :3] = rpy_to_mat([0.05, -0.62, 0.11])
     model_from_base[:3, 3] = [0.37, -0.04, 0.54]
@@ -102,10 +82,13 @@ def test_action_chunk_rejects_inconsistent_shapes(broken):
         ActionChunk(poses=chunk.poses, grippers=chunk.grippers)
 
 
-def test_load_backend_round_trip():
-    backend = load_backend('a2d_omnipicker', backend_parameters('a2d_omnipicker'))
+def test_load_backend_round_trip(monkeypatch):
+    from g1_vla_bridge.backends.cogact_unitree import CogACTUnitreeBackend
+
+    monkeypatch.setattr(CogACTUnitreeBackend, 'configure', lambda self: None)
+    backend = load_backend('cogact_unitree', backend_parameters('cogact_unitree'))
     assert isinstance(backend, VlaBackend)
-    assert backend.spec.name == 'a2d_omnipicker'
+    assert backend.spec.name == 'cogact_unitree'
     assert backend.spec.action_semantics == 'absolute'
     backend.close()
 
@@ -118,7 +101,7 @@ def test_load_backend_rejects_junk(name):
 
 
 def test_spec_summary_answers_the_frame_question():
-    summary = A2D.summary()
-    assert summary['origin_in_base'] == [-0.4633, 0.0508, -0.5964]
+    summary = COGACT.summary()
+    assert summary['origin_in_base'] == [0.0, 0.0, 0.0]
     assert summary['action_semantics'] == 'absolute'
-    assert summary['image_height'] == 240
+    assert summary['image_height'] == 360

@@ -25,7 +25,6 @@ setup(
         'console_scripts': [
             'vla_node = g1_vla_bridge.vla_node:main',
             'vla_cli = g1_vla_bridge.vla_cli:main',
-            'calibrate_frame = g1_vla_bridge.calibrate_frame:main',
         ],
     },
 )

@@ -261,7 +261,6 @@ def create(params): ...     # -> VlaBackend 子类，实现 infer(Observation) -
 | 训练相机的内参/畸变/分辨率 | backend 常量（重投影用） | 同一物体尺度对不上 |
 | 夹爪的取值范围与方向 | `GripperSpec` | 该松手时夹紧 |
 | 输出是绝对位姿还是增量、N 是多少 | `action_semantics` / `horizon` | 重锚逻辑用错 |
-| 训练 episode 里真实的相机外参 4×4 | 喂给 `calibrate_frame` | 见下面「灵敏度」 |
 
 一致性由 [test_vla_backend.py](test/test_vla_backend.py) 兜底，接新 VLA 先跑它。
 
@@ -358,47 +357,6 @@ right: [0.143762115, -0.256049887, 0.264313750, 0.197254737, 0.847427008, 0.4396
 整段准入门（首点离实测太远就丢整段）**已删**：标定没定死之前首点总在 0.3 m 上下，它会
 把每一段都拒掉。可选单帧限速在 `motion_control` 的 IK 限幅**之上**，不冲突——那个管的是数值
 稳定性，管不住「目标本身给错了」。
-
-## 坐标系与标定
-
-`frame.origin_in_base` 的定义只有一句：**`base_frame` 里的这个点，在 VLA 系里就是原点。**
-
-模型的空间感全部来自图像，对「东西在哪」的判断由**它自己的相机内外参**建立，与手臂长度
-无关——所以**相机才是锚点，不是手臂**。整条链路只有一个式子：
-
-```
-T_model←base = T_model←cam · (T_base←cam)⁻¹
-```
-
-- `T_model←cam` = 训练侧的 `head_camera_in_world`
-- `T_base←cam` = 我方 TF 的 `torso_link -> camera_color_optical_frame`
-
-```bash
-# 首选：对面给了训练 episode 里真实的 head_camera_in_world（4x4 JSON 或文件）
-ros2 run g1_vla_bridge calibrate_frame --camera-in-world train_cam.json
-
-# 备选：对面只给关节值，用训练机的 URDF + 头部外参自己反算
-ros2 run g1_vla_bridge calibrate_frame --lift 0.28 --body-pitch 0.5236 --head-pitch 0
-
-# 控制栈没起来时，我方相机位姿也可以手工给：--camera-in-base our_cam.json
-```
-
-它打印两套参数：
-
-```
-[A] 只对位置：模型系保持水平朝前，原点挪到两台相机重合   <- 现在用这个
-[B] 完整六自由度：位置和朝向都重合，但模型系被掰斜
-```
-
-**A2D 这个模型泛化很差、对相机位置极敏感**，所以原点不按几何真值取，而是取 `[A]`——让
-我们的相机落到训练相机那个位置上。`rotation_rpy` 保持 0：掰了坐标系两台相机的朝向也能
-对上，但重力方向就错了、末端 state 跟着歪。代价是俯角仍差 17.8°，这是物理视角差，
-`head_reproject` 只改得了焦距和畸变，改不了它。推导过程写在
-[config/backends/a2d_omnipicker.yaml](config/backends/a2d_omnipicker.yaml) 里。
-
-**灵敏度：`head_pitch` 每 0.1 rad 让原点变 0.047 m；`body_pitch` 从 0 转到 55° 让原点的
-x 差 38 cm。** 务必用真实采样，别拿猜的关节值凑。改了 `origin_in_base` 却没重跑标定，
-`test_vla_backend.py` 会拦下来。
 
 ## delta 模式（`delta_position` / `delta_rotation`，默认关）
 
