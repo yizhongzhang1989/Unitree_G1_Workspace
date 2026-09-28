@@ -260,14 +260,13 @@ python3 scripts/set_wrist_camera_fps.py --time-sync --apply # 改走 NTP
 
 ## 时间对齐
 
-所有数据落在同一个 `CLOCK_REALTIME` 上。**每一行、每一帧都有可用时间戳**（实测两个
-session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
+所有数据落在同一个 `CLOCK_REALTIME` 上。**每一行、每一帧都有可用时间戳**。
 
 信号表每行同时存 `t_recv` 与 `t_header`，读的时候优先用 `t_header`：
 
 | 时间列 | 哪些表 | 语义 |
 |---|---|---|
-| `header`（源端打戳） | `joint_states`、`pelvis_imu`、四路 `wrench`、`torso_pose`、`dog_odom` | 数据产生的时刻，不含传输抖动 |
+| `header`（源端打戳） | `joint_states`、`pelvis_imu`、`head_imu`、四路 `wrench`、`torso_pose`、`dog_odom` | 数据产生的时刻，不含传输抖动。`head_imu` 是 `/utlidar/imu_livox_mid360` 的原始 200 Hz 数据，线加速度单位为 g |
 | `recv`（接收时刻） | `motion_control_command/status`、`secondary_imu` | 消息类型没有 header 字段。**对指令话题这本来就是正确语义** —— 指令是收到那一刻才生效的，不存在更早的「采集时刻」 |
 
 区分这两者只是为了知道对齐精度：源端戳不含传输抖动，接收戳含。实测有 header 的表
