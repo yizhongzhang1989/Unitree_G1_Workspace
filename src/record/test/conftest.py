@@ -7,6 +7,10 @@ import pytest
 #: link 也只由 `create: true` 那两条现建。
 CALIBRATION = {
     'version': 1,
+    'head_imu_reference': {
+        'head_zero': [0.0, 0.0, -1.0],
+        'torso_zero': [0.0, 0.0, 9.81],
+    },
     'intrinsics': {
         'camera_left': [
             {'width': 1920, 'height': 1080,
@@ -27,7 +31,7 @@ CALIBRATION = {
     },
     'urdf_overrides': {
         'd435_joint': {
-            'parent': 'torso_link', 'child': 'd435_link',
+            'parent': 'head_mount_link', 'child': 'd435_link',
             'xyz': [0.0708667, 0.0112327, 0.4236048],
             'rpy': [0.025366, 1.0747681, 0.0237102],
         },

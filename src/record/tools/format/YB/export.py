@@ -81,6 +81,9 @@ FORMAT_DOC = 'record/tools/format/YB/README.md'
 DEFAULT_HZ = 30.0
 #: 超过这么久没有新样本，该时刻就判为无效而不是继续保持上一个值
 DEFAULT_MAX_AGE_S = 0.1
+#: 两路 IMU 的时间来源不同（head 用 header、torso 用接收时刻），只配最近样本；
+#: 超过这个间隔就不把它们当成同一时刻的相对姿态。
+MAX_IMU_PAIR_GAP_S = 0.1
 
 #: 动作前后各保留多少秒空隙。操作者要先回去按「开始」、做完再回去按「成功」，
 #: 两头都挂着一大段机器人不动的画面。实测一次 13 条 episode 的采集：
@@ -270,6 +273,97 @@ def _quat_to_matrix(quat) -> np.ndarray:
     ], axis=-2)
 
 
+def _unit(vector) -> np.ndarray:
+    vector = np.asarray(vector, float)
+    length = np.linalg.norm(vector)
+    if vector.shape != (3,) or not np.isfinite(vector).all() or length < 1e-6:
+        raise ValueError('无效的重力向量')
+    return vector / length
+
+
+def _align_vector(source, target) -> np.ndarray:
+    """返回把一个单位向量转到另一个单位向量的最短弧旋转。"""
+    source, target = _unit(source), _unit(target)
+    cross = np.cross(source, target)
+    sine, cosine = np.linalg.norm(cross), float(source @ target)
+    if sine < 1e-8:
+        if cosine < 0:
+            raise ValueError('零位两路重力方向相反')
+        return np.eye(3)
+    axis = cross / sine
+    skew = np.array([[0.0, -axis[2], axis[1]],
+                     [axis[2], 0.0, -axis[0]],
+                     [-axis[1], axis[0], 0.0]])
+    return np.eye(3) + sine * skew + (1.0 - cosine) * (skew @ skew)
+
+
+def _head_pitches(head, torso, rotation_zero, axis) -> np.ndarray:
+    """批量计算配对重力向量的颈角；几何退化的行返回 NaN。"""
+    head, torso = np.atleast_2d(head), np.atleast_2d(torso)
+    source = (rotation_zero @ (head / np.linalg.norm(head, axis=1)[:, None]).T).T
+    target = torso / np.linalg.norm(torso, axis=1)[:, None]
+    source -= np.outer(source @ axis, axis)
+    target -= np.outer(target @ axis, axis)
+    source_norm = np.linalg.norm(source, axis=1)
+    target_norm = np.linalg.norm(target, axis=1)
+    valid = (source_norm >= 0.1) & (target_norm >= 0.1)
+    source[valid] /= source_norm[valid, None]
+    target[valid] /= target_norm[valid, None]
+    angles = np.full(head.shape[0], np.nan)
+    angles[valid] = np.arctan2(
+        np.cross(source[valid], target[valid]) @ axis,
+        np.einsum('ij,ij->i', source[valid], target[valid]))
+    return angles
+
+
+def _nearest_indices(source: np.ndarray, query: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """每个 query 在有序 source 中的最近下标及绝对时间差。"""
+    right = np.searchsorted(source, query, side='left')
+    left = np.clip(right - 1, 0, source.size - 1)
+    right = np.clip(right, 0, source.size - 1)
+    choose_right = np.abs(source[right] - query) < np.abs(source[left] - query)
+    index = np.where(choose_right, right, left)
+    return index, np.abs(source[index] - query)
+
+
+def head_pitch_for_episode(session: Session, model, grid, reference: dict) -> float:
+    """逐对计算双 IMU 相对角，再用圆均值得到 episode 的静态颈角。"""
+    if not reference or any(name not in reference for name in ('head_zero', 'torso_zero')):
+        raise ValueError('camera_params.yaml 缺少 head_imu_reference')
+    head_t, head_data = read_table(session, 'head_imu', 10)
+    torso_t, torso_data = read_table(session, 'secondary_imu', 13)
+    inside = (head_t >= grid[0]) & (head_t <= grid[-1])
+    head_t, head_accel = head_t[inside], head_data[inside, 7:10]
+    if head_t.size == 0 or torso_t.size == 0:
+        raise ValueError('episode 内缺少双 IMU 样本')
+    torso_index, gap = _nearest_indices(torso_t, head_t)
+    torso_accel = torso_data[torso_index, 7:10]
+    head_norm = np.linalg.norm(head_accel, axis=1)
+    torso_norm = np.linalg.norm(torso_accel, axis=1)
+    valid = (gap <= MAX_IMU_PAIR_GAP_S)
+    valid &= np.isfinite(head_accel).all(axis=1) & np.isfinite(torso_accel).all(axis=1)
+    valid &= (head_norm > 0.85) & (head_norm < 1.15)
+    valid &= (torso_norm > 8.3) & (torso_norm < 11.3)
+    if not valid.any():
+        raise ValueError('episode 内没有时间匹配且模长有效的双 IMU 样本对')
+
+    joint = model.joints.get('head_pitch_joint')
+    if joint is None or joint.limit is None:
+        raise ValueError('URDF 缺少带限位的 head_pitch_joint')
+    nominal = urdf_fk.rpy_to_matrix([np.pi, 0.05112069379091391, 0.0])
+    source = nominal @ _unit(reference['head_zero'])
+    rotation_zero = _align_vector(source, reference['torso_zero']) @ nominal
+    axis = _unit(joint.axis)
+    angles = _head_pitches(head_accel[valid], torso_accel[valid], rotation_zero, axis)
+    angles = angles[np.isfinite(angles)]
+    if angles.size == 0:
+        raise ValueError('episode 内没有几何有效的双 IMU 样本对')
+    angle = float(np.arctan2(np.sin(angles).mean(), np.cos(angles).mean()))
+    if not joint.limit[0] <= angle <= joint.limit[1]:
+        raise ValueError(f'颈角 {angle:.4f} rad 超出 URDF 限位')
+    return angle
+
+
 # ------------------------------------------------------------------- 各 space
 
 
@@ -435,7 +529,7 @@ def unify_pose(pose) -> np.ndarray:
 
 
 def camera_space(model, joints: dict, session: Session, grid, max_age,
-                 intrinsics: dict, direction: str) -> dict:
+                 intrinsics: dict, direction: str, head_pitch: float) -> dict:
     """内参逐档取标定值，外参靠 FK。图像另存 mp4，h5 里只留帧号。"""
     matrices, sizes, extrinsic, frames, warnings = [], [], [], [], []
     for camera in CAMERAS:
@@ -448,7 +542,9 @@ def camera_space(model, joints: dict, session: Session, grid, max_age,
         # 配 640x360 的画面）。不把尺寸一起写下去，拿到数据的人无法自行换算。
         sizes.append([int(entry['width'] or 0), int(entry['height'] or 0)]
                      if entry else [0, 0])
-        pose = model.poses(ORIGIN, camera.frame, {} if camera.static else joints)
+        values = ({'head_pitch_joint': head_pitch}
+              if camera.name == 'headcam' else joints)
+        pose = model.poses(ORIGIN, camera.frame, values)
         pose = np.broadcast_to(pose, (grid.size, 4, 4))
         if direction == 'cam_T_base':
             pose = urdf_fk.invert(pose)
@@ -616,18 +712,19 @@ def export_episode(handle, spaces: dict, grid: np.ndarray) -> None:
 
 
 def build_spaces(session: Session, model, grid, args, intrinsics,
-                 provenance: dict) -> dict:
+                 provenance: dict, head_imu_reference: dict) -> dict:
     order = list(session.meta.get('joint_order') or [])
     gripper_index = tuple(order.index(n) for n in GRIPPER_JOINTS if n in order)
     joint = joint_space(session, grid, order, args.max_age, gripper_index)
     joints = dict(zip(joint['names'], joint['state']['position'].T))
+    head_pitch = head_pitch_for_episode(session, model, grid, head_imu_reference)
     return {
         'joint': joint,
         'actuator': actuator_space(session, grid, order, args.max_age, gripper_index),
         'end': end_space(model, joints, session, grid, args.max_age,
                          args.end_action, provenance),
         'camera': camera_space(model, joints, session, grid, args.max_age,
-                               intrinsics, args.extrinsic),
+                               intrinsics, args.extrinsic, head_pitch),
     }
 
 
@@ -764,6 +861,10 @@ def build_rigs(sessions: list, session_ids: list, urdf: Path, urdf_text: str,
                   '只能来自这次采集自带的那一份，没有就导不了',
                   file=sys.stderr)
             return None
+        if not params.get('head_imu_reference'):
+            print(f'！{session_id} 的 camera_params.yaml 缺少 head_imu_reference，'
+                  '无法合成 torso_link 到头相机的外参', file=sys.stderr)
+            return None
         model, applied = load_model(urdf_text, params)
         add_head_optical(model, head_optical)
         intrinsics = collect_intrinsics(session, params)
@@ -782,6 +883,7 @@ def build_rigs(sessions: list, session_ids: list, urdf: Path, urdf_text: str,
                       file=sys.stderr)
                 return None
         rigs.append({'model': model, 'intrinsics': intrinsics,
+                     'head_imu_reference': params['head_imu_reference'],
                      'provenance': fk_provenance(urdf, session, applied)})
     return rigs
 
@@ -871,7 +973,8 @@ def main() -> int:
             grid = build_grid(episode['t0'], episode['t1'], args.hz)
             spaces = build_spaces(session, rigs[order]['model'], grid, args,
                                   rigs[order]['intrinsics'],
-                                  rigs[order]['provenance'])
+                                  rigs[order]['provenance'],
+                                  rigs[order]['head_imu_reference'])
             name = episode_name(serial, session_id, episode)
             cut = episode.get('trim')
             cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'

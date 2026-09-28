@@ -202,7 +202,7 @@ def test_camera_layout_matches_spec():
     """导出用对面样例的词（headcam/leftcam/rightcam），session 里的流名另存。"""
     assert [c.name for c in ex.CAMERAS] == ['headcam', 'leftcam', 'rightcam']
     assert [c.source for c in ex.CAMERAS] == ['head', 'wrist_left', 'wrist_right']
-    # 头部固连 torso_link，腕相机随手臂动 —— static_extrinsic 就是这个意思
+    # 头部在每条 episode 内不动，腕相机随手臂动 —— static_extrinsic 就是这个意思
     assert [int(c.static) for c in ex.CAMERAS] == [1, 0, 0]
 
 
@@ -249,7 +249,7 @@ EXPORT_SOURCE = (Path(ex.__file__)).read_text(encoding='utf-8')
 @pytest.mark.skipif(not (G1_URDF.is_file() and G1_CALIBRATION.is_file()),
                     reason='工作区里没有 G1 的 URDF 或标定')
 def test_head_extrinsic_is_constant():
-    """头相机固连 `torso_link`，参考系就是 `torso_link` —— 外参逐帧不变。
+    """片段均值只产生一个头角，因此一条 episode 内的外参逐帧不变。
 
     `static_extrinsic` 下游照着决定只读第 0 行还是逐帧读，标错了会拿一帧的外参去投影整段。
     """
@@ -267,11 +267,15 @@ def test_head_extrinsic_is_constant():
     grid = np.arange(4) / 30.0
     joints = {n: np.zeros(grid.size) for camera in ex.CAMERAS
               for n in model.moving_joints(ex.ORIGIN, camera.frame)}
-    space = ex.camera_space(model, joints, _Stub(), grid, 0.1, {}, 'base_T_cam')
+    space = ex.camera_space(model, joints, _Stub(), grid, 0.1, {}, 'base_T_cam', 0.2)
 
     assert space['static_extrinsic'] == [1, 0, 0]
     head = space['state']['extrinsic'][:, 0]
     assert np.allclose(head, head[0])
+
+    other = ex.camera_space(model, joints, _Stub(), grid, 0.1, {},
+                            'base_T_cam', -0.2)
+    assert not np.allclose(head[0], other['state']['extrinsic'][0, 0])
 
 
 @pytest.mark.skipif(not (G1_URDF.is_file() and G1_CALIBRATION.is_file()),
@@ -326,11 +330,75 @@ def test_each_session_keeps_its_own_head_extrinsic():
     poses = []
     for pitch in (0.8440717, 1.0747681):
         model, applied = ex.load_model(urdf_text, {'urdf_overrides': {'d435_joint': {
-            'parent': 'torso_link', 'child': 'd435_link',
+            'parent': 'head_mount_link', 'child': 'd435_link',
             'xyz': [0.07, 0.01, 0.42], 'rpy': [0.02, pitch, 0.02]}}})
         assert applied == ['d435_joint']
-        poses.append(model.poses(ex.ORIGIN, 'd435_link', {}))
+        poses.append(model.poses(ex.ORIGIN, 'd435_link', {'head_pitch_joint': 0.0}))
     assert not np.allclose(poses[0], poses[1])
+
+
+@pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')
+def test_head_pitch_averages_paired_relative_angles_per_episode():
+    class _Stub:
+        def __init__(self):
+            self._tables = {
+                'head_imu': (np.array([1.0, 1.1, 1.2]),
+                             np.tile([0, 0, 0, 1, 0, 0, 0, 0, 0, -1.0], (3, 1))),
+                'secondary_imu': (np.array([1.0, 1.1, 1.2]),
+                                  np.tile([1, 0, 0, 0, 0, 0, 0, 0, 0, 9.81, 0, 0, 0],
+                                          (3, 1))),
+            }
+
+        def tables(self):
+            return list(self._tables)
+
+        def table(self, key):
+            return self._tables[key]
+
+    model = urdf_fk.RobotModel.from_urdf(G1_URDF)
+    reference = {'head_zero': [0, 0, -1], 'torso_zero': [0, 0, 9.81]}
+    angle = ex.head_pitch_for_episode(_Stub(), model, np.array([1.0, 1.2]), reference)
+    assert angle == pytest.approx(0.0, abs=1e-12)
+
+
+def test_nearest_imu_pairing_uses_each_head_sample_time():
+    source = np.array([1.00, 1.10, 1.20])
+    index, gap = ex._nearest_indices(source, np.array([1.02, 1.16]))
+    assert index.tolist() == [0, 2]
+    assert gap == pytest.approx([0.02, 0.04])
+
+
+@pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')
+def test_head_pitch_circular_mean_is_taken_after_pairwise_angles():
+    model = urdf_fk.RobotModel.from_urdf(G1_URDF)
+    joint = model.joints['head_pitch_joint']
+    axis = joint.axis / np.linalg.norm(joint.axis)
+    reference = {'head_zero': [0, 0, -1], 'torso_zero': [0, 0, 9.81]}
+    nominal = urdf_fk.rpy_to_matrix([np.pi, 0.05112069379091391, 0.0])
+    rotation_zero = ex._align_vector(
+        nominal @ ex._unit(reference['head_zero']), reference['torso_zero']) @ nominal
+    heads = np.array([[0.08, 0.02, -0.9966], [-0.06, 0.04, -0.9974]])
+    torsos = np.array([[0.3, -0.2, 9.80], [-0.4, 0.25, 9.79]])
+    pair_angles = ex._head_pitches(heads, torsos, rotation_zero, axis)
+
+    class _Stub:
+        def tables(self):
+            return ['head_imu', 'secondary_imu']
+
+        def table(self, key):
+            if key == 'head_imu':
+                return np.array([1.0, 1.1]), np.column_stack((
+                    np.zeros((2, 7)), heads))
+            return np.array([1.0, 1.1]), np.column_stack((
+                np.zeros((2, 7)), torsos, np.zeros((2, 3))))
+
+    expected = np.arctan2(np.sin(pair_angles).mean(), np.cos(pair_angles).mean())
+    actual = ex.head_pitch_for_episode(
+        _Stub(), model, np.array([1.0, 1.1]), reference)
+    assert actual == pytest.approx(expected)
+
+    single = ex._head_pitches(heads[0], torsos[0], rotation_zero, axis)
+    assert single.shape == (1,)
 
 
 @pytest.mark.skipif(not G1_URDF.is_file(), reason='工作区里没有 G1 的 URDF')

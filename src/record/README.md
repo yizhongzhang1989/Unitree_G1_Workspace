@@ -340,7 +340,8 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 
 | 段 | 来源 | 不用它会怎样 |
 |---|---|---|
-| `torso_link → d435_link` | session 自带 `camera_params.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
+| `torso_link → head_mount_link` | 按时间配对的头部/躯干 IMU 相对角圆均值 + session 自带 `head_imu_reference` | YB 导出按每条 episode 合成一个静态头角；采集时头部不动，所以片段内外参不变 |
+| `head_mount_link → d435_link` | session 自带 `camera_params.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
 | `d435_link → camera_color_optical_frame` | `tools/urdf_fk.py` 的 `HEAD_OPTICAL` | 没有别的来源 —— 那是 realsense-ros 从设备出厂标定读出来发的 TF，标定文件里没这条 |
 | 内参 `fx/fy/cx/cy` | session 自己的 `meta.json` | 也没有别的来源 —— `intrinsics` 段只有两台腕相机，头部在 `cameras.yaml` 里是 `role: reference`，只出外参修正不出内参。而且这份正是采集当时真正发布的那一份 |
 > **夹爪的 mimic 必须夹到各段自己的 `<limit>`。** URDF 的 mimic 只能写线性式，而夹爪是
