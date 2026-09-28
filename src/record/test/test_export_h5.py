@@ -363,7 +363,7 @@ def test_head_pitch_averages_paired_relative_angles_per_episode():
 
 def test_nearest_imu_pairing_uses_each_head_sample_time():
     source = np.array([1.00, 1.10, 1.20])
-    index, gap = ex._nearest_indices(source, np.array([1.02, 1.16]))
+    index, gap = ex.head_extrinsic.nearest_indices(source, np.array([1.02, 1.16]))
     assert index.tolist() == [0, 2]
     assert gap == pytest.approx([0.02, 0.04])
 
@@ -375,11 +375,12 @@ def test_head_pitch_circular_mean_is_taken_after_pairwise_angles():
     axis = joint.axis / np.linalg.norm(joint.axis)
     reference = {'head_zero': [0, 0, -1], 'torso_zero': [0, 0, 9.81]}
     nominal = urdf_fk.rpy_to_matrix([np.pi, 0.05112069379091391, 0.0])
-    rotation_zero = ex._align_vector(
-        nominal @ ex._unit(reference['head_zero']), reference['torso_zero']) @ nominal
+    rotation_zero = ex.head_extrinsic.align_vector(
+        nominal @ ex.head_extrinsic.unit(reference['head_zero']),
+        reference['torso_zero']) @ nominal
     heads = np.array([[0.08, 0.02, -0.9966], [-0.06, 0.04, -0.9974]])
     torsos = np.array([[0.3, -0.2, 9.80], [-0.4, 0.25, 9.79]])
-    pair_angles = ex._head_pitches(heads, torsos, rotation_zero, axis)
+    pair_angles = ex.head_extrinsic.paired_pitches(heads, torsos, rotation_zero, axis)
 
     class _Stub:
         def tables(self):
@@ -397,7 +398,7 @@ def test_head_pitch_circular_mean_is_taken_after_pairwise_angles():
         _Stub(), model, np.array([1.0, 1.1]), reference)
     assert actual == pytest.approx(expected)
 
-    single = ex._head_pitches(heads[0], torsos[0], rotation_zero, axis)
+    single = ex.head_extrinsic.paired_pitches(heads[0], torsos[0], rotation_zero, axis)
     assert single.shape == (1,)
 
 
