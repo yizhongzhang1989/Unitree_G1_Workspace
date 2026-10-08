@@ -11,7 +11,8 @@ setup(
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        (share, ['package.xml', 'README.md']),
+        (share, ['package.xml', 'README.md', 'pyroki_offboard.md', 'retarget_and_postprocess_guide.md']),
+        (share + '/docs', glob('docs/*')),
         (share + '/launch', glob('launch/*.launch.py')),
         (share + '/config', glob('config/*.yaml')),
         # 面板页面。vendor 里是 three.js 与两个 addon，本地托管——机器人上没有外网。
@@ -30,6 +31,7 @@ setup(
         'console_scripts': [
             'mocap_node = g1_mocap.mocap_node:main',
             'dashboard_node = g1_mocap.dashboard_node:main',
+            'motion_capture_node = g1_mocap.motion_capture_node:main',
         ],
     },
 )

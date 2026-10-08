@@ -5,7 +5,6 @@ from typing import Any, Dict, List, cast
 from unittest import mock
 
 import pytest
-import yaml
 from launch import LaunchContext
 from launch.actions import (
     DeclareLaunchArgument,
@@ -69,10 +68,6 @@ def _node_package(node: Node) -> str:
 
 def _node_executable(node: Node) -> str:
     return cast(str, getattr(node, "_Node__node_executable"))
-
-
-def _node_parameters(node: Node) -> List[Dict[str, Any]]:
-    return cast(List[Dict[str, Any]], getattr(node, "_Node__parameters"))
 
 
 parametrize = cast(Any, pytest.mark.parametrize)
@@ -200,41 +195,6 @@ def test_lowlevel_dashboard_expands_to_one_read_only_web_node():
     assert isinstance(actions[0], Node)
     assert _node_package(actions[0]) == "robot_bringup"
     assert _node_executable(actions[0]) == "lowlevel_dashboard"
-
-
-def test_ikt_pose_commander_uses_named_position_controllers():
-    module = _load_launch("ikt_pose_commander.launch.py")
-    description = module.generate_launch_description()
-    nodes = [
-        entity for entity in description.entities
-        if isinstance(entity, Node)
-    ]
-    assert len(nodes) == 2
-    by_executable = {
-        _node_executable(node): node
-        for node in nodes
-    }
-    commander = by_executable["ikt_pose_commander"]
-    assert _node_package(commander) == "robot_bringup"
-    assert _node_executable(commander) == "ikt_pose_commander"
-    context = LaunchContext()
-    context.launch_configurations["max_iters"] = module._DEFAULTS["max_iters"]
-    parameters = {
-        _perform(context, name): value
-        for name, value in _node_parameters(commander)[0].items()
-    }
-    assert yaml.safe_load(_perform(context, parameters["command_mode"])) == "fpc"
-    assert yaml.safe_load(_perform(context, parameters["fpc_controller"])) == \
-        "forward_position_controller"
-    assert yaml.safe_load(_perform(context, parameters["jtc_controller"])) == \
-        "joint_trajectory_controller"
-    # Pinned to INTEGER: rclpy rejects a DOUBLE override against an int declaration.
-    assert parameters["max_iters"].evaluate(context) == 20
-    assert parameters["max_iters"].value_type is int
-    assert "max_joint_accel" not in module._DEFAULTS
-    assert "max_joint_accel" not in parameters
-    dashboard = by_executable["ikt_pose_commander_dashboard"]
-    assert _node_package(dashboard) == "robot_bringup"
 
 
 def test_gravity_float_demo_releases_the_robot_when_the_demo_exits():

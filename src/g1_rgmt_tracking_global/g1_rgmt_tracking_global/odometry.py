@@ -96,7 +96,7 @@ class OdometryFuser:
 
     @property
     def correction(self) -> tuple[np.ndarray, float]:
-        """当前的漂移修正量，供 status 上报。范数持续增长就是 odom 在漂。"""
+        """world <- odom 的平移与 yaw，含坐标原点差异，范数不等于定位误差。"""
         return self._corr_pos.copy(), self._corr_yaw
 
     def reset_lidar_origin(self, origin_stamp: float = -1.0) -> None:
@@ -130,6 +130,10 @@ class OdometryFuser:
 
         雷达 stamp 滞后约 34 ms，必须拿**同一时刻**的 odom 去解修正量，
         直接和当前 odom 相除会把这 34 ms 的运动算进漂移里。
+
+        后续修正先把雷达位姿用配对帧到最新帧的 odom 增量推进到当前时刻，
+        在当前躯干位置处低通并限幅 XY，再按新 yaw 反算变换平移。
+        不能单独钳变换平移：远 odom 原点下，yaw 更新需要的平移抵消会被截断。
         """
         if self._mode == 'odom_only':
             return False
@@ -167,12 +171,17 @@ class OdometryFuser:
         # 慢通道低通。10 Hz 更新、tau 秒时间常数，单帧跳变还要再钳一道：
         # 雷达在空旷处会退化且协方差恒为 0 给不出预警，只能靠幅度拦。
         alpha = 1.0 - math.exp(-0.1 / max(self._tau, 1e-3))
-        delta = target_pos - self._corr_pos
+        latest = self._odom[-1].pos
+        current_position = self._corr_pos + quat_apply(_yaw_quat(self._corr_yaw), latest)
+        target_position = pos + quat_apply(_yaw_quat(yaw), latest - paired.pos)
+        delta = target_position - current_position
+        delta[2] = 0.0
         norm = float(np.linalg.norm(delta))
         if norm > self._max_step:
             delta *= self._max_step / norm
-        self._corr_pos = self._corr_pos + alpha * delta
         self._corr_yaw = _wrap(self._corr_yaw + alpha * _wrap(yaw - self._corr_yaw))
+        self._corr_pos = current_position + alpha * delta - quat_apply(_yaw_quat(self._corr_yaw), latest)
+        self._corr_pos[2] = 0.0
         return True
 
     def _sample_at(self, stamp: float) -> PoseSample | None:

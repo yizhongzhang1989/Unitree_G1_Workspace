@@ -23,7 +23,6 @@ find_package(gloria_ros REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(imu_sensor_broadcaster REQUIRED)
 find_package(joint_state_broadcaster REQUIRED)
-find_package(joint_trajectory_controller REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(realtime_tools REQUIRED)
@@ -41,7 +40,6 @@ add_library(${PROJECT_NAME} SHARED
   src/ft_compensation.cpp
   src/gravity_feedforward.cpp
   src/gravity_table.cpp
-  src/gravity_joint_trajectory_controller.cpp
   src/g1_topic_system.cpp
   src/throttled_broadcasters.cpp
 )
@@ -57,7 +55,6 @@ ament_target_dependencies(${PROJECT_NAME}
   hardware_interface
   imu_sensor_broadcaster
   joint_state_broadcaster
-  joint_trajectory_controller
   pluginlib
   rclcpp
   realtime_tools
@@ -110,7 +107,6 @@ install(
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
-  find_package(trajectory_msgs REQUIRED)
   ament_add_gtest(
     test_periodic_deadline
     test/test_periodic_deadline.cpp
@@ -179,21 +175,6 @@ if(BUILD_TESTING)
   # 跨语言对拍数据由 arm_gravity_compensation 的 Python 参考实现生成。
   target_compile_definitions(test_ft_compensation PRIVATE
     TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test")
-  ament_add_gtest(
-    test_gravity_joint_trajectory_controller
-    test/test_gravity_joint_trajectory_controller.cpp
-  )
-  target_link_libraries(
-    test_gravity_joint_trajectory_controller
-    ${PROJECT_NAME}
-  )
-  ament_target_dependencies(
-    test_gravity_joint_trajectory_controller
-    hardware_interface
-    joint_trajectory_controller
-    rclcpp
-    trajectory_msgs
-  )
   ament_add_pytest_test(
     test_default_controller_config
     test/test_default_controller_config.py
@@ -210,7 +191,6 @@ ament_export_dependencies(
   hardware_interface
   imu_sensor_broadcaster
   joint_state_broadcaster
-  joint_trajectory_controller
   pluginlib
   rclcpp
   realtime_tools

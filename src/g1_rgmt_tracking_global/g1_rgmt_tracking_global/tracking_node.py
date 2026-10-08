@@ -355,7 +355,9 @@ class RgmtTrackingNode(Node):
             buffer, control_dt=spec.control_dt, lead_frames=lead,
             stand_joint_pos=stand,
             stale_timeout_s=float(p('mocap_stale_timeout_s', 0.3)
-                                  .get_parameter_value().double_value))
+                                  .get_parameter_value().double_value),
+            smoothing_weight=float(p('mocap_smoothing_weight', 0.25)
+                                   .get_parameter_value().double_value))
 
     def _on_mocap_frame(self, gate: MocapFrameGate, message: MocapFrame) -> None:
         """每帧核对两份名单。两者都是**顺序敏感**且错了不报错的。
@@ -603,7 +605,8 @@ class RgmtTrackingNode(Node):
             self._stand_tracks_mocap = self._mocap_clip is not None and self._tracking
             self._policy.reset()
             # 同时锁偏航与平移。中途重算等于把已产生的跟踪误差抹掉，那 15 维就永远读作零。
-            torso_quat = self._torso_quat(measured, pelvis_quat)
+            torso_quat = self._odom.orientation_in_world(
+                self._torso_quat(measured, pelvis_quat))
             if self._mocap_clip is None:
                 self._clip.align(pose, torso_quat)
             else:
@@ -792,10 +795,9 @@ class RgmtTrackingNode(Node):
         if self._imu_quat is None or now - self._imu_stamp > self._timeout:
             return 'IMU 超时'
         if self._mocap_clip is not None:
-            # 断流后参考会被钳在最后一帧，机器人保持最后姿势继续站着，看起来毫无异样，
-            # 实际上已经完全失去操作。必须当成急停条件。
-            # 缓冲里的时间轴是消息的 header.stamp，所以比较基准用 ROS 时钟。
-            mocap = self._mocap_clip.stale(now)
+            require_live = self._tracking or self._state not in ACTIVE_STATES \
+                or (self._state is State.STAND and self._stand_tracks_mocap)
+            mocap = self._mocap_clip.stale(now, require_live=require_live)
             if mocap:
                 return mocap
         return self._odom.stale(now) or ''

@@ -24,7 +24,7 @@ def _nodes(context):
     # config 里的参数挂在 /mocap 名下，本节点叫别的名字，只能读出来当 dict 传。
     document = yaml.safe_load(config.read_text(encoding='utf-8'))
     parameters = dict(next(iter(document.values()))['ros__parameters'])
-    for name in ('frame_topic', 'status_topic', 'calibrate_service'):
+    for name in ('frame_topic', 'status_topic', 'calibrate_service', 'motions_dir'):
         value = LaunchConfiguration(name).perform(context)
         if value:
             parameters[name] = value
@@ -48,6 +48,8 @@ def generate_launch_description() -> LaunchDescription:
                               description='数据源，默认 /mocap/frame'),
         DeclareLaunchArgument('status_topic', default_value=''),
         DeclareLaunchArgument('calibrate_service', default_value=''),
+        DeclareLaunchArgument('motions_dir', default_value='/home/unitree/motions_dataset',
+                              description='录制数据目录，包含 motions/*.csv'),
         DeclareLaunchArgument('dashboard_port', default_value='',
                               description='网页端口，浏览器开这个（默认 18080）'),
         OpaqueFunction(function=_nodes),

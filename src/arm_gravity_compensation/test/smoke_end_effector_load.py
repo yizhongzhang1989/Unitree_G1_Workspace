@@ -14,7 +14,9 @@ import numpy as np
 import rclpy
 import yaml
 from geometry_msgs.msg import InertiaStamped, WrenchStamped
+from rcl_interfaces.srv import SetParameters
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from unitree_hg.msg import IMUState
@@ -76,7 +78,27 @@ class Harness(Node):
         self.create_subscription(
             InertiaStamped, "/arm0/payload",
             lambda message: setattr(self, "payload", message), sensor_qos)
-        self.create_timer(0.01, self._tick)
+        self.input_timer = self.create_timer(0.01, self._tick)
+
+    def settle(self, duration):
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+    def set_estimation(self, enabled):
+        client = self.create_client(SetParameters, "/payload_estimator/set_parameters")
+        try:
+            assert client.wait_for_service(timeout_sec=5.0)
+            request = SetParameters.Request()
+            request.parameters = [Parameter("estimation_enabled", value=enabled).to_parameter_msg()]
+            future = client.call_async(request)
+            deadline = time.monotonic() + 5.0
+            while not future.done():
+                assert time.monotonic() < deadline, "parameter change timed out"
+                rclpy.spin_once(self, timeout_sec=0.05)
+            assert all(result.successful for result in future.result().results)
+        finally:
+            self.destroy_client(client)
 
     def gravity(self):
         """重力在左侧传感器系里的向量，躯干直立。"""
@@ -108,6 +130,7 @@ class Harness(Node):
 
 
 def main():
+    assert os.environ.get("ROS_DOMAIN_ID") == "187" and os.environ.get("ROS_LOCALHOST_ONLY") == "1", "use isolated domain 187, localhost only"
     model = prepare()
     log = open("/tmp/smoke_end_effector_load.log", "w", encoding="utf-8")
     # 独立会话 + 独立日志：``ros2 run`` 会再 fork 一层，孙进程继承管道的话，
@@ -134,10 +157,11 @@ def main():
             print("FAIL: no output (net=%s payload=%s)"
                   % (harness.net, harness.payload))
             return 1
-        # 第一帧 payload 必然是零：质量要等估计器攒到第二个静止样本才出来。
-        settle = time.monotonic() + 3.0
-        while time.monotonic() < settle:
-            rclpy.spin_once(harness, timeout_sec=0.05)
+        harness.settle(1.0)
+        assert harness.payload.inertia.m == 0.0, "must remain zero until explicitly enabled"
+        print("default disabled: payload mass 0 with a simulated 0.85 kg load")
+        harness.set_estimation(True)
+        harness.settle(1.0)
 
         gravity = harness.gravity()
         expected = tool_wrench(PAYLOAD, gravity)
@@ -159,6 +183,22 @@ def main():
             failures.append("payload mass %.4f" % harness.payload.inertia.m)
         if harness.net.header.frame_id != "left_kwr57b_link":
             failures.append("frame %s" % harness.net.header.frame_id)
+        harness.set_estimation(False)
+        harness.input_timer.cancel()
+        harness.settle(0.7)
+        assert harness.payload.inertia.m == 0.0
+        stamp = harness.payload.header.stamp
+        harness.settle(0.3)
+        assert harness.payload.inertia.m == 0.0
+        assert harness.payload.header.stamp != stamp, "disabled zero output must not depend on sensor input"
+        harness.input_timer.reset()
+        harness.set_estimation(True)
+        harness.settle(0.7)
+        assert abs(harness.payload.inertia.m - PAYLOAD.mass) < 1e-6
+        harness.set_estimation(False)
+        harness.settle(0.3)
+        assert harness.payload.inertia.m == 0.0
+        print("runtime switch: enabled -> 0.85 kg; disabled -> zero without input; re-enable works")
         for failure in failures:
             print("FAIL:", failure)
         print("OK" if not failures else "FAILED")
@@ -167,7 +207,7 @@ def main():
         harness.destroy_node()
         rclpy.shutdown()
         for process in nodes:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            os.killpg(os.getpgid(process.pid), signal.SIGINT)
         for process in nodes:
             process.wait(timeout=5)
         log.close()

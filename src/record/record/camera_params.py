@@ -8,7 +8,8 @@
 录制分辨率时会**取标定表第一档**，档位顺序一变就静默拿 640x360 的 K 去导 1080p 的
 视频；表里只剩一档就不会取错。
 
-内容是 `calibration.yaml` 的裁剪版，键完全一致（`intrinsics` / `urdf_overrides`），
+内容是 `calibration.yaml` 的裁剪版，键完全一致（`head_imu_reference` / `intrinsics` /
+`urdf_overrides`），
 导出侧直接当标定字典用。不含 `extrinsics`（求解中间量，FK 读的是 `urdf_overrides`）。
 """
 
@@ -66,6 +67,7 @@ def build(root: str | Path, calibration: dict) -> dict:
             intrinsics[key] = [entry]
     return {
         'version': SCHEMA_VERSION,
+        'head_imu_reference': calibration.get('head_imu_reference'),
         'intrinsics': intrinsics,
         # FK 要的就是这三条（头部 d435_joint + 两条腕相机光心）。原样保留，
         # `apply_overrides` 只读 parent/child/xyz/rpy/create，多余的键无害。

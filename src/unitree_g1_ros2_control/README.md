@@ -3,7 +3,7 @@
 ## 概览
 本包负责把 ros2_control 的**关节位置命令**变成设备真正接收的 **MIT 命令**，并把 G1、双夹爪、双 FT 和 IMU 的反馈变成 ros2_control 状态。
 
-> 简单理解：FPC/JTC 只写目标位置；`G1TopicSystem` 再填齐 MIT 命令所需的其他字段，然后发布 G1 `LowCmd` 或夹爪 `MitCommand`。
+> 简单理解：FPC 只写目标位置；`G1TopicSystem` 再填齐 MIT 命令所需的其他字段，然后发布 G1 `LowCmd` 或夹爪 `MitCommand`。
 
 具体来说，`q` 来自 position interface，`kp/kd` 来自[默认增益表](config/default_31dof_param.yaml)，`dq/tau` 固定为 `0`，`mode` 固定为 MIT 模式，`mode_machine` 跟随 `/lowstate`，CRC 在发布前计算。夹爪的 `q` 同样来自 position interface，后两项增益分别写入左右夹爪命令。实际位置闭环由设备底层完成。
 
@@ -11,11 +11,10 @@
 |---|---|
 | `G1TopicSystem` | 生成 MIT 命令，执行控制权与反馈安全检查 |
 | `ForwardPositionController` | 校验全量命令的维度与有限值，合法目标原样写入 position interface |
-| `JointTrajectoryController` | 使用标准 JTC 执行离散关节轨迹 |
 | broadcasters | 按需发布关节、IMU 和 FT 状态 |
 | `control.launch.py` | 启动唯一 controller manager、硬件插件、RSP 和 controllers |
 
-本包不负责 IK、动作规划、网页交互或设备 CAN 协议。命令链为 `Dashboard / IK -> FPC 或 JTC -> position interface -> G1TopicSystem -> LowCmd / MitCommand`；FPC 与 JTC 互斥使用同一组 position interface。
+本包不负责 IK、动作规划、网页交互或设备 CAN 协议。命令链为 `Dashboard / IK -> FPC -> position interface -> G1TopicSystem -> LowCmd / MitCommand`。
 
 ## 系统结构
 
@@ -24,7 +23,7 @@
 
 - **hardware interface（硬件插件）**——唯一碰真实设备的东西。它把设备"能读的量"导出成 **state interface**、"能写的量"导出成 **command interface**；每个 interface 就是一个具名的 `double`，例如 `left_elbow_joint/position`。本包的实现是 `G1TopicSystem`。
 - **controller**——读 state interface、写 command interface 的算法插件。它不知道下面是真机还是仿真，也不知道 `LowCmd` 长什么样。
-- **controller_manager**——把上面两者装进**同一个进程**，按固定频率跑 `read() → 所有 active controller 的 update() → write()`，并**仲裁**谁能写哪个 command interface：同一个 command interface 在任意时刻只能被一个 controller claim。FPC 与 JTC 的互斥完全来自这条规则，没有任何额外代码。
+- **controller_manager**——把上面两者装进**同一个进程**，按固定频率跑 `read() → 所有 active controller 的 update() → write()`，并**仲裁**谁能写哪个 command interface：同一个 command interface 在任意时刻只能被一个 controller claim。
 
 关键一点：**controller 与硬件插件之间没有话题**，是同进程的指针读写。只有"外部节点 → controller"这一段才走 DDS。
 
@@ -33,7 +32,7 @@
 
 ```mermaid
 flowchart TB
-  UP["上游命令源（独立进程）<br/>8200 控制器面板 · 8180 IK Commander"]
+  UP["上游命令源（独立进程）<br/>8200 控制器面板 · g1_motion_control"]
 
   subgraph P1["进程 A：ros2_control_node —— 唯一 controller_manager，500 Hz"]
     direction TB
@@ -41,7 +40,6 @@ flowchart TB
     subgraph CTRL["controller（pluginlib 装入本进程）"]
       direction LR
       FPC["forward_position_controller<br/>claim：31 × position<br/>内含重力前馈"]
-      JTC["joint_trajectory_controller<br/>claim：31 × position"]
       BC["joint_state_broadcaster<br/>pelvis_imu_broadcaster<br/>claim：无"]
     end
     HW["G1TopicSystem<br/>read() → 各 update() → write()"]
@@ -56,13 +54,11 @@ flowchart TB
 
   RSP["robot_state_publisher → TF"]
 
-  UP -. "① ~/commands（31 值）" .-> FPC
-  UP -. "② ~/joint_trajectory + ~/follow_joint_trajectory" .-> JTC
+  UP -. "~/commands（31 值）" .-> FPC
   UP -. "switch_controller" .-> CM
   CM --- CTRL
 
   FPC ==> |"写 31 × &lt;joint&gt;/position"| HW
-  JTC ==> |"写 31 × &lt;joint&gt;/position"| HW
   HW ==> |"读 torso_imu 四元数 + 14 组 kp/kd 表值"| FPC
   HW ==> |"读 position/velocity/effort + pelvis_imu"| BC
 
@@ -74,11 +70,10 @@ flowchart TB
   BC -. "/joint_states、~/imu" .-> RSP
 ```
 
-读图三条规则：
+读图两条规则：
 
 - **虚线 `-.->` 是 DDS**（跨进程或同进程回环都算），**粗实线 `==>` 是同进程指针读写**——后者不经过任何序列化，也不会丢帧。
-- **①② 是两个互斥入口**，上游同一时刻只能用其中一个：FPC/JTC claim 同一组 command interface，manager 强制互斥。
-- 只有 `G1TopicSystem` 碰真实设备；FPC/JTC 从头到尾不知道 `LowCmd` 长什么样。
+- 只有 `G1TopicSystem` 碰真实设备；FPC 从头到尾不知道 `LowCmd` 长什么样。
 
 下面几节把图上每条边的消息类型、QoS 和数量展开。
 
@@ -89,43 +84,27 @@ flowchart TB
 | `ros2_control_node`（含 manager + 全部 controller + `G1TopicSystem`） | [control.launch.py](launch/control.launch.py)，被 `robot_bringup/all_data.launch.py scope:=whole_body` include | 唯一 manager，500 Hz |
 | `robot_state_publisher` | 同上 | 发 `/robot_description` 与 TF |
 | `joint_state_broadcaster`、`pelvis_imu_broadcaster` | 同上，`spawner` | **active**，各 100 Hz |
-| `forward_position_controller`、`joint_trajectory_controller` | 同上，`spawner --inactive` | **inactive**，用谁激活谁 |
+| `forward_position_controller` | 同上，`spawner --inactive` | **inactive**，需要时再激活 |
 | `left_ft_broadcaster`、`right_ft_broadcaster` | 已在 `controllers.yaml` 注册，默认不 spawn | 未加载（KWR57 raw 话题已存在，避免 1 kHz 重复发布） |
 | CAN bridge、KWR57、Gloria-M、相机 | `robot_bringup/all_data.launch.py`（两个 scope 都启动） | 独立进程 |
 | 8200 控制器测试网页 | `robot_bringup/whole_body_dashboard.launch.py` | 独立进程，纯客户端 |
-| 8180 IK Commander + 网页 | `robot_bringup/ikt_pose_commander.launch.py` | 独立进程 |
 
 `all_data.launch.py scope:=whole_body` 已经 include 本包的 `control.launch.py`——**不要再起第二个 manager**。
 
-### 两个 controller 的对外接口
+### FPC 的对外接口
 
-| | `forward_position_controller`（FPC） | `joint_trajectory_controller`（JTC） |
-|---|---|---|
-| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` | `unitree_g1_joint_trajectory_controller/JointTrajectoryController`（上游官方类的子类） |
-| **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) | 话题 `~/joint_trajectory`<br/>+ action `~/follow_joint_trajectory`<br/>（`control_msgs/FollowJointTrajectory`） |
-| **输出** | 写 command interface（含重力偏移） | 写 command interface（含重力偏移） |
-| claim 的 command interface | 31 × `<joint>/position`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` | 同左（同一组） |
-| 读的 state interface | 31 × `<joint>/position`<br/>+ 4 × `torso_imu/orientation.{x,y,z,w}`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` | 31 × `position`、`velocity`<br/>+ 同样 4 + 28 个 |
-| 运行时可调参数 | `compensation_scale`、`friction_scale`、`friction_load_ratio`、`friction_offset_nm`、`friction_error_epsilon`、`friction_velocity_epsilon`、`adaptive_stiffness_scale`、`adaptive_stiffness_b`、`adaptive_stiffness_power`（均为无锁写，active 时可改；两个表的路径只在配置时读） | 同左，另加标准 JTC 容差等 |
+| | `forward_position_controller`（FPC） |
+|---|---|
+| plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` |
+| **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) |
+| **输出** | 写 command interface（含重力偏移） |
+| claim 的 command interface | 31 × `<joint>/position`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` |
+| 读的 state interface | 31 × `<joint>/position`<br/>+ 4 × `torso_imu/orientation.{x,y,z,w}`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` |
+| 运行时可调参数 | `compensation_scale`、`friction_scale`、`friction_load_ratio`、`friction_offset_nm`、`friction_error_epsilon`、`friction_velocity_epsilon`、`adaptive_stiffness_scale`、`adaptive_stiffness_b`、`adaptive_stiffness_power`（均为无锁写，active 时可改；两个表的路径只在配置时读） |
 
 两个 broadcaster 方向相反——它们只读 state interface，往外发话题：`joint_state_broadcaster` → `/joint_states`（100 Hz），`pelvis_imu_broadcaster` → `sensor_name: pelvis_imu` / `frame_id: pelvis`（100 Hz）。
 
-### controller 之间的关系：互斥
-
-```mermaid
-flowchart LR
-  U1["8200 面板 / IK Commander"]
-  U1 -->|"~/commands"| FPC
-  U1 -.->|"或 ~/joint_trajectory"| JTC
-  FPC["forward_position_controller<br/>claim：31 × position<br/>内含重力前馈"]
-  JTC["joint_trajectory_controller<br/>claim：31 × position"]
-  FPC ==>|"指针写"| HW["G1TopicSystem"]
-  JTC ==>|"指针写"| HW
-  FPC <-.->|"互斥：同一组 command interface<br/>只能一个 active"| JTC
-```
-
-- **互斥（FPC ↔ JTC）**：两者从 `default_31dof_param.yaml` 的 `/**.ros__parameters.joints` 读取同一组 31 个 `<joint>/position`。ResourceManager 拒绝重复 claim，所以 `switch_controller` 激活其中一个时必须同时停掉另一个。这不是约定，是硬约束。
-- **重力补偿不是第三个 controller**，而是这两个 controller 内部各自的一段前馈（见下节），参数名和含义完全一致。「要不要补偿」是 `compensation_scale` 参数，不是「激活哪个 controller」。
+**重力补偿不是另一个 controller**，而是 FPC 内部的一段前馈（见下节）。「要不要补偿」是 `compensation_scale` 参数，不是「激活哪个 controller」。
 
 ### `G1TopicSystem` 的接口
 
@@ -166,18 +145,18 @@ G1 有两颗 IMU，中间隔着三个腰关节，弯腰时重力方向相差可�
 
 manager 以 500 Hz 调用 `read()`/`write()`。G1 命令直接从 `write()` 发布；Gloria-M 在同一路径内用 steady clock 固定相位 deadline 降采样到 100 Hz。若一次 `write()` 错过一个或多个时隙，deadline 直接前移到下一个未来时隙，不补发过期命令，也不按“当前时刻 + 10 ms”累积漂移。KWR57 raw 保持设备节点原有 1 kHz 话题，插件用每侧原子快照读取，不增加转发节点。FT 数值按 `9.80665` 从 kgf/kgf m 转为 SI；Unitree 四元数从 `w,x,y,z` 转为 ROS `x,y,z,w` 并归一化。
 
-`default_31dof_param.yaml` 是 31 轴顺序的唯一来源：`/**.ros__parameters.joints` 由 ROS 2 wildcard 同时注入 FPC 和 JTC，`/g1_gain_table.ros__parameters` 保存同序的 `stiffness`/`damping`。Humble 的 spawner 依次加载这份公共文件和 controller 专属文件；后者只保留各自不同的参数。前 29 项保持 G1 物理电机顺序，最后两项分别是 `left_eccentric_joint` 和 `right_eccentric_joint`。`arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，夹爪、腿、腰和全部 `kd` 不变。唯一数值默认值由底层 `G1TopicSystem` 持有，为 `1.0`；上层 launch/xacro 的默认值为空，因此默认生成的 URDF 不包含该字段。需要覆盖时显式传入（例如 `arm_stiffness_scale:=2.5`），xacro 才会把它写入 ros2_control hardware 参数；允许范围为 `(0, 4]`。
+`default_31dof_param.yaml` 是 31 轴顺序的唯一来源：`/**.ros__parameters.joints` 由 ROS 2 wildcard 注入 FPC，`/g1_gain_table.ros__parameters` 保存同序的 `stiffness`/`damping`。Humble 的 spawner 依次加载这份公共文件和 controller 专属文件；后者只保留专属参数。前 29 项保持 G1 物理电机顺序，最后两项分别是 `left_eccentric_joint` 和 `right_eccentric_joint`。`arm_stiffness_scale` 只缩放双臂 15–28 号关节的 `kp`，夹爪、腿、腰和全部 `kd` 不变。唯一数值默认值由底层 `G1TopicSystem` 持有，为 `1.0`；上层 launch/xacro 的默认值为空，因此默认生成的 URDF 不包含该字段。需要覆盖时显式传入（例如 `arm_stiffness_scale:=2.5`），xacro 才会把它写入 ros2_control hardware 参数；允许范围为 `(0, 4]`。
 
 **增益有两个方向，背后是两块内存**。`<joint>/kp`、`<joint>/kd` **state** interface 是增益表的值（已含 `arm_stiffness_scale`），加载后恒定不变；双臂 14 组同名的 **command** interface 才是 `write()` 真正写进 `LowCmd` 的那份，缺省等于表值。两者刻意不共用一块内存：若 controller 写回它读到的那份，下一拍读到的就是自己上拍的输出，每个周期复乘一次，运行时调 `adaptive_stiffness_scale` 会发散而不是收敛。腿、腰和夹爪没有 command 方向，只能用表值。
 
 `write()` 对命令增益做一道卫生检查：非有限、为负、或超过表值的 10 倍一律退回表值。这不是调参上限，而是因为 controller 崩溃时最后一次写入会留在接口里，而固件没有看门狗。
 
-硬件导出的 31 个 command interface 由 `forward_position_controller`（FPC）或 `joint_trajectory_controller`（JTC）互斥 claim。ros2_control 的 claim 只提供命令资源互斥，不检查反馈是否新鲜；feedback freshness 是 `G1TopicSystem` 自己实现的安全策略。G1 使用 `state_timeout_s=0.25 s`，Gloria 使用独立的 `gripper_state_timeout_s=0.75 s`。单侧夹爪 stale 时只跳过该侧 MIT 输出，G1 LowCmd 和另一侧不受影响；反馈恢复后该侧自然恢复。
+硬件导出的 31 个 command interface 由 `forward_position_controller`（FPC）claim。ros2_control 的 claim 只提供命令资源互斥，不检查反馈是否新鲜；feedback freshness 是 `G1TopicSystem` 自己实现的安全策略。G1 使用 `state_timeout_s=0.25 s`，Gloria 使用独立的 `gripper_state_timeout_s=0.75 s`。单侧夹爪 stale 时只跳过该侧 MIT 输出，G1 LowCmd 和另一侧不受影响；反馈恢复后该侧自然恢复。
 
 启动反馈到达前，对外 joint state 使用有限零值，IMU 使用单位四元数，避免 `robot_state_publisher` 产生 NaN TF。控制安全仍由独立的 `received` 标志和 freshness 检查决定，中性启动值不能使 controller 通过 Engage。
 
-### 手臂重力补偿（内置于两个运动 controller）
-重力前馈不是单独的 controller，而是 [`GravityFeedforward`](include/unitree_g1_ros2_control/gravity_feedforward.hpp) 这个类：FPC 和 JTC 各持有一个成员，参数名、state interface 和数值行为完全相同。它只改写 14 个手臂位，其余位原样透传，之后直接写 command interface。纯数学部分（`load_gravity_table` / `update_torso_gravity` / `arm_offsets`）不碰任何 ROS 类型，可单独做数值单测。
+### 手臂重力补偿（内置于 FPC）
+重力前馈不是单独的 controller，而是 [`GravityFeedforward`](include/unitree_g1_ros2_control/gravity_feedforward.hpp) 这个类，由 FPC 持有。它只改写 14 个手臂位，其余位原样透传，之后直接写 command interface。纯数学部分（`load_gravity_table` / `update_torso_gravity` / `arm_offsets`）不碰任何 ROS 类型，可单独做数值单测。
 
 ```mermaid
 graph LR
@@ -340,16 +319,6 @@ Jetson 上实测一次完整求值（IMU 滤波 + 两条链共14 个刚体）：
 
 Foxy 和 Humble 都没有办法让一个 controller 直接调另一个 controller 的接口。Humble 的 `ChainableControllerInterface` 也不行——它解决的是进程内交接和依赖管理，**依旧要同时 activate 两个**。合并是唯一能做到只激活一个、且偏移量与写硬件同拍的办法。
 
-#### 轨迹控制器怎么拿到同一份偏移
-`joint_trajectory_controller` 是上游包的类，不能改它的代码，所以本包继承出 `GravityJointTrajectoryController`，在它的 `update()` 外面加偏移。关键在于上游 controller **在保持位置时根本不写 command interface**，直接“读回来再加偏移”会把自己的输出当成输入，每拍累加一次，手臂直接飞走。因此顺序是：
-
-1. 先把上一拍的**裸** setpoint 写回 command interface；
-2. 调上游 `update()`（它不读 command interface，只可能覆写）；
-3. 再读回来——无论它写了没写，拿到的都是裸 setpoint；
-4. 加偏移写下去。
-
-因为步骤 2 的前提是“不读 command interface”，`open_loop_control: true` 会让它从 command interface 取初值，那时偏移已经在里面了——所以两者**同时开启会在 `on_configure` 直接报错**。激活后到第一个轨迹到达之前不写任何命令，保持 FPC→JTC 交接时的零位移行为不变。
-
 #### 重力表里有什么
 Controller 不解析 URDF、也不依赖任何动力学库。URDF 中与静态重力有关的只有两类信息，它们已在导出时蒸馏进 `gravity_table`（默认 `package://arm_gravity_compensation/config/gravity_table.yaml`，即仓库内受版本管理的那份；参数同时接受普通绝对路径和 `~`）：
 
@@ -431,7 +400,7 @@ ros2 control load_controller forward_position_controller --set-state configure
 - Gloria-M：硬件插件发布既有 `gloria_ros/msg/MitCommand`，独立 `gloria_ros` 节点继续负责模式、量程、安全检查和 CAN 编码；反馈仍用其 `JointState`。
 - KWR57：CAN 三帧协议由 `canalystii_native_bridge` 在 C++ 进程内解析；硬件插件直接订阅既有 raw `WrenchStamped`，不会创建中间节点或再次发布 raw Wrench。
 
-所以 ros2_control 的 controller-to-hardware 路径本身不增加 DDS hop。外部 Dashboard/IK 通过 FPC commands 或 JTC action 进入当前 active controller。Gloria 保留已有 ROS 设备边界，KWR57 只增加 ros2_control 作为 raw Wrench 的订阅者。默认不启动 FT broadcaster，避免重复发布 1 kHz 状态。
+所以 ros2_control 的 controller-to-hardware 路径本身不增加 DDS hop。外部 Dashboard/IK 通过 FPC 的 `~/commands` 进入 controller。Gloria 保留已有 ROS 设备边界，KWR57 只增加 ros2_control 作为 raw Wrench 的订阅者。默认不启动 FT broadcaster，避免重复发布 1 kHz 状态。
 
 2026-07-23 的四设备 30 秒实机验收中，左右 MIT 命令为 `100.000/100.000 Hz`，bridge 实际 CAN TX 为 `99.999/100.001 Hz`；同场景双 KWR57 source 最大 gap 为 `6.860/7.322 ms`，ROS receive 最大 gap 为 `7.027/7.433 ms`。完整配置、USB 空包根因和测试边界见 [canalystii_native_bridge/README.md](../canalystii_native_bridge/README.md)。
 
@@ -457,7 +426,7 @@ source scripts/env.sh
 ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 ```
 
-这个独立入口只创建 manager、硬件插件、broadcaster、RSP 和 inactive controllers，不打开 CAN 或创建设备驱动。
+这个独立入口只创建 manager、硬件插件、broadcaster、RSP 和 inactive FPC，不打开 CAN 或创建设备驱动。
 
 启动结果：
 
@@ -465,12 +434,11 @@ ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 - `joint_state_broadcaster`：active，默认 100 Hz；
 - `pelvis_imu_broadcaster`：active，默认 100 Hz；
 - `forward_position_controller`：已配置但 inactive；
-- `joint_trajectory_controller`：已配置但 inactive；
 - `left_ft_broadcaster`、`right_ft_broadcaster`：已注册但默认不启动。
 
-`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。`joint_trajectory_controller` 类型为上游标准 `joint_trajectory_controller/JointTrajectoryController`，动作接口为 `/joint_trajectory_controller/follow_joint_trajectory`。两者共享公共参数文件中的 31 个 `joints`，并请求同一组 position command interface；controller_manager 的 resource claim 保证它们互斥 active。两者都只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
+`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。它从公共参数文件读取 31 个 `joints`，只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
 
-FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也只暴露最新样本；短暂调度繁忙后不会依次执行过时 setpoint。可靠发布者仍可与该订阅匹配，G1 Pose Commander 则直接使用相同的 BEST_EFFORT latest-only 配置。
+FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也只暴露最新样本；短暂调度繁忙后不会依次执行过时 setpoint。可靠发布者仍可与该订阅匹配。
 
 ### 命令校验与输出
 
@@ -493,7 +461,7 @@ G1 本体消息的 `dq/tau` 固定为 `0`。URDF 关节范围仍可供上层规�
 本硬件插件的命令输出。Gloria-M 驱动仍保留独立的固件量程确认、`safe_position` 限制和
 反馈超时失能，详见 [`gloria_ros/README.md`](../gloria_ros/README.md)。
 
-`robot_test_dashboard` 中的 JTC/FPC 代码只是测试命令生成器，不应搬入本包。JTC 的插值、目标容差和 action 状态机已经由标准插件实现；重复实现会产生第二套语义。Cartesian IK 同样保持在 `ikt_core`/Pose Commander 算法层，它输出关节目标但不拥有 hardware interface。只有将来确实需要硬实时 Cartesian servo 时，才应新增独立 C++ ros2_control controller 包，并复用这里的 position interfaces，而不是把 Python IK 或网页逻辑放进硬件插件。
+`robot_test_dashboard` 中的 FPC 代码只是测试命令生成器，不应搬入本包。Cartesian IK 同样保持在上层（`g1_motion_control`），它输出关节目标但不拥有 hardware interface。只有将来确实需要硬实时 Cartesian servo 时，才应新增独立 C++ ros2_control controller 包，并复用这里的 position interfaces，而不是把 Python IK 或网页逻辑放进硬件插件。
 
 启动后先检查，不要直接 Engage：
 
@@ -502,11 +470,11 @@ ros2 control list_controllers --controller-manager /controller_manager
 ros2 control list_hardware_interfaces --controller-manager /controller_manager
 ```
 
-预期两个控制器都为 `inactive`，31 个 position command interface 全部 `unclaimed`；任意激活其中一个后 31 个接口都被 claim，另一个必须保持 `inactive`。
+预期 FPC 为 `inactive`，31 个 position command interface 全部 `unclaimed`；激活 FPC 后 31 个接口都被 claim。
 
 ## 安全切换
 
-controller inactive 时不 claim command interface。FPC/JTC 切换由 `controller_manager/switch_controller` 在一个请求中一停一启；二者 claim 集相同，manager 不允许同时 active。第一次从全 inactive 状态 Engage 时，硬件插件按顺序执行：
+controller inactive 时不 claim command interface。FPC 由 `controller_manager/switch_controller` 激活或停用。第一次从全 inactive 状态 Engage 时，硬件插件按顺序执行：
 
 1. 检查 29 轴 G1 反馈未超过 `state_timeout_s`，两侧 Gloria 反馈未超过 `gripper_state_timeout_s`；本体还要求 `mode_pr == 0`。
 2. 使用 MotionSwitcher API 1001/1003 检查并释放现有运动模式。

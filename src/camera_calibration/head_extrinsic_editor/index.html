@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>头相机外参手调</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div><strong>HEAD EXTRINSIC</strong><span>当前照片外参叠加</span></div>
+    <output id="status">正在读取…</output>
+  </header>
+  <main>
+    <section class="workbench">
+      <div class="viewport">
+        <img id="preview" alt="当前外参的轮廓叠图">
+        <div id="empty">点击“拍新照片”开始调整</div>
+        <div class="legend"><i></i> 左臂 <i></i> 右臂</div>
+      </div>
+      <div class="controls">
+        <button id="capture" title="替换当前照片">拍新照片</button>
+        <div class="field"><label for="x">X (m)</label><input id="x" inputmode="decimal" autocomplete="off"></div>
+        <div class="field"><label for="y">Y (m)</label><input id="y" inputmode="decimal" autocomplete="off"></div>
+        <div class="field"><label for="z">Z (m)</label><input id="z" inputmode="decimal" autocomplete="off"></div>
+        <div class="field"><label for="roll">Roll (rad)</label><input id="roll" inputmode="decimal" autocomplete="off"></div>
+        <div class="field"><label for="pitch">Pitch (rad)</label><input id="pitch" inputmode="decimal" autocomplete="off"></div>
+        <div class="field"><label for="yaw">Yaw (rad)</label><input id="yaw" inputmode="decimal" autocomplete="off"></div>
+        <output id="capture-meta"></output>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

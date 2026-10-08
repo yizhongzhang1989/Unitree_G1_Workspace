@@ -84,7 +84,9 @@ class MocapNode(Node):
             anchor_body=p('anchor_body', 'torso_link').get_parameter_value().string_value,
             default_joint_pos=default_pos,
             foot_ground_clearance_m=float(
-                p('foot_ground_clearance_m', 0.03).get_parameter_value().double_value))
+                p('foot_ground_clearance_m', 0.03).get_parameter_value().double_value),
+            landmark_iterations=int(
+                p('landmark_iterations', 2).get_parameter_value().integer_value))
 
         self._stream = MocapStream(
             self._retarget,

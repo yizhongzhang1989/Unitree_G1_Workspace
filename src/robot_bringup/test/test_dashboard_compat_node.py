@@ -10,6 +10,8 @@ from robot_bringup.dashboard_compat_node import (
     G1RobotTestDashboard,
     _collapse_joint_tree,
     _correct_mimic_transforms,
+    _filter_mimic_snapshot,
+    _hidden_mimic_names,
     _is_internal_name,
     _mimic_values,
     _parse_mimic_joints,
@@ -134,13 +136,51 @@ def test_parses_both_prefixed_grippers_from_assembled_model():
     assert all(spec.name in values for spec in specs)
 
 
+def test_snapshot_hides_internal_model_data_after_correcting_fk():
+    specs = _parse_mimic_joints(FINAL_URDF.read_text(encoding="utf-8"))
+    hidden_links, hidden_joints = _hidden_mimic_names(specs)
+    theta = 2.0 * 2.76377472169236 / 3.0
+    link_tf = _correct_mimic_transforms(
+        {"left_gripper_base": IDENTITY, "right_gripper_base": IDENTITY},
+        specs, {"left_eccentric_joint": theta, "right_eccentric_joint": theta})
+    state = {
+        "link_tf": link_tf,
+        "links": list(link_tf),
+        "visuals": [{"link": link} for link in link_tf],
+        "has_meshes": True,
+        "joint_tree": [
+            {"name": spec.name, "parent": spec.parent, "child": spec.child,
+             "type": spec.joint_type}
+            for spec in specs
+        ],
+        "movable_joints": [{"name": spec.name} for spec in specs],
+        "joint_values": {spec.name: 0.0 for spec in specs},
+        "joint_state_names": [spec.name for spec in specs],
+    }
+
+    filtered = _filter_mimic_snapshot(state, hidden_links, hidden_joints)
+
+    assert "left_left_connecting_rod" in filtered["link_tf"]
+    assert "right_right_connecting_rod" in filtered["link_tf"]
+    assert not hidden_links.intersection(filtered["links"])
+    assert not hidden_links.intersection(filtered["link_tf"])
+    assert not hidden_links.intersection(
+        visual["link"] for visual in filtered["visuals"])
+    assert filtered["has_meshes"] is True
+    assert not hidden_links.intersection(
+        joint["child"] for joint in filtered["joint_tree"])
+    assert not hidden_joints.intersection(
+        joint["name"] for joint in filtered["movable_joints"])
+    assert not hidden_joints.intersection(filtered["joint_values"])
+    assert not hidden_joints.intersection(filtered["joint_state_names"])
+
+
 def test_switch_uses_humble_fields_and_confirms_final_state():
     switch_response = SwitchController.Response()
     switch_response.ok = True
     listed = ListControllers.Response()
     listed.controller = [
         _state("forward_position_controller", "active"),
-        _state("joint_trajectory_controller", "inactive"),
     ]
     switch_client = _Client(switch_response)
     dashboard = SimpleNamespace(
@@ -152,11 +192,11 @@ def test_switch_uses_humble_fields_and_confirms_final_state():
     assert G1RobotTestDashboard._switch(
         cast(G1RobotTestDashboard, dashboard),
         ["forward_position_controller"],
-        ["joint_trajectory_controller"],
+        [],
     ) is True
     request = switch_client.requests[0]
     assert request.activate_controllers == ["forward_position_controller"]
-    assert request.deactivate_controllers == ["joint_trajectory_controller"]
+    assert request.deactivate_controllers == []
     assert request.activate_asap is True
 
 
@@ -166,7 +206,6 @@ def test_switch_rejects_best_effort_partial_success():
     listed = ListControllers.Response()
     listed.controller = [
         _state("forward_position_controller", "inactive"),
-        _state("joint_trajectory_controller", "inactive"),
     ]
     dashboard = SimpleNamespace(
         _cli_switch=_Client(switch_response),
@@ -177,5 +216,5 @@ def test_switch_rejects_best_effort_partial_success():
     assert G1RobotTestDashboard._switch(
         cast(G1RobotTestDashboard, dashboard),
         ["forward_position_controller"],
-        ["joint_trajectory_controller"],
+        [],
     ) is False

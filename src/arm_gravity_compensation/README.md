@@ -69,7 +69,7 @@ $$q_{\text{other}} = [\,+1,\ -1,\ -1,\ +1,\ -1,\ +1,\ -1\,] \odot q_{\text{sourc
 ## 第二步：自动标定
 执行前必须满足：
 - 机械臂得到可靠支撑，周围无人且运动范围无障碍物。
-- ros2_control 的 FPC/JTC 都是 inactive，不存在其他 `/lowcmd` publisher。
+- ros2_control 的 FPC 是 inactive，不存在其他 `/lowcmd` publisher。
 - `/lowstate` 新鲜，`mode_pr == 0`。
 - 已记录足够多且分布不同的姿态。页面会显示回归 rank/nullity 和条件数；姿态越多、分布越分散，可观测子空间越完整。
 
@@ -141,11 +141,44 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body
 ros2 launch robot_bringup end_effector_load.launch.py
 ```
 - `ft_wrench_compensator`（C++，在 `unitree_g1_ros2_control`）：`wrench_raw` → `wrench_net`，扣掉零偏和工具自重，输出的是**负载或环境施加给工具侧的物理力旋量**，静挂 1 kg 就是 9.81 N 指向地面，frame 是 `*_kwr57b_link` 且对其原点取矩。服务 `~/rezero` 在已知空载时单姿态重估零偏（只改内存，应对温漂）。
-- `payload_estimator`（Python，本包）：净力 + `<arm>/gravity` → `geometry_msgs/InertiaStamped` 的质量与质心 → 重力补偿。**不把净力直接喂回补偿**：那是一条增益 $1/k_p$ 的导纳环，而且分不清"一直拎着的负载"和"顶到桌子上的接触力"。压成缓变参数则天然稳定——只在重力方向不再动（手臂静止）且净力确实沿重力方向时才更新。质心要多个朝向才可辨识，在那之前按可观测度线性混合工具自身的质心当先验。
+- `payload_estimator`（Python，本包）：净力 + `<arm>/gravity` → `geometry_msgs/InertiaStamped` 的质量与质心 → 重力补偿。**默认禁止估计**（`estimation_enabled: false`），持续发布零负载；显式开启后才实时更新。开启时沿用重力方向变化小、净力沿重力等判据；这些判据不能可靠区分手拉接触、传感器零偏和真实负载，浮动示教与力传感器未校准时应保持关闭。质心要多个朝向才可辨识，在那之前按可观测度线性混合工具自身的质心当先验。
+
+开关同时作用于左右臂，可在节点运行时调整，不影响 `wrench_net`、工具自重扣除或手臂自身重力补偿：
+
+```bash
+# 查询；默认 false
+ros2 param get /payload_estimator estimation_enabled
+# 明确允许实时估计
+ros2 param set /payload_estimator estimation_enabled true
+# 禁止估计，清空历史，并持续输出零负载
+ros2 param set /payload_estimator estimation_enabled false
+```
+
+开启和关闭时均清空历史，重新开启从新样本开始。关闭时立即发布零负载，之后默认以 10 Hz 持续发布，不依赖力传感器或重力方向输入是否到达；FPC 仍按自身 `payload_filter_tau_s`（默认 1 秒）平滑淡出已施加的额外补偿，**不是瞬时卸力或急停**。`~/reset` 和 `~/reload_calibration` 清理估计，但不改变开关；重启节点默认重新关闭，除非显式传入启动参数 `estimation_enabled:=true`。旧版运行进程需要在安全停机窗口重启负载节点一次才具备这个参数，修改源码不会更新已运行的 Python 对象。
+
+开启后，不满足接收条件的读数不会更新估计，但仍会发布历史估计，因此不能靠“松手”或“转动手臂”自动清除误判的负载；需要明确关闭开关。
 
 **运动学只算一遍**：补偿节点为了扣工具自重本来就要算传感器系的重力方向，于是把它一并发到 `<arm>/gravity`，估计器直接用——不订阅 `/joint_states`，也不加载重力表。养第二份 FK 除了多一份 CPU，还会在两次求解落到不同 `joint_states` 采样上时悄悄错开。
 
 > **标定完成后不要再按 dashboard 的"置零"**：那是驱动内部的软件 tare，会把标定好的零偏整个错开。`ft_wrench_compensator` 启动时会主动调一次 `reset_tare` 把它清掉。
+
+### whole_body 下独立自动标定
+
+已有 whole_body 和双侧力补偿节点时直接运行。两手空载、机器人可靠支撑、运动路径无障碍，停止 float/遥操作等 FPC 命令源；`estimation_enabled` 保持关闭。脚本不操作 float，也不直发 LowCmd。
+
+```bash
+ros2 run arm_gravity_compensation auto_ft_calibration
+# 可选：指定另一份姿态配置
+ros2 run arm_gravity_compensation auto_ft_calibration --config /path/to/config.yaml
+```
+
+配置见 [`config/auto_ft_calibration.yaml`](config/auto_ft_calibration.yaml)：`left_positions` 保存左臂关节数组（rad），右臂自动镜像；`transition_s` 默认 1.5 秒，`minimum_wait_s` 默认 0.5 秒。至少 4 组方向充分分散的姿态；安装旋转显著性检验需至少 5 组。
+
+流程：保存位置和 FPC 激活状态 → 双臂同时进行约 100 Hz 五次平滑插值 → 等双臂稳定且满足最短等待时间 → 用共同的 1 秒窗口采集 → 重复下一姿态 → 一起回原位 → 恢复 FPC 状态 → 求解、保存、在线重载。腿、腰和夹爪保持启动目标；取矩点沿用现有标定。
+
+仅两侧成功后更新 `ft_calibration.yaml` 和 `parameters.json` 的力标定部分，不写备份、不回滚。通过两个节点的 `~/reload_calibration` 生效，不重启 whole_body；首次升级旧节点需在安全窗口重启一次。写盘或重载失败可能留下部分更新，请检查报错，勿同时操作标定网页。
+
+保留数据新鲜度、关节限位、方向覆盖和稳定性检查，不做碰撞规划。异常中断时不强行回位，FPC 可能保持最后目标，脚本退出不等于急停。原来未 engage 时，回位后恢复 inactive 也不保证手臂继续悬停。
 
 ## 两个已知缺陷
 

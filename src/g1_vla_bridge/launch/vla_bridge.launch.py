@@ -4,6 +4,7 @@
     #   换服务端：  server_url:=http://10.172.100.47:5509/api/inference
     #   换 VLA：     vla_backend:=<backends/ 下的模块名>
     #   显式代理：  proxy:=socks5h://127.0.0.1:1080
+    #   只执行末点：skip_intermediate_waypoints:=true
     #   直接带指令：task_description:='Pick up the bottled grape juice using the right arm.'
 
 参数分两层：``config/vla_bridge.yaml`` 是与 VLA 无关的那一份，``config/backends/<name>.yaml``
@@ -28,7 +29,9 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 # 只暴露现场最常改的这几个，其余走 config/*.yaml。
-_ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description')
+_ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'execution_mode',
+              'skip_intermediate_waypoints',
+              'async_min_overlap_actions', 'execution_rate_hz', 'history_length')
 
 
 def _node(context):
@@ -41,7 +44,17 @@ def _node(context):
     for name in _ARGUMENTS:
         value = LaunchConfiguration(name).perform(context)
         if value:
-            overrides[name] = value
+            if name == 'skip_intermediate_waypoints':
+                normalized = value.lower()
+                if normalized not in ('true', 'false'):
+                    raise ValueError(f'{name} 只能是 true 或 false，收到 {value!r}')
+                overrides[name] = normalized == 'true'
+            elif name == 'execution_rate_hz':
+                overrides[name] = float(value)
+            elif name in ('async_min_overlap_actions', 'history_length'):
+                overrides[name] = int(value)
+            else:
+                overrides[name] = value
 
     with open(common, 'r', encoding='utf-8') as handle:
         backend = yaml.safe_load(handle)['/vla_bridge']['ros__parameters']['vla_backend']
@@ -54,7 +67,7 @@ def _node(context):
 
     return [Node(
         package='g1_vla_bridge',
-        executable='vla_node',
+        executable=LaunchConfiguration('bridge_executable'),
         name='vla_bridge',
         output='screen',
         emulate_tty=True,
@@ -65,6 +78,7 @@ def _node(context):
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
+        DeclareLaunchArgument('bridge_executable', default_value='vla_node'),
         *(DeclareLaunchArgument(name, default_value='') for name in _ARGUMENTS),
         OpaqueFunction(function=_node),
     ])

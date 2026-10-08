@@ -5,14 +5,14 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 | 模块 | 负责 |
 |---|---|
 | `robot_bringup` | 组合整机或末端设备的生产 launch |
-| `unitree_g1_ros2_control` | 把 FPC/JTC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
+| `unitree_g1_ros2_control` | 把 FPC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
 | `g1_motion_control` | FPC 之上的整机 31 轴运动控制层：下肢 15 轴走 ONNX 策略（输入 `vx/vy/w/h`），上肢 14 轴走双臂 IK，夹爪 2 轴透传；内附 VR / 键盘遥操 |
 | `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
 | `head_sensors` | 头部传感器：Livox MID-360 雷达接入（TF、空点过滤、IMU 单位修正）+ RealSense D435i（官方 realsense2_camera） |
 | `g1_localization` | 头部雷达世界定位：Point-LIO 之上只暴露 `~/set_origin` 与 `~/torso_pose` 两个接口，另可广播 `world -> pelvis` |
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
-| `inverse_kinematics_toolkit`、Dashboards | 将末端目标或人工操作转换为控制器命令；不直接驱动硬件 |
+| Dashboards | 将人工操作转换为控制器命令；不直接驱动硬件 |
 | `g1_motion_control` | 整机 31 轴运动控制层 + 遥操台（在 FPC 之上） |
 
 
@@ -131,7 +131,7 @@ python3 scripts/set_wrist_camera_fps.py --osd-blank osd_title --apply
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
-`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、互斥 FPC/JTC 和状态 broadcaster：FPC 只校验全量位置命令的维度与有限值，controller 将目标写入 position interface，`G1TopicSystem` 不限制有限 target 的数据范围，直接补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。这是因为阻抗控制需要通过目标位置相对反馈位置的偏移产生力矩。
+`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、FPC 和状态 broadcaster：FPC 只校验全量位置命令的维度与有限值，controller 将目标写入 position interface，`G1TopicSystem` 不限制有限 target 的数据范围，直接补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。这是因为阻抗控制需要通过目标位置相对反馈位置的偏移产生力矩。
 
 
 ## 目录
@@ -156,13 +156,12 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── point_lio_ros2/           [git submodule] 激光惯性里程计本体（上游原样引入）
     ├── kwr57_ros/                力传感器 ROS 设备节点（import kwr57_sensor）【已经被 canalystii_native_bridge 取代】
     ├── gloria_ros/               夹爪 ROS 设备节点 + MIT/PV 消息（复用 Gloria SDK 协议）
-    ├── inverse_kinematics_toolkit/ [git submodule] Pinocchio IK、Pose Commander 与 Dashboard
     ├── robot_bringup/            全身控制与末端设备的分层 launch 编排
     ├── robot_test_dashboard/     [git submodule] 机器人测试 Dashboard
     ├── unitree_g1_description/   整机 description 包（model/ 为 URDF submodule）
     ├── arm_gravity_compensation/ 双臂重力参数采点、EM 标定与 Web 工作流
     ├── g1_motion_control/     整机 31 轴运动控制层 + 遥操台（在 FPC 之上）
-    ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和互斥 FPC/JTC
+    ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和 FPC
     └── unitree_ros2/             [git submodule] 官方消息结构（仅构建 unitree_api、unitree_hg）
 ```
 
@@ -290,14 +289,6 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 # http://<机器人 IP>:8200
 ```
 
-终端 C 可启动 IKT Pose Commander Dashboard：
-```bash
-ros2 launch robot_bringup ikt_pose_commander.launch.py
-# http://<机器人 IP>:8180
-```
-
-该入口默认控制 `right_gripper_base`、以 `torso_link` 为参考帧并保持 disabled。**Track robot** 使用 FPC；**Snap robot** 与 `return_to_start` 使用 JTC。Commander 通过 `/controller_manager/switch_controller` 一停一启，两个 controller 对相同资源的 claim 提供真实互斥。只启动 Commander、不启动 8180 页面时传入 `enable_dashboard:=false`。
-
 ### 其他启动方式
 双臂重力参数初始化与手拉采点页面（默认不允许输出 `/lowcmd`）：
 ```bash
@@ -305,7 +296,7 @@ ros2 launch arm_gravity_compensation gravity_calibration.launch.py
 # http://<机器人 IP>:8310
 ```
 
-机械臂已可靠支撑、FPC/JTC 均 inactive 且无其他 `/lowcmd` 源时，才显式开放自动纯扭矩标定：
+机械臂已可靠支撑、FPC 为 inactive 且无其他 `/lowcmd` 源时，才显式开放自动纯扭矩标定：
 ```bash
 ros2 launch arm_gravity_compensation gravity_calibration.launch.py \
     allow_torque_output:=true
@@ -327,7 +318,7 @@ ros2 launch head_sensors head_camera.launch.py                 # 只要相机
 
 点云和图像要挂到机器人模型上需要整机 TF，先起 `all_data.launch.py scope:=whole_body`（提供 `robot_state_publisher`）。头部挂载角的校准步骤见 [head_sensors/README.md](src/head_sensors/README.md)。
 
-`scope:=whole_body` 在同一末端拓扑之外启动唯一的真实 `controller_manager`、统一硬件插件、`robot_state_publisher`、100 Hz JointState/IMU broadcaster，以及保持 `inactive` 的 FPC/JTC。manager 的更新率为 500 Hz；未 Engage 时 31 个 command interface 均未 claim，插件不会发布 `/lowcmd` 或 Gloria-M MIT 命令。
+`scope:=whole_body` 在同一末端拓扑之外启动唯一的真实 `controller_manager`、统一硬件插件、`robot_state_publisher`、100 Hz JointState/IMU broadcaster，以及保持 `inactive` 的 FPC。manager 的更新率为 500 Hz；未 Engage 时 31 个 command interface 均未 claim，插件不会发布 `/lowcmd` 或 Gloria-M MIT 命令。
 
 | 参数 | 可选值 | 默认值 | 含义 |
 |---|---|---|---|
@@ -359,7 +350,7 @@ ros2 launch robot_bringup end_effectors_dashboard.launch.py topology:=dual
 
 8770 默认是监视模式：显示相机、KWR57 和 Gloria 反馈，但不创建 `MitCommand` publisher，也不调用夹爪 enable/disable。它可以和 8200 同时运行。仅在 `scope:=end_effectors`、没有任何 ros2_control 夹爪 controller 时，才可显式追加 `allow_gripper_control:=true` 恢复独立末端控制；不要在整机控制期间打开该参数。
 
-整机 Dashboard 只发现 controller、执行 Engage/Disengage，并按类型向 FPC 的 `/forward_position_controller/commands` 或 JTC 的轨迹接口发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放）。
+整机 Dashboard 只发现 controller、执行 Engage/Disengage，并向 FPC 的 `/forward_position_controller/commands` 发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放）。
 
 Engage 会依次检查 31 轴反馈 freshness 与 PR mode、释放现有 MotionSwitcher 模式、等待外部 `/lowcmd` 静默、使能所 claim 的 Gloria-M，并在二次状态检查后才开放输出。Disengage 先阻止低层输出、失能夹爪，再恢复接管前的运动模式。任一步失败都保持输出关闭并返回切换失败。完整事务见 [unitree_g1_ros2_control/README.md](src/unitree_g1_ros2_control/README.md)。
 
@@ -371,15 +362,14 @@ ros2 topic hz /joint_states
 ros2 topic hz /pelvis_imu_broadcaster/imu
 ```
 
-正常启动后应看到两个 broadcaster 为 `active`、FPC/JTC 均为 `inactive`，31 个 position command interface 全部 `unclaimed`。KWR57 原始 Wrench 继续由设备节点以 1 kHz 发布；默认不启动 FT broadcaster，避免重复 DDS 流。确需标准 ros2_control FT 输出时可手动 spawn `left_ft_broadcaster`/`right_ft_broadcaster`。
+正常启动后应看到两个 broadcaster 为 `active`、FPC 为 `inactive`，31 个 position command interface 全部 `unclaimed`。KWR57 原始 Wrench 继续由设备节点以 1 kHz 发布；默认不启动 FT broadcaster，避免重复 DDS 流。确需标准 ros2_control FT 输出时可手动 spawn `left_ft_broadcaster`/`right_ft_broadcaster`。
 
 ### 通信路径与 DDS 开销
-ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`controller_manager`、`ForwardCommandController`、`JointTrajectoryController` 和 `G1TopicSystem` 都加载在同一个 `ros2_control_node` 进程中；active controller 的 `update()` 写 command interface，随后 manager 直接调用硬件插件的 `write()`，这段是 C++ 内存访问，没有 ROS 消息、序列化或 DDS hop。
+ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`controller_manager`、`ForwardCommandController` 和 `G1TopicSystem` 都加载在同一个 `ros2_control_node` 进程中；active controller 的 `update()` 写 command interface，随后 manager 直接调用硬件插件的 `write()`，这段是 C++ 内存访问，没有 ROS 消息、序列化或 DDS hop。
 
 | 路径 | 边界 | 是否 DDS | 说明 |
 |---|---|---|---|
 | Dashboard/IK -> `/forward_position_controller/commands` | 外部应用 -> controller | 是 | 外部目标输入；controller 收到后进入实时缓冲 |
-| Commander -> `/joint_trajectory_controller/follow_joint_trajectory` | 外部应用 -> controller | 是 | Snap robot 与 return-to-start 的标准 JTC action |
 | controller -> command interface -> `G1TopicSystem::write()` | 同一 `ros2_control_node` | 否 | 直接内存接口与函数调用 |
 | `G1TopicSystem` -> `/lowcmd` -> G1 | PC2 -> Unitree 低层 | 是 | Unitree 官方低层接口；LowCmd 组包和 CRC 在硬件插件进程内完成 |
 | `G1TopicSystem` -> `MitCommand` -> Gloria 节点 | ros2_control -> 独立夹爪进程 | 是，100 Hz | 默认 controller claim 两侧 eccentric interface；单侧反馈超时只停止该侧 |
@@ -387,7 +377,7 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 | CAN -> native KWR57 device | 同一 C++ bridge 进程 | 否 | 原始三帧直接组包，不发布中间 CAN Frame |
 | native KWR57 device -> raw Wrench -> `G1TopicSystem` | bridge 进程 -> ros2_control | 是，1 kHz | 插件只是已有 raw Wrench 的订阅者，不再转发 |
 
-因此，controller 层本身没有增加 DDS hop。上层通过 FPC commands 或 JTC action 进入当前 active controller；controller 到 hardware interface 仍是进程内接口。KWR57 默认不启动 FT broadcaster，所以不会自动产生第二条 1 kHz Wrench 流。
+因此，controller 层本身没有增加 DDS hop。上层通过 FPC commands 进入 controller；controller 到 hardware interface 仍是进程内接口。KWR57 默认不启动 FT broadcaster，所以不会自动产生第二条 1 kHz Wrench 流。
 
 ### 主要 Launch
 
@@ -397,8 +387,7 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 | `robot_bringup/end_effectors_*_bus.launch.py` | 单/双总线 bridge、KWR57、Gloria-M 和相机 | 末端拓扑底层入口 |
 | `robot_bringup/end_effectors_dashboard.launch.py` | 8770 末端监视网页；默认不创建夹爪命令源 | 可与 8200 同时运行 |
 | `robot_bringup/whole_body_dashboard.launch.py` | 仅 8200 controller Dashboard | 已有真实 manager 时联调 |
-| `robot_bringup/ikt_pose_commander.launch.py` | G1 适配 Commander、可选 8180 Dashboard | FPC 连续跟踪、JTC Snap/return-to-start |
-| `unitree_g1_ros2_control/control.launch.py` | 唯一 manager、硬件插件、RSP、broadcaster、inactive FPC/JTC | 独立整机控制入口 |
+| `unitree_g1_ros2_control/control.launch.py` | 唯一 manager、硬件插件、RSP、broadcaster、inactive FPC | 独立整机控制入口 |
 | `unitree_g1_description/description.launch.py` | 仅模型、RSP 和 TF | 已有 `/joint_states` 时查看模型 |
 | `head_sensors/head_sensors.launch.py` | 头部雷达节点 + RealSense，可用 `lidar` / `camera` 单开 | 头部传感器，不在 `all_data` 里 |
 | `head_sensors/head_camera.launch.py` | 仅 RealSense + `d435_link → camera_link` 挂载 TF | 只要头部相机 |

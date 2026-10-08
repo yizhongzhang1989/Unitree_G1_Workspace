@@ -71,12 +71,20 @@ T_world_torso(t) = T_world_odom(t_k) @ T_odom_torso(t)
 
 左项是 odom 的累积漂移，属慢变量，滤得狠也不引入动态滞后；全部动态由 500 Hz 快通道承担。
 
-三个实现要点：
+实现要点：
 
 - 雷达 stamp 比 odom 滞后约 34 ms，**必须按 stamp 回溯匹配**同一时刻的 odom，直接和当前值相除会把这 34 ms 的运动算成漂移
 - `/dog_odom` 订阅**必须 `depth=1`**，实测 `depth=50` 时接收时刻恒定滞后约 48 ms，静默不报错
 - `/dog_odom` 给的是盆骨，本包用腰三轴把位置和姿态都 FK 到 `torso_link`；雷达与快通道必须是同一个刚体，否则腰偏航会被误算成定位 yaw 漂移
 - 融合输出的位置和 anchor 姿态必须乘同一个定位 yaw 修正；只旋位置会让 key body 的局部误差整体转错
+- 后续雷达修正在**当前躯干世界位置**处低通并限制 XY 位移，再用更新后的 yaw 反算变换平移；延迟雷达先按配对帧到最新帧的 odom 增量推进到当前时刻。不能分别限幅变换平移、更新 yaw，否则远 odom 原点会放大假平移
+
+默认 `lidar_correction_tau_s=2.0`、每次位置残差限幅 `0.05 m`，雷达更新对当前融合位置的单次修正不超过 `(1-exp(-0.1/2))*0.05 = 2.439 mm`；这不限制两次雷达之间的真实 odom 增量，也不限制 yaw 本身。首次有效雷达仍直接对齐，Z 仍保留 odom 高度。
+
+`status` 的 `drift` 是变换平移范数，包含坐标原点偏移，不能当作实际定位误差。
+
+启动对齐也必须使用融合世界系的躯干姿态，不能只在 RUNNING 时应用偏航修正。
+否则参考位置和姿态分属不同坐标系，非零融合偏航修正会造成参考朝向错位。
 
 ## 已知风险：漂移会被策略当真
 
@@ -101,6 +109,8 @@ T_world_torso(t) = T_world_odom(t_k) @ T_odom_torso(t)
     -> point_lio -> /aft_mapped_to_init -> localization_node -> ~/torso_pose
 ```
 
+训练侧使用固定 PD 增益与重力补偿，并模拟关节摩擦，但没有摩擦前馈。因此 RGMT 部署保留重力补偿，在 engage 前关闭 FPC 的自适应刚度和摩擦前馈。2026-09-16 用户真机反馈：自适应刚度已关闭时仍抖动，进一步关闭摩擦前馈后抖动消失。以下参数是当前节点的临时设置，重启控制栈后需重新执行；不改变其他控制场景的默认配置。
+
 按顺序起，前四步各占一个终端：
 
 ```bash
@@ -108,10 +118,13 @@ T_world_torso(t) = T_world_odom(t_k) @ T_odom_torso(t)
 #    （定位层要拿腰角把 lio 结果推到 torso_link，所以它得在第 3 步之前）
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
-# 1b. 关掉 FPC 的手臂自适应刚度：策略训练时是纯 PD，YAML 默认的 2.0 会把手臂
+# 关闭这两个非常重要，否则会剧烈抖动！！！缺一不可
+# 1b. 关掉 FPC 的手臂自适应刚度：训练采用固定 PD 增益，YAML 默认的 2.0 会把手臂
 #     零误差处的 kp 抬到 3 倍。all_data.launch.py 没有对应的 launch 参数，
 #     只能起完再设；FPC 此时还是 inactive，engage 之前设完即可
 ros2 param set /forward_position_controller adaptive_stiffness_scale 0.0
+# 1c. 训练模拟了关节摩擦，但没有摩擦前馈；这里只关摩擦前馈，保留重力补偿
+ros2 param set /forward_position_controller friction_scale 0.0
 
 # 2. 头部传感器。**它不在控制栈里，漏了就没有 /head/lidar/points_full**，
 #    表现是 localization_node 刷「没有里程计输入」
@@ -237,7 +250,7 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
     该姿势；重新按住后才恢复实时流
 
 `squeeze` 使用 0.7/0.5 的接合/释放迟滞，避免模拟量卡在门限附近反复切换。手柄断连也会
-立即冻结参考；动捕骨架流断开仍按 `mocap_stale_timeout_s` 急停。
+立即冻结参考；未接合时默认或冻结参考不要求骨架流持续更新，实时跟踪时才按 `mocap_stale_timeout_s` 检查断流。
 
 `~/status` 里会多出 `mocap[...]`，`link=up` 且 `body_status=1` 才算通。
 `body_status=2` 配 `message=7` 是头显没被正常佩戴/站好，站直走两步通常能回到 VALID。
@@ -265,6 +278,12 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
 `15 + mocap_lead_margin_frames` 拍。把 `mocap_lead_margin_frames` 调小并不会让延迟消失，
 只会让 `+15` 那个 token 被钳成当前帧——**前瞻静默失效**，策略突然没有了未来信息。
 
+实时参考默认还会在 50 Hz 控制网格上做三点对称平滑
+`[mocap_smoothing_weight, 1 - 2 * mocap_smoothing_weight, mocap_smoothing_weight]`，同时处理
+关节、root、anchor、key body 和姿态，再从平滑后的量计算速度。四元数先统一到中心帧的
+同一半球，等价的 `q/-q` 不会相消。默认权重 0.25；设为 0 可关闭。它使用上面 margin
+已经留出的未来一拍，不额外增加播放延迟。
+
 **二、`~/start` 之前必须先校准，而且要人站直。** 校准归 `mocap_node`，本层只检查
 「标过没有」，没标过直接拒绝 `~/start`。标的是人机比例：按腿长比缩放位移，把站立高度
 锚到 G1 自己的高度，再把整个站立位形映射到 `default_joint_pos`。
@@ -278,8 +297,13 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
 
 ### 断流会怎样
 
-断流后参考被钳在最后一帧，机器人保持最后的姿势继续站着，**看起来毫无异常**。所以
-`mocap_stale_timeout_s`（默认 0.3 s）到点直接急停，不要调大。
+已经进入默认站姿或冻结参考、且 squeeze 未接合时，只要参考缓冲可用，骨架流超过
+`mocap_stale_timeout_s`（默认 0.3 s）未更新或链路断开都不会单独触发急停。
+缓存参考继续供策略使用；这不是停止控制，机器人仍可能运动，仍需有人看护。
+
+启动前、squeeze 接合跟踪时、以及从实时动捕姿态启动的 STAND 过渡阶段，仍要求动捕数据新鲜。
+重新接合时若骨架仍旧过期，断流保护立即恢复；不放宽 0.3 s 门限。缓冲为空仍拒绝继续，
+关节、IMU、定位超时与躯干倾角保护均不受 squeeze 状态影响。
 
 ## 关节名单
 

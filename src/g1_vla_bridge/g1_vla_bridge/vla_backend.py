@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from g1_vla_bridge.control_history import ControlStep
 from g1_vla_bridge.transforms import FrameTransform, rpy_to_mat
 
 SIDES = ('left', 'right')
@@ -66,8 +67,10 @@ class FrameSpec:
         """把 ``transforms.solve_base_frame()`` 的解转成本类的声明式字段。"""
         origin = -rpy_to_mat(rotation_rpy).T @ np.asarray(
             base_offset, dtype=np.float64).reshape(3)
+        rotation = np.asarray(rotation_rpy, dtype=np.float64).reshape(3)
         return cls(origin_in_base=tuple(origin),
-                   rotation_rpy=tuple(float(v) for v in rotation_rpy), **rest)
+                   rotation_rpy=(float(rotation[0]), float(rotation[1]),
+                                 float(rotation[2])), **rest)
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,7 @@ class ImageSpec:
 class GripperSpec:
     """夹爪单位换算：VLA 的开合量 <-> 我方关节弧度。
 
-    **两边的「0」经常是反的**（A2D 模型 0=张开、我们的偏心轴 0 rad=夹紧），写成恒等映射
+    **两边的「0」经常是反的**（模型 0=张开、我们的偏心轴 0 rad=夹紧），写成恒等映射
     的后果是「该松手时夹紧」，实机上很难当场认出来，所以两端都写死在这里。
     """
 
@@ -172,9 +175,12 @@ class Observation:
     grippers: dict[str, float]
     #: ``side -> bool`` 这一侧是否参与——发给模型的协议字段，不是执行开关。
     enabled: dict[str, bool]
-    #: 4x4，``base_frame`` -> 头部相机光心。
-    camera_in_base: np.ndarray
-    camera: CameraCalibration | None = None
+    #: 图像槽位 -> 相机内参。
+    calibrations: dict[str, CameraCalibration] = field(default_factory=dict)
+    #: 图像槽位 -> 4x4 ``T_base<-cam``。多视角几何模型使用。
+    camera_poses: dict[str, np.ndarray] = field(default_factory=dict)
+    acquired_monotonic: float | None = None
+    history: tuple[ControlStep, ...] = ()
 
 
 @dataclass
@@ -226,6 +232,17 @@ class VlaBackend(abc.ABC):
     def stats(self) -> dict[str, Any]:
         """给 ``~/status`` 的补充信息，比如重投影填充率。"""
         return {}
+
+    @property
+    def history_enabled(self) -> bool:
+        return False
+
+    @property
+    def history_length(self) -> int:
+        return 0
+
+    def reset(self) -> None:
+        """Reset server episode state, when supported by the backend."""
 
     def close(self) -> None:
         """释放连接等资源。"""

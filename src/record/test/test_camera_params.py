@@ -69,6 +69,7 @@ def test_extrinsics_come_over_but_solver_leftovers_do_not(tmp_path, calibration)
     snapshot = camera_params.build(
         root, dict(calibration, extrinsics={'camera_left': {}}))
     assert set(snapshot['urdf_overrides']) == set(calibration['urdf_overrides'])
+    assert snapshot['head_imu_reference'] == calibration['head_imu_reference']
     assert 'extrinsics' not in snapshot
 
 

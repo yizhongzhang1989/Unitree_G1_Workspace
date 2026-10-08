@@ -180,8 +180,6 @@ def _control_nodes(context):
         package_share / "config" / "default_31dof_param.yaml")
     forward_position_parameters = str(
         package_share / "config" / "forward_position_controller.yaml")
-    joint_trajectory_parameters = str(
-        package_share / "config" / "joint_trajectory_controller.yaml")
     imu_parameters = str(
         package_share / "config" / "pelvis_imu_broadcaster.yaml")
     joint_state_parameters = str(
@@ -214,9 +212,13 @@ def _control_nodes(context):
             }],
             remappings=[
                 ("robot_description", LaunchConfiguration("robot_description_topic")),
-                ("joint_states", LaunchConfiguration("joint_states_topic")),
+                ("joint_states", LaunchConfiguration('joint_states_topic')),
             ],
         ),
+        Node(
+            package="head_sensors", executable="head_tf", name="head_tf",
+            parameters=[{"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}],
+            remappings=[("robot_description", LaunchConfiguration("robot_description_topic"))]),
         Node(
             package="controller_manager",
             executable="spawner",
@@ -246,19 +248,6 @@ def _control_nodes(context):
                 "forward_position_controller",
                 "--param-file", common_controller_parameters,
                 "--param-file", forward_position_parameters,
-                "--inactive",
-                "--controller-manager", controller_manager,
-                "--controller-manager-timeout", "30",
-            ],
-            output="screen",
-        ),
-        Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=[
-                "joint_trajectory_controller",
-                "--param-file", common_controller_parameters,
-                "--param-file", joint_trajectory_parameters,
                 "--inactive",
                 "--controller-manager", controller_manager,
                 "--controller-manager-timeout", "30",

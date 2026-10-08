@@ -98,8 +98,8 @@
     right_tip_frame: right_gripper_base
     robot_description_topic: /robot_description
 
-    # DLS 迭代参数。无线搜索、无 SVD、次数硬上限，成本可预测。实测双臂热启动 ~0.3 ms、
-    # 跑满 10 次也只要 ~1.1 ms，相对 20 ms 周期够用。到上限不报错，直接发尽力而为的解。
+    # 原 DLS 循环次数上限；结束后固定追加一次 DLS + SVD 严格零空间偏好，最多11次更新。
+    # 容差仅控制原循环停止，末尾更新不做回溯；不可达仍返回尽力而为的解。
     ik_max_iters: 10
     ik_damping: 0.05
     ik_tol_pos: 0.001

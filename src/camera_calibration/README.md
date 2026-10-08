@@ -272,7 +272,7 @@ $$T_{\text{parent}\leftarrow\text{mount}}^{\text{new}} = T_{\text{parent}\leftar
 ### 保存完必须重启控制栈
 
 `control.launch.py` **只在启动那一刻读一次** `calibration.yaml`，之后不再看。
-控制栈先起、标定后存，那份 `/robot_description` 里就没有相机 —— 表现是 8200/8180
+控制栈先起、标定后存，那份 `/robot_description` 里就没有相机 —— 表现是 8200
 页面和 rviz 里**找不到 `camera_left` / `camera_right`，`d435_joint` 还是名义值**。
 
 ```bash

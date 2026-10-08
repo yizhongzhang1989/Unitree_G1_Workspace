@@ -3,7 +3,7 @@
 
 **不把净力直接喂回补偿**是这里唯一重要的设计决定。净力经位置命令改变手臂受力，再从
 传感器回来，就是一条增益 1/kp 的导纳环，而且分不清"一直拎着的负载"和"顶到桌子上的
-接触力"。把它压缩成缓变的 (质量, 质心) 参数则天然稳定。
+接触力"。估计默认关闭，必须显式开启；缓变参数仍不能可靠区分手拉接触与真实负载。
 
 运动学不在这里：``ft_wrench_compensator`` 为了扣掉工具自重本来就要算传感器系的重力
 方向，它把那个方向一并发出来。养第二份 joint_states 订阅和第二个运动学模型除了多一份
@@ -19,13 +19,15 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import InertiaStamped, Vector3Stamped, WrenchStamped
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
-from .constants import SIDES
-from .ft_model import PayloadEstimator, gravity_aligned, instantaneous_mass
+from .constants import FT_SENSOR_LINKS, SIDES
+from .ft_model import FtCalibration, PayloadEstimator, gravity_aligned, instantaneous_mass
 
 
 _DEFAULTS = {"left": ("/arm0/wrench_net", "/arm0/gravity", "/arm0/payload"),
@@ -58,6 +60,8 @@ class PayloadEstimatorNode(Node):
             "state_timeout_s", 0.5).get_parameter_value().double_value
         forgetting = self.declare_parameter(
             "forgetting", 0.995).get_parameter_value().double_value
+        self._estimation_enabled = self.declare_parameter(
+            "estimation_enabled", False).get_parameter_value().bool_value
 
         self._gravity: Dict[str, Optional[np.ndarray]] = {
             side: None for side in SIDES}
@@ -98,6 +102,35 @@ class PayloadEstimatorNode(Node):
         if not self._outputs:
             raise RuntimeError("no side is calibrated; nothing to estimate")
         self.create_service(Trigger, "~/reset", self._on_reset)
+        self.create_service(Trigger, "~/reload_calibration", self._on_reload)
+        self.add_on_set_parameters_callback(self._on_parameters)
+        self.create_timer(self._period, self._publish_disabled)
+
+    def _on_parameters(self, parameters):
+        for parameter in parameters:
+            if parameter.name == "estimation_enabled" and parameter.type_ != Parameter.Type.BOOL:
+                return SetParametersResult(
+                    successful=False, reason="estimation_enabled must be a boolean")
+        for parameter in parameters:
+            if parameter.name == "estimation_enabled" and parameter.value != self._estimation_enabled:
+                self._estimation_enabled = parameter.value
+                self._clear_estimates()
+        return SetParametersResult(successful=True)
+
+    def _clear_estimates(self):
+        for side, estimator in self._estimators.items():
+            estimator.reset()
+            self._previous[side] = None
+            self._sampled[side] = 0.0
+        stamp = self.get_clock().now().to_msg()
+        for side in self._outputs:
+            self._publish(side, FT_SENSOR_LINKS[side], stamp)
+
+    def _publish_disabled(self):
+        if not self._estimation_enabled:
+            stamp = self.get_clock().now().to_msg()
+            for side in self._outputs:
+                self._publish(side, FT_SENSOR_LINKS[side], stamp)
 
     def _load_tool_com(self, path: str) -> Dict[str, np.ndarray]:
         """工具自己的质心，在质心可辨识之前当作负载质心的先验。"""
@@ -107,8 +140,24 @@ class PayloadEstimatorNode(Node):
             only = next(iter(document.values()))
             if isinstance(only, dict) and "ros__parameters" in only:
                 document = only["ros__parameters"]
-        return {side: np.asarray(document[side]["tool_com"], dtype=float)
+        return {side: FtCalibration.from_dict(document[side]).com
                 for side in SIDES if side in document}
+
+    def _on_reload(self, request, response):
+        try:
+            replacement = self._load_tool_com(
+                self.get_parameter("ft_calibration").value)
+            if not all(side in replacement for side in self._outputs):
+                raise ValueError("calibration is missing an active side")
+            self._tool_com = replacement
+            self._on_reset(request, response)
+            for side in SIDES:
+                self._gravity[side] = None
+            response.message = "tool calibration reloaded; payload estimate cleared"
+        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as error:
+            response.success = False
+            response.message = str(error)
+        return response
 
     def _on_gravity(self, side: str, message: Vector3Stamped) -> None:
         # 这条回调按净力的速率来，别在这里碰 numpy：真正要用时才组装。
@@ -117,6 +166,8 @@ class PayloadEstimatorNode(Node):
         self._gravity_stamp[side] = time.monotonic()
 
     def _on_wrench(self, side: str, message: WrenchStamped) -> None:
+        if not self._estimation_enabled:
+            return
         now = time.monotonic()
         if now - self._sampled[side] < self._period:
             return
@@ -149,6 +200,12 @@ class PayloadEstimatorNode(Node):
             wrench, gravity, tolerance=self._parallel_tolerance)
 
     def _publish(self, side: str, frame: str, stamp) -> None:
+        if not self._estimation_enabled:
+            message = InertiaStamped()
+            message.header.stamp = stamp
+            message.header.frame_id = frame
+            self._outputs[side].publish(message)
+            return
         estimate = self._estimators[side].estimate()
         # 质心要多个朝向才可辨识；在那之前用工具自己的质心当先验，总比放在传感器
         # 原点上强。
@@ -170,8 +227,7 @@ class PayloadEstimatorNode(Node):
         self._outputs[side].publish(message)
 
     def _on_reset(self, _request, response):
-        for estimator in self._estimators.values():
-            estimator.reset()
+        self._clear_estimates()
         response.success = True
         response.message = "payload estimate cleared"
         return response

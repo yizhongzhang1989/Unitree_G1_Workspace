@@ -71,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from session_reader import Session                        # noqa: E402
 import resample_video                                     # noqa: E402
 import urdf_fk                                            # noqa: E402
+import head_extrinsic                                     # noqa: E402
 from urdf_fk import HEAD_OPTICAL, HEAD_OPTICAL_FRAME      # noqa: E402
 
 VERSION = '0.1'
@@ -270,6 +271,19 @@ def _quat_to_matrix(quat) -> np.ndarray:
     ], axis=-2)
 
 
+def head_pitch_for_episode(session: Session, model, grid, reference: dict) -> float:
+    """逐对计算双 IMU 相对角，再用圆均值得到 episode 的静态颈角。"""
+    head_t, head_data = read_table(session, 'head_imu', 10)
+    torso_t, torso_data = read_table(session, 'secondary_imu', 13)
+    inside = (head_t >= grid[0]) & (head_t <= grid[-1])
+    joint = model.joints.get('head_pitch_joint')
+    if joint is None:
+        raise ValueError('URDF 缺少 head_pitch_joint')
+    return head_extrinsic.estimate_pitch(
+        head_t[inside], head_data[inside, 7:10], torso_t, torso_data[:, 7:10],
+        reference, joint, urdf_fk.rpy_to_matrix)
+
+
 # ------------------------------------------------------------------- 各 space
 
 
@@ -435,7 +449,7 @@ def unify_pose(pose) -> np.ndarray:
 
 
 def camera_space(model, joints: dict, session: Session, grid, max_age,
-                 intrinsics: dict, direction: str) -> dict:
+                 intrinsics: dict, direction: str, head_pitch: float) -> dict:
     """内参逐档取标定值，外参靠 FK。图像另存 mp4，h5 里只留帧号。"""
     matrices, sizes, extrinsic, frames, warnings = [], [], [], [], []
     for camera in CAMERAS:
@@ -448,7 +462,9 @@ def camera_space(model, joints: dict, session: Session, grid, max_age,
         # 配 640x360 的画面）。不把尺寸一起写下去，拿到数据的人无法自行换算。
         sizes.append([int(entry['width'] or 0), int(entry['height'] or 0)]
                      if entry else [0, 0])
-        pose = model.poses(ORIGIN, camera.frame, {} if camera.static else joints)
+        values = ({'head_pitch_joint': head_pitch}
+              if camera.name == 'headcam' else joints)
+        pose = model.poses(ORIGIN, camera.frame, values)
         pose = np.broadcast_to(pose, (grid.size, 4, 4))
         if direction == 'cam_T_base':
             pose = urdf_fk.invert(pose)
@@ -616,18 +632,21 @@ def export_episode(handle, spaces: dict, grid: np.ndarray) -> None:
 
 
 def build_spaces(session: Session, model, grid, args, intrinsics,
-                 provenance: dict) -> dict:
+                 provenance: dict, head_imu_reference: dict,
+                 head_pitch_override: float | None = None) -> dict:
     order = list(session.meta.get('joint_order') or [])
     gripper_index = tuple(order.index(n) for n in GRIPPER_JOINTS if n in order)
     joint = joint_space(session, grid, order, args.max_age, gripper_index)
     joints = dict(zip(joint['names'], joint['state']['position'].T))
+    head_pitch = (head_pitch_for_episode(session, model, grid, head_imu_reference)
+                  if head_pitch_override is None else head_pitch_override)
     return {
         'joint': joint,
         'actuator': actuator_space(session, grid, order, args.max_age, gripper_index),
         'end': end_space(model, joints, session, grid, args.max_age,
                          args.end_action, provenance),
         'camera': camera_space(model, joints, session, grid, args.max_age,
-                               intrinsics, args.extrinsic),
+                               intrinsics, args.extrinsic, head_pitch),
     }
 
 
@@ -764,6 +783,17 @@ def build_rigs(sessions: list, session_ids: list, urdf: Path, urdf_text: str,
                   '只能来自这次采集自带的那一份，没有就导不了',
                   file=sys.stderr)
             return None
+        override = head_extrinsic.read_override(session.root)
+        if override:
+            params = dict(params)
+            mounts = dict(params.get('urdf_overrides') or {})
+            mounts.pop('head_pitch_joint', None)
+            mounts['d435_joint'] = override['d435_joint']
+            params['urdf_overrides'] = mounts
+        if not override and not params.get('head_imu_reference'):
+            print(f'！{session_id} 的 camera_params.yaml 缺少 head_imu_reference，'
+                  '无法合成 torso_link 到头相机的外参', file=sys.stderr)
+            return None
         model, applied = load_model(urdf_text, params)
         add_head_optical(model, head_optical)
         intrinsics = collect_intrinsics(session, params)
@@ -782,6 +812,8 @@ def build_rigs(sessions: list, session_ids: list, urdf: Path, urdf_text: str,
                       file=sys.stderr)
                 return None
         rigs.append({'model': model, 'intrinsics': intrinsics,
+                     'head_imu_reference': params.get('head_imu_reference') or {},
+                     'head_pitch_override': (override or {}).get('head_pitch_rad'),
                      'provenance': fk_provenance(urdf, session, applied)})
     return rigs
 
@@ -871,7 +903,9 @@ def main() -> int:
             grid = build_grid(episode['t0'], episode['t1'], args.hz)
             spaces = build_spaces(session, rigs[order]['model'], grid, args,
                                   rigs[order]['intrinsics'],
-                                  rigs[order]['provenance'])
+                                  rigs[order]['provenance'],
+                                  rigs[order]['head_imu_reference'],
+                                  rigs[order]['head_pitch_override'])
             name = episode_name(serial, session_id, episode)
             cut = episode.get('trim')
             cut_note = (f'  裁掉 头{cut["head_s"]:.1f}+尾{cut["tail_s"]:.1f}s'

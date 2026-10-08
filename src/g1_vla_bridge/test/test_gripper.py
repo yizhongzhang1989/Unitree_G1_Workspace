@@ -6,7 +6,7 @@
 import numpy as np
 import pytest
 
-from g1_vla_bridge.backends.a2d_omnipicker import SPEC
+from g1_vla_bridge.backends.cogact_unitree import SPEC
 from g1_vla_bridge.vla_backend import GripperSpec
 
 GRIP = SPEC.gripper

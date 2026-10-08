@@ -17,7 +17,6 @@ RobotTestDashboard = importlib.import_module(
     "robot_test_dashboard.dashboard_node").RobotTestDashboard
 
 
-JOINT_KINDS = ("forward_position", "joint_trajectory")
 SWITCH_TIMEOUT_S = 30.0
 
 
@@ -241,11 +240,6 @@ def _filter_mimic_snapshot(
             link: transform for link, transform in state["link_tf"].items()
             if link not in hidden_links
         }
-    if "skeleton" in state:
-        state["skeleton"] = {
-            link: [matrix[0][3], matrix[1][3], matrix[2][3]]
-            for link, matrix in state.get("link_tf", {}).items()
-        }
     if "visuals" in state:
         state["visuals"] = [
             visual for visual in state["visuals"]
@@ -261,45 +255,16 @@ def _filter_mimic_snapshot(
             joint for joint in state["movable_joints"]
             if joint["name"] not in hidden_joints
         ]
-    if "joints" in state:
-        state["joints"] = [
-            joint for joint in state["joints"]
+    if "joint_values" in state:
+        state["joint_values"] = {
+            joint: value for joint, value in state["joint_values"].items()
             if joint not in hidden_joints
-        ]
-    for key in ("joint_values", "joint_limits"):
-        if key in state:
-            state[key] = {
-                joint: value for joint, value in state[key].items()
-                if joint not in hidden_joints
-            }
+        }
     if "joint_state_names" in state:
         state["joint_state_names"] = [
             joint for joint in state["joint_state_names"]
             if joint not in hidden_joints
         ]
-
-    status = state.get("status")
-    if isinstance(status, dict):
-        state["status"] = dict(status)
-        for key in ("available_links",):
-            values = state["status"].get(key)
-            if isinstance(values, list):
-                state["status"][key] = [
-                    value for value in values if value not in hidden_links]
-        for key in (
-                "available_joints", "fixed_joints", "joints",
-                "group_joints", "command_joints"):
-            values = state["status"].get(key)
-            if isinstance(values, list):
-                state["status"][key] = [
-                    value for value in values if value not in hidden_joints]
-        for key in ("joint_speed_limits", "joint_accel_limits"):
-            values = state["status"].get(key)
-            if isinstance(values, dict):
-                state["status"][key] = {
-                    joint: value for joint, value in values.items()
-                    if joint not in hidden_joints
-                }
     return state
 
 

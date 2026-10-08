@@ -297,6 +297,79 @@ def test_fused_rejects_unpairable_lidar():
     assert not fuser.push_lidar(50.0, [1.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
 
 
+@pytest.mark.parametrize('origin', ([0.0, 0.0, 0.0], [10.0, 3.0, 0.0], [-100.0, 50.0, 0.0]))
+@pytest.mark.parametrize('yaw_step', (-0.02, 0.02))
+def test_fused_yaw_update_preserves_stationary_position(origin, yaw_step):
+    fuser = OdometryFuser()
+    identity = quat_from_axis('z', 0.0)
+    odom_position = np.asarray(origin) + [0.0, 0.0, 0.8]
+    fuser.push_odom(1.0, odom_position, identity)
+    assert fuser.push_lidar(1.0, [0.2, -0.4, 0.0], identity)
+    before = fuser.torso_position().copy()
+    fuser.push_odom(1.1, odom_position, identity)
+    assert fuser.push_lidar(1.1, [0.2, -0.4, 0.0], quat_from_axis('z', yaw_step))
+    np.testing.assert_allclose(fuser.torso_position(), before, atol=1e-12)
+    alpha = 1.0 - np.exp(-0.1 / 2.0)
+    np.testing.assert_allclose(fuser.orientation_in_world(identity),
+                               quat_from_axis('z', alpha * yaw_step), atol=1e-12)
+
+
+@pytest.mark.parametrize('coordinate_yaw', (0.0, 0.7))
+def test_fused_updates_are_invariant_to_odom_coordinates(coordinate_yaw):
+    original, shifted = OdometryFuser(), OdometryFuser()
+    coordinate_quat = quat_from_axis('z', coordinate_yaw)
+    translation = np.array([100.0, -50.0, 0.0])
+    for step in range(20):
+        stamp = 1.0 + step * 0.1
+        position = np.array([0.015 * step, 0.01 * np.sin(step), 0.8 + step * 0.001])
+        orientation = quat_from_axis('z', 0.03 * step)
+        original.push_odom(stamp, position, orientation)
+        shifted.push_odom(stamp, quat_apply(coordinate_quat, position) + translation,
+                          quat_mul(coordinate_quat, orientation))
+        latest = position + [0.006, 0.002, 0.001]
+        original.push_odom(stamp + 0.03, latest, orientation)
+        shifted.push_odom(stamp + 0.03, quat_apply(coordinate_quat, latest) + translation,
+                          quat_mul(coordinate_quat, orientation))
+        lidar_position = [0.4 + 0.008 * step, -0.3 + 0.02 * np.cos(step), 0.0]
+        lidar_orientation = quat_from_axis('z', 0.04 * step)
+        assert original.push_lidar(stamp, lidar_position, lidar_orientation)
+        assert shifted.push_lidar(stamp, lidar_position, lidar_orientation)
+        np.testing.assert_allclose(original.torso_position(), shifted.torso_position(), atol=1e-11)
+        np.testing.assert_allclose(original.orientation_in_world(orientation),
+                                   shifted.orientation_in_world(quat_mul(coordinate_quat, orientation)),
+                                   atol=1e-11)
+
+
+@pytest.mark.parametrize('lidar_error', (0.01, 1.0))
+def test_fused_limits_current_position_update_with_delayed_yaw(lidar_error):
+    fuser = OdometryFuser()
+    identity = quat_from_axis('z', 0.0)
+    start = np.array([10.0, 3.0, 0.8])
+    fuser.push_odom(1.0, start, identity)
+    assert fuser.push_lidar(1.0, [0.0, 0.0, 0.0], identity)
+    paired = start + [0.1, 0.0, 0.0]
+    latest = paired + [0.02, 0.01, 0.02]
+    fuser.push_odom(1.1, paired, identity)
+    fuser.push_odom(1.13, latest, identity)
+    before = fuser.torso_position().copy()
+    lidar_quat = quat_from_axis('z', 0.3)
+    lidar_position = np.array([0.1 + lidar_error, 0.0, 0.0])
+    desired_now = lidar_position + quat_apply(lidar_quat, latest - paired)
+    error = desired_now - before
+    error[2] = 0.0
+    alpha = 1.0 - np.exp(-0.1 / 2.0)
+    expected_step = alpha * error * min(1.0, 0.05 / np.linalg.norm(error))
+    assert fuser.push_lidar(1.1, lidar_position, lidar_quat)
+    np.testing.assert_allclose(fuser.torso_position(), before + expected_step, atol=1e-12)
+    assert np.linalg.norm(fuser.torso_position() - before) <= alpha * 0.05 + 1e-12
+    assert fuser.correction[0][2] == 0.0
+    after = fuser.torso_position().copy()
+    fast_step = np.array([0.02, -0.01, 0.003])
+    fuser.push_odom(1.15, latest + fast_step, identity)
+    np.testing.assert_allclose(fuser.torso_position() - after,
+                               quat_apply(quat_from_axis('z', alpha * 0.3), fast_step), atol=1e-12)
+
+
 def test_odom_stamp_regression_clears_buffer():
     fuser = OdometryFuser(mode='odom_only')
     fuser.push_odom(10.0, [1.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])

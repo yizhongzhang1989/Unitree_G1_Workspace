@@ -1,5 +1,12 @@
 # head_sensors
 
+颈部标定原理与流程见 [被动颈轴标定](../camera_calibration/NECK_CALIBRATION.md)。
+双 IMU 零位统一读取 camera_calibration 的
+[calibration.yaml](../camera_calibration/config/calibration.yaml) 中的 `head_imu_reference`，
+可通过节点参数 `calibration_file` 指定其他文件。配置缺失时启动失败，不回退到硬编码零位。
+颈轴几何及限位从实际 `robot_description` 的 `head_pitch_joint` 获取，不在 YAML 中重复保存。
+一次性实验目录已移至 `/home/unitree/.ros/calibration_archives/head_sensors_20260914`，不参与运行。
+
 G1 头部两个传感器的调用层：头顶 Livox MID-360 雷达 + 头顶 RealSense D435i 深度相机。
 
 两者的接入方式完全不同，这是本包存在的理由：
@@ -184,6 +191,19 @@ ros2 launch head_sensors head_camera.launch.py color_profile:=640x480x15 depth_p
 **相机 IMU** 默认关（`enable_gyro`/`enable_accel`）——机器人本体已经有盆骨和躯干两个 IMU。
 
 ## 实机验证挂载 TF
+
+头部双 IMU 估计节点 `head_tf`（`head_sensors.head_tf.HeadTF`）直接发布动态 TF
+`torso_link -> head_mount_link`，不发布头部 JointState，也不转发身体 `/joint_states`。
+`head_angle.py` 保持为不依赖 ROS 的纯角度计算模块；节点与 console entry 均为 `head_tf`。
+description/control launch 会自动启动该节点。仅在未由 launch 启动时，才独立运行：
+
+```bash
+ros2 run head_sensors head_tf
+```
+
+头部传感器的固定安装关系仍由 URDF 提供。消费者按传感器时间戳查询完整 TF；
+`verify_head_view` 默认查询 `torso_link -> camera_color_optical_frame`，缺失时停止渲染。
+离线 FK 工具需要保存完整相机变换或对应头角，不能把缺失头角当成零位。
 `verify_head_view` 拍一张实拍图 + 读当前关节角 → URDF 拍照 → 把渲染轮廓叠上去。命令见上面「校准头部安装角」。
 
 | 决定 | 为什么 |
@@ -191,7 +211,7 @@ ros2 launch head_sensors head_camera.launch.py color_profile:=640x480x15 depth_p
 | **不摆姿势** | 摆姿势已经有 `gravity_float_demo`，重新发明一遍等于多一份要维护的控制代码和安全面 |
 | 模型取自 **`/robot_description`** 而不是磁盘 | 广播那份才是机器人实际在跑的模型。磁盘 `final.urdf` 写的是相对 mesh 路径，广播的是 `package://`，两份不是同一个文件。收不到广播直接报错退出 |
 | 关节角在窗口内取均值 | **不是为了降噪** —— 静止时 `/joint_states` 标准差实测只有 0.00002 rad，平均毫无意义。窗口是用来发现「拍照那一刻手臂还在动」，峰峰值超 `--still` 就警告 |
-| 外参从 **TF** 读 `d435_link -> camera_color_optical_frame` | 彩色镜头不在 `d435_link` 原点上，实测偏 `[-0.8 +15.3 0.0] mm`。当成纯旋转会让渲染整体横移十几个像素 |
+| 外参从 **TF** 读 `torso_link -> camera_color_optical_frame` | 完整链包含动态头角、传感器固定安装关系和相机光学中心偏移；不能只取 `d435_link` 到光学 frame 的固定段 |
 | **只出一张 `_overlay.png`** | 要判的就是「轮廓贴不贴得上」。深度图、部件图、原图都是中间产物，真要它们直接用 `render_head_view` |
 
 ## 从 URDF 渲染相机视角
@@ -201,7 +221,7 @@ ros2 launch head_sensors head_camera.launch.py color_profile:=640x480x15 depth_p
 |---|---|---|
 | `urdf_view.py` | pinocchio / numpy / opencv | 渲染全部能力，核心是 `shoot(关节角) -> Shot` |
 | `render_head_view.py` | 同上 | 薄 CLI |
-| `verify_head_view.py` | **rclpy 等** | 实物对照，本包唯一碰 ROS 的文件 |
+| `verify_head_view.py` | **rclpy 等** | 实物对照，订阅 ROS 状态并查询 TF |
 
 前两个拷走就能跑，已实测 `env -i` 剥掉所有环境变量、只给 pinocchio 的 `PYTHONPATH` 照样出图：
 ```bash

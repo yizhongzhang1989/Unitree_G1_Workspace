@@ -11,6 +11,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'README.md']),
+        ('share/' + package_name + '/g1_vla_bridge/online_rl', ['g1_vla_bridge/online_rl/README.md']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
         ('share/' + package_name + '/config/backends', glob('config/backends/*.yaml')),
@@ -24,7 +25,10 @@ setup(
     entry_points={
         'console_scripts': [
             'vla_node = g1_vla_bridge.vla_node:main',
-            'calibrate_frame = g1_vla_bridge.calibrate_frame:main',
+            'vla_cli = g1_vla_bridge.vla_cli:main',
+            'gripper_gate_node = g1_vla_bridge.gripper_gate_node:main',
+            'online_rl_bridge = g1_vla_bridge.online_rl.bridge:main',
+            'online_rl_cli = g1_vla_bridge.online_rl.cli:main',
         ],
     },
 )

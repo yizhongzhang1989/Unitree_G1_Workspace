@@ -14,9 +14,13 @@ import pytest
 from g1_mocap.kinematics import G1Kinematics
 from g1_mocap.retarget import LEGS, ARMS, RetargetCalibration, Retargeter
 from g1_mocap.skeleton import SMPL_JOINTS, BodyFrame
-from g1_mocap.stream import StreamStats, _RingBuffer
+from g1_mocap.stream import SampleBatch, StreamStats, _RingBuffer
 
-from g1_rgmt_tracking_global.mocap_clip import MocapClip, lead_frames_for
+from g1_rgmt_tracking_global.mocap_clip import (
+    MocapClip,
+    _smooth_quaternions,
+    lead_frames_for,
+)
 
 URDF = str(Path(__file__).resolve().parents[2] / 'unitree_g1_description' / 'model'
            / 'g1_description' / 'g1_29dof_mode_15.urdf')
@@ -138,9 +142,60 @@ def make_clip(stream, offsets=CONTRACT_OFFSETS, **kwargs) -> MocapClip:
                      stand_joint_pos=DEFAULT_Q, **kwargs)
 
 
+class ScalarStream:
+    def __init__(self, signal) -> None:
+        self._signal = signal
+
+    def sample(self, times):
+        times = np.asarray(times, dtype=np.float64)
+        values = np.asarray(self._signal(times), dtype=np.float64)
+        positions = np.column_stack((values, np.zeros_like(values), np.zeros_like(values)))
+        quaternions = np.tile(IDENTITY_QUAT, (len(times), 1))
+        return SampleBatch(
+            times,
+            np.repeat(values[:, None], len(ACTION_JOINTS), axis=1),
+            positions,
+            quaternions,
+            positions.copy(),
+            quaternions.copy(),
+            np.repeat(positions[:, None, :], len(KEY_BODIES), axis=1),
+        )
+
+
 ##
 # 窗口布局
 ##
+
+def test_smoothing_reduces_a_single_frame_impulse():
+    stream = ScalarStream(lambda times: np.isclose(times, 1.0).astype(np.float64))
+    clip = make_clip(stream, smoothing_weight=0.25)
+    batch = clip._sample(np.array([1.0]))
+    assert batch.joint_pos[0, 0] == pytest.approx(0.5)
+    assert batch.root_pos[0, 0] == pytest.approx(0.5)
+    assert batch.anchor_pos[0, 0] == pytest.approx(0.5)
+    assert batch.key_pos[0, 0, 0] == pytest.approx(0.5)
+
+
+def test_smoothing_preserves_a_constant_velocity_ramp():
+    clip = make_clip(ScalarStream(lambda times: 0.7 * times - 0.2),
+                     smoothing_weight=0.25)
+    times = np.array([0.4, 1.0, 1.8])
+    batch = clip._sample(times)
+    np.testing.assert_allclose(batch.joint_pos[:, 0], 0.7 * times - 0.2,
+                               atol=1e-12)
+
+
+@pytest.mark.parametrize('weight', [-0.01, 0.251, float('nan')])
+def test_smoothing_rejects_invalid_weights(fake_stream, weight):
+    with pytest.raises(ValueError, match='smoothing_weight'):
+        make_clip(fake_stream, smoothing_weight=weight)
+
+
+def test_quaternion_smoothing_does_not_cancel_equivalent_signs():
+    quaternion = np.array([[math.cos(0.35), 0.0, 0.0, math.sin(0.35)]])
+    smoothed = _smooth_quaternions(quaternion, -quaternion, quaternion, 0.25)
+    assert abs(float(smoothed[0] @ quaternion[0])) == pytest.approx(1.0)
+
 
 def test_window_shape_matches_the_contract(fake_stream):
     clip = make_clip(fake_stream)

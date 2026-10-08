@@ -6,7 +6,7 @@
 
 | 命令 | 实际启动 |
 |---|---|
-| `ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual` | **推荐整机入口**（同时也是全部默认值）：末端拓扑 + 唯一真实 `controller_manager` + 统一硬件插件 + broadcaster + URDF + 互斥 inactive FPC/JTC + 末端负载链 |
+| `ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual` | **推荐整机入口**（同时也是全部默认值）：末端拓扑 + 唯一真实 `controller_manager` + 统一硬件插件 + broadcaster + URDF + inactive FPC + 末端负载链 |
 | `ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual` | 只启末端拓扑：bridge、进程内 KWR57、Gloria-M、左右相机 |
 | `ros2 launch robot_bringup all_data.launch.py scope:=whole_body end_effector_load:=false` | 整机但不启净力/负载估计，重力补偿退回标称工具重量 |
 | `ros2 launch robot_bringup all_data.launch.py enable_grippers_on_start:=false` | 同上，但两只 Gloria-M 上电保持失能 |
@@ -18,9 +18,6 @@
 | `ros2 launch robot_bringup whole_body_dashboard.launch.py` | controller 测试网页 `8200`；连接已有 manager |
 | `ros2 launch robot_bringup lowlevel_dashboard.launch.py` | `LowState` 只读监控页 `8210`；不依赖本仓库任何东西 |
 | `ros2 launch robot_bringup lowlevel_dashboard.launch.py lowstate_topic:=/lowstate secondary_imu_topic:=/secondary_imu` | 同上，改订 1040 Hz 高频流，代价接近一个核 |
-| `ros2 launch robot_bringup ikt_pose_commander.launch.py` | IK Pose Commander + 网页 `8180`；连接已有 FPC/JTC，默认控右手 |
-| `ros2 launch robot_bringup ikt_pose_commander.launch.py controlled_frame:=left_gripper_base` | 同上，改控左手 |
-| `ros2 launch robot_bringup ikt_pose_commander.launch.py enable_dashboard:=false` | 只启 Commander，不开网页 |
 | `ros2 launch robot_bringup gravity_float_demo.launch.py` | 激活 FPC 并让双臂进入可徒手推动的失重状态；连接已有 manager |
 | `ros2 control switch_controllers --deactivate forward_position_controller` | 停掉 demo 遗留的 active FPC |
 | `ros2 param set /forward_position_controller compensation_scale 0.0` | 临时关掉手臂重力补偿 |
@@ -28,7 +25,7 @@
 | `ros2 run robot_bringup exit_debug_mode` | 卸力斜坡 + 交还 `ai` 模式；控制栈被强杀后的兜底 |
 | `kill -INT -- -"$(ps -o pgid= -p "$(pgrep -f 'ros2 launch robot_bringup all_data' \| head -1)" \| tr -d ' ')"` | 正确停控制栈（**发给进程组**）；**绝不要 `pkill`**，原因见下文 |
 
-网页端口：`8770` 末端联调、`8200` 整机 controller、`8210` 底层只读、`8180` IK Commander、`8010`/`8011` 相机自带页。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，`localhost` 常先解析到 IPv6 `::1`，表现为页面能开、数据不来。远程转发 `ssh -L 8770:127.0.0.1:8770 user@robot`，其余端口同理。
+网页端口：`8770` 末端联调、`8200` 整机 controller、`8210` 底层只读、`8010`/`8011` 相机自带页。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，`localhost` 常先解析到 IPv6 `::1`，表现为页面能开、数据不来。远程转发 `ssh -L 8770:127.0.0.1:8770 user@robot`，其余端口同理。
 
 ## 末端设备结构
 `all_data.launch.py scope:=end_effectors topology:=dual` 的实际数据流如下；8770 Dashboard 是独立进程，用户需要时再手动启动：
@@ -147,7 +144,7 @@ KWR57 一律以 **SI 发布**（`use_si=True`）：`geometry_msgs/Wrench` 就定
 ## 数据启动
 ```bash
 source scripts/env.sh
-# 推荐整机入口：设备 + 唯一 manager + inactive FPC/JTC
+# 推荐整机入口：设备 + 唯一 manager + inactive FPC
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 
 # 仅设备和原始话题，不启 ros2_control
@@ -173,6 +170,16 @@ ros2 launch robot_bringup end_effector_load.launch.py
 ```
 
 **只在 `whole_body` 下有意义**：补偿节点要关节角和躯干 IMU。它依赖仓库里已导出的 `ft_calibration.yaml`；该文件缺失或不合法时只有这两个节点退出，整机栈照常跑，重力补偿在 `payload_timeout_s` 后退回标称工具重量。起来后 8770 页面会自动多画一组净力六轴条。
+
+**启动负载节点不等于开始估计**：`payload_estimator.estimation_enabled` 默认 `false`，两侧持续输出零负载；净力 `wrench_net` 和手臂自身重力补偿照常工作。只有显式开启后才实时估计，浮动手拉与传感器未校准时保持关闭。
+
+```bash
+ros2 param get /payload_estimator estimation_enabled
+ros2 param set /payload_estimator estimation_enabled true   # 开启实时估计
+ros2 param set /payload_estimator estimation_enabled false  # 禁止估计并清空历史
+```
+
+关闭会清空估计并持续发布零负载，控制器平滑淡出额外补偿；重启默认关闭。不能用 `compensation_scale=0` 代替，那会连手臂自重补偿一起关闭。
 
 ## 双手 Web 联调
 先启数据再启网页，`topology` 必须一致：
@@ -240,50 +247,22 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ros2 launch robot_bringup whole_body_dashboard.launch.py
 ```
 
-第一条启动唯一 `/controller_manager`，将 `/lowstate`、双 Gloria-M、双 KWR57 和 pelvis IMU 接入 `hardware_interface`，发布 `/robot_description`、TF 与统一 `/joint_states`；第二条只在 `http://<机器人 IP>:8200` 提供网页。FPC 和 JTC 均已加载但保持 `inactive`，且 claim 相同的 29 个 G1 关节和两只 Gloria，因此只能激活其中一个。夹爪采用独立、更宽的 `0.75 s` feedback timeout，单侧 stale 只停该侧，不切断本体 LowCmd。
+第一条启动唯一 `/controller_manager`，将 `/lowstate`、双 Gloria-M、双 KWR57 和 pelvis IMU 接入 `hardware_interface`，发布 `/robot_description`、TF 与统一 `/joint_states`；第二条只在 `http://<机器人 IP>:8200` 提供网页。FPC 已加载但保持 `inactive`，激活后 claim 29 个 G1 关节和两只 Gloria。夹爪采用独立、更宽的 `0.75 s` feedback timeout，单侧 stale 只停该侧，不切断本体 LowCmd。
 
 Dashboard wrapper 只把切换超时放宽到 30 秒并做切换后状态校验，不代理任何 controller-manager 服务。Web 快照还会按 URDF joint limit 一次性重算 Gloria-M 的受限分段 mimic FK，并隐藏 `internal_*` 虚拟 link/joint，不改变 `/joint_states`、TF 或控制链。Engage/Disengage 的 MotionSwitcher、夹爪生命周期、状态 freshness 和回滚由 C++ 硬件插件执行，详见 [`unitree_g1_ros2_control/README.md`](../unitree_g1_ros2_control/README.md)。实机 Disengage 后仍建议独立确认 controller 为 `inactive`、命令接口为 `unclaimed`、两只夹爪已失能且 MotionSwitcher 模式已恢复。
 
-手臂重力补偿已内置在 FPC 里，不是第三个 controller，页面上只看得到 FPC 和 JTC 两个互斥项：
+手臂重力补偿已内置在 FPC 里，不是另一个 controller，页面上只看得到 FPC 一项：
 
 ```bash
 # 临时不要补偿
 ros2 param set /forward_position_controller compensation_scale 0.0
 ```
 
-`robot_test_dashboard` 不是 controller 实现，只是通用测试客户端：对 JTC 生成单点 `JointTrajectory`，对 FPC 生成限速后的 `Float64MultiArray`。真正的 JTC 是 ROS 2 `joint_trajectory_controller` 标准插件，本工作区只在 `unitree_g1_ros2_control` 中保存其实例配置。IK 也不属于 Dashboard 或硬件插件，它由 `ikt_core` 求解、由 Pose Commander 选择目标并调用 FPC/JTC。
+`robot_test_dashboard` 不是 controller 实现，只是通用测试客户端：对 FPC 生成限速后的 `Float64MultiArray`。IK 也不属于 Dashboard 或硬件插件，双臂 IK 在 `g1_motion_control` 里。
 
 Gloria-M 使用 `kp=10`、`kd=5`。`kd=5` 是 SDK `pack_mit_command()` 将 12 bit 字段映射到 `[0,5]` 后的最大值；输入 10 会在 SDK 层被夹到 5，因此统一节点启动时拒绝超出该范围的配置。
 
 默认模型根帧为 `pelvis`，TCP 为 `right_gripper_base`。没有真实 ros2_control 栈时，页面会等待 `/robot_description`、`/joint_states`、TF 和 `/controller_manager`。
-
-### 接入 IK Pose Commander
-保持上面的整机数据与控制栈运行，再启动 G1 适配入口：
-```bash
-source scripts/env.sh
-ros2 launch robot_bringup ikt_pose_commander.launch.py
-
-# 改控左手
-ros2 launch robot_bringup ikt_pose_commander.launch.py controlled_frame:=left_gripper_base
-# 只要 Commander，不要 8180 网页
-ros2 launch robot_bringup ikt_pose_commander.launch.py enable_dashboard:=false
-```
-
-该入口连接两个真实 controller：自定义 FPC 用于 **Track robot** 连续跟踪，上游标准 JTC 用于 **Snap robot**、Disable 后持位和 `return_to_start`。两者配置完全相同的 31 个 position command interface，Commander 通过 `/controller_manager/switch_controller` 一启一停，manager 的资源 claim 保证它们不能同时 active。两者最终都只写 `G1TopicSystem` 的 position command interface，实际 MIT 命令仍由硬件插件生成，没有第二条底层下发通道。Stop/Disengage 在同一次 `switch_controller` 里把两者一起停掉。
-
-FPC 那条全量位置流直接发到 `/forward_position_controller/commands`，它自己把标定后的手臂重力偏移加在每个 setpoint 上（每拍重算、跟随躯干姿态），手臂因此停在指令位姿上而不是沉在它下方。
-
-FPC 用一个 200 Hz control timer 完成“读取最新 Cartesian 目标、必要时求解 IK、更新全关节 target 缓存并发布”的完整周期。缓存按 controller 的 31 个关节名建立，首次缺失项才从实测位置初始化；每次 IK 结果只覆盖本次动态 active-joint 区间，区间外关节继续用上次设定的 target，而不是用实时反馈回填。因此切换控制手或 controller 后仍保留另一只手及其余关节的设定目标。浏览器只允许一个目标请求在途，等待槽只保留最新姿态；每个到达的 `/api/target` 立即发布一次 ROS 目标，100 Hz 定时器只负责保活。目标订阅和 FPC 命令链均为 `KEEP_LAST(1)`，不会在恢复后回放拖动期间的旧 setpoint。
-
-网页选择的 base/target 同时定义本次 IK 的活动关节区间。适配层从完整 Pinocchio 模型创建动态 active-joint 视图，只向未修改的 `ikt_core.solve()` 暴露该区间的 Jacobian 列，再把结果散射回完整关节向量，因此求解矩阵维度随选择变化：`pelvis -> right_gripper_base` 10 维，`torso_link -> right_gripper_base` 7 维，`right_shoulder_yaw_link -> right_gripper_base` 4 维。base 与 target 在不同分支时沿两端到最近公共祖先的唯一链路建立并用相对位姿误差，例如 `torso_link -> left_ankle_roll_link` 为 3 腰 + 6 左腿共 9 维。
-
-默认跟踪参数 `control_rate_hz=200`、`stream_rate_hz=100`、`max_joint_speed=2 rad/s`，即单步上限 `2 / 200 = 0.01 rad`。这是 Commander 对 target 缓存的**上游**限速，不是 C++ FPC 自身的限位：C++ FPC 只接受宽度正确且全部有限的全量 target 并原样写入 hardware interface，不加误差窗、跳变、速度/加速度或命令超时回填。`G1TopicSystem` 同样**不读 URDF position command interface 的 `min/max`、不对目标做任何限幅**：MIT 阻抗控制靠目标与反馈的偏移产生力矩，在这一层裁剪会直接改变期望的恢复力矩。本体 `NaN/Inf` 时跳过整帧 `LowCmd`，夹爪 `NaN/Inf` 时只跳过对应侧。
-
-不可达或奇异目标保持 `best-effort`：IK 每次只从当前实测关节 seed 求解并发送最接近配置，不切中立 seed、不保存“最后可达解”，也不需要恢复服务。目标回到可达区域时会在同一控制周期链上自然恢复。
-
-适配入口只处理动态模型视图、固定的 G1 控制器名和最长 30 秒的硬件接管等待，不修改 toolkit submodule。默认控制帧 `right_gripper_base`、参考帧 `torso_link`，Dashboard 在 `http://<机器人 IP>:8180`，并复用整机测试页面的 Gloria-M 受限分段 mimic FK 与 `internal_*` 虚拟节点过滤。
-
-启动仍默认 disabled。先在页面确认模型、关节状态、控制帧和两个 controller 均已识别，再 Engage。任一控制器都会同时 claim G1 本体与双夹爪；力传感器不参与 Commander 的命令闭环。
 
 ### 手臂失重 demo
 先按上面启动整机数据与控制栈，再单独启动 demo：
@@ -395,7 +374,6 @@ robot_bringup/
 │   ├── end_effectors_dashboard.launch.py   纯末端 Web Dashboard（8770）
 │   ├── whole_body_dashboard.launch.py   纯整机控制器测试 Dashboard（8200）
 │   ├── lowlevel_dashboard.launch.py     纯底层只读监控页（8210）
-│   ├── ikt_pose_commander.launch.py     对接互斥 FPC/JTC 的 IK Commander（8180）
 │   └── gravity_float_demo.launch.py     激活 FPC 并跟随实测值的失重 demo
 ├── robot_bringup/
 │   ├── end_effectors/
@@ -406,8 +384,6 @@ robot_bringup/
 │   ├── lowlevel/
 │   │   ├── dashboard_node.py            LowState 只读监控节点
 │   │   └── static/                      8210 页面（HTML/CSS/JS + 曲线组件）
-│   ├── ik_model_view.py                 完整 Pinocchio 模型的动态 active-joint 视图
-│   ├── ikt_pose_commander_compat.py     IK Commander 与其 Dashboard 的 G1 适配层
 │   ├── dashboard_compat_node.py         8200 页面的 controller 切换 wrapper
 │   ├── gravity_float_demo.py            失重 demo 节点
 │   ├── enter_debug_mode.py              释放运控模式

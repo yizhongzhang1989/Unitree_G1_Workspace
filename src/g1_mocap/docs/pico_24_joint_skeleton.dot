@@ -1,0 +1,58 @@
+graph pico_24_joint_skeleton {
+    graph [
+        layout=neato,
+        overlap=false,
+        splines=line,
+        outputorder=edgesfirst,
+        bgcolor="#fafaf7",
+        pad=0.35,
+        size="12,9!",
+        ratio=compress,
+        label="PICO 24-joint skeleton\nEach node is one positions[i]; each node also carries rotations[i]",
+        labelloc=t,
+        fontsize=22,
+        fontname="DejaVu Sans"
+    ];
+    node [
+        shape=box,
+        style="rounded,filled",
+        fontname="DejaVu Sans Mono",
+        fontsize=12,
+        penwidth=1.8,
+        margin="0.13,0.08"
+    ];
+    edge [color="#666666", penwidth=3.0];
+
+    pelvis         [label="0  PELVIS",          pos="0,210!",   fillcolor="#e8e8e3", color="#555555"];
+    spine1         [label="3  SPINE1",          pos="0,365!",   fillcolor="#e8e8e3", color="#555555"];
+    spine2         [label="6  SPINE2",          pos="0,520!",   fillcolor="#e8e8e3", color="#555555"];
+    spine3         [label="9  SPINE3",          pos="0,675!",   fillcolor="#e8e8e3", color="#555555"];
+    neck           [label="12 NECK",            pos="0,805!",   fillcolor="#e8e8e3", color="#555555"];
+    head           [label="15 HEAD",            pos="0,925!",   fillcolor="#e8e8e3", color="#555555"];
+
+    left_hip       [label="1  LEFT_HIP",        pos="-185,120!", fillcolor="#fff0d7", color="#c77918"];
+    left_knee      [label="4  LEFT_KNEE",       pos="-220,-95!", fillcolor="#fff0d7", color="#c77918"];
+    left_ankle     [label="7  LEFT_ANKLE",      pos="-225,-310!", fillcolor="#fff0d7", color="#c77918"];
+    left_foot      [label="10 LEFT_FOOT",       pos="-300,-455!", fillcolor="#fff0d7", color="#c77918"];
+    left_collar    [label="13 LEFT_COLLAR",     pos="-210,680!", fillcolor="#fff0d7", color="#c77918"];
+    left_shoulder  [label="16 LEFT_SHOULDER",   pos="-420,650!", fillcolor="#fff0d7", color="#c77918"];
+    left_elbow     [label="18 LEFT_ELBOW",      pos="-610,505!", fillcolor="#fff0d7", color="#c77918"];
+    left_wrist     [label="20 LEFT_WRIST",      pos="-730,335!", fillcolor="#fff0d7", color="#c77918"];
+    left_hand      [label="22 LEFT_HAND",       pos="-790,185!", fillcolor="#fff0d7", color="#c77918"];
+
+    right_hip      [label="2  RIGHT_HIP",       pos="185,120!",  fillcolor="#dff4f2", color="#16817b"];
+    right_knee     [label="5  RIGHT_KNEE",      pos="220,-95!",  fillcolor="#dff4f2", color="#16817b"];
+    right_ankle    [label="8  RIGHT_ANKLE",     pos="225,-310!", fillcolor="#dff4f2", color="#16817b"];
+    right_foot     [label="11 RIGHT_FOOT",      pos="300,-455!", fillcolor="#dff4f2", color="#16817b"];
+    right_collar   [label="14 RIGHT_COLLAR",    pos="210,680!",  fillcolor="#dff4f2", color="#16817b"];
+    right_shoulder [label="17 RIGHT_SHOULDER",  pos="420,650!",  fillcolor="#dff4f2", color="#16817b"];
+    right_elbow    [label="19 RIGHT_ELBOW",     pos="610,505!",  fillcolor="#dff4f2", color="#16817b"];
+    right_wrist    [label="21 RIGHT_WRIST",     pos="730,335!",  fillcolor="#dff4f2", color="#16817b"];
+    right_hand     [label="23 RIGHT_HAND",      pos="790,185!",  fillcolor="#dff4f2", color="#16817b"];
+
+    pelvis -- spine1 -- spine2 -- spine3 -- neck -- head;
+    pelvis -- left_hip -- left_knee -- left_ankle -- left_foot;
+    pelvis -- right_hip -- right_knee -- right_ankle -- right_foot;
+    spine3 -- left_collar -- left_shoulder -- left_elbow -- left_wrist -- left_hand;
+    spine3 -- right_collar -- right_shoulder -- right_elbow -- right_wrist -- right_hand;
+}

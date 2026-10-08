@@ -7,8 +7,9 @@
 末端位姿相对 ``base_frame``（torso_link）。缩减模型锁死了腰和腿，torso_link 是常量
 位姿，构造时算一次 ``_oMb`` 就够——求解时不必关心策略把腰摆到了哪儿。
 
-纯 DLS 牛顿迭代：无线搜索、无 SVD、迭代数硬上限，成本可预测。到上限也不报错，直接
-返回尽力而为的解——上肢够不着不该把正在平衡的下肢一起拖下水。
+原循环是 DLS 牛顿迭代，次数有硬上限；结束后固定追加一次 DLS 残差修正与 SVD
+严格零空间偏好，无额外迭代或回溯。最坏为 max_iters + 1 次更新，返回最终 FK 残差。
+不可达仍返回尽力而为的解，不保证容差或偏好参考值都满足。
 
 阻尼项写在任务空间（6x6，比 7x7 快），恒等于对**步长**的 L2 正则
 ``min ||J dq - e||^2 + lambda^2 ||dq||^2``。惩罚 ``dq`` 而非 ``q - q_ref``，所以冗余
@@ -151,6 +152,16 @@ class ArmIK:
                 raise ValueError(f'{name} 的 null_target 需要正的 null_gain')
             self._null_target[index] = value
 
+        self._damping_matrix = self._lambda2 * _I6
+        self._null_terms = {}
+        for side, (_, cols) in self._tip.items():
+            reference = self._null_target[cols]
+            ungated = np.isfinite(reference)
+            self._null_terms[side] = (
+                ungated, bool(ungated.any()), np.where(ungated, reference, 0.0),
+                self._null_gain[cols] if self._null_gain is not None else None,
+            )
+
     @property
     def rotation_weight(self) -> float:
         return self._rotation_weight
@@ -177,11 +188,22 @@ class ArmIK:
                 [bMt.translation, pin.Quaternion(bMt.rotation).coeffs()])
         return poses
 
+    def _preference(self, angles, side):
+        ungated, _, reference, gains = self._null_terms[side]
+        if gains is None:
+            return None
+        offset = angles - reference
+        gate = np.where(ungated, 1.0, np.minimum(np.maximum(
+            (np.abs(offset) - self._gate_lo) / self._gate_span, 0.0), 1.0))
+        preference = -gains * gate * offset
+        return preference if preference.any() else None
+
     def solve(self, seed, targets: dict):
         """targets: ``{side: [x, y, z, qx, qy, qz, qw]}``，base_frame 系。
 
         没给到的一侧保持种子值不动。返回 ``(q, pos_err, ori_err, iters)``，
-        q 始终落在 URDF 限位内。
+        q 始终落在 URDF 限位内。有效目标固定追加一次严格零空间精修，
+        iters 包含该次更新；返回误差按最终输出重新 FK 计算。
         """
         q = np.clip(np.asarray(seed, dtype=np.float64), self.lower, self.upper)
         goal = {side: self._oMb * pin.SE3(
@@ -193,18 +215,16 @@ class ArmIK:
                                np.sqrt(rotation_weight),
                                np.sqrt(rotation_weight),
                                np.sqrt(rotation_weight)])
-        pos_err = ori_err = 0.0
+        has_ungated = any(self._null_terms[side][1] for side in goal)
         for step in range(self._iters):
             self._place(q)
-            errors, pos_err, ori_err = {}, 0.0, 0.0
+            errors = {}
             for side, oMt in goal.items():
                 cur = self.data.oMf[self._tip[side][0]]
                 error = np.concatenate([oMt.translation - cur.translation,
                                         pin.log3(oMt.rotation @ cur.rotation.T)])
                 side_pos = float(np.linalg.norm(error[:3]))
                 side_ori = float(np.linalg.norm(error[3:]))
-                pos_err = max(pos_err, side_pos)
-                ori_err = max(ori_err, side_ori)
                 # 收敛判据按侧算：已经到位的一侧这一轮完全不碰，省一次 DLS 求解，
                 # 也保证“只发右臂指令时左臂位形一动不动”。
                 # 权重为 0 时姿态不进代价，也就不该再拿它拖着不判收敛。
@@ -217,46 +237,69 @@ class ArmIK:
                     if side_ori > self._max_step_ori > 0.0:
                         capped[3:] *= self._max_step_ori / side_ori
                     errors[side] = capped
-            has_ungated = any(np.isfinite(
-                self._null_target[self._tip[side][1]]).any() for side in goal)
             if not errors and not has_ungated:
-                return q, pos_err, ori_err, step
+                return self._final_update(q, goal, task_scale, step)
             # 两条手臂是彼此独立的分支，雅可比不含对方的列，同一轮里各更新各的 7 列。
             for side in goal:
                 fid, cols = self._tip[side]
                 error = errors.get(side)
-                target = self._null_target[cols]
-                ungated = np.isfinite(target)
-                if error is None and not ungated.any():
+                if error is None and not self._null_terms[side][1]:
                     continue
                 jac = pin.getFrameJacobian(
                     self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:, cols]
                 weighted_jac = task_scale[:, None] * jac
                 # 阻尼最小二乘：加了 lambda^2*I 之后矩阵恒正定，solve 不会奇异。
                 jjt = weighted_jac @ weighted_jac.T
-                preference = None
-                if self._null_gain is not None:
-                    offset = q[cols] - np.where(ungated, target, 0.0)
-                    gate = np.where(ungated, 1.0, np.clip(
-                        (np.abs(offset) - self._gate_lo) / self._gate_span, 0.0, 1.0)
-                    )
-                    candidate = -self._null_gain[cols] * gate * offset
-                    if candidate.any():
-                        preference = candidate
+                preference = self._preference(q[cols], side)
                 if preference is None:
                     if error is None:
                         continue
                     task = weighted_jac.T @ np.linalg.solve(
-                        jjt + self._lambda2 * _I6, task_scale * error)
+                        jjt + self._damping_matrix, task_scale * error)
                 else:
                     # 要显式取伪逆才能构造零空间投影 (I - J# J)，比 solve 略贵；
                     # 正常构型下门全关，走上面那条快路径，开销与不带偏置时一致。
-                    sharp = weighted_jac.T @ np.linalg.inv(jjt + self._lambda2 * _I6)
+                    sharp = weighted_jac.T @ np.linalg.inv(jjt + self._damping_matrix)
                     task = (self._null_eye[side] - sharp @ weighted_jac) @ preference
                     if error is not None:
                         task += sharp @ (task_scale * error)
-                q[cols] = np.clip(q[cols] + task, self.lower[cols], self.upper[cols])
+                q[cols] = np.minimum(np.maximum(q[cols] + task, self.lower[cols]), self.upper[cols])
             # 任务已到位时每帧只尝试一次软偏好；投影为零就自然不动，不设角度门限。
             if not errors:
-                return q, pos_err, ori_err, step + 1
-        return q, pos_err, ori_err, self._iters
+                return self._final_update(q, goal, task_scale, step + 1)
+        return self._final_update(q, goal, task_scale, self._iters)
+
+    def _final_update(self, q, goals, task_scale, iterations):
+        """原版求解之后固定追加一次 DLS + 严格零空间偏好，不做回溯。"""
+        self._place(q)
+        for side, target in goals.items():
+            fid, cols = self._tip[side]
+            actual = self.data.oMf[fid]
+            error = np.concatenate((target.translation - actual.translation,
+                                    pin.log3(target.rotation @ actual.rotation.T)))
+            position = float(np.linalg.norm(error[:3]))
+            orientation = float(np.linalg.norm(error[3:]))
+            if position > self._max_step_pos > 0:
+                error[:3] *= self._max_step_pos / position
+            if orientation > self._max_step_ori > 0:
+                error[3:] *= self._max_step_ori / orientation
+            jacobian = pin.getFrameJacobian(
+                self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:, cols]
+            weighted = task_scale[:, None] * jacobian
+            step = weighted.T @ np.linalg.solve(
+                weighted @ weighted.T + self._damping_matrix, task_scale * error)
+            preference = self._preference(q[cols], side)
+            if preference is not None:
+                _, singular, vectors = np.linalg.svd(weighted, full_matrices=True)
+                threshold = np.finfo(float).eps * max(weighted.shape) * singular[0]
+                basis = vectors[int(np.count_nonzero(singular > threshold)):].T
+                step += basis @ (basis.T @ preference)
+            q[cols] = np.minimum(np.maximum(q[cols] + step, self.lower[cols]), self.upper[cols])
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        position = orientation = 0.0
+        for side, target in goals.items():
+            actual = self.data.oMf[self._tip[side][0]]
+            position = max(position, float(np.linalg.norm(target.translation - actual.translation)))
+            orientation = max(orientation, float(np.linalg.norm(pin.log3(target.rotation @ actual.rotation.T))))
+        return q, position, orientation, iterations + bool(goals)
