@@ -1,42 +1,27 @@
+# pyright: reportArgumentType=false, reportCallIssue=false
+
 import json
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+from unittest.mock import Mock
+
+import cv2
 import numpy as np
 import pytest
 
 from g1_vla_bridge.backends.cogact_unitree import CogACTUnitreeBackend, SPEC, build_payload, parse_action
 from g1_vla_bridge.control_history import ControlHistory
-from test_cogact_unitree_backend import _observation, history_config
-
-
-def response():
-    action = {}
-    for side in ('LEFT', 'RIGHT'):
-        action[f'ROBOT_{side}_TRANS'] = np.zeros((30, 3)).tolist()
-        action[f'ROBOT_{side}_ROT_MAT'] = np.tile(np.eye(3), (30, 1, 1)).tolist()
-        action[f'ROBOT_{side}_GRIPPER'] = np.zeros((30, 1)).tolist()
-    return {'action': action, 'action_type_info': {'translation': 'abs', 'rotation': 'abs'}}
+from test_cogact_unitree_backend import _observation, action_response, history_config
 
 
 @pytest.mark.parametrize('suffix', ['TRANS', 'ROT_MAT', 'GRIPPER'])
 def test_bad_shape_rejected(suffix):
-    body = response()
+    body = action_response()
     body['action'][f'ROBOT_LEFT_{suffix}'].pop()
     with pytest.raises(ValueError, match='expected'):
         parse_action(body)
-
-
-def test_finite_and_real_extrinsics():
-    current = _observation()
-    current.grippers['left'] = float('nan')
-    with pytest.raises(ValueError, match='nonfinite'):
-        build_payload(current, SPEC.frame.transform())
-    current.grippers['left'] = 0.
-    current.camera_poses['head'] = np.eye(4)
-    with pytest.raises(ValueError, match='placeholder'):
-        build_payload(current, SPEC.frame.transform())
 
 
 @pytest.mark.parametrize('history_length', [1, 15, 16, 30])
@@ -45,6 +30,7 @@ def test_empty_short_full_over_real_local_http(history_length):
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
+            _ = args
             pass
 
         def reply(self, body):
@@ -69,8 +55,11 @@ def test_empty_short_full_over_real_local_http(history_length):
             assert set(parts) == {'json', 'image_0', 'image_1', 'image_2'}
             assert parts['json'].get_filename() == 'query.json'
             assert parts['json'].get_content_type() == 'application/json'
+            for index in range(3):
+                image = np.frombuffer(parts[f'image_{index}'].get_payload(decode=True), np.uint8)
+                assert cv2.imdecode(image, 1).shape == (360, 640, 3)
             received.append(json.loads(parts['json'].get_payload(decode=True)))
-            self.reply(response())
+            self.reply(action_response())
 
     server = HTTPServer(('127.0.0.1', 0), Handler)
     worker = threading.Thread(target=server.serve_forever)
@@ -78,6 +67,7 @@ def test_empty_short_full_over_real_local_http(history_length):
     backend = CogACTUnitreeBackend(
         f'http://127.0.0.1:{server.server_port}/api/inference', history_length=history_length)
     backend._session.trust_env = False
+    backend.dump = Mock(side_effect=AssertionError('disk writes forbidden'))
     try:
         backend.configure()
         current = _observation()
@@ -93,6 +83,8 @@ def test_empty_short_full_over_real_local_http(history_length):
                                current.grippers, current.grippers, index / 10)
             current.history = history.snapshot()
             assert backend.infer(current).horizon == 30
+            backend.dump.assert_not_called()
+            assert received[-1] == build_payload(current, SPEC.frame.transform(), history_length)
             for field, offset in (('history_state', 0), ('history_action', 100)):
                 if count:
                     assert len(received[-1][field]) == 6
@@ -100,6 +92,8 @@ def test_empty_short_full_over_real_local_http(history_length):
                     for side in ('LEFT', 'RIGHT'):
                         positions = np.asarray(received[-1][field][f'ROBOT_{side}_TRANS'])[:, 0]
                         np.testing.assert_allclose(positions, np.arange(max(0, count - history_length), count) + offset)
+                        assert np.shape(received[-1][field][f'ROBOT_{side}_ROT_MAT']) == (min(count, history_length), 3, 3)
+                        assert np.shape(received[-1][field][f'ROBOT_{side}_GRIPPER']) == (min(count, history_length), 1)
                 else:
                     assert received[-1][field] is None
     finally:

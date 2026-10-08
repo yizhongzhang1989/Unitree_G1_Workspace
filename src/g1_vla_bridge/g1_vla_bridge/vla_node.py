@@ -161,8 +161,7 @@ class VlaBridgeNode(Node):
             ControlHistory(history_length=self._backend.history_length)
             if self._backend.history_enabled else None)
         # 把实际发出去的图落盘，用来人工核对"模型到底看到了什么"。置空关掉。
-        self._backend.debug_dir = p('debug_image_dir', '') \
-            .get_parameter_value().string_value
+        self._backend.debug_dir = p('debug_image_dir', '').get_parameter_value().string_value
 
         self._task = p('task_description', '').get_parameter_value().string_value
         self._enabled = {
@@ -190,15 +189,12 @@ class VlaBridgeNode(Node):
 
         rate = float(p('action_rate_hz', 10.0).get_parameter_value().double_value)
         self._action_rate = rate
-        self._execution_rate = float(p('execution_rate_hz', 30.0).value)
+        self._execution_rate = float(p('execution_rate_hz', 30.0).get_parameter_value().double_value)
         if not math.isfinite(self._execution_rate) or self._execution_rate <= 0:
             raise ValueError('execution_rate_hz 必须是有限正数')
-        self._async_min_overlap = p('async_min_overlap_actions', 7) \
-            .get_parameter_value().integer_value
-        TimedActions(rate, 0.0, self._async_min_overlap,
-                 execution_rate=self._execution_rate)
-        self._execution_mode = p('execution_mode', 'manual') \
-            .get_parameter_value().string_value
+        self._async_min_overlap = p('async_min_overlap_actions', 7).get_parameter_value().integer_value
+        TimedActions(rate, 0.0, self._async_min_overlap, execution_rate=self._execution_rate)
+        self._execution_mode = p('execution_mode', 'manual').get_parameter_value().string_value
         if self._execution_mode not in ('continuous', 'manual', 'async'):
             raise ValueError("execution_mode 只能是 'continuous'、'manual' 或 'async'")
         self._continuous_next_delay = float(
@@ -215,13 +211,11 @@ class VlaBridgeNode(Node):
             raise ValueError(f'{name} 输出的是 {self._spec.action_semantics} 动作，'
                              '不能再开 delta_position / delta_rotation')
         self._horizon = p('action_horizon', 0).get_parameter_value().integer_value
-        self._skip_intermediate = p('skip_intermediate_waypoints', False) \
-            .get_parameter_value().bool_value
+        self._skip_intermediate = p('skip_intermediate_waypoints', False).get_parameter_value().bool_value
         reason = self._mode_error(self._execution_mode)
         if reason:
             raise ValueError(reason)
-        self._cartesian_limit_enabled = p('cartesian_limit_enabled', False) \
-            .get_parameter_value().bool_value
+        self._cartesian_limit_enabled = p('cartesian_limit_enabled', False).get_parameter_value().bool_value
         self._max_step_pos = float(
             p('max_step_pos', 0.02).get_parameter_value().double_value)
         self._max_step_ori = float(
@@ -230,11 +224,11 @@ class VlaBridgeNode(Node):
 
         self._lock = threading.Lock()
         self._observations = ObservationBuffer(
-            self._spec.images.slots, float(p('observation_rate_hz', 10.0).value))
+            self._spec.images.slots, float(p('observation_rate_hz', 10.0).get_parameter_value().double_value))
         self._model = None
         self._readers = {}
         calibration_path = p('observation_calibration_file', str(
-            Path(get_package_share_directory('camera_calibration')) / 'config/calibration.yaml')).value
+            Path(get_package_share_directory('camera_calibration')) / 'config/calibration.yaml')).get_parameter_value().string_value
         self._calibration = yaml.safe_load(Path(calibration_path).read_text()) or {}
         self._camera_info: dict[str, CameraInfo] = {}
         self._status: dict = {}
@@ -275,16 +269,15 @@ class VlaBridgeNode(Node):
                     callback_group=MutuallyExclusiveCallbackGroup())
 
         self.create_subscription(
-            JointState, p('joint_states_topic', '/joint_states').value,
+            JointState, p('joint_states_topic', '/joint_states').get_parameter_value().string_value,
             self._on_joints, small, callback_group=MutuallyExclusiveCallbackGroup())
         description_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(
-            String, p('robot_description_topic', '/robot_description').value,
+            String, p('robot_description_topic', '/robot_description').get_parameter_value().string_value,
             self._on_description, description_qos, callback_group=sensors)
 
         self.create_subscription(
-            String, p('status_topic', '/motion_control/status')
-            .get_parameter_value().string_value,
+            String, p('status_topic', '/motion_control/status').get_parameter_value().string_value,
             self._on_status, 10, callback_group=sensors)
         self.create_subscription(String, '~/task', self._on_task, 10, callback_group=sensors)
         # camera_info 只有几十字节，用 BEST_EFFORT 能同时匹配两种发布端。
@@ -296,8 +289,7 @@ class VlaBridgeNode(Node):
                     callback_group=sensors)
 
         self._publisher = self.create_publisher(
-            Float64MultiArray, p('command_topic', '/motion_control/command')
-            .get_parameter_value().string_value, command_qos)
+            Float64MultiArray, p('command_topic', '/motion_control/command').get_parameter_value().string_value, command_qos)
         self._status_publisher = self.create_publisher(String, '~/status', 10)
 
         self._tf = Buffer()
@@ -320,7 +312,7 @@ class VlaBridgeNode(Node):
         self._alive = True
         for slot, address in (('left_wrist', '97'), ('right_wrist', '98')):
             url = p(f'{slot}_rtsp_url',
-                    f'rtsp://admin:123456@192.168.123.{address}/stream0').value
+                    f'rtsp://admin:123456@192.168.123.{address}/stream0').get_parameter_value().string_value
             if slot in self._spec.images.slots:
                 self._readers[slot] = WristReader(slot, url, self._observations)
         self._worker = threading.Thread(target=self._infer_loop, daemon=True)
@@ -360,7 +352,7 @@ class VlaBridgeNode(Node):
                 self._stop(f'历史测量不可用: {error}')
             return
         with self._lock:
-            if generation == self._generation and self._running.is_set():
+            if self._history is not None and generation == self._generation and self._running.is_set():
                 for publish_stamp, command, grip in pending:
                     self._history.append(
                         publish_stamp, command, measured, action_grippers=grip,
@@ -398,19 +390,8 @@ class VlaBridgeNode(Node):
                 self._history.clear()
             self._task = msg.data
             if changed and self._running.is_set():
-                self._generation += 1
+                self._reset_execution(start=True)
                 request_generation = self._generation
-                self._infer_requested.clear()
-                self._chunk, self._cursor, self._inference_active = None, 0, False
-                self._continuous_next_at = None
-                self._timed = (TimedActions(
-                    self._action_rate, time.monotonic(), self._async_min_overlap,
-                    first_offset_steps=1 if self._history is not None else 0,
-                    execution_rate=self._execution_rate)
-                    if self._execution_mode == 'async' else None)
-                self._async_step = {}
-                self._async_merge = {}
-                self._async_last_publish = None
                 self._error = ''
         self.get_logger().info(f'任务指令更新为: {msg.data!r}')
         if (request_generation is not None
@@ -842,22 +823,13 @@ class VlaBridgeNode(Node):
             self._grip_command = {
                 side: opened if self._active[side] else float(observation.grippers[side])
                 for side in SIDES}
-            self._chunk, self._cursor, self._error = None, 0, ''
-            self._continuous_next_at = None
+            self._reset_execution(start=True)
+            self._error = ''
             self._pending_control.clear()
             self._last_control_stamp = None
             self._observation_timing = None
-            self._async_step = {}
-            self._async_merge = {}
-            self._async_last_publish = None
-            self._timed = (TimedActions(self._action_rate, time.monotonic(),
-                                        self._async_min_overlap,
-                                        first_offset_steps=1 if self._history is not None else 0,
-                                        execution_rate=self._execution_rate)
-                           if self._execution_mode == 'async' else None)
             if self._history is not None:
                 self._history.clear()
-            self._generation += 1
             self._running.set()
         if self._execution_mode in ('continuous', 'async'):
             self._request_inference()
@@ -911,11 +883,7 @@ class VlaBridgeNode(Node):
             reason = self._mode_error(mode)
             if reason:
                 return reason
-            self._generation += 1
-            self._infer_requested.clear()
-            self._chunk, self._cursor, self._inference_active = None, 0, False
-            self._continuous_next_at = None
-            self._timed = None
+            self._reset_execution()
             self._execution_mode = mode
         return ''
 
@@ -947,12 +915,8 @@ class VlaBridgeNode(Node):
                 return response
         self._stop('收到 ~/home')
         with self._lock:
-            self._generation += 1
+            self._reset_execution()
             self._running.clear()
-            self._infer_requested.clear()
-            self._chunk, self._cursor, self._inference_active = None, 0, False
-            self._continuous_next_at = None
-            self._timed = None
             command = {side: np.array(HOME_POSES[side]) for side in SIDES}
             try:
                 self._publisher.publish(Float64MultiArray(data=join_command(**command)))
@@ -968,9 +932,6 @@ class VlaBridgeNode(Node):
 
     def _on_reset(self, request, response):
         self._stop('收到 ~/reset')
-        with self._lock:
-            if self._history is not None:
-                self._history.clear()
         try:
             self._backend.reset()
         except Exception as error:
@@ -978,6 +939,20 @@ class VlaBridgeNode(Node):
         else:
             response.success, response.message = True, 'episode 已重置，请重新 ~/start'
         return response
+
+    def _reset_execution(self, start=False):
+        self._generation += 1
+        self._infer_requested.clear()
+        self._chunk, self._cursor, self._inference_active = None, 0, False
+        self._continuous_next_at = None
+        self._timed = None
+        if start:
+            self._async_step, self._async_merge, self._async_last_publish = {}, {}, None
+            if self._execution_mode == 'async':
+                self._timed = TimedActions(
+                    self._action_rate, time.monotonic(), self._async_min_overlap,
+                    first_offset_steps=1 if self._history is not None else 0,
+                    execution_rate=self._execution_rate)
 
     def _stop(self, reason: str, generation=None) -> None:
         with self._lock:
@@ -989,12 +964,8 @@ class VlaBridgeNode(Node):
                 self._history.clear()
             if not self._running.is_set():
                 return
-            self._generation += 1
+            self._reset_execution()
             self._running.clear()
-            self._infer_requested.clear()
-            self._chunk, self._cursor, self._inference_active = None, 0, False
-            self._manual_next_at = None
-            self._timed = None
             self._error = reason
         # 停止只是不再发新目标，手臂保持在最后一帧；卸力要走 motion_control 的 ~/estop。
         self.get_logger().warning(f'停止下发: {reason}')

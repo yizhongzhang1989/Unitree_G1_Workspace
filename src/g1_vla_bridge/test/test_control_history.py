@@ -1,3 +1,5 @@
+# pyright: reportOptionalSubscript=false
+
 import numpy as np
 import pytest
 

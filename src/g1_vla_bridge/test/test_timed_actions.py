@@ -1,5 +1,7 @@
 """No ROS nodes, HTTP requests or hardware commands."""
 
+# pyright: reportOptionalSubscript=false
+
 import numpy as np
 import pytest
 

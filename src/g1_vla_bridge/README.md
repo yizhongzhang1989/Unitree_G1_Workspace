@@ -1,9 +1,5 @@
 # g1_vla_bridge
-
-> **history15_10hz_delta 分支：适配 CogACT 10Hz、30步、双路含夹爪历史，数量可配置（默认16条）。**
-> 保留原有 start/home、模式切换和可选限幅，默认 manual；没有新增 dry_run 运行参数。
-
-VLA 推理服务与 `g1_motion_control` 之间的桥。**流程是固定的，VLA 是可换的**：
+VLA 推理服务与 `g1_motion_control` 之间的桥。
 
 ```
 采观测 → backend.infer() → 重锚 → 可选逐帧限幅 → /motion_control/command
@@ -49,221 +45,6 @@ flowchart LR
     timer --> mc["/motion_control/command<br/>14 双臂位姿 + 2 夹爪"]
 ```
 
-推理和下发是两条线程（一轮推理几百毫秒且抖动大，放回调里会堵死执行器）。默认是手动模式：
-每次请求得到一个完整 chunk，下发定时器按 `execution_rate_hz` 从第 0 点播到最后一点，中途绝不
-替换；播完停在最后一点，等待下一次请求。`execution_mode:=continuous` 则播完后自动请求下一段。
-默认 `cartesian_limit_enabled: false`，VLA 不裁剪位置和姿态，按下发频率插值下发 waypoint；
-motion_control 的关节限速和 IK 保护仍保留。设置该参数为 `true` 可恢复 VLA 限速。
-开启时，最后一点若被限速截断，会继续下发到指令达到末点后才结束；这不代表实机反馈已经到位。
-任何一轮推理失败都只是这一轮作废，手臂保持当前目标；manual 模式等待下一次 Enter，
-continuous 模式在 `retry_delay_s` 后自动重试。`async` 模式见下方。
-
-### CogACT 10Hz 成对历史
-
-启动依次调用 GET `/api/health` 和 `/api/config`，健康检查或 HTTP 请求失败即停止；
-服务端配置用于状态展示。
-历史数量由 [config/backends/cogact_unitree.yaml](config/backends/cogact_unitree.yaml) 的
-`history_length` 配置（正整数，默认 16），也可启动时传 `history_length:=30` 覆盖；修改后需重启节点。
-同一配置用于历史截取和请求长度上限，`~/status` 中也会显示该值。
-当前 state 和两路历史均含 LEFT/RIGHT 的 TRANS、ROT_MAT、GRIPPER 六字段。
-历史按 10Hz 取最近 `history_length` 对真实动作和反馈，旧到新排列；30Hz 插值仅用于执行。
-以 episode 首次下发时间为原点，每个 100ms 时间格选第一条实际发布并完成配对的记录。
-默认连续执行时 16 条对应约 1.6 秒历史（首末间隔约 1.5 秒），无动作的时间格不补造记录。
-每次发布位姿和夹爪命令后，将实际 action 加入待配对 FIFO 队列，不阻塞后续下发。
-每条 JointState 到达后从队头依次匹配：`state.stamp >= action.stamp` 就出队配对，
-直到队列为空或 state 早于队头 action。同一条 state 可以满足多个 action。
-没有符合条件的 state 时队列继续保留，不设置等待超时或丢弃期限。
-每条用于配对的 state 只计算一次双臂 FK 和实测夹爪，供本次出队的 action 共享；
-状态使用原始 JointState 时间戳，命令使用发布后、FK 前记录的时间戳，FK 耗时不计入数据时间。
-随后将这次测量和限幅、融合、冻结后的实际命令作为一对入缓存。
-FK 在 JointState 回调中计算；计算异常仍走原有错误处理，停止或换任务会取消待配对记录。
-观测、图像和历史配对均不按年龄或处理耗时拒绝数据；无反馈时待配对队列可能持续增长。
-这不是底层执行器接收确认，也不是相机曝光同步保证。
-ControlHistory 保留当前 episode 的全部 10Hz 配对记录，支持延迟观测回查，无 64 窗口期限；
-内存占用随 episode 时长增长。请求仅深拷贝当前实测观测之前的最近 `history_length` 对，不回算历史 FK。
-只有命令和实测样本均早于当前观测的记录才能进入历史；当前 state 单独取当前观测。
-等待不新增、不复制保持目标、不因时间流逝丢历史；不足配置数量只发已有记录，首次为 null。
-停止、start、任务切换、reset 清空两路本地缓存；reset 不调用服务器。
-start 时冻结或禁用侧夹爪保持观测实测值，活动侧保留原有张开起步行为。
-关节时间戳回退，或发令时钟回退/重复时停止本次执行、清空 pending/history 并作废在途响应，
-需重新 start；这是时间顺序检查，不是数据年龄或等待超时门限。
-
-位姿使用 torso_link / 米 / pose_unified；夹爪遵循本仓库 YB 导出器的显式换算，
-不是模型统计预归一化。图片完整缩放至 640x360 后 JPEG 编码，无裁剪。
-内参与原图几何严格匹配后归一化，因此完整缩放不改变归一化 K；外参是实时 T_robot<-camera。
-请求、图像和响应不落盘。纯内存只读探针：
-
-```bash
-source /opt/ros/humble/setup.bash
-source /workspace/install/setup.bash
-PYTHONPATH=/workspace/src/g1_vla_bridge:$PYTHONPATH python3 src/g1_vla_bridge/test/dry_run_10hz.py
-```
-
-async 模式下，第0行目标对应观测 t+0.1s，末行为 t+3s；丢弃过期行，单worker异步推理。
-上述测试脚本独立隔离控制发布，不改变业务节点的 start/home 或运行模式。
-
-### 异步执行
-
-顿挫与振幅增长的检查结果见 [Async 审查](ASYNC_AUDIT.md)。时间对齐和加权融合不保证闭环
-稳定；长延迟下可能只执行预测尾部、随后断供，当前尚未验证真机闭环稳定性。
-
-`execution_mode:=async` 让推理与动作执行并行，始终最多一个 HTTP 推理在途。
-每次响应合并进未来动作队列后，立即采最新观测并请求下一段，不等队列播完。
-融合层输入两段 10Hz chunk，输出 10Hz 动作；执行层输入融合后的 10Hz 动作，输出 30Hz 插值目标。
-若未来重合部分有 x 个 **10Hz 动作点**，第 k 点（k=1..x）的新预测权重为 `k/(x+1)`，
-旧预测权重为 `1-k/(x+1)`。位置按此线性加权，旋转按同一权重 SLERP。
-夹爪不做跨 chunk 加权，重合点直接用新预测覆盖；执行层的 30Hz 夹爪插值保持不变。
-前段偏向旧 chunk，后段偏向新 chunk；非重合部分直接接入新预测。
-
-时间约定：本分支 CogACT 第 0 个动作对应选中观测时刻后 0.1 秒，不是 HTTP 请求开始或返回时刻。
-取下面公共观测时间格的时刻 T，按同次采样的 ROS 时钟与单调时钟
-映射为 `acquired_monotonic`；第 k 个动作对应 `T + (k+1)/action_rate_hz`。
-因此已计入修正后的观测年龄、本轮观测处理、编码、网络及推理耗时。
-`action_rate_hz` 必须与训练动作时间间隔匹配，
-当前固定模型契约为 10 Hz。非整数拍的请求起点先以位置/夹爪线性插值与姿态 SLERP
-对齐到统一的 10Hz 模型时间格，再融合。重合数和权重不按 30Hz 执行点计算。
-执行取样器仅在下发时将融合结果插值到默认 30Hz 网格；迟到的控制 tick 不补播历史动作。
-
-例如观测时刻为 0 s、返回时刻为 0.37 s，模型时间格也以 0 s 为原点时，
-保留 0.4～3.0 s 的 27 个目标。裁剪按观测时刻计算，不能只减去 HTTP 推理耗时。
-
-### 与 record 的观测对齐
-
-三个执行模式使用同一个观测入口：
-
-- 腕图直接通过 PyAV/libavformat 读取 RTSP，使用与 record 相同的 TCP、low_delay、
-  `use_wallclock_as_timestamps=1`。保留解码帧的绝对 PTS，不用读出帧时的当前时间；
-  缺 PTS 的启动帧跳过。默认 stream0 原分辨率，不额外限帧或缩放。
-- 腕图使用原始 PTS 减 record 的 `CAMERA_DELAY_S`（110 ms），头图保留 RealSense header。
-  不再在线使用离线 `fitted_pts`，避免停顿或突发收包使滑动拟合向过去或未来偏移；
-  每帧时间固定，后续帧不改写旧帧时间，保留收包抖动。图像缓存 32 帧。
-  解码持续取流，推理只转换选中的帧。断流清空对应缓存并重连。
-- `observation_rate_hz=10`，从首个可用公共时刻建立固定时间格。
-  T 不晚于任何输入的最新时刻，也不晚于头部 TF 的最新可用时刻。
-  图像和 `/joint_states` 均选最后一条时间戳不大于 T 的记录，不插值。
-  不限制每条记录相对 T 的年龄；找不到 T 之前的样本才拒绝本轮。
-- 双臂末端与腕相机外参复用 record FK，由**同一条实测关节记录**计算；
-  夹爪也来自这条记录的 eccentric 轴，不再使用指令值。
-  模型读取实际 `/robot_description`，只解析顶层运动学关节，保留运行中的标定。
-  腕内参从 `observation_calibration_file` 按真实分辨率精确匹配，默认是已安装的
-  camera_calibration/config/calibration.yaml，不使用别的档位缩放代替。
-
-不设置公共观测年龄、图像到达年龄、处理耗时或时钟偏差门限，相关参数已移除。
-缺关节、缺图或缺历史 TF 仍拒绝本轮，async 继续已有有效预测；队列空时保持最后目标并继续重试。
-HTTP/RTSP 网络 I/O 超时仍用于连接故障处理；它们不是观测有效性校验。
-状态的 `observation_sample_age_s` 是选中图像/关节各自的修正年龄，
-`observation_skew_s` 是它们的时间差，`observation_age_s` 是公共观测年龄；
-`wrist_stream_errors` 显示直连流是否异常。不支持 ROS 仿真时钟与真实相机时钟混用。
-头图、关节或腕流时间戳回退时清空对应流旧缓存并重置观测格原点；关节回退另停止执行。
-不使用回退幅度门限，单条乱序包也按该规则处理。
-
-**一致性的边界：** 离线导出使用整段视频拟合，在线使用未拟合的原始 PTS；
-延迟补偿相同，但时间重建及时间格起点不同，不能承诺逐帧编号完全相同。110 ms 是既有标定而非本次重测，
-编码设置变化须重新标定。当前新增的可动头部仅发布 TF、不发布 JointState，record 导出仍
-将头部当静态链；在线头部因此使用 T 时刻的历史 TF。动态头部训练/导出尚未闭合，
-本改动不宣称与旧静态头部数据完全一致，也没有验证真实模型的闭环效果。
-
-依赖安装与只读预检（不调用模型、不发运动命令）：
-
-```bash
-python3 -m pip install --user -r src/g1_vla_bridge/requirements.txt
-colcon build --packages-select g1_vla_bridge --symlink-install
-source install/setup.bash
-python3 src/g1_vla_bridge/test/observation_preflight.py
-```
-
-腕流地址由 `left_wrist_rtsp_url`、`right_wrist_rtsp_url` 配置；无需给 VLA 额外发布腕部
-ROS 裸图。原相机预览与标定节点不受修改，但同时开多路解码仍有 CPU 成本。
-
-### 异步参数与切换
-
-`execution_rate_hz` 单独控制目标下发定时器和插值网格，默认 **30 Hz**；
-`action_rate_hz` 默认 **10 Hz**，表示模型预测点的训练时间间隔。
-位置和夹爪角度线性插值，姿态使用四元数 SLERP；相邻 10Hz 点之间补两个目标。
-async 在每个约 33.3 ms tick 取对应的插值目标，跳过期间的旧点，不延长预测三秒的时域。
-history 模型首点仍在观测后 0.1 秒，不凭空添加观测到首点之间的轨迹。
-manual/continuous 以 90 个执行 tick 播完 30 个预测点，仍约三秒，不把动作加速三倍。
-降低下发频率不是限速或平滑，单次目标变化可能更大，不能保证减轻跳动。
-此参数在启动时读取，修改后需要停止并重新启动 VLA 节点；不要同时启动两个桥。
-保留原有 proxy、server_url 等启动参数，不传频率参数即使用 30 Hz 执行；
-也可显式指定 `execution_rate_hz:=30.0`。状态中会显示实际 `execution_rate_hz`。
-直接运行节点、不加载 YAML 时也相同：观测和模型预测 10 Hz，执行插值 30 Hz。
-
-`async_min_overlap_actions` 默认 7：若新旧预测的实际重合少于该数目，会重复最后一个
-旧 target 补足；完全没有旧 target 时，改为重复当前命令目标。补齐后的第 $k$ 个
-10 Hz 点使用权重 $k/(L+1)$，其中 $L$ 是本次实际融合长度。
-队列耗尽后保持最后目标并继续请求，不因断供自动停止；首次启动也持续等待有效预测。
-新结果有未来重合点才做融合，没有重合则直接接入有效的未来目标，如同首次接入。
-全部过期的响应不执行，继续请求下一段；不重置时间轴、不补播过期动作。
-`async_hold_timeout_s` 已移除，无需再传此参数。手动 `/stop` 和手臂接管检查仍有效。
-停止不等于卸力；卸力仍需 `/estop`。状态提供 `async_pending` 和 `async_buffer_s`，
-前者统计缓存中的 10Hz 模型点（可能含一个执行插值左端点）；错误原因保留在 `error`。
-
-async 仅支持绝对位姿，要求 `delta_position=false`、`delta_rotation=false`、
-`skip_intermediate_waypoints=false`。`action_horizon` 仍限制每次预测使用的前缀长度。
-加权融合不保证轨迹可达或避障，也不能证明跳过的动作已经物理完成；限速仍遵循原有配置。
-
-```bash
-ros2 launch g1_vla_bridge vla_bridge.launch.py execution_mode:=async \
-  async_min_overlap_actions:=7
-ros2 run g1_vla_bridge vla_cli
-```
-
-CLI 用 `/stop`、`/mode async`、`/start` 切入；`/mode manual` 和 `/mode continuous`
-恢复原两种执行方式。`/mode` 只选择模式，不自动启动。所有模式变更都要求先停止，
-并清空队列、使旧请求失效。服务接口为 `~/set_async`（SetBool，true=async，false=manual）
-和 `~/set_auto`（SetBool，true=continuous，false=manual）。CLI 退出不影响节点调度。
-
-## 接一个新的 VLA
-
-加两个同名文件，把 `vla_backend` 指过去。**`vla_node.py` 一行都不用改。**
-
-```
-g1_vla_bridge/backends/<名字>.py     # SPEC + PARAMETERS + create(params)
-config/backends/<名字>.yaml          # 参数值，launch 按 vla_backend 自动挂上
-```
-
-配置分层，两边的键不许重叠（[test_config_layout.py](test/test_config_layout.py) 机械核对）：
-
-| | 装什么 |
-|---|---|
-| 代码里的 `PARAMETERS` | 默认值 |
-| `config/vla_bridge.yaml` | 与 VLA 无关：话题、坐标系名、下发速率、限幅 |
-| `config/backends/<名字>.yaml` | 这家的：服务地址、坐标系标定、图像预处理 |
-| launch 的 arg | 现场临时改的那几个 |
-
-```python
-SPEC = VlaSpec(
-    name='<名字>',
-    frame=FrameSpec(
-        origin_in_base=(...),        # VLA 坐标系原点落在 base_frame 的哪里
-        rotation_rpy=(...),          # VLA 坐标系相对 base_frame 的朝向
-        tool_offset=(...),           # 我方 tip frame -> VLA 末端 frame
-        tool_rotation_rpy=(...)),
-    images=ImageSpec(slots=('head', 'left_wrist', 'right_wrist'), height=240),
-    gripper=GripperSpec(model_open=0.0, model_closed=1.0,             # VLA 侧
-                        robot_open_rad=2.76377, robot_closed_rad=0.0),  # 我方关节
-    horizon=30,
-    action_semantics='absolute')     # 'absolute' 才允许开 delta 重锚
-
-PARAMETERS = {...}          # 要节点替它 declare 的 ROS 参数及默认值
-def create(params): ...     # -> VlaBackend 子类，实现 infer(Observation) -> ActionChunk
-```
-
-**接入清单**——下面这些必须逐条问清楚，猜不得：
-
-| 要问的 | 落到哪 | 猜错的后果 |
-|---|---|---|
-| **动作/state 在哪个系，原点在机器人的什么位置** | `frame.origin_in_base` | 绝对模式下整段偏掉 |
-| 那个系相对地面是不是水平的、朝向如何 | `frame.rotation_rpy` | **delta 也救不了**，「往前」会走成别的方向 |
-| 末端参考点是法兰还是夹爪、姿态轴怎么定 | `frame.tool_*` | 姿态整个反过来 |
-| 要几张图、顺序、分辨率、预处理 | `ImageSpec` + backend 的编码 | 模型不报错，只是变傻 |
-| 训练相机的内参/畸变/分辨率 | backend 常量（重投影用） | 同一物体尺度对不上 |
-| 夹爪的取值范围与方向 | `GripperSpec` | 该松手时夹紧 |
-| 输出是绝对位姿还是增量、N 是多少 | `action_semantics` / `horizon` | 重锚逻辑用错 |
-
-一致性由 [test_vla_backend.py](test/test_vla_backend.py) 兜底，接新 VLA 先跑它。
-
 ## 运行
 
 前置：`motion_control` 已 `~/engage`（`/motion_control/status` 里 `arms_live=true`）；
@@ -275,24 +56,10 @@ def create(params): ...     # -> VlaBackend 子类，实现 infer(Observation) -
 | `left_wrist` | `left_wrist_rtsp_url` | RTSP, 1920x1080x30（stream0） |
 | `right_wrist` | `right_wrist_rtsp_url` | RTSP, 1920x1080x30（stream0） |
 
-默认 backend 是 `cogact_unitree`。客户端保持三路图像的原分辨率并编码成 JPEG，缩放由
-CogACT server 完成。这些输入 profile 与 `record` 采集时一致；导出器再把训练视频统一为
-640x360。当前模型实际看到的训练分辨率为 448x256，服务端使用：
-
-```bash
-python -m cogact.inference.serve_batch \
-  --checkpoint_path <checkpoint-dir> \
-  --dataset_class UnifiedV2EpisodicDataset \
-  --image_size 448 256 \
-  --has-left --has-right \
-  --use_bf16 \
-  --port 5500
-```
-
-客户端目前发送三路 `image_types`、归一化内参和 `base_T_cam`，其方向与 `record` 默认导出一致：
-`world_xyz = extrinsic @ camera_xyz`。注意：训练文件的存储方向不等于 HTTP 接口的输入契约；
-仍需用服务端 dataset 和 serve_batch 的消费代码确认是否取逆、是否再次归一化 K，以及响应是否为
-`pose_unified`。仅推理成功或客户端测试通过不能证明这些约定正确。机器人侧必须提供：
+默认 backend 为 `cogact_unitree`，启动检查服务端 `/api/health` 和 `/api/config`。
+三图完整缩放至 640×360 后 JPEG 编码，发送 `return_dict=true`、归一化内参和 `base_T_cam` 外参
+（`base_xyz = extrinsic @ camera_xyz`），接收绝对 30 步动作。服务端消费约定需另行核对，
+仅推理成功不能证明坐标与图像契约正确。标定来源：
 
 | 槽位 | 内参来源 | 外参来源（相对 `torso_link`） |
 |---|---|---|
@@ -300,9 +67,13 @@ python -m cogact.inference.serve_batch \
 | `left_wrist` | `observation_calibration_file` | 实测关节 FK 到 `camera_left` |
 | `right_wrist` | `observation_calibration_file` | 实测关节 FK 到 `camera_right` |
 
-内参宽高必须和对应原图一致；腕部按分辨率精确匹配标定文件。
+内参宽高必须与原图一致。服务地址、代理和历史数量见 [后端配置](config/backends/cogact_unitree.yaml)。
 
 ```bash
+python3 -m pip install --user -r src/g1_vla_bridge/requirements.txt
+colcon build --packages-select g1_vla_bridge --symlink-install
+source install/setup.bash
+
 # 先决条件 相机参数和 record 保持一致
 ros2 launch robot_bringup all_data.launch.py \
   scope:=whole_body topology:=dual \
@@ -316,34 +87,93 @@ ros2 launch head_sensors head_camera.launch.py \
 # 服务在电脑 B 的局域网里时，先从 B 开反向 SOCKS：ssh -N -R 1080 user@<本机>
 ros2 launch g1_vla_bridge vla_bridge.launch.py proxy:=socks5h://127.0.0.1:1080
 
+# 另一个终端
 ros2 run g1_vla_bridge vla_cli
-# CLI 中：/engage 明确使能；输入任务文字并 Enter 只更新目标；空行 Enter 请求并完整执行
-# 一个 30 点 chunk。切换模式先 /stop；/auto on 选择连续并启动，/auto off 选择单段模式；/skip on 跳过中间点，
-# /skip off 恢复逐点执行。/estop 急停卸力；/stop 停止 VLA；/quit 只退出 CLI，不急停机器人。
 ```
 
-启动日志会打出这次用的规格摘要（原点、图像、语义），现场先核这一行。
-`~/stop` **只是停止下发新目标**，手臂保持在最后一帧；卸力走 `/motion_control/estop`。
+CLI 输入任务文字只更新指令，空行 Enter 请求并完整执行一段；`/engage` 使能，`/start` 待命，
+`/stop` 停止下发，`/estop` 急停卸力。`/auto [on|off]` 选择连续或手动，开启时自动 start；
+`/skip [on|off]` 选择末点直达或逐点执行。`/quit` 只退出普通 CLI，不停止节点。
+不要同时启动两个控制 bridge；频率参数在启动时读取，修改后需重启。
+
+Online RL 人工评分的用途、操作和恢复见 [独立说明](g1_vla_bridge/online_rl/README.md)。
+
+## 执行方式
+推理在线程中进行，下发由定时器完成，避免网络和模型耗时阻塞控制。`manual` 每次请求完整执行一个
+chunk，播完等待下一次 Enter；`continuous` 播完后等待 `continuous_next_delay_s` 再请求下一段。
+推理失败时保持当前目标，manual 等待人工请求，continuous/async 按 `retry_delay_s` 重试。
+
+默认观测和模型动作均为 10 Hz，下发为 30 Hz：位置和夹爪线性插值，姿态 SLERP，30 个模型动作约三秒，
+不是加速三倍。`action_horizon` 限制每段使用的前缀，0 表示全部；`hold_*` 冻结对应侧的执行。
+
+### 异步执行
+即得到请求返回结果后立即观测并执行下一次请求。重合的action之间使用加权融合，加权方案为：第 k 个动作的新预测权重为 `k/(x+1)`，旧预测权重为 `1-k/(x+1)`，其中 x 为重合的动作点数，k=1..x。位置按此线性加权，旋转按同一权重 SLERP，夹爪不做跨 chunk 加权，重合点直接用新预测覆盖。
+
+为减少推理间隙的目标突变，`async_min_overlap_actions` 默认 7，不足时用旧末点或当前指令补齐，
+权重分母相应使用实际融合长度。动作时间从选中观测起算，首点在观测后 0.1 秒；
+仅执行未来点，不补播过期动作，队列耗尽时保持最后目标并继续请求。
+async 只支持绝对位姿，要求关闭 `delta_position`、`delta_rotation` 和 `skip_intermediate_waypoints`。
+
+```bash
+ros2 launch g1_vla_bridge vla_bridge.launch.py execution_mode:=async \
+  async_min_overlap_actions:=7
+ros2 run g1_vla_bridge vla_cli
+```
+
+运行中切换用 `/stop` → `/mode async` → `/start`；模式变更清空队列并作废旧请求。
+`~/status` 中的 `async_pending`、`async_buffer_s` 用于查看预测缓存，融合本身不保证闭环稳定或避障。
+
+### 与 record 的观测对齐
+为了让模型输入接近训练数据，三个模式共用固定 10 Hz 时间格：选取不晚于公共时刻的图像和关节样本，
+不插值。腕图直接读取 RTSP，用原始 PTS 减既有 110 ms 延迟补偿；头图保留 ROS 时间戳。
+双臂 FK、腕外参和夹爪来自同一条实测关节，头部外参使用该时刻的历史 TF。
+腕内参按原图分辨率精确匹配 `observation_calibration_file`，默认使用 camera_calibration 的标定文件。
+
+缺图、关节或 TF 时不请求模型；普通 bridge 不按数据年龄拦截。断流重连，时间戳回退清对应缓存，
+关节或发令时间回退还会停止执行。`~/status` 提供观测年龄、时间偏差和腕流错误，便于检查输入质量。
+在线原始 PTS 与离线拟合时间不完全一致；动态头部的训练/导出尚未闭合，不能承诺逐帧相同。
+
+### 真实动作与反馈历史
+为模型提供执行上下文，请求附带最近 `history_length` 对真实 action/state，默认 16 对。
+位姿和夹爪发布后进入待配对队列，以首条不早于命令时间的实测反馈配对，每个 100 ms 时间格取首条记录。
+历史只取当前观测之前的记录，旧到新排列，不足时只发已有记录，首次为 null；等待不会补造样本。
+start、stop、任务变化和 reset 清空本地历史，reset 不请求服务端。缓存保留整个 episode 供延迟观测回查，
+无反馈时待配对队列可能增长；配对不是控制器接收或机械臂到位确认。
+
+## 接一个新的 VLA
+backend 隔离模型协议、坐标转换和图像预处理，节点只负责观测与执行。新增同名模块和配置，
+再通过 `vla_backend` 选择，无需把模型协议写进节点：
+
+```
+g1_vla_bridge/backends/<名字>.py     # SPEC + PARAMETERS + create(params)
+config/backends/<名字>.yaml          # 参数值，launch 按 vla_backend 自动挂上
+```
+
+模块导出 `SPEC`、`PARAMETERS` 和 `create(params)`，实现 `infer(Observation) -> ActionChunk`；
+可参考 [cogact_unitree.py](g1_vla_bridge/backends/cogact_unitree.py)。接入前核对：
+
+| 约定 | 定义位置 |
+|---|---|
+| 模型坐标系原点、朝向 | `FrameSpec.origin_in_base / rotation_rpy` |
+| 末端参考点和姿态轴 | `FrameSpec.tool_offset / tool_rotation_rpy` |
+| 图像槽位、顺序、尺寸和预处理 | `ImageSpec` 与 backend |
+| 相机内参、畸变和外参方向 | backend 请求协议 |
+| 夹爪范围与开合方向 | `GripperSpec` |
+| 绝对或增量动作、序列长度 | `VlaSpec.action_semantics / horizon` |
+
+通用配置放 [config/vla_bridge.yaml](config/vla_bridge.yaml)，模型参数放同名 backend YAML，键不重叠。
+生效顺序为代码默认值 → 通用配置 → backend 配置 → launch 覆盖。
 
 ### 双臂复位
+`/home` 用于回到固定双臂起始姿态：先停止 VLA、清空历史和播放队列、作废在途响应，
+再直接发送一次双臂 IK 目标，由 motion_control 执行，夹爪保持不变。也可调用 `~/home` Trigger 服务。
+必须已接管手臂，要求 `torso_link` 和左右 `gripper_base`，不受冻结或禁用侧限制。
+固定位姿见 [HOME_POSES](g1_vla_bridge/vla_node.py)，服务成功仅表示目标已发布，不代表到位或自动恢复执行。
 
-在 `vla_cli` 输入 `/home`，或调用
-`ros2 service call /vla_bridge/home std_srvs/srv/Trigger '{}'`。
-服务先停止 VLA、清空播放队列、作废在途推理结果，再立即发送一次双臂 IK 目标。
-在 history 分支中，停止路径同时清空该分支的动作历史。
-不等待相机、任务或模型，不经过 VLA 笛卡尔插值；实际运动仍由 `motion_control` 的 IK 和关节控制执行。
-必须先 `/engage` 且手臂已接管；不会自动使能。夹爪不发送新指令，保持原目标。
-复位始终作用于双臂，不受 `hold_left/hold_right` 或 `has_left/has_right` 限制。
-完成后 VLA 保持停止，不自动恢复推理。服务成功只表示已发布目标，不表示机械臂已到位。
-
-固定位姿来自 2026-09-18 采样的左臂，右臂为镜像；参考系 `torso_link`，
-末端为 `left_gripper_base` / `right_gripper_base`，更换这些 frame 时服务拒绝执行。
-顺序为 `[x, y, z, qx, qy, qz, qw]`，位置单位米：
-
-```yaml
-left:  [0.143762115,  0.256049887, 0.264313750, 0.847427008, 0.197254737, 0.222810522, 0.439674318]
-right: [0.143762115, -0.256049887, 0.264313750, 0.197254737, 0.847427008, 0.439674318, 0.222810522]
-```
+### 夹爪截断实验
+`gripper_gate.launch.py` 在夹爪开合跨过阈值时终止后续动作，让下一次 Enter 重新观测：
+从 `>=0.75` 降到 `<0.75`，或从 `<=0.25` 升到 `>0.25` 触发。
+启动 `ros2 launch g1_vla_bridge gripper_gate.launch.py`，仍使用普通 `vla_cli`。
 
 ## 安全边界
 
@@ -354,69 +184,36 @@ right: [0.143762115, -0.256049887, 0.264313750, 0.197254737, 0.847427008, 0.4396
 | 接管检查 | — | `arms_live` 掉了自动 `stop` |
 | 只记录不拦截 | `~/status` 的 `jump` / `lead` | manual/continuous 的首点距实测、指令领先实测；async 为 null |
 
-整段准入门（首点离实测太远就丢整段）**已删**：标定没定死之前首点总在 0.3 m 上下，它会
-把每一段都拒掉。可选单帧限速在 `motion_control` 的 IK 限幅**之上**，不冲突——那个管的是数值
-稳定性，管不住「目标本身给错了」。
+motion_control 的 IK 保护和关节限速仍生效，但不保证模型目标正确或轨迹安全。
+`/stop` 只停止新目标，手臂仍保持最后指令；需要卸力时用 `/estop`。
 
 ## delta 模式（`delta_position` / `delta_rotation`，默认关）
+用于保留模型轨迹的相对变化，将首点重锚到上一段留下的指令值；仅适用于绝对动作的 manual/continuous：
 
-标定不准时可以只取模型整段的**形状**，重锚到当前指令值：
-
-```
+```text
 out[k].p = anchor.p + (poses[k].p − poses[0].p)
 out[k].R = poses[k].R · poses[0].Rᵀ · anchor.R
 ```
 
-| | 绝对 | delta |
-|---|---|---|
-| `model_origin_in_base` / `tool_offset` | 必须准 | **相减时抵消** |
-| `model_rotation_rpy` | 必须准 | **仍然必须准**（`Δp_model = R · Δp_base`，方向不抵消） |
-| `tool_rotation_rpy` | 必须准 | 抵消 |
-| 误差累积 | 无 | 指令是累积的，跟不上时会一路往前堆 |
-
-原点对齐好之后一般走绝对模式——delta 会把原点减掉，对齐就白做了。夹爪不走 delta，
-它是开合量不是位姿。
-
-**锚点必须是「上一段留下的指令值」，不是实测值**（2026-08-17 踩过，锚在实测上机器人只
-在原地抖）：当时实验为 30 Hz（非本分支当前默认的 10 Hz），推理一轮约 250 ms，
-只播得完 30 个 waypoint 里的前 8 个，实测在这
-250 ms 里几乎没动，锚回去就把走过的一截抹掉，再叠上模型噪声就是以约 4 Hz 抖 ±4 cm。
-代价是指令可能跑在实测前面，`~/status` 的 `lead` 就是这个领先量。与 `vr_teleop` 的离合
-锚点同一套取舍：**绝不拿可达性反馈去修锚点**。
-
-`test_delta_mode.py` 钉死了「偏置必须抵消」「旋转必须不抵消」「进度必须累积」。
+锚在指令而非实测上，是为了避免跟踪滞后把已累积的轨迹进度抹掉；代价是指令可能领先实测，
+可看 `~/status.lead`。位置相减能消去固定原点偏置，但方向误差不会抵消，不能代替坐标标定。
+夹爪不做 delta；标定对齐后通常使用绝对模式。
 
 ## 已知坑
+- `base_frame` 必须与 motion_control 的 IK 参考系一致，改动时同步核对其配置。
+- 相机 profile 必须显式使用 record 配置；普通 bringup 的低带宽 stream1 不能替代腕部 stream0。
+- 畸变系数：厂商 JSON 常为 `k1,k2,k3,p1,p2`，OpenCV/ROS 为 `k1,k2,p1,p2,k3`。
+- 网络错误先看 `~/status.error`；反向 SOCKS 的连接成功不代表服务端可用，必要时在服务端本机 curl。
 
-- **坐标系必须和 `motion_control` 一致。** `base_frame: torso_link` 是因为它的 IK 就是
-  相对 `torso_link` 解的。改它要同步核对 `motion_control.yaml`——两边不一致不会报错，
-  只会让手臂去错地方。
-- **相机没订阅者时根本不拉流**，所以刚起来的头 1~3 秒会因图像过期跳过几轮推理，属正常。
-- **VLA 启动必须显式使用 record 的相机 profile。** 头部是 `1280x720x30 YUYV`，腕部是
-  两路 `stream0 1920x1080x30`；不要沿用普通 bringup 的低带宽 stream1 配置。图像不在
-  机器人侧缩放，由 CogACT server 统一缩到 448x256。
-- **`head_reproject`** 把我们的图重采样到训练相机内参上（焦距差 1.42 倍，同一物体在我们
-  图里大 42%），代价是画布只填得满约 49%、其余靠边缘外推——**那本身也是分布偏移**。用
-  分别配置开关后用预检比较。修正只做**输入侧**：焦距失配是角度误差不是三维相似变换，
-  输出侧再乘系数是双重修正。
-- **畸变顺序**：厂商 JSON 给 `k1 k2 k3 p1 p2`，OpenCV/ROS 要 `[k1,k2,p1,p2,k3]`。抄错
-  不报错，只会悄悄画歪。
-- `RemoteDisconnected` / curl exit=52 → 服务端不回数据。`ssh -R` 的反向 SOCKS 是**乐观
-  应答**（关闭的端口也回 "request granted"），拿对照端口分不出「服务挂了」还是「路由断
-  了」，只能去 B 上 curl。
-- 打不通时先看 `/vla_bridge/status` 的 `error` 字段，那里是原始异常。
-
-## 测试
-
+## 测试与预检
 ```bash
 python3 -m pytest src/g1_vla_bridge/test -q
-python3 -m pycodestyle --ignore=E501,W503 \
+python3 -m flake8 --extend-ignore=E501 \
     src/g1_vla_bridge/g1_vla_bridge src/g1_vla_bridge/test src/g1_vla_bridge/launch
+python3 src/g1_vla_bridge/test/observation_preflight.py
 ```
 
-`test_*.py` 不启动 ROS 节点、不访问网络；部分测试需要已安装 ROS Python 包。
-`test/observation_preflight.py` 是使用真实观测入口的只读传感器预检，命令见上方
-「与 record 的观测对齐」。它不调用模型、不验证闭环跟踪。
-执行回归测试直接跑真实推理线程与下发回调（mock backend/publisher），逐帧核对双臂位姿、
-夹爪、单次请求和 stop/start 后旧响应丢弃；关闭 delta 与 VLA 限速、未冻结且 horizon=0 时，
-完整输出每个 waypoint。底层 IK、关节限速和物理跟踪误差仍然存在。
+回归覆盖坐标变换、真实执行回调、停止后的响应作废，以及协议和反馈恢复；使用 mock、本机 HTTP
+和隔离 ROS，不调用远端模型或控制真机。部分测试需要已安装 ROS Python 包。
+`observation_preflight.py` 使用真实观测入口做只读传感器检查，不调用模型、不发运动命令。
+这些检查不验证真实模型效果和机械臂闭环跟踪。

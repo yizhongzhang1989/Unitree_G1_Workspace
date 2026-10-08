@@ -1,5 +1,7 @@
 """In-memory live observation and HTTP probe; no command publisher or data dumps."""
 
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+
 import json
 from pathlib import Path
 import time
@@ -23,10 +25,12 @@ class ObservationProbe(VlaBridgeNode):
         return super().create_publisher(msg_type, *args, **kwargs)
 
     def _on_start(self, request, response):
+        _ = request
         response.success, response.message = False, 'observation probe only'
         return response
 
     def _on_home(self, request, response):
+        _ = request
         response.success, response.message = False, 'observation probe only'
         return response
 

@@ -37,7 +37,8 @@ class TimedActions:
             raise ValueError('first_offset_steps must be 0 or 1')
         self.first_offset_steps = first_offset_steps
         self.end = origin
-        self._execution = ExecutionInterpolator(self.execution_rate, origin)
+        self._consumed = -1
+        self._last_time = None
         self.samples: dict[int, tuple[dict, dict]] = {}
         self.last_merge: dict = {}
         self.merges = 0
@@ -48,8 +49,8 @@ class TimedActions:
               fallback_poses: dict[str, np.ndarray] | None = None) -> int:
         end = requested + chunk.horizon / self.rate
         consumed = -1
-        if self._execution.last_time is not None:
-            consumed = math.floor((self._execution.last_time - self.origin) * self.rate + 1e-8)
+        if self._last_time is not None:
+            consumed = math.floor((self._last_time - self.origin) * self.rate + 1e-8)
         first = max(consumed + 1,
                     math.ceil((max(now, requested + self.first_offset_steps / self.rate)
                                - self.origin) * self.rate - 1e-8))
@@ -57,11 +58,9 @@ class TimedActions:
         if self.first_offset_steps:
             stop = math.floor((end - self.origin) * self.rate + 1e-8) + 1
         anchor = math.floor((now - self.origin) * self.rate + 1e-8)
-        self.samples = {tick: value for tick, value in self.samples.items()
-                if tick >= first or tick == anchor}
+        self.samples = {tick: value for tick, value in self.samples.items() if tick >= first or tick == anchor}
         accepted = max(0, stop - first)
-        old_poses = [self.samples[tick][0] for tick in range(first, stop)
-                 if tick in self.samples]
+        old_poses = [self.samples[tick][0] for tick in range(first, stop) if tick in self.samples]
         overlap_count = len(old_poses)
         blend_count = min(accepted, max(overlap_count, self.minimum_overlap_actions))
         fallback = old_poses[-1] if old_poses else fallback_poses
@@ -105,39 +104,26 @@ class TimedActions:
         return accepted
 
     def take(self, now: float):
-        return self._execution.take(self, now)
-
-
-class ExecutionInterpolator:
-    def __init__(self, rate: float, origin: float):
-        self.rate = rate
-        self.origin = origin
-        self.consumed = -1
-        self.last_time = None
-
-    def take(self, actions: TimedActions, now: float):
-        if actions.first_offset_steps and now > actions.end + 1e-8:
-            actions.samples.clear()
+        if self.first_offset_steps and now > self.end + 1e-8:
+            self.samples.clear()
             return None
-        tick = math.floor((now - self.origin) * self.rate + 1e-8)
-        if tick <= self.consumed:
+        tick = math.floor((now - self.origin) * self.execution_rate + 1e-8)
+        if tick <= self._consumed:
             return None
-        self.consumed = tick
-        self.last_time = self.origin + tick / self.rate
-        offset = tick * actions.rate / self.rate
+        self._consumed = tick
+        self._last_time = self.origin + tick / self.execution_rate
+        offset = tick * self.rate / self.execution_rate
         lower = math.floor(offset + 1e-8)
         fraction = max(0., offset - lower)
-        start = actions.samples.get(lower)
-        finish = actions.samples.get(lower + 1)
-        actions.samples = {key: sample for key, sample in actions.samples.items()
-                           if key >= lower and (actions.origin + key / actions.rate >= now
-                                                or now < actions.end)}
-        if start is None or now > actions.end + 1e-8:
+        start = self.samples.get(lower)
+        finish = self.samples.get(lower + 1)
+        self.samples = {key: sample for key, sample in self.samples.items() if key >= lower and (self.origin + key / self.rate >= now or now < self.end)}
+        if start is None or now > self.end + 1e-8:
             return None
         if fraction < 1e-8:
             return start
         if finish is None:
-            return start if not actions.first_offset_steps and now < actions.end else None
+            return start if not self.first_offset_steps and now < self.end else None
         poses, grippers = {}, {}
         for side in SIDES:
             poses[side] = _blend_pose(start[0][side], finish[0][side], fraction)

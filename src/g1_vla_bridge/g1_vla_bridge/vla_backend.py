@@ -67,8 +67,10 @@ class FrameSpec:
         """把 ``transforms.solve_base_frame()`` 的解转成本类的声明式字段。"""
         origin = -rpy_to_mat(rotation_rpy).T @ np.asarray(
             base_offset, dtype=np.float64).reshape(3)
+        rotation = np.asarray(rotation_rpy, dtype=np.float64).reshape(3)
         return cls(origin_in_base=tuple(origin),
-                   rotation_rpy=tuple(float(v) for v in rotation_rpy), **rest)
+                   rotation_rpy=(float(rotation[0]), float(rotation[1]),
+                                 float(rotation[2])), **rest)
 
 
 @dataclass(frozen=True)

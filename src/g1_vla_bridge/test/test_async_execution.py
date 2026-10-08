@@ -1,7 +1,7 @@
 """Exercise bridge callbacks with a fake clock and a mock publisher."""
 
-import threading
-from collections import deque
+# pyright: reportGeneralTypeIssues=false, reportOptionalSubscript=false
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,10 +9,10 @@ import numpy as np
 import pytest
 
 from g1_vla_bridge import vla_node
-from g1_vla_bridge.backends.cogact_unitree import SPEC
 from g1_vla_bridge.control_history import ControlHistory
 from g1_vla_bridge.record_observation import ObservationBuffer
 from test_history_execution import deliver_state
+from test_execution_regression import executor_fixture
 from g1_vla_bridge.timed_actions import TimedActions
 from g1_vla_bridge.vla_backend import ActionChunk, SIDES
 from g1_vla_bridge.vla_node import VlaBridgeNode
@@ -43,30 +43,14 @@ def test_ten_hz_execution_preserves_thirty_hz_prediction_time():
 def bridge(monkeypatch):
     clock = SimpleNamespace(now=0.)
     monkeypatch.setattr(vla_node.time, 'monotonic', lambda: clock.now)
-    node = SimpleNamespace(
-        _lock=threading.Lock(), _running=threading.Event(), _infer_requested=threading.Event(),
-        _inference_active=False, _generation=0, _execution_mode='async', _chunk=None,
-        _cursor=0, _timed=TimedActions(30., 0.), _horizon=0,
-        _command={side: np.array([0., 0., 0., 0., 0., 0., 1.]) for side in SIDES},
-        _grip_command={side: 0. for side in SIDES}, _active={side: True for side in SIDES},
-        _publisher=Mock(), _arms_ready=lambda: '', _cartesian_limit_enabled=False,
-        _delta=False, _spec=SPEC, _skip_intermediate=False, _error='',
-        _max_step_pos=.02, _max_step_ori=.1, get_logger=Mock(return_value=Mock()),
+    node = executor_fixture('async')
+    node.__dict__.update(
+        _chunk=None, _timed=TimedActions(30., 0.), _cartesian_limit_enabled=False,
         _retry_delay=0., _action_rate=30., _execution_rate=30., _task='test',
-        _async_min_overlap=7,
         _observe=lambda: SimpleNamespace(grippers={'left': .7, 'right': .8}),
-        _alive=True, _history=None, _pending_control=deque(), _last_control_stamp=None)
-    node._running.set()
+        _alive=True)
+    del node._request_inference
     node._measured_pose = lambda side: node._command[side].copy()
-    node._request_inference = lambda generation=None: VlaBridgeNode._request_inference(node, generation)
-    node._accept = lambda *args, **kwargs: VlaBridgeNode._accept(node, *args, **kwargs)
-    node._fail = lambda *args: VlaBridgeNode._fail(node, *args)
-    node._stop = lambda reason, **kwargs: VlaBridgeNode._stop(node, reason, **kwargs)
-    node._on_async_tick = lambda: VlaBridgeNode._on_async_tick(node)
-    node._limit = lambda current, target: VlaBridgeNode._limit(node, current, target)
-    node._publish_control = lambda *args: VlaBridgeNode._publish_control(node, *args)
-    node._mode_error = lambda mode: VlaBridgeNode._mode_error(node, mode)
-    node._set_execution_mode = lambda mode: VlaBridgeNode._set_execution_mode(node, mode)
     return node, clock
 
 
@@ -140,9 +124,12 @@ def test_async_thirty_hz_publications_and_history(bridge):
     node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(
         nanoseconds=round(clock.now * 1e9)))
     node._observations = ObservationBuffer(())
-    node._control_measurement = lambda joints: (
-        {side: node._command[side].copy() for side in SIDES},
-        dict(node._grip_command))
+    def control_measurement(joints):
+        _ = joints
+        return ({side: node._command[side].copy() for side in SIDES},
+                dict(node._grip_command))
+
+    node._control_measurement = control_measurement
     assert VlaBridgeNode._on_start(node, None, SimpleNamespace()).success
     assert node._timed.execution_rate == 30.
     chunk = prediction()
@@ -291,6 +278,7 @@ def test_worker_immediately_observes_again_without_ticks(bridge):
     node._observe = observe
 
     def infer(observation):
+        _ = observation
         clock.now += .2
         if len(observed) == 2:
             node._alive = False
@@ -323,6 +311,7 @@ def test_worker_counts_image_age_as_well_as_inference_latency(bridge):
     node._observe = lambda: SimpleNamespace(acquired_monotonic=0.)
 
     def infer(observation):
+        _ = observation
         clock.now = .3
         node._alive = False
         return prediction()
@@ -341,6 +330,7 @@ def test_async_missing_acquisition_time_never_calls_backend(bridge):
     node._backend = Mock()
 
     def fail(reason, generation):
+        _ = generation
         node._error = reason
         node._alive = False
 

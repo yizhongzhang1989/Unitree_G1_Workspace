@@ -15,7 +15,6 @@
 
     # -- 任务 ----------------------------------------------------------------
     # 空字符串时 ~/start 会拒绝，必须先发 ~/task 或在这里写死。
-    # 实测语言是模型最强的输入（换个物体名输出差 0.114 m，是噪声底 0.019 的 5.6 倍）。
     task_description: 'pick up the green potato chip bag using the right arm.'
     # CogACT 的双臂开关在 server 启动时配置；这里决定是否执行对应手臂的动作。
     has_left: true

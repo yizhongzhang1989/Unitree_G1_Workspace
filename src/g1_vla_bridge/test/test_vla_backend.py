@@ -3,6 +3,8 @@
 这里钉死的是**跨 VLA 都得成立**的约定，接新 VLA 时先跑这一组。
 """
 
+# pyright: reportArgumentType=false
+
 import numpy as np
 import pytest
 
@@ -85,7 +87,10 @@ def test_action_chunk_rejects_inconsistent_shapes(broken):
 def test_load_backend_round_trip(monkeypatch):
     from g1_vla_bridge.backends.cogact_unitree import CogACTUnitreeBackend
 
-    monkeypatch.setattr(CogACTUnitreeBackend, 'configure', lambda self: None)
+    def no_configure(self):
+        _ = self
+
+    monkeypatch.setattr(CogACTUnitreeBackend, 'configure', no_configure)
     backend = load_backend('cogact_unitree', backend_parameters('cogact_unitree'))
     assert isinstance(backend, VlaBackend)
     assert backend.spec.name == 'cogact_unitree'

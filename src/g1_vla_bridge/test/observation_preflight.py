@@ -1,5 +1,7 @@
 """Read-only live observation check: no inference calls or motion publishers."""
 
+# pyright: reportOperatorIssue=false, reportOptionalMemberAccess=false
+
 import json
 import time
 from collections import Counter
@@ -15,8 +17,11 @@ def main():
     rclpy.init(args=['--ros-args', '-r', '__node:=vla_observation_preflight',
                      '-r', '/motion_control/command:=/vla_preflight/unused_command'])
     node = VlaBridgeNode()
-    node._backend.infer = lambda observation: (_ for _ in ()).throw(
-        AssertionError('preflight must never infer'))
+    def infer(observation):
+        _ = observation
+        raise AssertionError('preflight must never infer')
+
+    node._backend.infer = infer
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     started = time.monotonic()

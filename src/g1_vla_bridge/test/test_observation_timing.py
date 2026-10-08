@@ -1,5 +1,7 @@
 """One held measured state drives poses, extrinsics and grippers."""
 
+# pyright: reportArgumentType=false, reportCallIssue=false, reportOptionalSubscript=false
+
 import threading
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
@@ -116,7 +118,7 @@ def test_old_observation_and_slow_processing_are_not_rejected(observation_node, 
 
 
 @pytest.mark.parametrize('failure', ['missing', 'description'])
-def test_invalid_inputs_fail_closed(observation_node, monkeypatch, failure):
+def test_invalid_inputs_fail_closed(observation_node, failure):
     node = observation_node
     if failure == 'missing':
         node._observations.reset_camera('head')

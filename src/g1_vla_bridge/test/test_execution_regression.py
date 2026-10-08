@@ -1,5 +1,7 @@
 """Exercise the actual callbacks without ROS nodes or hardware publishers."""
 
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+
 import threading
 from collections import deque
 from types import SimpleNamespace
@@ -17,7 +19,8 @@ from g1_vla_bridge.transforms import pose_matrix, quat_angle
 
 def executor_fixture(mode='manual'):
     pose = np.array([0., 0., 0., 0., 0., 0., 1.])
-    node = SimpleNamespace(
+    node = object.__new__(VlaBridgeNode)
+    node.__dict__.update(
         _lock=threading.Lock(), _running=threading.Event(),
         _command={side: pose.copy() for side in SIDES},
         _grip_command={side: 0. for side in SIDES},
@@ -29,18 +32,14 @@ def executor_fixture(mode='manual'):
         _publisher=Mock(), _arms_ready=lambda: '', _execution_mode=mode,
         _request_inference=Mock(),
         _generation=0, _infer_requested=threading.Event(), _inference_active=False,
-    _delta=False, _spec=SPEC, _timed=None, _history=None, _pending_control=deque(),
-    _last_control_stamp=None,
+        _delta=False, _spec=SPEC, _timed=None, _history=None, _pending_control=deque(),
+        _last_control_stamp=None,
         _continuous_next_delay=0.5, _continuous_next_at=None,
-        _task='pick up the basketball', _async_alpha=.5, _async_min_overlap=7,
+        _task='pick up the basketball', _async_min_overlap=7,
         _async_step={}, _async_merge={}, _async_last_publish=None, _error='',
         get_logger=Mock(return_value=Mock()),
     )
-    node._mode_error = lambda mode: VlaBridgeNode._mode_error(node, mode)
-    node._set_execution_mode = lambda mode: VlaBridgeNode._set_execution_mode(node, mode)
     node._running.set()
-    node._limit = lambda current, target: VlaBridgeNode._limit(node, current, target)
-    node._publish_control = lambda *args: VlaBridgeNode._publish_control(node, *args)
     poses = np.tile(pose, (30, 1))
     poses[-1, 0] = 0.1
     node._chunk = ActionChunk(
@@ -131,27 +130,19 @@ def test_skip_intermediate_sends_only_final_waypoint():
     assert len(arms) == 1
     assert np.allclose(arms[0][:7], final_pose)
     assert node._chunk is None
-
-
-def test_enable_auto_requires_stopped_bridge():
-    node = executor_fixture()
-    node._chunk = None
-    node._request_inference = Mock(return_value='')
-    response = VlaBridgeNode._on_set_auto(
-        node, SimpleNamespace(data=True), SimpleNamespace())
-    assert not response.success
-    assert node._execution_mode == 'manual'
+    for _ in range(3):
+        node._on_tick()
     node._request_inference.assert_not_called()
 
 
-def test_disable_auto_keeps_current_chunk():
-    node = executor_fixture('continuous')
+@pytest.mark.parametrize('mode,enabled', [('manual', True), ('continuous', False)])
+def test_auto_switch_requires_stop_and_keeps_current_chunk(mode, enabled):
+    node = executor_fixture(mode)
     chunk = node._chunk
-    node._request_inference = Mock()
     response = VlaBridgeNode._on_set_auto(
-        node, SimpleNamespace(data=False), SimpleNamespace())
+        node, SimpleNamespace(data=enabled), SimpleNamespace())
     assert not response.success
-    assert node._execution_mode == 'continuous'
+    assert node._execution_mode == mode
     assert node._chunk is chunk
     node._request_inference.assert_not_called()
 
@@ -164,17 +155,6 @@ def test_set_skip_intermediate_keeps_current_chunk():
     assert response.success
     assert node._skip_intermediate is True
     assert node._chunk is chunk
-
-
-def test_manual_never_requests_next_chunk_automatically():
-    node = executor_fixture()
-    node._cartesian_limit_enabled = False
-    node._skip_intermediate = True
-    VlaBridgeNode._on_tick(node)
-    assert node._chunk is None
-    for _ in range(3):
-        VlaBridgeNode._on_tick(node)
-    node._request_inference.assert_not_called()
 
 
 def test_continuous_requests_next_chunk_after_configured_delay(monkeypatch):
@@ -199,9 +179,10 @@ def test_continuous_requests_next_chunk_after_configured_delay(monkeypatch):
     node._request_inference.assert_called_once()
 
 
-def test_continuous_task_change_discards_old_chunk_and_requests_new_task():
-    node = executor_fixture('continuous')
-    old_chunk = node._chunk
+@pytest.mark.parametrize('mode', ['continuous', 'async'])
+def test_task_change_discards_old_execution_and_requests_new_task(mode):
+    node = executor_fixture(mode)
+    node._history = Mock()
     node._inference_active = True
     node._infer_requested.set()
     node._continuous_next_at = 123.
@@ -212,27 +193,15 @@ def test_continuous_task_change_discards_old_chunk_and_requests_new_task():
     assert node._generation == 1
     assert node._task == 'place the basketball on the table'
     assert node._chunk is None
-    assert node._chunk is not old_chunk
     assert node._cursor == 0
     assert not node._inference_active
     assert not node._infer_requested.is_set()
     assert node._continuous_next_at is None
     node._request_inference.assert_called_once_with(1)
-
-
-def test_async_task_change_recreates_timed_queue_without_legacy_alpha():
-    node = executor_fixture('async')
-    node._history = Mock()
-    del node._async_alpha
-
-    VlaBridgeNode._on_task(node, SimpleNamespace(data='place the basketball on the table'))
-
-    assert node._running.is_set()
-    assert node._timed is not None
-    assert node._timed.rate == node._action_rate
-    assert node._timed.execution_rate == node._execution_rate
-    assert node._timed.first_offset_steps == 1
-    node._request_inference.assert_called_once_with(1)
+    if mode == 'async':
+        assert node._timed.rate == node._action_rate
+        assert node._timed.execution_rate == node._execution_rate
+        assert node._timed.first_offset_steps == 1
 
 
 def test_returned_unified_poses_recover_raw_commands():
@@ -280,8 +249,7 @@ def worker_fixture():
     node.get_logger = Mock(return_value=Mock())
     node._fail = Mock()
     node._retry_delay = 0.
-    node._request_inference = lambda: VlaBridgeNode._request_inference(node)
-    node._accept = lambda *args: VlaBridgeNode._accept(node, *args)
+    del node._request_inference
     return node
 
 
@@ -368,6 +336,7 @@ def test_stop_restart_discards_late_response_without_new_next():
     entered, release, handled = threading.Event(), threading.Event(), threading.Event()
 
     def infer(observation):
+        _ = observation
         entered.set()
         assert release.wait(3)
         return chunk
@@ -405,13 +374,13 @@ def test_shutdown_waits_for_inference_before_closing_backend():
     entered, release, closed = threading.Event(), threading.Event(), threading.Event()
 
     def infer(observation):
+        _ = observation
         entered.set()
         assert release.wait(3)
         return executor_fixture()._chunk
 
     node._backend = SimpleNamespace(infer=infer, close=closed.set)
     node._readers = {}
-    node._stop = lambda reason: VlaBridgeNode._stop(node, reason)
     node._worker = threading.Thread(target=VlaBridgeNode._infer_loop, args=(node,))
     node._request_inference()
     node._worker.start()

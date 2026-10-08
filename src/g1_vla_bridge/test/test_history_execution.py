@@ -1,3 +1,6 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+# pyright: reportOptionalMemberAccess=false, reportOptionalSubscript=false
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 from sensor_msgs.msg import JointState
@@ -20,7 +23,6 @@ def node_with_history():
     node._control_measurement = Mock(return_value=(poses(-1.), dict(left=.2, right=.3)))
     node._observations = ObservationBuffer(())
     node.get_logger = Mock(return_value=Mock())
-    node._stop = lambda reason, **kwargs: VlaBridgeNode._stop(node, reason, **kwargs)
     node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1_100_000_000))
     return node
 
@@ -36,9 +38,12 @@ def test_history_after_both_publications_and_limits():
     node = node_with_history()
     node._chunk.poses['left'][0, 0] = 1.
     node._active['right'] = False
-    node._publisher.publish.side_effect = lambda message: (
-        pytest.fail('history recorded before both publications')
-        if node._history.snapshot() else None)
+    def check_publish(message):
+        _ = message
+        if node._history.snapshot():
+            pytest.fail('history recorded before both publications')
+
+    node._publisher.publish.side_effect = check_publish
     VlaBridgeNode._on_tick(node)
     assert node._history.snapshot() == ()
     deliver_state(node, 1.101)
@@ -65,23 +70,6 @@ def test_failed_publication_never_records_history(failure):
         with pytest.raises(RuntimeError):
             VlaBridgeNode._on_tick(node)
     assert node._history.snapshot() == ()
-
-
-@pytest.mark.parametrize('operation', ['stop', 'reset', 'task'])
-def test_episode_boundary_clears_both_histories(operation):
-    node = node_with_history()
-    node._task = 'old task'
-    node._backend = Mock()
-    node._history.append(1.1, poses(2), poses(-1), dict(left=1., right=1.), dict(left=.2, right=.3), 1.)
-    if operation == 'stop':
-        node._stop('test')
-    elif operation == 'reset':
-        assert VlaBridgeNode._on_reset(node, None, SimpleNamespace()).success
-    else:
-        VlaBridgeNode._on_task(node, SimpleNamespace(data='new task'))
-    assert node._history.snapshot() == ()
-    assert node._running.is_set() is (operation == 'task')
-    assert not VlaBridgeNode._publish_control(node, poses(0), dict(left=0., right=0.), 0)
 
 
 def test_two_nodes_have_isolated_histories():
@@ -147,7 +135,7 @@ def test_first_state_is_fixed_before_slow_fk(monkeypatch):
     node._observations = ObservationBuffer(())
     node._observations.add('joints', .99, {'sample': 1}, .99)
     node._model, node._base_frame, node._tip_frames = object(), 'torso_link', {}
-    node._control_measurement = lambda joints: VlaBridgeNode._control_measurement(node, joints)
+    del node._control_measurement
 
     events = []
 
@@ -199,6 +187,7 @@ def test_stop_during_fk_does_not_restore_cleared_history():
     node = node_with_history()
 
     def measure_and_stop(joints):
+        _ = joints
         assert node._publisher.publish.call_count == 2
         node._stop('test stop during FK')
         return poses(4), dict(left=.2, right=.3)
@@ -215,6 +204,7 @@ def test_action_published_during_fk_stays_queued_for_next_state():
     VlaBridgeNode._on_tick(node)
 
     def measure_and_publish(joints):
+        _ = joints
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=1_200_000_000))
         VlaBridgeNode._on_tick(node)
         return poses(4), dict(left=.2, right=.3)
@@ -233,6 +223,7 @@ def test_action_published_during_fk_stays_queued_for_next_state():
 @pytest.mark.parametrize('operation', ['stop', 'reset', 'task', 'home'])
 def test_pending_state_cannot_restore_history_after_stop(operation):
     node = node_with_history()
+    node._history.append(1., poses(2), poses(-1), dict(left=1., right=1.), dict(left=.2, right=.3), 1.)
     VlaBridgeNode._on_tick(node)
     assert node._pending_control
     if operation == 'task':
@@ -250,6 +241,8 @@ def test_pending_state_cannot_restore_history_after_stop(operation):
     deliver_state(node, 1.101)
     assert node._history.snapshot() == ()
     assert not node._pending_control
+    assert node._running.is_set() is (operation == 'task')
+    assert not node._publish_control(poses(0), dict(left=0., right=0.), 0)
     node._control_measurement.assert_not_called()
 
 

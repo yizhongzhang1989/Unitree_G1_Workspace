@@ -1,5 +1,7 @@
 """Parity against the real offline exporter, without ROS publishers."""
 
+# pyright: reportArgumentType=false, reportOptionalMemberAccess=false
+
 import importlib.util
 from pathlib import Path
 import sys
@@ -184,6 +186,7 @@ def test_stream_failure_clears_cached_frames_without_leaking_credentials():
                              stop_event=event, error='')
 
     def fail(*args, **kwargs):
+        _ = args, kwargs
         buffer.add('left_wrist', 10., object(), 10.)
         event.set()
         raise OSError('rtsp://secret')

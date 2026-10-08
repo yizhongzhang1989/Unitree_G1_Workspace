@@ -67,7 +67,7 @@ def _node(context):
 
     return [Node(
         package='g1_vla_bridge',
-        executable='vla_node',
+        executable=LaunchConfiguration('bridge_executable'),
         name='vla_bridge',
         output='screen',
         emulate_tty=True,
@@ -78,6 +78,7 @@ def _node(context):
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
+        DeclareLaunchArgument('bridge_executable', default_value='vla_node'),
         *(DeclareLaunchArgument(name, default_value='') for name in _ARGUMENTS),
         OpaqueFunction(function=_node),
     ])

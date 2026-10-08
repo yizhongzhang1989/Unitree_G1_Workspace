@@ -62,6 +62,14 @@ def encode_jpeg(bgr: np.ndarray, quality: int = 90) -> bytes:
     return buffer.tobytes()
 
 
+def encode_images(observation, spec=SPEC):
+    missing = set(spec.images.slots) - observation.images.keys()
+    if missing:
+        raise ValueError(f'缺图像 {sorted(missing)}')
+    return tuple(encode_jpeg(cv2.resize(observation.images[slot], (640, 360), interpolation=cv2.INTER_AREA), spec.images.jpeg_quality)
+                 for slot in spec.images.slots)
+
+
 def normalized_intrinsic(calibration, image: np.ndarray) -> list[list[float]]:
     """按训练侧规则将 ``fx/fy/cx/cy`` 归一化到图像宽高。"""
     height, width = image.shape[:2]
@@ -133,20 +141,14 @@ def parse_action(body: Mapping[str, Any]) -> dict[str, dict[str, np.ndarray]]:
     if missing:
         raise ValueError(f'返回缺字段: {missing}')
     action = {}
-    horizons = set()
-    for side, trans_key, rot_key, grip_key in (
-            ('left', _TRANS[0], _ROT[0], _GRIP[0]),
-            ('right', _TRANS[1], _ROT[1], _GRIP[1])):
+    for side, trans_key, rot_key, grip_key in zip(SIDES, _TRANS, _ROT, _GRIP):
         trans = np.asarray(body[trans_key], dtype=np.float64)
         rot = np.asarray(body[rot_key], dtype=np.float64)
         grip = np.asarray(body[grip_key], dtype=np.float64)
         if trans.shape != (30, 3) or rot.shape != (30, 3, 3) or grip.shape != (30, 1):
             raise ValueError(f'{side}: expected TRANS[30,3], ROT_MAT[30,3,3], GRIPPER[30,1]')
         grip = grip[:, 0]
-        horizons.update((len(trans), len(rot), len(grip)))
         action[side] = {'trans': trans, 'rot': rot, 'grip': grip}
-    if len(horizons) != 1 or horizons == {0}:
-        raise ValueError(f'各字段的 horizon 无效: {sorted(horizons)}')
     for side, fields in action.items():
         for name, value in fields.items():
             if not np.all(np.isfinite(value)):
@@ -226,13 +228,7 @@ class CogACTUnitreeBackend(VlaBackend):
     def infer(self, observation: Observation) -> ActionChunk:
         if not self.history_enabled:
             raise RuntimeError('health/config must pass before inference')
-        missing = [slot for slot in self.spec.images.slots if slot not in observation.images]
-        if missing:
-            raise ValueError(f'缺图像 {missing}')
-        images = []
-        for slot in self.spec.images.slots:
-            resized = cv2.resize(observation.images[slot], (640, 360), interpolation=cv2.INTER_AREA)
-            images.append(encode_jpeg(resized, self.spec.images.jpeg_quality))
+        images = encode_images(observation, self.spec)
         payload = build_payload(observation, self._frame, self.history_length)
         files = [(part, (filename, data, 'image/jpeg'))
                  for (part, filename), data in zip(IMAGE_PARTS, images)]
@@ -253,9 +249,6 @@ class CogACTUnitreeBackend(VlaBackend):
             ])
             grippers[side] = self.spec.gripper.to_robot(action[side]['grip'])
         return ActionChunk(poses=poses, grippers=grippers)
-
-    def reset(self) -> None:
-        pass
 
     def close(self) -> None:
         self._session.close()
