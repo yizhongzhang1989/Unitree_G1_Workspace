@@ -11,8 +11,7 @@ from g1_vla_bridge.transforms import (
     rpy_to_mat,
 )
 
-# 2026-08-14 那套已被推翻的标定值（见 README），这里只当**测符号用的真实量级数据**，
-# 别拿去当现役参数——现役的在 backends/a2d_omnipicker.py 的 SPEC 里。
+# 2026-08-14 那套已被推翻的标定值（见 README），这里只当**测符号用的真实量级数据**。
 CALIB = dict(base_offset=[0.3704, 0.0, 0.5427],
              tool_rotation_rpy=[0.0, 0.0, np.pi],
              tool_offset=[0.0, 0.0, -0.0281])

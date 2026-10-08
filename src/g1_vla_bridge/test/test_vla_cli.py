@@ -1,5 +1,7 @@
 """VLA CLI 的输入语义：空行执行，文字只更新任务。"""
 
+# pyright: reportArgumentType=false
+
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -158,7 +160,11 @@ def test_home_cli_calls_service_without_start_or_inference(monkeypatch):
     cli = MagicMock()
     inputs = iter(['/home', '/quit'])
     monkeypatch.setattr(vla_cli, 'VlaCli', lambda: cli)
-    monkeypatch.setattr('builtins.input', lambda prompt: next(inputs))
+    def input_value(prompt):
+        _ = prompt
+        return next(inputs)
+
+    monkeypatch.setattr('builtins.input', input_value)
     monkeypatch.setattr(vla_cli.rclpy, 'init', MagicMock())
     monkeypatch.setattr(vla_cli.rclpy, 'ok', lambda: True)
     monkeypatch.setattr(vla_cli.rclpy, 'shutdown', MagicMock())

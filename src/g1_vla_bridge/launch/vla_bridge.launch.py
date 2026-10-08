@@ -30,8 +30,8 @@ from launch_ros.actions import Node
 
 # 只暴露现场最常改的这几个，其余走 config/*.yaml。
 _ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'execution_mode',
-              'skip_intermediate_waypoints', 'async_ema_alpha', 'async_hold_timeout_s',
-              'async_min_overlap_actions', 'execution_rate_hz')
+              'skip_intermediate_waypoints',
+              'async_min_overlap_actions', 'execution_rate_hz', 'history_length')
 
 
 def _node(context):
@@ -49,9 +49,9 @@ def _node(context):
                 if normalized not in ('true', 'false'):
                     raise ValueError(f'{name} 只能是 true 或 false，收到 {value!r}')
                 overrides[name] = normalized == 'true'
-            elif name in ('async_ema_alpha', 'async_hold_timeout_s', 'execution_rate_hz'):
+            elif name == 'execution_rate_hz':
                 overrides[name] = float(value)
-            elif name == 'async_min_overlap_actions':
+            elif name in ('async_min_overlap_actions', 'history_length'):
                 overrides[name] = int(value)
             else:
                 overrides[name] = value
@@ -67,7 +67,7 @@ def _node(context):
 
     return [Node(
         package='g1_vla_bridge',
-        executable='vla_node',
+        executable=LaunchConfiguration('bridge_executable'),
         name='vla_bridge',
         output='screen',
         emulate_tty=True,
@@ -78,6 +78,7 @@ def _node(context):
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
+        DeclareLaunchArgument('bridge_executable', default_value='vla_node'),
         *(DeclareLaunchArgument(name, default_value='') for name in _ARGUMENTS),
         OpaqueFunction(function=_node),
     ])

@@ -260,14 +260,13 @@ python3 scripts/set_wrist_camera_fps.py --time-sync --apply # 改走 NTP
 
 ## 时间对齐
 
-所有数据落在同一个 `CLOCK_REALTIME` 上。**每一行、每一帧都有可用时间戳**（实测两个
-session 全部 12 张表 + 3 路视频，无效时间戳 0 行）。
+所有数据落在同一个 `CLOCK_REALTIME` 上。**每一行、每一帧都有可用时间戳**。
 
 信号表每行同时存 `t_recv` 与 `t_header`，读的时候优先用 `t_header`：
 
 | 时间列 | 哪些表 | 语义 |
 |---|---|---|
-| `header`（源端打戳） | `joint_states`、`pelvis_imu`、四路 `wrench`、`torso_pose`、`dog_odom` | 数据产生的时刻，不含传输抖动 |
+| `header`（源端打戳） | `joint_states`、`pelvis_imu`、`head_imu`、四路 `wrench`、`torso_pose`、`dog_odom` | 数据产生的时刻，不含传输抖动。`head_imu` 是 `/utlidar/imu_livox_mid360` 的原始 200 Hz 数据，线加速度单位为 g |
 | `recv`（接收时刻） | `motion_control_command/status`、`secondary_imu` | 消息类型没有 header 字段。**对指令话题这本来就是正确语义** —— 指令是收到那一刻才生效的，不存在更早的「采集时刻」 |
 
 区分这两者只是为了知道对齐精度：源端戳不含传输抖动，接收戳含。实测有 header 的表
@@ -341,7 +340,8 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 
 | 段 | 来源 | 不用它会怎样 |
 |---|---|---|
-| `torso_link → d435_link` | session 自带 `camera_params.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
+| `torso_link → head_mount_link` | 按时间配对的头部/躯干 IMU 相对角圆均值 + session 自带 `head_imu_reference` | YB 导出按每条 episode 合成一个静态头角；采集时头部不动，所以片段内外参不变 |
+| `head_mount_link → d435_link` | session 自带 `camera_params.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
 | `d435_link → camera_color_optical_frame` | `tools/urdf_fk.py` 的 `HEAD_OPTICAL` | 没有别的来源 —— 那是 realsense-ros 从设备出厂标定读出来发的 TF，标定文件里没这条 |
 | 内参 `fx/fy/cx/cy` | session 自己的 `meta.json` | 也没有别的来源 —— `intrinsics` 段只有两台腕相机，头部在 `cameras.yaml` 里是 `role: reference`，只出外参修正不出内参。而且这份正是采集当时真正发布的那一份 |
 > **夹爪的 mimic 必须夹到各段自己的 `<limit>`。** URDF 的 mimic 只能写线性式，而夹爪是

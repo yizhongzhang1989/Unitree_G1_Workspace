@@ -161,7 +161,18 @@ def test_high_rate_topics_are_throttled():
     assert by['arm0_wrench_raw'].max_hz == 200.0     # 实测 743 Hz
     assert by['secondary_imu'].max_hz == 100.0       # 实测 755 Hz
     assert by['dog_odom'].max_hz == 100.0            # 实测 500 Hz
+    assert by['head_imu'].max_hz == 0.0              # 原始 200 Hz，全量保留
     assert by['joint_states'].max_hz == 0.0          # 100 Hz，不抽
+
+
+def test_head_imu_records_livox_raw_stream_by_default():
+    spec = {s.key: s for s in sig.default_specs()}['head_imu']
+    assert spec.topic == '/utlidar/imu_livox_mid360'
+    assert spec.type_name == 'sensor_msgs/msg/Imu'
+    assert spec.best_effort
+    assert spec.default_on
+    assert spec.columns == ['qx', 'qy', 'qz', 'qw', 'wx', 'wy', 'wz',
+                            'ax', 'ay', 'az']
 
 
 def test_dog_odom_subscribes_with_depth_one():

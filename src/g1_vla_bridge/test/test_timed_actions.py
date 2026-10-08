@@ -1,5 +1,7 @@
 """No ROS nodes, HTTP requests or hardware commands."""
 
+# pyright: reportOptionalSubscript=false
+
 import numpy as np
 import pytest
 
@@ -14,7 +16,7 @@ def chunk(position=0., grip=0.):
 
 
 def test_two_requests_overlap_on_execution_time():
-    queue = TimedActions(30., 0.25, 0.)
+    queue = TimedActions(30., 0.)
     assert queue.merge(chunk(0.), 0., 0.2) == 24
     assert queue.last_merge['overlap'] == 0
     assert queue.last_merge['new'] == 24
@@ -33,16 +35,18 @@ def test_two_requests_overlap_on_execution_time():
     assert queue.last_merge['first_action_offset_s'] == pytest.approx(.2)
     assert sorted(queue.samples) == list(range(12, 36))
     for tick in range(12, 30):
-        assert queue.samples[tick][0]['left'][0] == 1.
-        assert queue.samples[tick][1]['left'] == 1.
+        weight = (tick - 11) / 19
+        for side in SIDES:
+            assert queue.samples[tick][0][side][0] == pytest.approx(4. * weight)
+            assert queue.samples[tick][1][side] == 1.
     for tick in range(30, 36):
         assert queue.samples[tick][0]['left'][0] == 4.
     queue.merge(chunk(8.), 0.4, 0.6)
-    assert queue.samples[18][0]['left'][0] == 2.75
+    assert queue.samples[18][0]['left'][0] == pytest.approx((18 / 19) * (4 * 7 / 19) + 8 / 19)
 
 
 def test_fractional_request_time_interpolates_on_shared_grid():
-    queue = TimedActions(30., 0.5, 10.)
+    queue = TimedActions(30., 10.)
     prediction = chunk()
     for side in SIDES:
         prediction.poses[side][:, 0] = np.arange(30)
@@ -52,7 +56,7 @@ def test_fractional_request_time_interpolates_on_shared_grid():
 
 
 def test_expired_results_and_delayed_ticks_never_replay():
-    queue = TimedActions(30., 0.5, 0.)
+    queue = TimedActions(30., 0.)
     assert queue.merge(chunk(), 0., 1.1) == 0
     assert queue.last_merge['accepted'] == 0
     assert queue.last_merge['first_action_offset_s'] is None
@@ -65,8 +69,8 @@ def test_expired_results_and_delayed_ticks_never_replay():
     assert not queue.samples
 
 
-def test_constant_predictions_cannot_self_amplify_through_ema():
-    queue = TimedActions(30., .5, 0.)
+def test_constant_predictions_cannot_self_amplify_through_blending():
+    queue = TimedActions(30., 0.)
     prediction = chunk(.02, 1.)
     for requested in np.arange(0., 2., .1):
         queue.merge(prediction, float(requested), float(requested + .2))
@@ -77,26 +81,32 @@ def test_constant_predictions_cannot_self_amplify_through_ema():
 
 
 def test_already_consumed_tick_is_not_reinserted():
-    queue = TimedActions(30., 0.5, 0.)
+    queue = TimedActions(30., 0.)
     queue.merge(chunk(), 0., 0.2)
     queue.take(0.4)
     queue.merge(chunk(3.), 0.2, 0.4)
-    assert min(queue.samples) == 13
+    assert min(queue.samples) == 12
+    assert queue.samples[12][0]['left'][0] == 0.
+    assert queue.take(.4) is None
+    assert queue.samples[13][0]['left'][0] > 0.
 
 
 def test_rotation_uses_shortest_arc():
-    queue = TimedActions(30., 0.5, 0.)
+    queue = TimedActions(30., 0.)
     queue.merge(chunk(), 0., 0.2)
     prediction = chunk()
     for side in SIDES:
         prediction.poses[side][:, 3:] = [0., 0., 1., 0.]
     queue.merge(prediction, 0.2, 0.4)
-    assert np.allclose(np.abs(queue.samples[12][0]['left'][3:]),
-                       [0., 0., 2 ** -0.5, 2 ** -0.5])
+    for tick in range(12, 30):
+        angle = np.pi * (tick - 11) / 19
+        for side in SIDES:
+            np.testing.assert_allclose(queue.samples[tick][0][side][3:],
+                                       [0., 0., np.sin(angle / 2), np.cos(angle / 2)])
 
 
 def test_minimum_overlap_repeats_last_existing_target():
-    queue = TimedActions(10., .5, 0., minimum_overlap_actions=10)
+    queue = TimedActions(10., 0., minimum_overlap_actions=10)
     current = {side: np.array([2., 0., 0., 0., 0., 0., 1.]) for side in SIDES}
     queue.merge(chunk(2.), 0., 0., fallback_poses=current)
     short_chunk = ActionChunk(
@@ -107,24 +117,25 @@ def test_minimum_overlap_repeats_last_existing_target():
     assert queue.last_merge['overlap'] == 5
     assert queue.last_merge['blended'] == 10
     for tick in range(25, 35):
-        assert queue.samples[tick][0]['left'][0] == pytest.approx(4.)
+        weight = (tick - 24) / 11
+        assert queue.samples[tick][0]['left'][0] == pytest.approx(2. + 4. * weight)
     for tick in range(35, 40):
         assert queue.samples[tick][0]['left'][0] == 6.
 
 
 def test_minimum_overlap_uses_current_pose_when_no_target_remains():
-    queue = TimedActions(10., .5, 0., minimum_overlap_actions=3)
+    queue = TimedActions(10., 0., minimum_overlap_actions=3)
     current = {side: np.array([2., 0., 0., 0., 0., 0., 1.]) for side in SIDES}
     queue.merge(chunk(6.), 0., 0., fallback_poses=current)
     assert queue.last_merge['overlap'] == 0
     assert queue.last_merge['blended'] == 3
     for tick in range(3):
-        assert queue.samples[tick][0]['left'][0] == pytest.approx(4.)
+        assert queue.samples[tick][0]['left'][0] == pytest.approx(3. + tick)
     assert queue.samples[3][0]['left'][0] == 6.
 
 
 def test_minimum_overlap_is_limited_by_new_action_count():
-    queue = TimedActions(10., .5, 0., minimum_overlap_actions=10)
+    queue = TimedActions(10., 0., minimum_overlap_actions=10)
     current = {side: np.array([2., 0., 0., 0., 0., 0., 1.]) for side in SIDES}
     short_chunk = ActionChunk(
         poses={side: np.tile([6., 0., 0., 0., 0., 0., 1.], (3, 1)) for side in SIDES},
@@ -133,11 +144,22 @@ def test_minimum_overlap_is_limited_by_new_action_count():
     assert queue.last_merge['accepted'] == 3
     assert queue.last_merge['blended'] == 3
     for tick in range(3):
-        assert queue.samples[tick][0]['left'][0] == pytest.approx(4.)
+        assert queue.samples[tick][0]['left'][0] == pytest.approx(3. + tick)
 
 
-@pytest.mark.parametrize(('rate', 'alpha'), [
-    (0., .5), (30., 0.), (30., 1.1), (float('nan'), .5), (30., float('nan'))])
-def test_invalid_configuration(rate, alpha):
+@pytest.mark.parametrize('rate', [0., -1., float('nan'), float('inf')])
+def test_invalid_configuration(rate):
     with pytest.raises(ValueError):
-        TimedActions(rate, alpha, 0.)
+        TimedActions(rate, 0.)
+
+
+def test_single_overlap_uses_half_weight_and_new_tail_is_unchanged():
+    queue = TimedActions(30., 0.)
+    queue.merge(chunk(2., .2), 0., 0.)
+    queue.merge(chunk(4., .8), 29 / 30., 29 / 30.)
+    assert queue.last_merge['overlap'] == 1
+    for side in SIDES:
+        assert queue.samples[29][0][side][0] == pytest.approx(3.)
+        assert queue.samples[29][1][side] == .8
+        assert queue.samples[30][0][side][0] == 4.
+        assert queue.samples[30][1][side] == .8

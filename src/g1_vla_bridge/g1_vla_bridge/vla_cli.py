@@ -47,20 +47,21 @@ def mode_command(line: str) -> str:
 
 class VlaCli(Node):
 
-    def __init__(self) -> None:
-        super().__init__('vla_cli')
-        self._task_publisher = self.create_publisher(String, '/vla_bridge/task', 10)
-        self._start = self.create_client(Trigger, '/vla_bridge/start')
-        self._next = self.create_client(Trigger, '/vla_bridge/next')
-        self._stop = self.create_client(Trigger, '/vla_bridge/stop')
-        self._home = self.create_client(Trigger, '/vla_bridge/home')
-        self._set_auto = self.create_client(SetBool, '/vla_bridge/set_auto')
-        self._set_async = self.create_client(SetBool, '/vla_bridge/set_async')
-        self._set_skip = self.create_client(SetBool, '/vla_bridge/set_skip_intermediate')
+    def __init__(self, name='vla_cli', bridge='/vla_bridge', modes=True) -> None:
+        super().__init__(name)
+        self._task_publisher = self.create_publisher(String, bridge + '/task', 10)
+        self._start = self.create_client(Trigger, bridge + '/start')
+        self._next = self.create_client(Trigger, bridge + '/next')
+        self._stop = self.create_client(Trigger, bridge + '/stop')
+        self._home = self.create_client(Trigger, bridge + '/home')
+        if modes:
+            self._set_auto = self.create_client(SetBool, bridge + '/set_auto')
+            self._set_async = self.create_client(SetBool, bridge + '/set_async')
+            self._set_skip = self.create_client(SetBool, bridge + '/set_skip_intermediate')
         self._engage = self.create_client(Trigger, '/motion_control/engage')
         self._estop = self.create_client(Trigger, '/motion_control/estop')
         self._status = {}
-        self.create_subscription(String, '/vla_bridge/status', self._on_status, 1)
+        self.create_subscription(String, bridge + '/status', self._on_status, 1)
 
     def _on_status(self, message: String) -> None:
         try:

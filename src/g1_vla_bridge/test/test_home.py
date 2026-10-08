@@ -1,3 +1,5 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -73,3 +75,14 @@ def test_home_publish_failure_keeps_vla_stopped():
     assert not node._running.is_set()
     assert node._chunk is None and node._timed is None
     node._stop.assert_called_once_with('收到 ~/home')
+
+
+@pytest.mark.parametrize('running', [False, True])
+def test_home_clears_control_history(running):
+    node = home_node()
+    node._history = Mock()
+    if not running:
+        node._running.clear()
+    response = VlaBridgeNode._on_home(node, None, SimpleNamespace())
+    assert response.success
+    node._history.clear.assert_called_once_with()

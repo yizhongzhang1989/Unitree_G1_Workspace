@@ -47,10 +47,10 @@ class AlignedSamples:
 
 
 class ObservationBuffer:
-    def __init__(self, slots, rate=30.0, max_age=0.1, capacity=32):
-        if not np.isfinite(rate) or rate <= 0 or not np.isfinite(max_age) or max_age <= 0:
-            raise ValueError('rate and max_age must be finite and positive')
-        self.rate, self.max_age = rate, max_age
+    def __init__(self, slots, rate=10.0, capacity=32):
+        if not np.isfinite(rate) or rate <= 0:
+            raise ValueError('rate must be finite and positive')
+        self.rate = rate
         self.images = {slot: deque(maxlen=capacity) for slot in slots}
         self.joints = deque(maxlen=2048)
         self.origin = None
@@ -61,20 +61,27 @@ class ObservationBuffer:
             return
         with self.lock:
             queue = self.joints if slot == 'joints' else self.images[slot]
-            if queue and stamp < queue[-1].stamp:
-                return
+            reset = bool(queue and stamp < queue[-1].stamp)
+            if reset:
+                queue.clear()
+                self.origin = None
             queue.append(Sample(stamp, value, received))
+            return reset
 
     def reset_camera(self, slot):
         with self.lock:
             self.images[slot].clear()
+            self.origin = None
 
     def replace_camera(self, slot, samples):
         with self.lock:
+            previous = self.images[slot]
+            if previous and samples and samples[-1].stamp < previous[-1].stamp:
+                self.origin = None
             self.images[slot].clear()
             self.images[slot].extend(samples)
 
-    def select(self, now, max_delay, available_until=None):
+    def select(self, available_until=None):
         with self.lock:
             queues = {**self.images, 'joints': self.joints}
             missing = [key for key, queue in queues.items() if not queue]
@@ -86,35 +93,41 @@ class ObservationBuffer:
             if self.origin is None:
                 self.origin = latest
             reference = self.origin + np.floor((latest - self.origin) * self.rate + 1e-6) / self.rate
-            if reference > now or now - reference > max_delay:
-                raise RuntimeError('observation reference stale or future')
             selected = {}
             for key, queue in queues.items():
                 stamps = np.maximum.accumulate([sample.stamp for sample in queue])
                 index = int(np.searchsorted(stamps, reference, side='right')) - 1
-                if index < 0 or reference - stamps[index] > self.max_age:
-                    raise RuntimeError(f'observation sample age: {key}')
+                if index < 0:
+                    ranges = ', '.join(
+                        f'{name}=[{samples[0].stamp - reference:+.3f},'
+                        f'{samples[-1].stamp - reference:+.3f}]s/{len(samples)}'
+                        for name, samples in queues.items())
+                    tf_offset = (f'{available_until - reference:+.3f}s'
+                                 if available_until is not None else 'none')
+                    raise RuntimeError(
+                        f'observation missing sample before reference: {key}; '
+                        f'reference={reference:.6f}, grid_backoff={latest - reference:.3f}s, '
+                        f'tf_offset={tf_offset}, ranges_relative_to_reference: {ranges}')
                 selected[key] = queue[index]
             return AlignedSamples(reference, {key: selected[key] for key in self.images},
                                   selected['joints'])
 
 
 class WristTimeline:
-    def __init__(self, slot, capacity=32, fit_frames=900):
+    def __init__(self, slot, capacity=32):
         source = {'left_wrist': 'wrist_left', 'right_wrist': 'wrist_right'}[slot]
         self.delay = record_tool('session_reader').CAMERA_DELAY_S[source]
-        self.raw = deque(maxlen=fit_frames)
         self.frames = deque(maxlen=capacity)
+        self.last_stamp = None
 
     def append(self, stamp, frame, received):
         if not np.isfinite(stamp) or stamp <= 0:
             raise ValueError('invalid wrist packet timestamp')
-        self.raw.append(stamp)
-        self.frames.append((frame, received))
-        fitted = record_tool('session_reader').fitted_pts(np.asarray(self.raw)) - self.delay
-        fitted = np.maximum.accumulate(fitted)[-len(self.frames):]
-        return [Sample(float(stamp), frame, received)
-                for stamp, (frame, received) in zip(fitted, self.frames)]
+        if self.last_stamp is not None and stamp < self.last_stamp:
+            self.frames.clear()
+        self.last_stamp = stamp
+        self.frames.append(Sample(float(stamp - self.delay), frame, received))
+        return list(self.frames)
 
 
 def measured_state(model, base, tips, cameras, joints):
@@ -166,8 +179,6 @@ class WristReader:
                             if frame.pts is None:
                                 continue
                             stamp = float(frame.pts * frame.time_base)
-                            if abs(time.time() - stamp) > 3.0:
-                                raise RuntimeError('wrist packet clock stale or invalid')
                             samples = timeline.append(stamp, frame, time.monotonic())
                             self.buffer.replace_camera(self.slot, samples)
                             self.error = ''
