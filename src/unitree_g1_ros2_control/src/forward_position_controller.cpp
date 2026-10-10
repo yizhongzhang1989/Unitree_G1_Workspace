@@ -56,8 +56,8 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_configur
     const rclcpp_lifecycle::State&) {
     joint_names_ = get_node()->get_parameter("joints").as_string_array();
 
-    if (joint_names_.empty()) {
-        RCLCPP_ERROR(get_node()->get_logger(), "The joints parameter must not be empty");
+    if (joint_names_.empty() || joint_names_.size() > 31) {
+        RCLCPP_ERROR(get_node()->get_logger(), "The joints parameter must contain 1 to 31 joints");
         return CallbackReturn::ERROR;
     }
     auto sorted_names = joint_names_;
@@ -77,17 +77,22 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_configur
     measured_.assign(joint_names_.size(), 0.0);
     command_.assign(joint_names_.size(), 0.0);
     target_valid_ = false;
+    joint_mask_ = (std::uint32_t{1} << joint_names_.size()) - 1;
 
     const auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
-    command_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>(
+    command_subscription_ = get_node()->create_subscription<msg::JointTargets>(
+        "~/joint_targets", rclcpp::QoS(rclcpp::KeepLast(4)).best_effort(),
+        [this](msg::JointTargets::SharedPtr message) {
+            receive_command(message->mask, message->positions.data());
+        });
+    full_command_subscription_ = get_node()->create_subscription<std_msgs::msg::Float64MultiArray>(
         "~/commands", command_qos,
         [this](std_msgs::msg::Float64MultiArray::SharedPtr message) {
-            auto sample = std::make_shared<CommandSample>();
-            sample->positions = message->data;
-            sample->sequence = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-            command_buffer_.writeFromNonRT(std::move(sample));
+            if (message->data.size() == joint_names_.size()) {
+                receive_command(joint_mask_, message->data.data());
+            }
         });
-    command_buffer_.writeFromNonRT(std::shared_ptr<CommandSample>());
+    command_buffer_.writeFromNonRT(CommandSample{});
     return CallbackReturn::SUCCESS;
 }
 
@@ -110,6 +115,7 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_activate
         return CallbackReturn::ERROR;
     }
     stiffness_.reset();
+    std::lock_guard<std::mutex> lock(command_mutex_);
     // Start from where the joints physically are, so activation cannot jump.
     for (std::size_t index = 0; index < joint_names_.size(); ++index) {
         const double position = state_interfaces_[index].get_value();
@@ -118,10 +124,12 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_activate
             return CallbackReturn::ERROR;
         }
         command_interfaces_[index].set_value(position);
+        pending_command_.positions[index] = position;
     }
     processed_sequence_ = 0;
     target_valid_ = false;
-    command_buffer_.writeFromNonRT(std::shared_ptr<CommandSample>());
+    pending_command_.sequence = 0;
+    command_buffer_.writeFromNonRT(pending_command_);
     return CallbackReturn::SUCCESS;
 }
 
@@ -130,26 +138,19 @@ ForwardPositionController::CallbackReturn ForwardPositionController::on_deactiva
     target_valid_ = false;
     gravity_.reset();
     stiffness_.reset();
-    command_buffer_.writeFromNonRT(std::shared_ptr<CommandSample>());
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    pending_command_.sequence = 0;
+    command_buffer_.writeFromNonRT(pending_command_);
     return CallbackReturn::SUCCESS;
 }
 
 controller_interface::return_type ForwardPositionController::update(
     const rclcpp::Time&, const rclcpp::Duration& period) {
-    const auto sample = *command_buffer_.readFromRT();
-    if (sample && sample->sequence != processed_sequence_) {
+    const auto* sample = command_buffer_.readFromRT();
+    if (sample->sequence != processed_sequence_) {
         processed_sequence_ = sample->sequence;
-        if (sample->positions.size() != joint_names_.size() ||
-            !std::all_of(sample->positions.begin(), sample->positions.end(),
-                         [](double value) { return std::isfinite(value); })) {
-            RCLCPP_WARN(
-                get_node()->get_logger(),
-                "Discarding invalid position command: expected %zu finite values",
-                joint_names_.size());
-        } else {
-            target_ = sample->positions;
-            target_valid_ = true;
-        }
+        std::copy_n(sample->positions.begin(), target_.size(), target_.begin());
+        target_valid_ = true;
     }
     if (!target_valid_) return controller_interface::return_type::OK;
 
@@ -170,6 +171,25 @@ controller_interface::return_type ForwardPositionController::update(
             ? command_
             : target_);
     return controller_interface::return_type::OK;
+}
+
+void ForwardPositionController::receive_command(std::uint32_t mask, const double* positions) {
+    mask &= joint_mask_;
+    if (!mask) return;
+    for (auto bits = mask; bits; bits &= bits - 1) {
+        if (!std::isfinite(positions[__builtin_ctz(bits)])) {
+            RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                                 "Discarding invalid position command");
+            return;
+        }
+    }
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    for (auto bits = mask; bits; bits &= bits - 1) {
+        const auto index = __builtin_ctz(bits);
+        pending_command_.positions[index] = positions[index];
+    }
+    ++pending_command_.sequence;
+    command_buffer_.writeFromNonRT(pending_command_);
 }
 
 void ForwardPositionController::write_command(const std::vector<double>& positions) {

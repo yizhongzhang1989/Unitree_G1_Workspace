@@ -26,6 +26,7 @@ find_package(joint_state_broadcaster REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(realtime_tools REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -33,6 +34,13 @@ find_package(unitree_api REQUIRED)
 find_package(unitree_hg REQUIRED)
 find_package(yaml_cpp_vendor REQUIRED)
 find_package(yaml-cpp REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}_interfaces
+  "msg/JointTargets.msg"
+  LIBRARY_NAME ${PROJECT_NAME}
+)
+rosidl_get_typesupport_target(joint_targets_typesupport
+  ${PROJECT_NAME}_interfaces rosidl_typesupport_cpp)
 
 add_library(${PROJECT_NAME} SHARED
   src/adaptive_stiffness.cpp
@@ -65,7 +73,7 @@ ament_target_dependencies(${PROJECT_NAME}
   unitree_hg
   yaml_cpp_vendor
 )
-target_link_libraries(${PROJECT_NAME} yaml-cpp)
+target_link_libraries(${PROJECT_NAME} yaml-cpp "${joint_targets_typesupport}")
 
 # 把 KWR57 原始读数变成负载净力旋量。独立进程：通用 CAN bridge 不该知道手臂在哪。
 add_executable(ft_wrench_compensator src/ft_wrench_compensator_node.cpp)
@@ -194,6 +202,7 @@ ament_export_dependencies(
   pluginlib
   rclcpp
   realtime_tools
+  rosidl_default_runtime
   sensor_msgs
   std_msgs
   std_srvs
