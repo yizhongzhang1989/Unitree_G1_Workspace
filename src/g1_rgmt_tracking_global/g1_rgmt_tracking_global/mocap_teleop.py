@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import rclpy
-from g1_mocap_msgs.msg import MocapControllers
+from g1_mocap.msg import MocapControllers
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String

@@ -15,12 +15,16 @@
   <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
   <license>Apache-2.0</license>
 
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>
-  <exec_depend>g1_mocap_msgs</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
@@ -35,11 +39,14 @@
   <exec_depend>unitree_g1_description</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
 
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

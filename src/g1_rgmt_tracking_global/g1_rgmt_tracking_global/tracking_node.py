@@ -41,7 +41,7 @@ import numpy as np
 import rclpy
 from controller_manager_msgs.srv import SwitchController
 from unitree_g1_ros2_control.msg import JointTargets
-from g1_mocap_msgs.msg import MocapControllers, MocapFrame, MocapStatus
+from g1_mocap.msg import MocapControllers, MocapFrame, MocapStatus
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor

@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 import rclpy
-from g1_mocap_msgs.msg import MocapFrame, MocapStatus
+from g1_mocap.msg import MocapFrame, MocapStatus
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter

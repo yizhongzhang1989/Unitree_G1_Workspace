@@ -14,6 +14,8 @@ ros2 launch g1_mocap dashboard.launch.py
 自然站直后，**双摇杆同时按下**或在面板校准，随后发布 `/mocap/frame`、`/mocap/joint_states` 和 `/mocap/status`。
 动作帧保留原始 72/90 Hz，下游按时间戳插值，不要先降采样。
 
+消息定义与节点同属 `g1_mocap`：`/mocap/frame` 使用 `g1_mocap/msg/MocapFrame`，`/mocap/status` 使用 `g1_mocap/msg/MocapStatus`，`/mocap/controllers` 使用 `g1_mocap/msg/MocapControllers`。Python 消费者从 `g1_mocap.msg` 导入；消息字段和话题名保持不变。旧版 rosbag 的消息包名不同，回放到新版节点前需要转换消息类型。
+
 ## 录制动作
 
 ```bash
@@ -159,5 +161,8 @@ PyRoki 的 G1 `foot_contact` 是软代价：支撑期主要惩罚 ankle/toe 代�
 重定向实现：[g1_mocap/retarget.py](g1_mocap/retarget.py)，离线修正：[g1_mocap/contact_refine.py](g1_mocap/contact_refine.py)。
 
 ```bash
-cd src/g1_mocap && python3 -m pytest test/ -q
+colcon build --packages-select g1_mocap
+source install/setup.bash
+ROS_DOMAIN_ID=216 ROS_LOCALHOST_ONLY=1 colcon test --packages-select g1_mocap
+colcon test-result --verbose
 ```
