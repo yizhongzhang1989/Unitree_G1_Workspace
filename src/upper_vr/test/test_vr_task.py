@@ -153,27 +153,34 @@ def test_prepare_enables_vr_direct_fpc(graph):
 
 
 @pytest.mark.parametrize('finish', [True, False], ids=['complete', 'cancel'])
-def test_home_side_never_overwritten_and_reanchors(graph, finish):
+@pytest.mark.parametrize('side', ['left', 'right'])
+def test_home_side_never_overwritten_and_reanchors(graph, finish, side):
     task, _, _, _, _ = graph
     engage(task)
     current = frame()
     task._frame, task._frame_stamp = current, task.now()
     task._control()
-    task._on_event(MotionEvent(command='home_left', epoch=2))
-    slots, start, via, stamp = task._homes['left']
-    task._homes['left'] = slots, start, via, stamp - task.home_s / 2
-    task._tick_lifecycle()
+    current[side]['buttons']['squeeze'] = 0.0
+    task._start_home(side)
+    slots, start, via, stamp = task._homes[side]
+    task._homes[side] = slots, start, via, stamp - task.home_s / 2
+    task._tick_homes()
+    assert task.output.message.mask == UPPER_MASK
+    np.testing.assert_array_equal(task._ik_seed, task.output.positions[task.arm_indices])
     home = task.output.positions[slots].copy()
-    current['left']['grip']['position'][2] = -0.04
-    task._control()
+    current[side]['grip']['position'][2] = -0.04
+    task._pose[side][2] -= 0.04
+    task._send(left=task._pose['left'], right=task._pose['right'], grip=task._grip)
     np.testing.assert_array_equal(task.output.positions[slots], home)
+    assert side in task._homes
+    np.testing.assert_array_equal(task._ik_seed, task.output.positions[task.arm_indices])
     if finish:
-        task._homes['left'] = slots, start, via, stamp - task.home_s
-        task._tick_lifecycle()
+        task._homes[side] = slots, start, via, task.now() - task.home_s
+        task._tick_homes()
     else:
-        task._on_event(MotionEvent(command='home_cancel', epoch=3))
+        task._cancel_home('test')
     target = task.output.positions.copy()
-    reached = task.status_ik()['limited_pose']['left']
+    reached = task.status_ik()['limited_pose'][side]
     task._control()
-    np.testing.assert_allclose(task._pose['left'], reached)
+    np.testing.assert_allclose(task._pose[side], reached)
     assert np.max(np.abs(task.output.positions[slots] - target[slots])) < 0.01

@@ -32,6 +32,7 @@
   <exec_depend>upper_vr</exec_depend>
   <exec_depend>upper_vla</exec_depend>
   <exec_depend>upper_float</exec_depend>
+  <exec_depend>upper_force_feedback</exec_depend>
   <exec_depend>head_sensors</exec_depend>
   <exec_depend>g1_localization</exec_depend>
   <exec_depend>record</exec_depend>

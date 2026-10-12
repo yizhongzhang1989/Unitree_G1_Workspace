@@ -20,6 +20,7 @@
 """
 
 import os
+from pathlib import Path
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -27,7 +28,6 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from g1_motion_session.launch_support import task_parameters
 
 # 只暴露现场最常改的这几个，其余走 config/*.yaml。
 _ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'execution_mode',
@@ -36,10 +36,15 @@ _ARGUMENTS = ('vla_backend', 'server_url', 'proxy', 'task_description', 'executi
 
 
 def _node(context):
+    shared = Path(get_package_share_directory('g1_motion_session')) / 'config'
+    hardware = Path(get_package_share_directory('unitree_g1_ros2_control')) / 'config/default_31dof_param.yaml'
     config_dir = os.path.join(
         get_package_share_directory('upper_vla'), 'config')
     config = LaunchConfiguration('config').perform(context)
     common = config if os.path.isabs(config) else os.path.join(config_dir, config)
+    files = [str(shared / 'session.yaml'), str(shared / 'arm_ik.yaml'), os.path.join(config_dir, 'vla_bridge.yaml')]
+    if common not in files:
+        files.append(common)
     # 空值不进 override：字典参数无条件盖过 yaml，不筛掉的话「不传这个 arg」
     # 会把 yaml 里写好的值清成空串。
     overrides = {}
@@ -74,7 +79,7 @@ def _node(context):
         output='screen',
         emulate_tty=True,
         # 后面的盖前面的：通用 -> 这家 VLA 的 -> 命令行。
-        parameters=[*task_parameters('upper_vla', config), backend_config, overrides],
+        parameters=[*files, str(hardware), backend_config, overrides],
     )]
 
 

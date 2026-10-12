@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 
 # --- CAN 标识符 ------------------------------------------------------------
@@ -39,7 +39,7 @@ CAN_ID_CMD = 0x10            # 上位机 -> 传感器：默认命令(接收)ID
 CAN_ID_DATA_FX_FY = 0x15     # 传感器 -> 上位机：Fx, Fy；默认发送的起始 ID
 CAN_ID_DATA_FZ_MX = 0x16     # 传感器 -> 上位机：Fz, Mx
 CAN_ID_DATA_MY_MZ = 0x17     # 传感器 -> 上位机：My, Mz
-CAN_ID_FACTORY_RESET = 0x000 # 恢复出厂 ID 时使用的仲裁 ID
+CAN_ID_FACTORY_RESET = 0x000  # 恢复出厂 ID 时使用的仲裁 ID
 
 # 一个完整采样由这三帧组成，顺序为 0x15 -> 0x16 -> 0x17
 DATA_IDS: Tuple[int, int, int] = (
@@ -204,7 +204,7 @@ class WrenchAssembler:
         self.malformed_frames = 0
         self.dropped_sequences = 0
 
-    def push(self, can_id: int, data: bytes) -> Optional[Wrench]:
+    def push(self, can_id: int, data: Union[bytes, bytearray, memoryview]) -> Optional[Wrench]:
         """喂入一帧数据。若刚好集齐三帧则返回 Wrench，否则返回 None
 
         非数据帧（其它 CAN ID）会被忽略并返回 None

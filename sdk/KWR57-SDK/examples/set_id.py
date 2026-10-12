@@ -88,12 +88,14 @@ def main() -> int:
         ap.error("请给出 --host-id 和 --sensor-id，或使用 --factory-reset")
     if args.factory_reset and (args.host_id is not None or args.sensor_id is not None):
         ap.error("--factory-reset 不能与 --host-id/--sensor-id 同时使用")
+    host_id = args.host_id if args.host_id is not None else protocol.CAN_ID_CMD
+    sensor_id = args.sensor_id if args.sensor_id is not None else protocol.CAN_ID_DATA_FX_FY
 
     # 冲突检查：新的数据三帧不能与新的命令 ID 相同
     if not args.factory_reset:
-        new_ids = protocol.data_ids_from_base(args.sensor_id)
-        if args.host_id in new_ids:
-            ap.error(f"接收 ID 0x{args.host_id:X} 与数据三帧 "
+        new_ids = protocol.data_ids_from_base(sensor_id)
+        if host_id in new_ids:
+            ap.error(f"接收 ID 0x{host_id:X} 与数据三帧 "
                      f"{'/'.join(f'0x{c:X}' for c in new_ids)} 冲突，请另选")
 
     if args.factory_reset:
@@ -125,11 +127,11 @@ def main() -> int:
         else:
             with KWR57Sensor.open(interface=args.interface, channel=args.channel,
                                   cmd_id=args.current_cmd_id) as s:
-                s.modify_id(host_id=args.host_id, sensor_id=args.sensor_id)
+                s.modify_id(host_id=host_id, sensor_id=sensor_id)
             print(f"已发送修改 ID 指令：接收 0x{args.host_id:X} / 发送基址 0x{args.sensor_id:X}。")
             time.sleep(0.2)
             if args.verify:
-                _verify(args.interface, args.channel, args.host_id, args.sensor_id)
+                _verify(args.interface, args.channel, host_id, sensor_id)
     except Exception as exc:  # noqa: BLE001
         print(f"错误：{exc}", file=sys.stderr)
         return 1

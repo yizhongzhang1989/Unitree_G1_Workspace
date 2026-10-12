@@ -134,6 +134,10 @@ def _node_executable(node: Node) -> str:
         ('g1_motion_session', 'session.launch.py'),
         ('upper_float', 'float.launch.py', ''),
     ]),
+    ('none', 'force_feedback', [
+        ('g1_motion_session', 'session.launch.py'),
+        ('upper_force_feedback', 'force_feedback.launch.py', ''),
+    ]),
     ('none', 'none', [('g1_motion_session', 'session.launch.py')]),
 ])
 def test_motion_tasks_select_independent_launches(lower, upper, expected):
@@ -165,9 +169,10 @@ def test_motion_tasks_argument_defaults_and_choices():
         'upper_task': 'vr',
         'lower_config': '',
         'upper_config': '',
+        'safety_checks_enabled': '',
     }
     assert arguments['lower_task'].choices == ['velocity', 'footstep', 'none']
-    assert arguments['upper_task'].choices == ['vr', 'vla', 'float', 'none']
+    assert arguments['upper_task'].choices == ['vr', 'vla', 'float', 'force_feedback', 'none']
 
 
 @pytest.mark.parametrize('config,data', [('', 'true'), ('/tmp/replay-calibration.yaml', 'false')])
@@ -200,14 +205,21 @@ def test_record_launch_data_manager_parameters(config, data):
     },)
 
 
-def test_whole_vr_selects_vr_velocity_source():
+@pytest.mark.parametrize('safety', ['', 'false', 'true'])
+def test_whole_vr_selects_vr_velocity_source(safety):
     module = _load_launch('whole_vr.launch.py')
     with mock.patch.object(module, 'get_package_share_directory', return_value=str(LAUNCH_DIR.parent)):
         description = module.generate_launch_description()
-    include, = description.entities
+    include, = [entity for entity in description.entities
+                if isinstance(entity, IncludeLaunchDescription)]
     assert isinstance(include, IncludeLaunchDescription)
     assert _source_path(include).endswith('motion_tasks.launch.py')
-    assert dict(include.launch_arguments) == {
+    arguments = dict(include.launch_arguments)
+    override = arguments.pop('safety_checks_enabled')
+    context = LaunchContext()
+    context.launch_configurations['safety_checks_enabled'] = safety
+    assert _perform(context, override) == safety
+    assert arguments == {
         'lower_task': 'velocity', 'upper_task': 'vr', 'lower_config': 'lower_vr.yaml'}
 
 
@@ -455,6 +467,7 @@ def test_keyboard_launcher_real_pty_lifecycle(keyboard_launcher_pty, exit_kind):
     ('none', 'vr'),
     ('none', 'vla'),
     ('none', 'float'),
+    ('none', 'force_feedback'),
 ])
 @pytest.mark.parametrize('config', ['', '/tmp/user-calibration.yaml'])
 def test_motion_tasks_forward_explicit_config_in_scoped_group(
@@ -476,6 +489,65 @@ def test_motion_tasks_forward_explicit_config_in_scoped_group(
     assert dict(include.launch_arguments) == ({'config': config} if config else {})
     package, filename = module._LOWER[lower] if lower != 'none' else module._UPPER[upper]
     assert _source_path(include) == str(WORKSPACE_SRC / package / 'launch' / filename)
+
+
+@pytest.mark.parametrize('safety', ['', 'false', 'true'])
+def test_motion_tasks_forward_session_safety_override(safety):
+    module = _load_launch('motion_tasks.launch.py')
+    context = LaunchContext()
+    context.launch_configurations.update(lower_task='none', upper_task='none', safety_checks_enabled=safety)
+    with mock.patch.object(module, 'get_package_share_directory',
+                           side_effect=lambda name: str(WORKSPACE_SRC / name)):
+        actions = module._tasks(context)
+    include = next(entity for entity in actions[0].get_sub_entities()
+                   if isinstance(entity, IncludeLaunchDescription))
+    assert dict(include.launch_arguments) == ({'safety_checks_enabled': safety} if safety else {})
+
+
+@pytest.mark.parametrize('package,filename,default,ik,overrides', [
+    ('lower_velocity_tracking', 'velocity_tracking.launch.py', 'lower_body.yaml', False, {}),
+    ('lower_footstep_tracking', 'footstep_tracking.launch.py', 'footstep.yaml', False, {}),
+    ('upper_float', 'float.launch.py', 'upper_float.yaml', False,
+     {'gripper_source': 'keyboard', 'gripper_command_topic': '/custom/grip'}),
+    ('upper_force_feedback', 'force_feedback.launch.py', 'upper_force_feedback.yaml', False, {}),
+    ('upper_vr', 'vr_teleop.launch.py', 'upper_vr.yaml', True, {'arm_scale': 1.25}),
+    ('upper_vla', 'vla_bridge.launch.py', 'vla_bridge.yaml', True,
+     {'history_length': 8, 'execution_rate_hz': 25.0}),
+])
+@pytest.mark.parametrize('override', [False, True])
+def test_task_launch_parameter_sources_are_explicit(tmp_path, package, filename, default, ik, overrides, override):
+    from launch_ros.utilities import evaluate_parameters
+    import yaml
+
+    module = _load_launch(filename, WORKSPACE_SRC / package / 'launch')
+    context = LaunchContext()
+    for entity in module.generate_launch_description().entities:
+        if isinstance(entity, DeclareLaunchArgument):
+            context.launch_configurations[entity.name] = _default(entity)
+    context.launch_configurations.update({name: str(value) for name, value in overrides.items()})
+    config = WORKSPACE_SRC / package / 'config' / default
+    if override:
+        config = tmp_path / 'override.yaml'
+        config.write_text((WORKSPACE_SRC / package / 'config' / default).read_text())
+        context.launch_configurations['config'] = str(config)
+    factory = module._node if hasattr(module, '_node') else module._nodes
+    node, = factory(context)
+    parameters = evaluate_parameters(context, getattr(node, '_Node__parameters'))
+    expected = [WORKSPACE_SRC / 'g1_motion_session/config/session.yaml']
+    if ik:
+        expected.append(WORKSPACE_SRC / 'g1_motion_session/config/arm_ik.yaml')
+    expected.append(WORKSPACE_SRC / package / 'config' / default)
+    if override:
+        expected.append(config)
+    files = [source.resolve() for source in parameters if isinstance(source, Path)]
+    expected.append(WORKSPACE_SRC / 'unitree_g1_ros2_control/config/default_31dof_param.yaml')
+    if package == 'upper_vla':
+        expected.append(WORKSPACE_SRC / 'upper_vla/config/backends/cogact_unitree.yaml')
+    assert files == [source.resolve() for source in expected]
+    hardware = yaml.safe_load(expected[-2 if package == 'upper_vla' else -1].read_text())
+    assert len(hardware['/**']['ros__parameters']['joints']) == 31
+    if overrides:
+        assert parameters[-1] == overrides
 
 
 def test_record_all_preserves_startup_stages_and_shutdown_timeouts():

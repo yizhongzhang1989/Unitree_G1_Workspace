@@ -40,12 +40,13 @@ WebXR 只在安全上下文里可用，所以只有这两种进法；证书与 a
 自动进入 RUNNING；B/Y 的 start 步骤仍用于启动下肢任务。
 """
 
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-
-from g1_motion_session.launch_support import task_parameters
 
 # 可以从命令行覆盖的参数名与类型。**默认值只写在 vr_teleop.py 的 declare_parameter 里**，
 # 这里一律留空、留空就不覆盖：抄第二份早晚会像以前的 vx_max / height 那样悄悄跑偏。
@@ -70,7 +71,13 @@ _SINGLE_THREADED_BLAS = {'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}
 
 
 def _nodes(context):
-    config = LaunchConfiguration('config').perform(context)
+    directory = Path(get_package_share_directory('upper_vr')) / 'config'
+    shared = Path(get_package_share_directory('g1_motion_session')) / 'config'
+    hardware = Path(get_package_share_directory('unitree_g1_ros2_control')) / 'config/default_31dof_param.yaml'
+    files = [str(shared / 'session.yaml'), str(shared / 'arm_ik.yaml'), str(directory / 'upper_vr.yaml')]
+    config = str(directory / LaunchConfiguration('config').perform(context))
+    if config not in files:
+        files.append(config)
     overrides = {}
     for name, cast in _OVERRIDABLE.items():
         value = LaunchConfiguration(name).perform(context)
@@ -82,7 +89,7 @@ def _nodes(context):
         executable='vr_teleop',
         name='vr_teleop',
         output='screen',
-        parameters=task_parameters('upper_vr', config) + [overrides],
+        parameters=[*files, str(hardware), overrides],
         additional_env=_SINGLE_THREADED_BLAS,
         emulate_tty=True,
     )]

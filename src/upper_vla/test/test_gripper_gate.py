@@ -151,7 +151,6 @@ def test_no_transition_executes_full_chunk(gate):
 
 def test_experiment_launch_selects_node_and_preserves_proxy(monkeypatch):
     import ament_index_python.packages
-    import g1_motion_session.launch_support
     from launch import LaunchContext
     from launch.actions import DeclareLaunchArgument, SetLaunchConfiguration
 
@@ -161,7 +160,6 @@ def test_experiment_launch_selects_node_and_preserves_proxy(monkeypatch):
         return str(directory.parent.parent / name)
 
     monkeypatch.setattr(ament_index_python.packages, 'get_package_share_directory', package_directory)
-    monkeypatch.setattr(g1_motion_session.launch_support, 'get_package_share_directory', package_directory)
     experiment = runpy.run_path(str(directory / 'gripper_gate.launch.py'))
     common = runpy.run_path(str(directory / 'vla_bridge.launch.py'))
     context = LaunchContext()

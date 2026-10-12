@@ -35,6 +35,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
@@ -147,7 +148,7 @@ class MocapNode(Node):
         量级，每帧现算偏移足够。
         """
         offset = self.get_clock().now().nanoseconds * 1e-9 - time.monotonic()
-        return rclpy.time.Time(seconds=monotonic_t + offset).to_msg()
+        return Time(seconds=monotonic_t + offset).to_msg()
 
     def _publish_frame(self, stamped: float, raw: BodyFrame,
                        result: RetargetResult) -> None:

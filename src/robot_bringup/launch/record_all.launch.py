@@ -20,7 +20,7 @@ _STAGES = (
 _OVERRIDES = {
     'hardware': ('scope', 'topology'),
     'sensors': ('color_profile', 'color_format'),
-    'motion': ('lower_task', 'upper_task'),
+    'motion': ('lower_task', 'upper_task', 'safety_checks_enabled'),
 }
 
 
@@ -53,6 +53,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('topology', default_value='dual'),
         DeclareLaunchArgument('lower_task', default_value='velocity'),
         DeclareLaunchArgument('upper_task', default_value='vr'),
+        DeclareLaunchArgument('safety_checks_enabled', default_value=''),
         DeclareLaunchArgument('color_profile', default_value='1280x720x30'),
         DeclareLaunchArgument('color_format', default_value='YUYV'),
         *stages,

@@ -5,11 +5,11 @@ import math
 import threading
 import time
 from enum import Enum
-from functools import partial
 
 import numpy as np
 import rclpy
 from controller_manager_msgs.srv import SwitchController
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
@@ -68,9 +68,11 @@ class MotionSession(Node):
         self.stand_s = parameter('stand_s', 2.5).get_parameter_value().double_value
         self.clear_s = parameter('stand_clear_s', 0.4).get_parameter_value().double_value
         self.clear_roll = parameter('stand_clear_roll', 0.7).get_parameter_value().double_value
-        self.home_s = parameter('home_s', 2.0).get_parameter_value().double_value
-        if not 0.0 <= self.clear_s < min(self.stand_s, self.home_s):
-            raise ValueError('clearance time must be shorter than stand and home')
+        if not 0.0 <= self.clear_s < self.stand_s:
+            raise ValueError('clearance time must be shorter than stand')
+        self._safety_checks_enabled = parameter(
+            'safety_checks_enabled', True,
+            descriptor=ParameterDescriptor(read_only=True)).get_parameter_value().bool_value
         self._state_timeout = parameter('state_timeout_s', 0.2).get_parameter_value().double_value
         self._tilt_limit = parameter('tilt_limit_rad', 1.0).get_parameter_value().double_value
         self._switch_timeout = parameter('switch_timeout_s', 15.0).get_parameter_value().double_value
@@ -87,7 +89,6 @@ class MotionSession(Node):
             raise ValueError('default targets must contain 15 lower and 16 upper joints')
         self._default_goal = np.asarray([*lower, *upper], dtype=float)
         self.lock = threading.RLock()
-        self._condition = threading.Condition(self.lock)
         self._switch_lock = threading.Lock()
         self.state = State.IDLE
         self.generation = 0
@@ -105,11 +106,10 @@ class MotionSession(Node):
         self._default_start_time = 0.0
         self._default_start = self._q.copy()
         self._default_via = self._q.copy()
-        self._home_waiting = {}
         self.default_output = DefaultJointOutput(self, self.target_topic)
         services = ReentrantCallbackGroup()
         state_group = MutuallyExclusiveCallbackGroup()
-        # 服务等待时允许状态回调唤醒，注册与默认发布仍由同一把锁串行保护
+        # 注册与默认发布共用锁，避免掩码交接期间迟到输出
         self.control_group = MutuallyExclusiveCallbackGroup()
         stream = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         events = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
@@ -120,8 +120,9 @@ class MotionSession(Node):
                                  events, callback_group=state_group)
         self.create_subscription(JointState, '/joint_states', self._on_joint_states,
                                  stream, callback_group=state_group)
-        self.create_subscription(Imu, parameter('imu_topic', '/pelvis_imu_broadcaster/imu').get_parameter_value().string_value,
-                                 self._on_imu, stream, callback_group=state_group)
+        if self._safety_checks_enabled:
+            self.create_subscription(Imu, parameter('imu_topic', '/pelvis_imu_broadcaster/imu').get_parameter_value().string_value,
+                                     self._on_imu, stream, callback_group=state_group)
         self._switch = self.create_client(SwitchController, f'{manager}/switch_controller',
                                           callback_group=services)
         self.create_service(RegisterTask, '/motion_control/register', self._on_register,
@@ -130,9 +131,6 @@ class MotionSession(Node):
         self.create_service(Trigger, '~/start', self._on_start, callback_group=services)
         self.create_service(Trigger, '~/stop', self._on_stop, callback_group=services)
         self.create_service(Trigger, '~/estop', self._on_estop, callback_group=services)
-        self.create_service(Trigger, '~/home_left', partial(self._on_home, 'left'), callback_group=services)
-        self.create_service(Trigger, '~/home_right', partial(self._on_home, 'right'), callback_group=services)
-        self.create_service(Trigger, '~/home_cancel', self._on_home_cancel, callback_group=services)
         self.create_timer(self.dt, self._tick_defaults, callback_group=self.control_group)
         self.create_timer(self.dt, self._publish_status, callback_group=MutuallyExclusiveCallbackGroup())
 
@@ -149,12 +147,11 @@ class MotionSession(Node):
         return FULL_MASK & ~owned
 
     def _on_register(self, request, response):
-        with self._condition:
+        with self.lock:
             if request.release:
                 self._tasks.pop(request.task_id, None)
                 self.default_output.message.mask = self._unowned_mask()
                 self.default_output.positions[:] = self._q
-                self._condition.notify_all()
                 response.accepted, response.reason = True, 'released'
                 return response
             mask = request.mask & FULL_MASK
@@ -171,7 +168,6 @@ class MotionSession(Node):
                     task_id=request.task_id, mask=mask, state='idle', epoch=0,
                     ready=False, error='', status={})
             self.default_output.message.mask = self._unowned_mask()
-            self._condition.notify_all()
             response.accepted, response.reason = True, 'registered'
         return response
 
@@ -183,7 +179,7 @@ class MotionSession(Node):
             mask = int(payload['mask']) & FULL_MASK
         except (ValueError, TypeError, KeyError):
             return
-        with self._condition:
+        with self.lock:
             task = self._tasks.get(task_id)
             if task is None or mask != task['mask'] or epoch < task['epoch']:
                 return
@@ -193,7 +189,6 @@ class MotionSession(Node):
             task['error'] = payload.get('error', '')
             task['status'] = {key: value for key, value in payload.items()
                               if key not in ('task_id', 'mask', 'state', 'epoch', 'ready', 'error')}
-            self._condition.notify_all()
 
     def _broadcast(self, command):
         self._event_epoch += 1
@@ -217,9 +212,9 @@ class MotionSession(Node):
             if self._deactivating:
                 response.success, response.message = False, 'controller deactivation pending'
                 return response
-            reason = self.stale_reason()
-            if reason or tilt(self._quat) > self._tilt_limit:
-                response.success, response.message = False, reason or 'tilt limit exceeded'
+            reason = self.safety_reason()
+            if reason:
+                response.success, response.message = False, reason
                 return response
             if self.state is State.ENGAGING and not self._controller_active:
                 response.success, response.message = True, 'activation pending'
@@ -252,7 +247,6 @@ class MotionSession(Node):
                 elif not cancelled:
                     self.state, self._reason = State.ESTOP, detail
                     self._broadcast('stop')
-                    self._condition.notify_all()
             if emergency or not ok:
                 self._switch_controller(activate=False)
 
@@ -275,9 +269,9 @@ class MotionSession(Node):
 
     def _on_start(self, request, response):
         with self.lock:
-            reason = self.stale_reason()
-            if reason or tilt(self._quat) > self._tilt_limit:
-                response.success, response.message = False, reason or 'tilt limit exceeded'
+            reason = self.safety_reason()
+            if reason:
+                response.success, response.message = False, reason
                 return response
             if not self._ready_to_start():
                 response.success, response.message = False, 'tasks or default joints not ready'
@@ -297,7 +291,6 @@ class MotionSession(Node):
         for task in self._tasks.values():
             task.update(state='stopped', ready=False, epoch=self._event_epoch)
         self._reason = reason
-        self._condition.notify_all()
 
     def _on_stop(self, request, response):
         with self.lock:
@@ -332,60 +325,6 @@ class MotionSession(Node):
             if not ok:
                 self.get_logger().error(f'controller deactivation failed: {detail}')
         return active
-
-    def _on_home(self, side, request, response):
-        arm_mask = sum(1 << self.joints.index(f'{side}_{joint}_joint') for joint in (
-            'shoulder_pitch', 'shoulder_roll', 'shoulder_yaw', 'elbow',
-            'wrist_roll', 'wrist_pitch', 'wrist_yaw'))
-        flag = f'home_{side}'
-        with self._condition:
-            if self.state not in (State.STAND, State.RUNNING):
-                response.success, response.message = False, 'engage first'
-                return response
-            if side in self._home_waiting:
-                response.success, response.message = False, 'home already in progress'
-                return response
-            participants = [task_id for task_id, task in self._tasks.items() if task['mask'] & arm_mask]
-            if not participants:
-                response.success, response.message = False, 'no registered arm task'
-                return response
-            event = self._broadcast(flag)
-            self._home_waiting[side] = event.epoch
-            deadline = self.now() + self.home_s + 1.0
-            try:
-                while True:
-                    if self._home_waiting.get(side) != event.epoch or self.state in (State.IDLE, State.ESTOP):
-                        response.success, response.message = False, 'home cancelled'
-                        break
-                    tasks = [self._tasks.get(task_id) for task_id in participants]
-                    if any(task is None or task['error'] for task in tasks):
-                        response.success, response.message = False, 'home task unavailable'
-                        break
-                    completed = all(
-                        task is not None and task['epoch'] >= event.epoch and (
-                            task['status'].get(flag) is False or
-                            ('homing' in task['status'] and side not in task['status']['homing']))
-                        for task in tasks)
-                    if completed:
-                        response.success, response.message = True, 'home complete'
-                        break
-                    remaining = deadline - self.now()
-                    if remaining <= 0.0:
-                        self._broadcast('home_cancel')
-                        response.success, response.message = False, 'home timeout'
-                        break
-                    self._condition.wait(timeout=remaining)
-            finally:
-                self._home_waiting.pop(side, None)
-        return response
-
-    def _on_home_cancel(self, request, response):
-        with self._condition:
-            self._broadcast('home_cancel')
-            self._home_waiting.clear()
-            self._condition.notify_all()
-        response.success, response.message = True, 'home cancelled'
-        return response
 
     def _tick_defaults(self):
         from g1_motion_session.joint_output import two_stage
@@ -427,6 +366,8 @@ class MotionSession(Node):
             self._imu_stamp = self.now()
 
     def stale_reason(self):
+        if not self._safety_checks_enabled:
+            return ''
         now = self.now()
         if now - self._joint_stamp > self._state_timeout:
             return '/joint_states timeout'
@@ -434,20 +375,26 @@ class MotionSession(Node):
             return 'IMU timeout'
         return ''
 
+    def safety_reason(self):
+        if not self._safety_checks_enabled:
+            return ''
+        return self.stale_reason() or (
+            'tilt limit exceeded' if tilt(self._quat) > self._tilt_limit else '')
+
     def _publish_status(self):
         with self.lock:
-            reason = self.stale_reason()
+            reason = self.safety_reason()
             active = self.state in ACTIVE_STATES
-            tilted = tilt(self._quat) > self._tilt_limit
-        if active and (reason or tilted):
-            self.estop(reason or 'tilt limit exceeded')
+        if active and reason:
+            self.estop(reason)
         with self.lock:
             payload = {}
             for task in self._tasks.values():
                 payload.update(task['status'])
             payload.update(state=self.state.value, ready_to_start=self._ready_to_start(),
                            execution_epoch=self._claimed_epoch, reason=self._reason,
-                           stale=self.stale_reason(), joints=self.joints)
+                           stale=self.stale_reason(), safety_checks_enabled=self._safety_checks_enabled,
+                           joints=self.joints)
             payload['tasks'] = [{key: value for key, value in task.items() if key != 'status'}
                                 for task in self._tasks.values()]
         self._status_publisher.publish(String(data=json.dumps(payload)))

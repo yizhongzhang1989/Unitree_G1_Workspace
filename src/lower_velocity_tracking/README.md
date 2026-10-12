@@ -27,7 +27,7 @@ ros2 launch lower_velocity_tracking velocity_tracking.launch.py
 ros2 launch lower_velocity_tracking velocity_tracking.launch.py config:=lower_vr.yaml
 ```
 
-`config` 支持本包配置名或绝对路径，默认配置为 [lower_body.yaml](config/lower_body.yaml)，VR 输入使用 [lower_vr.yaml](config/lower_vr.yaml)。基础参数与 profile 由 `g1_motion_session.launch_support.task_parameters` 合并，31 轴顺序由公共控制参数加载，可 override。运行环境需已安装 onnxruntime；已加载 Humble 与所需 SDK 环境时也可 `source install/setup.bash`。
+`config` 支持本包配置名或绝对路径，默认配置为 [lower_body.yaml](config/lower_body.yaml)，VR 输入使用 [lower_vr.yaml](config/lower_vr.yaml)。本包 launch 直接列出公共准备参数、本包默认配置与 profile，再由 ROS 加载统一硬件31轴关节表，不加载手臂 IK。运行环境需已安装 onnxruntime；已加载 Humble 与所需 SDK 环境时也可 `source install/setup.bash`。
 
 ## 键盘控制
 

@@ -47,7 +47,6 @@ class TaskBase(Node):
         self.stand_s = p('stand_s', 2.5).get_parameter_value().double_value
         self.clear_s = p('stand_clear_s', 0.4).get_parameter_value().double_value
         self.clear_roll = p('stand_clear_roll', 0.7).get_parameter_value().double_value
-        self.home_s = p('home_s', 2.0).get_parameter_value().double_value
         self.target_topic = p('target_topic', '/forward_position_controller/joint_targets')\
             .get_parameter_value().string_value
         p('robot_description_topic', '/robot_description')
@@ -71,7 +70,6 @@ class TaskBase(Node):
         self._register_future = None
         self._error = ''
         self._events = {}
-        self._homes = {}
         self._q, self._dq = np.zeros(31), np.zeros(31)
         self._quat, self._omega = (0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0)
         self._joint_stamp = self._imu_stamp = 0.0
@@ -88,8 +86,7 @@ class TaskBase(Node):
         self._register = self.create_client(RegisterTask, '/motion_control/register')
         self.create_subscription(MotionEvent, '/motion_control/events', self._on_event,
                                  events, callback_group=self.control_group)
-        self.create_subscription(JointState, '/joint_states', self._on_joint_states,
-                                 stream, callback_group=sensors)
+        self._subscribe_feedback(stream, sensors)
         if imu_required:
             imu_topic = p('imu_topic', '/pelvis_imu_broadcaster/imu').get_parameter_value().string_value
             self.create_subscription(Imu, imu_topic,
@@ -97,6 +94,10 @@ class TaskBase(Node):
         self.create_timer(self.dt, self._tick_lifecycle, callback_group=self.control_group)
         self.create_timer(0.1, self._publish_task_status, callback_group=self.control_group)
         self._registration_timer = self.create_timer(0.5, self._register_task)
+
+    def _subscribe_feedback(self, qos, callback_group):
+        self.create_subscription(JointState, '/joint_states', self._on_joint_states,
+                                 qos, callback_group=callback_group)
 
     @overload
     def declare(self, name: str, default: bool) -> bool: ...
@@ -210,7 +211,6 @@ class TaskBase(Node):
                     return
                 if command in ('engage', 'stop'):
                     self.generation += 1
-                    self._homes.clear()
                 try:
                     if command == 'engage':
                         reason = self.stale_reason()
@@ -236,15 +236,6 @@ class TaskBase(Node):
                         callback = self._events.get('stop')
                         if callback is not None:
                             callback()
-                    elif command in ('home_left', 'home_right'):
-                        self._begin_home(command.removeprefix('home_'))
-                    elif command == 'home_cancel':
-                        if self._homes:
-                            from .arm_ik_mixin import ArmIKMixin
-
-                            if isinstance(self, ArmIKMixin) and self.ik_ready:
-                                self.reset_ik(self.output.positions.copy())
-                        self._homes.clear()
                 except Exception as error:
                     self.state, self._preparing, self._error = State.ERROR, False, str(error)
         self._publish_task_status()
@@ -288,8 +279,6 @@ class TaskBase(Node):
                                                   self._quat, self._omega)
                             self.prepared(snapshot)
                         self._publish_task_status()
-                if self._homes:
-                    self._tick_homes()
             except Exception as error:
                 self.estop(str(error))
 
@@ -302,53 +291,11 @@ class TaskBase(Node):
             self.output.publish()
             return True
 
-    def _begin_home(self, side):
-        slots = [index for index in self.slots if self.joints31[index].startswith(f'{side}_') and index < 29]
-        if len(slots) != 7 or self.state not in ACTIVE_STATES or self._preparing:
-            return
-        start = self.output.positions[slots].copy()
-        via = start.copy()
-        roll = next(index for index, slot in enumerate(slots) if 'shoulder_roll' in self.joints31[slot])
-        sign = 1.0 if side == 'left' else -1.0
-        via[roll] = sign * max(sign * via[roll], self.clear_roll)
-        self._homes[side] = (slots, start, via, self.now())
-
-    def _tick_homes(self):
-        with self.execution_lock, self.lock:
-            if not self._registered or self.state not in ACTIVE_STATES:
-                return
-            from .arm_ik_mixin import ArmIKMixin
-
-            for side, (slots, start, via, stamp) in list(self._homes.items()):
-                elapsed = self.now() - stamp
-                if elapsed < 0.0:
-                    continue
-                target = self.output.positions.copy()
-                target[slots] = two_stage(
-                    elapsed, self.clear_s, self.home_s, start, via, self._stand_goal[slots])
-                mask = self.output.message.mask
-                try:
-                    self.output.message.mask = sum(1 << index for index in slots)
-                    published = self.publish_target(target)
-                finally:
-                    self.output.message.mask = mask
-                if not published:
-                    continue
-                # 仅在目标成功发布后提交 IK 种子，home 完成时再重置参考
-                if isinstance(self, ArmIKMixin) and self.ik_ready:
-                    self.commit_ik(self.output.positions.copy())
-                if elapsed >= self.home_s:
-                    if isinstance(self, ArmIKMixin) and self.ik_ready:
-                        self.reset_ik(self.output.positions.copy())
-                    del self._homes[side]
-                    self._publish_task_status()
-
     def estop(self, reason):
         with self.execution_lock:
             with self.lock:
                 self.generation += 1
                 self.state, self._preparing, self._error = State.ERROR, False, reason
-                self._homes.clear()
             try:
                 self.stop()
                 callback = self._events.get('stop')
@@ -374,8 +321,6 @@ class TaskBase(Node):
                               upper_state='active' if self.state is State.RUNNING else 'idle',
                               arms_live=self.state is State.RUNNING,
                               arm_joints=self.joints31[15:29])
-                for side in ('left', 'right'):
-                    detail[f'home_{side}'] = side in self._homes
             state = 'preparing' if self._preparing else (
                 'ready' if self.state is State.STAND else self.state.value.lower())
             payload = dict(detail, task_id=self.get_fully_qualified_name(), mask=self._mask,

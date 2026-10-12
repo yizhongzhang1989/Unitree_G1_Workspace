@@ -403,13 +403,6 @@ class VlaBridgeNode(ArmIKMixin, TaskBase):
     def _stop_executor(self) -> None:
         self._stop('执行器停止')
 
-    def reset_ik(self, positions31) -> None:
-        with self.execution_lock, self.lock:
-            super().reset_ik(positions31)
-            with self._lock:
-                for side in getattr(self, '_homes', {}):
-                    self._command[side] = self._ik_status['limited_pose'][side].copy()
-
     def _on_ik_tick(self) -> None:
         with self.execution_lock:
             with self.lock:
@@ -417,19 +410,14 @@ class VlaBridgeNode(ArmIKMixin, TaskBase):
                     return
                 generation = self.generation
                 positions = self.output.positions31.copy()
-                homes = getattr(self, '_homes', {})
-                homing_slots = {slot for home in homes.values() for slot in home[0]}
             with self._lock:
-                command = {side: pose.copy() for side, pose in self._command.items()
-                           if side not in homes}
+                command = {side: pose.copy() for side, pose in self._command.items()}
                 grip = dict(self._grip_command)
             if not command:
                 return
             try:
                 arms, _, _, _ = self.solve_ik(command)
-                for index, slot in enumerate(self.arm_slots):
-                    if slot not in homing_slots:
-                        positions[slot] = arms[index]
+                positions[self.arm_slots] = arms
                 positions[29:31] = [grip[side] for side in SIDES]
                 with self.lock:
                     if self.state != 'RUNNING' or generation != self.generation:

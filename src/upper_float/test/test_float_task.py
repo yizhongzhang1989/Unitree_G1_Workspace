@@ -90,19 +90,7 @@ def test_measured_arms_direct_fpc_with_gripper_hold_and_home(ros_args, gripper_s
                      [float('nan'), 1.0], [1.0, float('inf')], [float('-inf'), 1.0]):
             task._on_gripper(Float64MultiArray(data=data))
             np.testing.assert_array_equal(task.output.positions, expected)
-        task._on_event(MotionEvent(command='home_left', epoch=2))
-        slots, start, via, stamp = task._homes['left']
-        task._homes['left'] = slots, start, via, stamp - task.home_s / 2
-        task._tick_lifecycle()
-        home = task.output.positions[slots].copy()
-        task._control()
-        np.testing.assert_array_equal(task.output.positions[slots], home)
-        np.testing.assert_array_equal(task.output.positions[22:29], measured[22:29])
-        assert task.output.positions[30] == task._grip_hi
-        task._on_event(MotionEvent(command='home_cancel', epoch=3))
-        task._control()
-        np.testing.assert_array_equal(task.output.positions[15:29], measured[15:29])
-        task._on_event(MotionEvent(command='stop', epoch=4))
+        task._on_event(MotionEvent(command='stop', epoch=2))
         held = task.output.positions.copy()
         task._q[:] += 0.1
         task._control()

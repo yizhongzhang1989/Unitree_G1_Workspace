@@ -16,15 +16,18 @@ _UPPER = {
     'vr': ('upper_vr', 'vr_teleop.launch.py'),
     'vla': ('upper_vla', 'vla_bridge.launch.py'),
     'float': ('upper_float', 'float.launch.py'),
+    'force_feedback': ('upper_force_feedback', 'force_feedback.launch.py'),
 }
 
 
-def _include(package, filename, config=''):
+def _include(package, filename, config='', *, safety_checks_enabled=''):
     source = PythonLaunchDescriptionSource(str(
         Path(get_package_share_directory(package)) / 'launch' / filename))
     arguments = {}
     if config:
         arguments['config'] = config
+    if safety_checks_enabled:
+        arguments['safety_checks_enabled'] = safety_checks_enabled
     # 子任务拥有配置默认值，分组隔离各自的 launch 参数
     return GroupAction(scoped=True, actions=[IncludeLaunchDescription(
         source, launch_arguments=arguments.items())])
@@ -35,7 +38,8 @@ def _tasks(context):
     upper = LaunchConfiguration('upper_task').perform(context)
     if lower not in (*_LOWER, 'none') or upper not in (*_UPPER, 'none'):
         raise ValueError('invalid lower_task or upper_task')
-    actions = [_include('g1_motion_session', 'session.launch.py')]
+    safety = LaunchConfiguration('safety_checks_enabled', default='').perform(context)
+    actions = [_include('g1_motion_session', 'session.launch.py', safety_checks_enabled=safety)]
     if lower != 'none':
         config = LaunchConfiguration('lower_config', default='').perform(context)
         actions.append(_include(*_LOWER[lower], config))
@@ -50,8 +54,9 @@ def generate_launch_description():
         DeclareLaunchArgument('lower_task', default_value='velocity',
                               choices=['velocity', 'footstep', 'none']),
         DeclareLaunchArgument('upper_task', default_value='vr',
-                              choices=['vr', 'vla', 'float', 'none']),
+                              choices=['vr', 'vla', 'float', 'force_feedback', 'none']),
         DeclareLaunchArgument('lower_config', default_value=''),
         DeclareLaunchArgument('upper_config', default_value=''),
+        DeclareLaunchArgument('safety_checks_enabled', default_value=''),
         OpaqueFunction(function=_tasks),
     ])

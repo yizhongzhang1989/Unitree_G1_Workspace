@@ -3,7 +3,6 @@
 import json
 import sys
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -15,7 +14,6 @@ from std_msgs.msg import String
 from g1_motion_session.session_node import DefaultJointOutput, FULL_MASK, MotionSession, State
 from g1_motion_session.task_base import State as TaskState, TaskBase
 from g1_motion_session.joint_output import JointOutput
-from g1_motion_session.arm_ik import ArmIK
 
 
 @pytest.mark.parametrize('override', [False, True])
@@ -40,7 +38,6 @@ def test_task_fixed_parameter_defaults_and_yaml_override(tmp_path, override):
             'stand_s': 3.0,
             'stand_clear_s': 0.5,
             'stand_clear_roll': 0.8,
-            'home_s': 3.5,
             'target_topic': '/test/targets',
             'robot_description_topic': '/test/description',
             'passive_targets': passive,
@@ -57,7 +54,6 @@ def test_task_fixed_parameter_defaults_and_yaml_override(tmp_path, override):
         assert node.stand_s == (3.0 if override else 2.5)
         assert node.clear_s == (0.5 if override else 0.4)
         assert node.clear_roll == (0.8 if override else 0.7)
-        assert node.home_s == (3.5 if override else 2.0)
         assert node._state_timeout == (0.3 if override else 0.2)
         np.testing.assert_array_equal(node._stand_goal[15:], passive)
         assert node.output.publisher.topic_name == (
@@ -86,7 +82,6 @@ def task():
     node._preparing = False
     node._error = ''
     node._events = {}
-    node._homes = {}
     node.joints31 = [f'joint_{index}' for index in range(31)]
     node.joints31[16] = 'left_shoulder_roll_joint'
     node.joints31[23] = 'right_shoulder_roll_joint'
@@ -147,7 +142,7 @@ def test_task_lifecycle_registration_and_stop_gate_publication(task):
 
 
 @pytest.fixture
-def home_task(task):
+def prepared_task(task):
     task.state = TaskState.RUNNING
     task.slots = list(range(15, 31))
     for side, offset in (('left', 15), ('right', 22)):
@@ -158,110 +153,28 @@ def home_task(task):
     task.output.message.mask = task._mask
     task.output.positions[:] = task._q
     task.clear_s = 0.4
-    task.home_s = 2.0
+    task.stand_s = 2.5
     task._stand_goal = np.zeros(31)
     task._stand_goal[16], task._stand_goal[23] = 0.6, -0.6
     task.now = Mock(return_value=100.0)
     return task
 
 
-@pytest.fixture
-def ik_home_task(home_task):
-    from g1_motion_session.arm_ik_mixin import ArmIKMixin
-
-    class IKTask(ArmIKMixin, TaskBase):
-        pass
-
-    node = IKTask.__new__(IKTask)
-    node.__dict__.update(home_task.__dict__)
-    node._ik = ArmIK.__new__(ArmIK)
-    node.commit_ik = Mock()
-    node.reset_ik = Mock()
-    return node
-
-
-@pytest.mark.parametrize('side, offset', [('left', 15), ('right', 22)])
-def test_task_home_side_mask_two_stage_and_committed_positions(ik_home_task, side, offset):
-    node = ik_home_task
-    published = []
-    node.output.publish = lambda: published.append((node.output.message.mask, node.output.positions.copy()))
-    start = node.output.positions.copy()
-    event(node, f'home_{side}', 1)
-    node._publish_task_status.assert_called_once()
-    slots = list(range(offset, offset + 7))
-    other = [index for index in range(31) if index not in slots]
-    node.now.return_value = 100.2
-    node._tick_homes()
-    expected = start.copy()
-    roll = offset + 1
-    sign = 1.0 if side == 'left' else -1.0
-    expected[roll] = (start[roll] + sign * max(sign * start[roll], node.clear_roll)) / 2.0
-    np.testing.assert_allclose(published[-1][1], expected)
-    node.output.positions[other] += 0.1
-    before = node.output.positions.copy()
-    node.now.return_value = 101.2
-    node._tick_homes()
-    via = start[slots].copy()
-    via[1] = sign * max(sign * via[1], node.clear_roll)
-    np.testing.assert_allclose(published[-1][1][slots], (via + node._stand_goal[slots]) / 2.0)
-    np.testing.assert_array_equal(published[-1][1][other], before[other])
-    node.now.return_value = 102.0
-    node._tick_homes()
-    assert [mask for mask, positions in published] == [sum(1 << index for index in slots)] * 3
-    for call, (_, positions) in zip(node.commit_ik.call_args_list, published):
-        np.testing.assert_array_equal(call.args[0], positions)
-    np.testing.assert_array_equal(published[-1][1][slots], node._stand_goal[slots])
-    node.reset_ik.assert_called_once()
-    np.testing.assert_array_equal(node.reset_ik.call_args.args[0], published[-1][1])
-    assert not node._homes
-    assert node.output.message.mask == node._mask
-    assert node._publish_task_status.call_count == 2
-
-
-def test_task_home_cancel_reseeds_before_immediate_status(ik_home_task):
-    node = ik_home_task
-    event(node, 'home_left', 1)
-    node.now.return_value = 100.2
-    node._tick_homes()
-    final = node.output.positions.copy()
-    node._publish_task_status.reset_mock()
-    event(node, 'home_cancel', 2)
-    np.testing.assert_array_equal(node.reset_ik.call_args.args[0], final)
-    assert not node._homes
-    node._publish_task_status.assert_called_once()
-
-
-def test_task_home_without_ik_and_stop_gate(home_task):
-    event(home_task, 'home_right', 1)
-    home_task.now.return_value = 100.2
-    home_task._tick_homes()
-    home_task.output.publish.assert_called_once()
-    before = home_task.output.positions.copy()
-    event(home_task, 'stop', 2)
-    home_task._tick_homes()
-    np.testing.assert_array_equal(home_task.output.positions, before)
-    home_task.output.publish.assert_called_once()
-
-
-@pytest.mark.parametrize('phase', ['prepare', 'home', 'prepared'])
-def test_task_lifecycle_exception_stops_locally(home_task, phase):
-    node = home_task
+@pytest.mark.parametrize('phase', ['prepare', 'prepared'])
+def test_task_lifecycle_exception_stops_locally(prepared_task, phase):
+    node = prepared_task
     node.stand_s = 2.5
     node._events['stop'] = Mock()
-    if phase == 'home':
-        event(node, 'home_left', 1)
-        node.output.publish.side_effect = RuntimeError('publish failed')
+    node.state = TaskState.IDLE
+    event(node, 'engage', 1)
+    node.now.return_value = 103.0 if phase == 'prepared' else 100.2
+    if phase == 'prepared':
+        node.prepared = Mock(side_effect=RuntimeError('prepared failed'))
     else:
-        node.state = TaskState.IDLE
-        event(node, 'engage', 1)
-        node.now.return_value = 103.0 if phase == 'prepared' else 100.2
-        if phase == 'prepared':
-            node.prepared = Mock(side_effect=RuntimeError('prepared failed'))
-        else:
-            node.output.publish.side_effect = RuntimeError('publish failed')
+        node.output.publish.side_effect = RuntimeError('publish failed')
     node._tick_lifecycle()
     assert node.state is TaskState.ERROR
-    assert not node._preparing and not node._homes
+    assert not node._preparing
     assert 'failed' in node._error
     assert node.output.message.mask == node._mask
     node.stop.assert_called_once()
@@ -271,8 +184,8 @@ def test_task_lifecycle_exception_stops_locally(home_task, phase):
     assert node.output.publish.call_count == before
 
 
-def test_default_preparation_finishes_without_starting(home_task):
-    node = home_task
+def test_default_preparation_finishes_without_starting(prepared_task):
+    node = prepared_task
     node.state = TaskState.IDLE
     node.stand_s = 2.5
     node.prepared = Mock()
@@ -296,30 +209,27 @@ def test_default_preparation_finishes_without_starting(home_task):
     assert node.state is TaskState.RUNNING
 
 
-@pytest.mark.parametrize('failure', ['stop', 'status', 'commit'])
-def test_task_lifecycle_cleanup_failure_does_not_escape(ik_home_task, failure):
-    node = ik_home_task
-    event(node, 'home_left', 1)
-    node.now.return_value = 102.0
-    if failure == 'commit':
-        node.commit_ik = Mock(side_effect=RuntimeError('commit failed'))
+@pytest.mark.parametrize('failure', ['stop', 'status'])
+def test_task_lifecycle_cleanup_failure_does_not_escape(prepared_task, failure):
+    node = prepared_task
+    node.state = TaskState.IDLE
+    event(node, 'engage', 1)
+    node.now.return_value = 100.2
+    node.output.publish.side_effect = RuntimeError('publish failed')
+    if failure == 'stop':
+        node.stop.side_effect = RuntimeError('stop failed')
     else:
-        node.output.publish.side_effect = RuntimeError('publish failed')
-        if failure == 'stop':
-            node.stop.side_effect = RuntimeError('stop failed')
-        else:
-            node._publish_task_status.side_effect = RuntimeError('status failed')
+        node._publish_task_status.side_effect = RuntimeError('status failed')
     node._tick_lifecycle()
     assert node.state is TaskState.ERROR
-    assert not node._homes
     assert f'{failure} failed' in node._error
     assert node.output.message.mask == node._mask
     node._tick_lifecycle()
 
 
 @pytest.mark.parametrize('emergency', [False, True])
-def test_task_blocking_stop_prevents_late_publication(home_task, emergency):
-    node = home_task
+def test_task_blocking_stop_prevents_late_publication(prepared_task, emergency):
+    node = prepared_task
     stopping = threading.Event()
     finish = threading.Event()
     attempting = threading.Event()
@@ -357,104 +267,9 @@ def test_task_blocking_stop_prevents_late_publication(home_task, emergency):
 
 
 @pytest.fixture
-def vla_home_task(ik_home_task):
-    from upper_vla.vla_node import VlaBridgeNode
-
-    node = VlaBridgeNode.__new__(VlaBridgeNode)
-    node.__dict__.update(ik_home_task.__dict__)
-    node._lock = threading.Lock()
-    node._command = {'left': np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]),
-                     'right': np.array([0.1, -0.2, 0.3, 0.0, 0.0, 0.0, 1.0])}
-    node._grip_command = {'left': 0.4, 'right': 0.7}
-    node.arm_slots = np.arange(15, 29)
-    node.output.positions31 = node.output.positions
-    node.solve_ik = Mock(return_value=(np.arange(14, dtype=float) / 10.0, 0.0, 0.0, 10))
-    node._stop = Mock()
-    return node
-
-
-@pytest.mark.parametrize('side, offset', [('left', 15), ('right', 22)])
-def test_vla_local_ik_preserves_home_side_and_tracks_other(vla_home_task, side, offset):
-    node = vla_home_task
-    event(node, f'home_{side}', 1)
-    node.now.return_value = 100.2
-    node._tick_homes()
-    before = node.output.positions.copy()
-    node._on_ik_tick()
-    other = 'right' if side == 'left' else 'left'
-    assert set(node.solve_ik.call_args.args[0]) == {other}
-    np.testing.assert_array_equal(node.output.positions[offset:offset + 7], before[offset:offset + 7])
-    other_offset = 22 if side == 'left' else 15
-    np.testing.assert_array_equal(node.output.positions[other_offset:other_offset + 7],
-                                  node.solve_ik.return_value[0][other_offset - 15:other_offset - 8])
-    np.testing.assert_array_equal(node.commit_ik.call_args.args[0], node.output.positions)
-
-
-def test_vla_local_ik_both_homes_pause_solver(vla_home_task):
-    node = vla_home_task
-    event(node, 'home_left', 1)
-    event(node, 'home_right', 2)
-    node._on_ik_tick()
-    node.solve_ik.assert_not_called()
-    node.output.publish.assert_not_called()
-
-
-@pytest.mark.parametrize('side', ['left', 'right'])
-@pytest.mark.parametrize('finish', ['complete', 'cancel'])
-def test_vla_home_reset_to_fk_preserves_other_target(vla_home_task, side, finish):
-    from g1_motion_session.arm_ik import ArmIK
-
-    node = vla_home_task
-    node.dt = 0.02
-    node.tip_frames = {'left': 'left_gripper_base', 'right': 'right_gripper_base'}
-    node.arm_joints = node.joints31[15:29]
-    description = Path(__file__).resolve().parents[2] / 'unitree_g1_description/model/final.urdf'
-    node._ik = ArmIK(description.read_text(), node.arm_joints, node.tip_frames,
-                     rotation_weight=0.01, reference=[0.0] * 14)
-    node.arm_indices = np.array([node.joints31.index(name) for name in node._ik.joint_names])
-    node._arm_from_model = np.array([node._ik.joint_names.index(name) for name in node.arm_joints])
-    node._ik_targets = {}
-    node._ik_status = {}
-    del node.solve_ik
-    del node.commit_ik
-    del node.reset_ik
-    node.reset_ik(node.output.positions)
-    node._command = {arm: pose.copy() for arm, pose in node._ik.fk(node._ik_seed, clamp=False).items()}
-    other = 'right' if side == 'left' else 'left'
-    node._command[side][0] += 0.03
-    node._command[other][0] += 0.01
-    other_target = node._command[other].copy()
-    event(node, f'home_{side}', 1)
-    for stamp in (100.2, 100.4, 100.8):
-        node.now.return_value = stamp
-        node._tick_homes()
-        np.testing.assert_array_equal(node._ik_seed, node.output.positions[node.arm_indices])
-        before = node.output.positions.copy()
-        node._on_ik_tick()
-        slots = node._homes[side][0]
-        np.testing.assert_array_equal(node.output.positions[slots], before[slots])
-        np.testing.assert_array_equal(node._ik_seed, node.output.positions[node.arm_indices])
-    if finish == 'complete':
-        node.now.return_value = 102.0
-        node._tick_homes()
-    else:
-        event(node, 'home_cancel', 2)
-    assert not node._homes
-    reached = node._ik.fk(node._ik_seed, clamp=False)
-    np.testing.assert_array_equal(node._command[side], reached[side])
-    np.testing.assert_array_equal(node._command[other], other_target)
-    before = node.output.positions.copy()
-    node._on_ik_tick()
-    slots = list(range(15, 22)) if side == 'left' else list(range(22, 29))
-    np.testing.assert_allclose(node.output.positions[slots], before[slots], atol=1e-8)
-    np.testing.assert_array_equal(node._ik_seed, node.output.positions[node.arm_indices])
-
-
-@pytest.fixture
 def session():
     node = MotionSession.__new__(MotionSession)
     node.lock = threading.RLock()
-    node._condition = threading.Condition(node.lock)
     node._switch_lock = threading.Lock()
     node._tasks = {}
     node.state = State.STAND
@@ -465,8 +280,7 @@ def session():
     node._deactivating = False
     node._default_preparing = False
     node._reason = ''
-    node._home_waiting = {}
-    node.home_s = 0.05
+    node._safety_checks_enabled = True
     node.clear_s = 0.4
     node.stand_s = 2.5
     node.clear_roll = 0.7
@@ -582,6 +396,63 @@ def test_empty_registry_can_start_after_default_preparation(session):
     assert session._on_start(None, SimpleNamespace()).success
 
 
+@pytest.mark.parametrize('enabled', [False, True])
+@pytest.mark.parametrize('fault,reason', [
+    ('joints', '/joint_states timeout'),
+    ('imu', 'IMU timeout'),
+    ('tilt', 'tilt limit exceeded'),
+])
+def test_session_safety_switch_controls_commands_and_monitoring(session, monkeypatch, enabled, fault, reason):
+    session._safety_checks_enabled = enabled
+    if fault == 'joints':
+        session._joint_stamp = 99.0
+    elif fault == 'imu':
+        session._imu_stamp = 99.0
+    else:
+        session._quat = (2 ** -0.5, 0.0, 0.0, 2 ** -0.5)
+    response = session._on_engage(None, SimpleNamespace())
+    assert response.success is not enabled
+    session._default_preparing = False
+    response = session._on_start(None, SimpleNamespace())
+    assert response.success is not enabled
+    if enabled:
+        assert response.message == reason
+    emergency = Mock()
+    monkeypatch.setattr(session, 'estop', emergency)
+    session._publish_status()
+    if enabled:
+        emergency.assert_called_once_with(reason)
+    else:
+        emergency.assert_not_called()
+    payload = json.loads(session._status_publisher.publish.call_args.args[0].data)
+    assert payload['safety_checks_enabled'] is enabled
+
+
+@pytest.mark.parametrize('override', [None, False])
+def test_session_configures_safety_and_sensor_subscription(override):
+    import rclpy
+
+    root = Path(__file__).resolve().parents[2]
+    arguments = ['--ros-args', '--params-file', str(root / 'g1_motion_session/config/session.yaml'),
+                 '--params-file', str(root / 'unitree_g1_ros2_control/config/default_31dof_param.yaml')]
+    if override is not None:
+        arguments.extend(['-p', 'safety_checks_enabled:=false'])
+    rclpy.init(args=arguments)
+    node = None
+    try:
+        node = MotionSession()
+        enabled = override is not False
+        assert node._safety_checks_enabled is enabled
+        assert node.describe_parameter('safety_checks_enabled').read_only
+        topics = {subscription.topic_name for subscription in node.subscriptions}
+        assert '/joint_states' in topics
+        assert ('/pelvis_imu_broadcaster/imu' in topics) is enabled
+    finally:
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_stop_holds_controller_and_stops_default_publish(session):
     register(session, 'lower', 1)
     session.state = State.RUNNING
@@ -693,61 +564,6 @@ def test_stop_during_activation_holds_controller_without_engage(session):
         finish.set()
 
 
-@pytest.fixture
-def pending_home(session):
-    for index, joint in enumerate(('shoulder_pitch', 'shoulder_roll', 'shoulder_yaw',
-                                   'elbow', 'wrist_roll', 'wrist_pitch', 'wrist_yaw'), start=15):
-        session.joints[index] = f'left_{joint}_joint'
-    register(session, 'upper', sum(1 << index for index in range(15, 22)))
-    status(session, 'upper', 'running')
-    session.state = State.RUNNING
-    session.now = time.monotonic
-    events = []
-    sent = threading.Event()
-
-    def publish(event):
-        events.append(event)
-        sent.set()
-
-    session._events_publisher.publish = publish
-    response = SimpleNamespace()
-    worker = threading.Thread(target=session._on_home, args=('left', None, response))
-    try:
-        worker.start()
-        assert sent.wait(1.0)
-        yield worker, response, events
-    finally:
-        session._on_home_cancel(None, SimpleNamespace())
-        worker.join(1.0)
-
-
-@pytest.mark.parametrize('active, completed', [
-    ({'home_left': True}, {'home_left': False}),
-    ({'homing': ['left']}, {'homing': []}),
-], ids=['explicit_completion', 'homing_flags'])
-def test_home_waits_for_event_epoch_and_explicit_completion(session, pending_home, active, completed):
-    worker, response, events = pending_home
-    epoch = events[0].epoch
-    status(session, 'upper', 'running', epoch=epoch)
-    assert worker.is_alive()
-    status(session, 'upper', 'running', epoch=epoch, **active)
-    assert worker.is_alive()
-    status(session, 'upper', 'running', epoch=epoch, **completed)
-    worker.join(1.0)
-    assert not worker.is_alive()
-    assert response.success
-    assert events[0].command == 'home_left'
-
-
-def test_home_cancel_interrupts_wait(session, pending_home):
-    worker, response, events = pending_home
-    assert session._on_home_cancel(None, SimpleNamespace()).success
-    worker.join(1.0)
-    assert not worker.is_alive()
-    assert not response.success
-    assert [event.command for event in events] == ['home_left', 'home_cancel']
-
-
 def test_estop_interrupts_pending_activation(session):
     session.state = State.ENGAGING
     session._controller_active = False
@@ -809,20 +625,32 @@ def test_task_legacy_fields_cannot_replace_session_epoch(session):
     assert payload['execution_epoch'] == 123
 
 
-def test_launch_parameters_defaults_and_override(monkeypatch, tmp_path):
-    import yaml
-    from g1_motion_session import launch_support
+@pytest.mark.parametrize('config', ['session.yaml', 'custom.yaml', 'absolute'])
+def test_session_launch_parameters_and_override(monkeypatch, tmp_path, config):
+    import runpy
+    from launch import LaunchContext
 
     root = Path(__file__).resolve().parents[2]
+    module = runpy.run_path(str(root / 'g1_motion_session/launch/session.launch.py'))
     shares = {'g1_motion_session': tmp_path,
               'unitree_g1_ros2_control': root / 'unitree_g1_ros2_control'}
-    hardware = shares['unitree_g1_ros2_control'] / 'config/default_31dof_param.yaml'
-    joints = yaml.safe_load(hardware.read_text())['/**']['ros__parameters']['joints']
-    monkeypatch.setattr(launch_support, 'get_package_share_directory', lambda name: str(shares[name]))
-    session_parameters = launch_support.task_parameters('g1_motion_session', 'session.yaml')
-    assert session_parameters == [str(tmp_path / 'config/session.yaml'), {'joints': joints}]
-    assert launch_support.task_parameters('g1_motion_session', 'custom.yaml') == [
-        str(tmp_path / 'config/session.yaml'), str(tmp_path / 'config/custom.yaml'), {'joints': joints}]
+    factory = Mock()
+    monkeypatch.setitem(module['_nodes'].__globals__, 'Node', factory)
+    monkeypatch.setitem(module['_nodes'].__globals__, 'get_package_share_directory',
+                        lambda name: str(shares[name]))
+    if config == 'absolute':
+        config = str(tmp_path / 'absolute.yaml')
+    context = LaunchContext()
+    context.launch_configurations.update(config=config, safety_checks_enabled='false')
+    module['_nodes'](context)
+    expected = [str(tmp_path / 'config/session.yaml')]
+    override = str(tmp_path / 'config' / config)
+    if override not in expected:
+        expected.append(override)
+    expected.append(str(shares['unitree_g1_ros2_control'] / 'config/default_31dof_param.yaml'))
+    parameters = factory.call_args.kwargs['parameters']
+    assert parameters[:-1] == expected
+    assert parameters[-1]['safety_checks_enabled'].evaluate(context) is False
 
 
 def test_default_output_exposes_full_positions(monkeypatch):

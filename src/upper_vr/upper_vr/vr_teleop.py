@@ -31,9 +31,8 @@
 * **夹爪**：``trigger`` 直接映射，**0 = 完全打开、1 = 夹紧**。注意 ``eccentric_joint``
   是 **0 rad 闭合、2.76377 rad 打开**（见 unitree_g1_description/model/Gloria-M/README.md），
   所以这里是**反向**映射；写反了就是该松手的时候夹紧。
-* **归位**：单手按 **A/X**（右手 A / 左手 X）把**那一只**手送回预备姿势。轨迹不在
-  这儿算：调策略层的 ``~/home_left`` / ``~/home_right``，和 B/Y 调 engage 完全同构。
-  归位期间本节点**只跟随不驱动**（目标钉在 ``limited_pose`` 上），否则 50 Hz 的
+* **归位**：单手按 **A/X**（右手 A / 左手 X）把**那一只**手送回预备姿势，轨迹由
+    本任务在本地执行，不经过 session。归位期间手柄映射**只跟随不驱动**，否则 50 Hz 的
   陈旧目标会和插值对着干、走完还把手臂拽回去。握 squeeze 或再按一次 A/X 即取消。
 
 坐标系：平移和转角**各自**可选「世界」或「局部」，随便搭配出四种手感。参数是
@@ -95,6 +94,7 @@ from std_msgs.msg import Float64MultiArray, String
 from std_srvs.srv import Trigger
 
 from g1_motion_session.arm_ik_mixin import ArmIKMixin, IKPublicStatus
+from g1_motion_session.joint_output import two_stage
 from g1_motion_session.task_base import State, TaskBase
 from upper_vr.make_vr_cert import DEFAULT_DIR, DEFAULT_TLS_PORT
 
@@ -122,8 +122,6 @@ _TOOL_AXIS_MAP = '-x +y -z'
 # 平移 local-floor (+X 右, +Y 上, -Z 前) -> 躯干 (+X 前, +Y 左, +Z 上)
 _BASE_AXIS_MAP = '-y +z -x'
 _MAX_HAND_STEP_M = 0.1
-# 归位服务是阻塞的。这是本地兜底：策略层掉了不能让那只手永远卡在“跟随”里。
-_HOME_TIMEOUT_S = 10.0
 # 平移与转角各自的参考系，含义见模块 docstring 的「坐标系」
 _FRAME_MODES = ('world', 'local')
 # 参数名 -> 存在节点上的属性名。默认值只写在 declare_parameter 那里。
@@ -333,11 +331,11 @@ class VRTeleop(ArmIKMixin, TaskBase):
         # 本次按住的起始时刻，以及“已被长按急停消费掉”（消费了就不再补一次短按）。
         self._button_down: float | None = None
         self._button_used = True
-        # A/X 归位：每侧一个超时时刻（None = 没在归位）加一个按键沿。
-        # 这两个会被服务回调那个线程碰，但只是整个替换字典项，不需要加锁。
-        self._homing: dict[str, float | None] = {side: None for side in SIDES}
+        self.home_s = p('home_s', 2.0).get_parameter_value().double_value
+        if not self.clear_s < self.home_s:
+            raise ValueError('home_s must be longer than stand_clear_s')
+        self._homes: dict[str, tuple[list[int], np.ndarray, np.ndarray, float]] = {}
         self._home_held = {side: True for side in SIDES}
-        self._last_homes = set()
 
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -357,8 +355,7 @@ class VRTeleop(ArmIKMixin, TaskBase):
             .get_parameter_value().string_value.rstrip('/')
         self._trigger = {
             name: self.create_client(Trigger, f'{policy}/{name}', callback_group=slow)
-            for name in ('engage', 'start', 'estop',
-                         'home_left', 'home_right', 'home_cancel')
+            for name in ('engage', 'start', 'estop')
         }
         self.add_on_set_parameters_callback(self._on_set_parameters)
 
@@ -378,12 +375,14 @@ class VRTeleop(ArmIKMixin, TaskBase):
         return self.ik_ready
 
     def prepared(self, snapshot) -> None:
+        self._homes.clear()
         self.reset_ik(snapshot.position)
         self._grip[:] = snapshot.position[self._gripper_slots]
         self._seeded = False
         self.state = State.RUNNING
 
     def stop(self) -> None:
+        self._homes.clear()
         self._seeded = False
         self._clutch = {side: None for side in SIDES}
 
@@ -400,14 +399,12 @@ class VRTeleop(ArmIKMixin, TaskBase):
 
     def _control(self) -> None:
         with self.execution_lock, self.lock:
-            if self.ik_ready and (self._homes or self._last_homes):
-                self.commit_ik(self.output.positions)
-            homes = set(self._homes) | {side for side in SIDES if self._homing[side] is not None}
+            try:
+                self._tick_homes()
+            except Exception as error:
+                self.estop(str(error))
+                return
             local = self.status()
-            for side in self._last_homes - homes:
-                self._pose[side] = np.asarray(local['limited_pose'][side], dtype=float)
-                self._clutch[side] = None
-            self._last_homes = homes
             with self._lock:
                 self._status.update(local, arms_live=(
                     self.state is State.RUNNING and not self._preparing and self.ik_ready))
@@ -618,7 +615,6 @@ class VRTeleop(ArmIKMixin, TaskBase):
                 return                  # 手臂刚接管，正解还没落到 status 上。
             self._grip = np.asarray(status.get('grip') or (0.0, 0.0),
                                     dtype=np.float64)
-            self._homing = {side: None for side in SIDES}
             self._home_held = {side: True for side in SIDES}
             self._seeded = True
             self.get_logger().info('手臂已接管，双臂目标已按策略层发布的位姿播种')
@@ -668,8 +664,7 @@ class VRTeleop(ArmIKMixin, TaskBase):
                 return
             target = self.output.positions.copy()
             poses = {side: chunks[side] for side in SIDES
-                     if side in chunks and side not in self._homes
-                     and self._homing[side] is None}
+                     if side in chunks and side not in self._homes}
             if poses:
                 arms, _, _, _ = self.solve_ik(targets=poses)
                 for side in poses:
@@ -752,12 +747,8 @@ class VRTeleop(ArmIKMixin, TaskBase):
     # -- A/X 归位 ---------------------------------------------------------------
 
     def _check_home(self, side: str, pressed: bool, clutching: bool) -> None:
-        """A/X 上升沿：把这一只手交给策略层的归位服务。再按一次或握 squeeze 都取消。"""
-        deadline = self._homing[side]
-        if deadline is not None and self._now() > deadline:
-            self._homing[side] = deadline = None
-            self.get_logger().warning(f'{side} 归位服务超时没返回，已恢复手动')
-        if deadline is not None:
+        """A/X 上升沿触发本地归位，再按一次或握 squeeze 取消"""
+        if side in self._homes:
             if clutching or (pressed and not self._home_held[side]):
                 self._cancel_home('squeeze 接管' if clutching else '再按一次 A/X')
         elif pressed and not self._home_held[side] and not clutching:
@@ -765,29 +756,52 @@ class VRTeleop(ArmIKMixin, TaskBase):
         self._home_held[side] = pressed
 
     def _start_home(self, side: str) -> None:
-        client = self._trigger[f'home_{side}']
-        if not client.service_is_ready():
-            self.get_logger().warning(f'{side} 归位：服务还没就绪')
+        if self.state is not State.RUNNING or self._preparing or not self._registered or not self.ik_ready:
             return
-        self._homing[side] = self._now() + _HOME_TIMEOUT_S
+        slots = [int(slot) for slot in self.arm_slots if self.joints31[slot].startswith(f'{side}_')]
+        start = self.output.positions[slots].copy()
+        via = start.copy()
+        roll = next(index for index, slot in enumerate(slots) if 'shoulder_roll' in self.joints31[slot])
+        sign = 1.0 if side == 'left' else -1.0
+        via[roll] = sign * max(sign * via[roll], self.clear_roll)
+        self._homes[side] = (slots, start, via, self.now())
         self._clutch[side] = None
         self.get_logger().info(f'A/X -> {side} 归位')
-        client.call_async(Trigger.Request()).add_done_callback(
-            lambda future: self._home_returned(side, future))
 
-    def _home_returned(self, side: str, future) -> None:
-        self._homing[side] = None
-        self._report(f'{side} 归位', future)
+    def _tick_homes(self) -> None:
+        if self.state is not State.RUNNING or self._preparing or not self._registered:
+            return
+        for side, (slots, start, via, stamp) in list(self._homes.items()):
+            elapsed = self.now() - stamp
+            if elapsed < 0.0:
+                continue
+            target = self.output.positions.copy()
+            target[slots] = two_stage(
+                elapsed, self.clear_s, self.home_s, start, via, self._stand_goal[slots])
+            mask = self.output.message.mask
+            try:
+                self.output.message.mask = sum(1 << slot for slot in slots)
+                published = self.publish_target(target)
+            finally:
+                self.output.message.mask = mask
+            if not published:
+                continue
+            self.commit_ik(self.output.positions.copy())
+            if elapsed >= self.home_s:
+                self.reset_ik(self.output.positions.copy())
+                self._pose[side] = self._ik_status['limited_pose'][side].copy()
+                self._clutch[side] = None
+                del self._homes[side]
 
     def _cancel_home(self, reason: str) -> None:
-        """取消两侧归位。标志留给服务返回时清：取消也是走同一条返回路径。"""
-        if not any(deadline is not None for deadline in self._homing.values()):
+        """取消本地归位，并从最后成功发布的姿态重新接合"""
+        if not self._homes:
             return
-        client = self._trigger['home_cancel']
-        if not client.service_is_ready():
-            self.get_logger().warning('取消归位：服务还没就绪')
-            return
-        client.call_async(Trigger.Request())
+        self.reset_ik(self.output.positions.copy())
+        for side in self._homes:
+            self._pose[side] = self._ik_status['limited_pose'][side].copy()
+            self._clutch[side] = None
+        self._homes.clear()
         self.get_logger().info(f'取消归位（{reason}）')
 
     def _stick(self, frame: dict, side: str) -> np.ndarray:
@@ -852,8 +866,8 @@ class VRTeleop(ArmIKMixin, TaskBase):
             clutch = self._clutch[side]
             active = squeeze >= (self._squeeze_off if clutch is not None else self._squeeze_on)
             self._check_home(side, bool(buttons.get('a_x')), active)
-            if self._homing[side] is not None:
-                # 归位由策略层驱动，这里只把目标钉在它已经限速的指令上：
+            if side in self._homes:
+                # 归位由本地轨迹驱动，手柄映射只跟随已提交的指令：
                 # 自己再发一份就是两个目标对着干，走完还会把手臂拽回去。
                 if side in limited:
                     self._pose[side] = np.asarray(limited[side], dtype=np.float64)

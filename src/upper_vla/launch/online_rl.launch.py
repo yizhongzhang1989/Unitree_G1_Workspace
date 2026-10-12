@@ -8,7 +8,6 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from g1_motion_session.launch_support import task_parameters
 
 
 OPTIONAL = {'server_url': str, 'proxy': str, 'task_description': str,
@@ -17,6 +16,8 @@ OPTIONAL = {'server_url': str, 'proxy': str, 'task_description': str,
 
 def _node(context):
     directory = Path(get_package_share_directory('upper_vla')) / 'config'
+    shared = Path(get_package_share_directory('g1_motion_session')) / 'config'
+    hardware = Path(get_package_share_directory('unitree_g1_ros2_control')) / 'config/default_31dof_param.yaml'
     parameters = {}
     for path in (directory / 'vla_bridge.yaml', directory / 'backends/cogact_unitree.yaml'):
         with path.open(encoding='utf-8') as handle:
@@ -32,9 +33,8 @@ def _node(context):
             parameters[name] = convert(value)
     return [Node(package='upper_vla', executable='online_rl_bridge',
                  name='online_rl_bridge', output='screen', emulate_tty=True,
-                 parameters=[*task_parameters('g1_motion_session', ''),
-                             str(Path(get_package_share_directory('g1_motion_session')) / 'config/arm_ik.yaml'),
-                             parameters])]
+                 parameters=[str(shared / 'session.yaml'), str(shared / 'arm_ik.yaml'),
+                             str(hardware), parameters])]
 
 
 def generate_launch_description():

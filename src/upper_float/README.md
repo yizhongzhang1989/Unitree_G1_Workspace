@@ -34,7 +34,7 @@ ros2 launch upper_float float.launch.py
 
 需要控制已有任务时，另开终端执行 `ros2 run lower_velocity_tracking teleop_keyboard`，它是 control-only，不启动第二套任务、session 或硬件。正式组合键盘退出先请求急停，再向自身启动的任务进程组发送 SIGINT，既有硬件进程保持运行。
 
-浮动效果依赖硬件栈已有的手臂重力补偿与增益配置。夹爪默认消费 `/motion_control/upper/input/keyboard` 的 `std_msgs/msg/Float64MultiArray`，`data` 为两个弧度值 `[left_rad, right_rad]`，保留最后生效请求与原行程裁剪。`gripper_source:=vr` 将默认话题切为 `/motion_control/upper/input/vr`；`gripper_command_topic:=...` 可显式覆盖话题，消息类型始终为该数组。准备期间夹爪随预备目标，归位侧暂由 TaskBase 轨迹管理，其余臂关节继续跟随实测。
+浮动效果依赖硬件栈已有的手臂重力补偿与增益配置。夹爪默认消费 `/motion_control/upper/input/keyboard` 的 `std_msgs/msg/Float64MultiArray`，`data` 为两个弧度值 `[left_rad, right_rad]`，保留最后生效请求与原行程裁剪。`gripper_source:=vr` 将默认话题切为 `/motion_control/upper/input/vr`；`gripper_command_topic:=...` 可显式覆盖话题，消息类型始终为该数组。准备期间夹爪随预备目标，运行时双臂关节持续跟随实测。
 
 ## 接口
 

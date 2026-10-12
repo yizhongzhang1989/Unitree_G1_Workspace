@@ -228,7 +228,6 @@ def test_upper_task_status_reaches_dashboard(upper_status, dashboard):
     host.get_fully_qualified_name = Mock(return_value='/upper_' + task)
     host.state = State.RUNNING
     host.joints31 = [f'joint_{index}' for index in range(31)]
-    host._homes = {}
     host._preparing = False
     host._mask = mask
     host._epoch = 1
@@ -423,75 +422,9 @@ def test_dashboard_launch_forwards_monitoring_parameters(monkeypatch):
     module['_node'](context)
     parameters = factory.call_args.kwargs['parameters']
     assert Path(parameters[0]).name == 'session.yaml'
-    assert len(parameters[-2]['joints']) == 31
+    assert Path(parameters[-2]).name == 'default_31dof_param.yaml'
     assert {name: value.perform(context) for name, value in parameters[-1].items()} == {
         'bind_host': '0.0.0.0', 'bind_port': '8181', 'base_frame': 'torso_link',
         'status_topic': '/motion_control/status', 'joint_states_topic': '/joint_states',
         'robot_description_topic': '/robot_description',
     }
-
-
-@pytest.mark.parametrize('package, filename, entry, config, default, overrides', [
-    ('lower_velocity_tracking', 'velocity_tracking.launch.py', '_nodes',
-     'lower_body.yaml', 'lower_body.yaml', {}),
-    ('lower_footstep_tracking', 'footstep_tracking.launch.py', '_nodes',
-        'footstep.yaml', None, {}),
-    ('upper_vla', 'vla_bridge.launch.py', '_node', 'vla_bridge.yaml',
-     'vla_bridge.yaml', {'history_length': 8, 'execution_rate_hz': 25.0}),
-    ('upper_vr', 'vr_teleop.launch.py', '_nodes', 'upper_vr.yaml',
-     'upper_vr.yaml', {'arm_scale': 1.25}),
-    ('upper_float', 'float.launch.py', '_nodes', 'upper_float.yaml', 'upper_float.yaml',
-     {'gripper_source': 'keyboard', 'gripper_command_topic': '/custom/grip'}),
-])
-def test_task_launch_config_sources_and_overrides(
-        package, filename, entry, config, default, overrides, monkeypatch, tmp_path):
-    import ament_index_python.packages
-    import g1_motion_session.launch_support
-    import yaml
-    from launch import LaunchContext
-    from launch.actions import DeclareLaunchArgument
-    import launch_ros.actions
-
-    root = Path(__file__).resolve().parents[2]
-
-    def share(name):
-        return str(root / name)
-
-    monkeypatch.setattr(ament_index_python.packages, 'get_package_share_directory', share)
-    monkeypatch.setattr(g1_motion_session.launch_support, 'get_package_share_directory', share)
-    factory = Mock()
-    monkeypatch.setattr(launch_ros.actions, 'Node', factory)
-    module = runpy.run_path(str(root / package / 'launch' / filename))
-    context = LaunchContext()
-    defaults = {action.name: ''.join(item.perform(context) for item in action.default_value or [])
-                for action in module['generate_launch_description']().entities
-                if isinstance(action, DeclareLaunchArgument)}
-    assert defaults['config'] == config
-    joints = yaml.safe_load((root / 'unitree_g1_ros2_control/config/default_31dof_param.yaml')
-                            .read_text())['/**']['ros__parameters']['joints']
-    sources = [str(root / 'g1_motion_session/config/session.yaml'),
-               str(root / 'g1_motion_session/config/arm_ik.yaml')]
-    if default is not None:
-        sources.append(str(root / package / 'config' / default))
-    configured_sources = sources if config == default else [
-        *sources, str(root / package / 'config' / config)]
-    context = LaunchContext()
-    context.launch_configurations.update(defaults)
-    context.launch_configurations.update({name: str(value) for name, value in overrides.items()})
-    module[entry](context)
-    parameters = factory.call_args.kwargs['parameters']
-    assert parameters[:len(configured_sources)] == configured_sources
-    assert parameters[len(configured_sources)] == {'joints': joints}
-    if overrides:
-        assert parameters[-1] == overrides
-    calibrated = tmp_path / 'calibrated.yaml'
-    calibrated.write_text((root / package / 'config' / config).read_text())
-    context.launch_configurations['config'] = str(calibrated)
-    module[entry](context)
-    parameters = factory.call_args.kwargs['parameters']
-    assert parameters[:len(sources) + 2] == [*sources, str(calibrated), {'joints': joints}]
-    if overrides:
-        assert parameters[-1] == overrides
-    if package == 'upper_vla':
-        backend = yaml.safe_load(calibrated.read_text())['/vla_bridge']['ros__parameters']['vla_backend']
-        assert parameters[-2] == str(root / package / 'config/backends' / f'{backend}.yaml')

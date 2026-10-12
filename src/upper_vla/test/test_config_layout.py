@@ -57,7 +57,6 @@ def test_backend_config_loads(path, monkeypatch):
 @pytest.mark.parametrize('override', ['', '15', '30'])
 def test_history_length_launch_override(monkeypatch, override):
     import ament_index_python.packages
-    import g1_motion_session.launch_support
     from launch import LaunchContext
     import launch_ros.actions
 
@@ -65,7 +64,6 @@ def test_history_length_launch_override(monkeypatch, override):
         return PACKAGE if name == 'upper_vla' else os.path.join(PACKAGE, '..', name)
 
     monkeypatch.setattr(ament_index_python.packages, 'get_package_share_directory', get_package_share_directory)
-    monkeypatch.setattr(g1_motion_session.launch_support, 'get_package_share_directory', get_package_share_directory)
     node_factory = Mock()
     monkeypatch.setattr(launch_ros.actions, 'Node', node_factory)
     module = runpy.run_path(os.path.join(PACKAGE, 'launch', 'vla_bridge.launch.py'))
@@ -89,7 +87,6 @@ def test_history_length_launch_override(monkeypatch, override):
 @pytest.mark.parametrize('cli_backend', [False, True])
 def test_launch_uses_selected_common_config(tmp_path, monkeypatch, cli_backend):
     import ament_index_python.packages
-    import g1_motion_session.launch_support
     from launch import LaunchContext
     from launch.actions import DeclareLaunchArgument
     from launch.utilities import perform_substitutions
@@ -99,7 +96,6 @@ def test_launch_uses_selected_common_config(tmp_path, monkeypatch, cli_backend):
         return PACKAGE if name == 'upper_vla' else os.path.join(PACKAGE, '..', name)
 
     monkeypatch.setattr(ament_index_python.packages, 'get_package_share_directory', get_package_share_directory)
-    monkeypatch.setattr(g1_motion_session.launch_support, 'get_package_share_directory', get_package_share_directory)
     node_factory = Mock()
     monkeypatch.setattr(launch_ros.actions, 'Node', node_factory)
     module = runpy.run_path(os.path.join(PACKAGE, 'launch', 'vla_bridge.launch.py'))

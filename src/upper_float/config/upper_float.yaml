@@ -4,7 +4,6 @@
     stand_s: 2.5
     stand_clear_s: 0.4
     stand_clear_roll: 0.7
-    home_s: 2.0
     passive_targets: [0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
                       0.0, -0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
                       0.0, 0.0]

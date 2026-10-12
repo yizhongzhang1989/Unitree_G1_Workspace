@@ -166,7 +166,7 @@ class MocapStream:
 
     def __init__(self, retargeter: Retargeter, *, host: str = '0.0.0.0',
                  port: int = 18000, token: str = '',
-                 log: Callable[[str], None] = print) -> None:
+                 log: Callable[[str], object] = print) -> None:
         self._retarget = retargeter
         self._host, self._port, self._token = host, int(port), token
         self._log = log

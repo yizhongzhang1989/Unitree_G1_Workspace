@@ -32,14 +32,14 @@ ros2 launch upper_vr vr_teleop.launch.py
 
 不需要行走时只启动 upper_vr。单包 launch 的 VR 参数覆盖方式保持不变。VR 与其他上肢任务使用同一组关节，每次只选择一套 session 和任务组合；已有任务需要额外键盘控制台时使用 `ros2 run lower_velocity_tracking teleop_keyboard`，它不启动任务或 session，速度只由选择键盘来源的下肢任务消费。
 
-WebXR、ADB、手柄分工与监控见 [VR 操作](vr/README.md)。单手归位由 TaskBase 插值；归位侧不参与 IK 目标求解，完成或取消后以实际输出 FK 重新接合。
+WebXR、ADB、手柄分工与监控见 [VR 操作](vr/README.md)。A/X 单手归位由 VR 任务本地执行两阶段插值，默认总时长为本包 `home_s` 的 2 秒；归位侧不参与手柄目标的 IK 求解，完成或取消后以实际输出 FK 重新接合。握 squeeze、再次按 A/X 或 VR 断联取消回位。
 
 ## 接口
 
 - 输出：`/forward_position_controller/joint_targets`，仅15至30槽位。
 - 摇杆：`/motion_control/lower/input/vr`，Float64MultiArray 四值数组。
 - 生命周期：`/motion_control/register`、`/motion_control/events`、`/motion_control/tasks`。
-- B/Y、A/X 服务与会话状态：默认 `/motion_control` 和 `/motion_control/status`。
+- B/Y 生命周期服务与会话状态：默认 `/motion_control` 和 `/motion_control/status`；A/X 只操作本任务。
 - WebXR：HTTP 8000、HTTPS 8443、`/monitor`、`/state`、`/haptic` 与两个 WebSocket 路径。
 
 ## 验证

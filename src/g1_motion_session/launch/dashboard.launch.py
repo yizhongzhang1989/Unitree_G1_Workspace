@@ -1,18 +1,21 @@
 """Independent arm dashboard using the shared task defaults."""
 
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from g1_motion_session.launch_support import task_parameters
-
 
 def _node(context):
+    shared = Path(get_package_share_directory('g1_motion_session')) / 'config'
+    hardware = Path(get_package_share_directory('unitree_g1_ros2_control')) / 'config/default_31dof_param.yaml'
     return [Node(
         package='g1_motion_session', executable='dashboard_node',
         name='motion_control_dashboard', output='screen',
-        parameters=task_parameters('g1_motion_session', '') + [{
+        parameters=[str(shared / 'session.yaml'), str(hardware), {
             'bind_host': LaunchConfiguration('bind_host'),
             'bind_port': LaunchConfiguration('bind_port'),
             'base_frame': LaunchConfiguration('base_frame'),

@@ -50,10 +50,7 @@ class FloatTask(TaskBase):
             if self.state is not State.RUNNING or self._preparing:
                 return
             target = self.output.positions.copy()
-            for slot in self.arm_slots:
-                side = self.joints31[slot].split('_', 1)[0]
-                if side not in self._homes:
-                    target[slot] = self._q[slot]
+            target[self.arm_slots] = self._q[self.arm_slots]
             self.publish_target(target)
 
     def status(self) -> dict[str, bool | str | list[float]]:

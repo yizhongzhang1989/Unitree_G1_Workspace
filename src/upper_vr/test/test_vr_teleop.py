@@ -112,11 +112,15 @@ def node(monkeypatch):
     teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
                     'right': np.array([0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])}
     teleop._grip = np.zeros(2)
-    # A/X 归位：按键沿同真实初值（连上就按着不算一次），服务客户端换成假的。
-    teleop._homing = {'left': None, 'right': None}
+    teleop._homes = {}
     teleop._home_held = {'left': True, 'right': True}
-    clients = {name: _FakeClient() for name in ('home_left', 'home_right', 'home_cancel')}
-    monkeypatch.setattr(teleop, '_trigger', clients, raising=False)
+    monkeypatch.setattr(teleop, '_trigger', {}, raising=False)
+
+    def start_home(side):
+        teleop._homes[side] = ([], np.zeros(0), np.zeros(0), 100.0)
+
+    monkeypatch.setattr(teleop, '_start_home', Mock(side_effect=start_home))
+    monkeypatch.setattr(teleop, '_cancel_home', Mock(side_effect=lambda reason: teleop._homes.clear()))
     teleop._now = lambda: 100.0
     monkeypatch.setattr(teleop, 'get_logger', Mock(return_value=_Silent()))
     return teleop
@@ -712,23 +716,22 @@ def _ax(pressed, squeeze=0.0, position=(0.0, 0.0, 0.0)):
             for side in ('left', 'right')}
 
 
-def test_a_x_calls_the_service_for_that_hand_only(node):
+def test_a_x_starts_that_hand_only(node):
     node._update_arms(_ax(()), LIMITED)               # 先松手，解除初始的"按着"
     node._update_arms(_ax(('right',)), LIMITED)
-    assert node._trigger['home_right'].calls == 1
-    assert node._trigger['home_left'].calls == 0
-    assert node._homing['right'] is not None and node._homing['left'] is None
+    node._start_home.assert_called_once_with('right')
+    assert set(node._homes) == {'right'}
 
 
 def test_holding_a_x_does_not_call_again(node):
     node._update_arms(_ax(()), LIMITED)
     for _ in range(20):
         node._update_arms(_ax(('right',)), LIMITED)
-    assert node._trigger['home_right'].calls == 1
+    node._start_home.assert_called_once_with('right')
 
 
 def test_homing_follows_limited_pose_instead_of_driving(node):
-    """归位期间本节点只跟随策略层的指令：自己再发一份就是两个目标对着干。"""
+    """归位期间手柄映射只跟随本地已提交的指令，不覆盖回位轨迹"""
     node._update_arms(_ax(()), LIMITED)
     node._update_arms(_ax(('right',)), LIMITED)
     node._update_arms(_ax(('right',)), LIMITED)
@@ -740,11 +743,8 @@ def test_squeeze_cancels_homing_and_takes_over_without_a_jump(node):
     node._update_arms(_ax(()), LIMITED)
     node._update_arms(_ax(('right',)), LIMITED)
     node._update_arms(_ax((), squeeze=1.0), LIMITED)
-    assert node._trigger['home_cancel'].calls == 1
-    # 标志由服务返回时清——取消也走同一条返回路径，不能在这里抢先清掉。
-    assert node._homing['right'] is not None
-    node._trigger['home_right'].finish()
-    assert node._homing['right'] is None
+    node._cancel_home.assert_called_once()
+    assert not node._homes
     here = node._pose['right'][:3].copy()
     node._update_arms(_ax((), squeeze=1.0), LIMITED)
     assert np.array_equal(node._pose['right'][:3], here)      # 接合瞬间零位移
@@ -755,32 +755,14 @@ def test_pressing_a_x_again_cancels(node):
     node._update_arms(_ax(('right',)), LIMITED)
     node._update_arms(_ax(()), LIMITED)
     node._update_arms(_ax(('right',)), LIMITED)
-    assert node._trigger['home_cancel'].calls == 1
-    assert node._trigger['home_right'].calls == 1             # 没有重复下单
+    node._cancel_home.assert_called_once()
+    node._start_home.assert_called_once_with('right')
 
 
 def test_homing_does_not_start_while_the_clutch_is_held(node):
     node._update_arms(_ax((), squeeze=1.0), LIMITED)
     node._update_arms(_ax(('right',), squeeze=1.0), LIMITED)
-    assert node._trigger['home_right'].calls == 0
-
-
-def test_service_not_ready_does_not_pretend_to_home(node):
-    node._trigger['home_right'].ready = False
-    node._update_arms(_ax(()), LIMITED)
-    node._update_arms(_ax(('right',)), LIMITED)
-    assert node._homing['right'] is None
-
-
-def test_a_lost_service_reply_eventually_hands_control_back(node):
-    """服务阻塞在策略层，策略层没了的话不能让那只手永远卡在跟随里。"""
-    from upper_vr.vr_teleop import _HOME_TIMEOUT_S
-    node._update_arms(_ax(()), LIMITED)
-    node._update_arms(_ax(('right',)), LIMITED)
-    assert node._homing['right'] is not None
-    node._now = lambda: 100.0 + _HOME_TIMEOUT_S + 1.0
-    node._update_arms(_ax(()), LIMITED)
-    assert node._homing['right'] is None
+    node._start_home.assert_not_called()
 
 
 # ------------------------------------------------------------- 断联期间交还上肢

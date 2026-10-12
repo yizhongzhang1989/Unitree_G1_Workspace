@@ -15,6 +15,7 @@
 | `ros2 launch robot_bringup motion_tasks.launch.py` | session + 下肢速度策略 + 上肢 VR，各任务直接发布 FPC 关节目标 |
 | `ros2 launch robot_bringup whole_vr.launch.py` | session + 上肢 VR + 摇杆速度跟踪，不重复启动硬件 |
 | `ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=float` | session + 独立上肢浮动，腰腿保持默认目标 |
+| `ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=force_feedback` | session + 双臂位置互换力反馈，腰腿和夹爪保持默认目标 |
 | `ros2 launch robot_bringup motion_tasks.launch.py lower_task:=footstep upper_task:=vla` | session + 脚步策略 + `upper_vla`；VLA 保持 `/vla_bridge` 服务 |
 | `ros2 launch record record.launch.py` | 录制 + 数据管理与内置回放，回放前已有 FPC 必须 active |
 | `ros2 run record data_manager` | 只启动数据页面与内置回放，无需额外执行器入口 |
@@ -39,7 +40,7 @@
 
 ## 运动与采集
 
-会话内上肢任务为 `upper_vr`、`upper_vla`、`upper_float`，下肢任务为 `lower_velocity_tracking` 或 `lower_footstep_tracking`。各任务认领关节并直接向 FPC 发布掩码目标，`g1_motion_session` 协调注册与生命周期。`lower_task` 可选 `velocity/footstep/none`，`upper_task` 可选 `vr/vla/float/none`。直接调用 `motion_tasks.launch.py` 默认为下肢 velocity、上肢 VR；正式键盘入口默认为下肢 velocity、上肢 float，两者是不同的默认组合。
+会话内上肢任务为 `upper_vr`、`upper_vla`、`upper_float`、[upper_force_feedback](../upper_force_feedback/README.md)，下肢任务为 `lower_velocity_tracking` 或 `lower_footstep_tracking`。各任务认领关节并直接向 FPC 发布掩码目标，`g1_motion_session` 协调注册与生命周期。`lower_task` 可选 `velocity/footstep/none`，`upper_task` 可选 `vr/vla/float/force_feedback/none`。直接调用 `motion_tasks.launch.py` 默认为下肢 velocity、上肢 VR；正式键盘入口默认为下肢 velocity、上肢 float，两者是不同的默认组合。
 
 [record](../record/README.md) 的 DataManager 在自身进程内创建 ReplayTask，两个节点共用 executor。回放读取 `motion_control_command` 末端轨迹，从当前实测姿态缓入首动作，通过共享本地 IK 输出上肢槽位 15..30 的 `JointTargets`。`record.launch.py` 默认 `data:=true` 自动带数据管理与回放；`data:=false` 只启动 recorder。只需数据页面与回放时执行 `ros2 run record data_manager`。回放复用 g1_motion_session 的 IK 工具，非会话任务。
 
@@ -52,10 +53,11 @@ source scripts/env.sh
 ros2 run robot_bringup teleop_keyboard
 ```
 
-正式键盘入口由 [motion_keyboard.py](robot_bringup/motion_keyboard.py) 的 `main` 实现，以 `teleop_keyboard=robot_bringup.motion_keyboard:main` 安装。它支持 `--upper-task {float,vr,vla}`、`--lower-config`、`--upper-config`，未知参数交给键盘节点作为 ROS 参数，任务参数与默认配置保持不变：
+正式键盘入口由 [motion_keyboard.py](robot_bringup/motion_keyboard.py) 的 `main` 实现，以 `teleop_keyboard=robot_bringup.motion_keyboard:main` 安装。它支持 `--upper-task {float,vr,vla,force_feedback}`、`--lower-config`、`--upper-config`，未知参数交给键盘节点作为 ROS 参数，任务参数与默认配置保持不变：
 
 ```bash
 ros2 run robot_bringup teleop_keyboard --upper-task vr
+ros2 run robot_bringup teleop_keyboard --upper-task force_feedback
 ros2 run robot_bringup teleop_keyboard --lower-config /workspace/src/lower_velocity_tracking/config/lower_body.yaml --upper-config /workspace/src/upper_float/config/upper_float.yaml
 ros2 run robot_bringup teleop_keyboard --ros-args -p vx_step:=0.05
 ```
@@ -76,6 +78,8 @@ ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=fl
 ```
 
 `whole_vr.launch.py` 使用下肢 `lower_vr.yaml`，将 `lower_source` 设为 `vr`；其余组合使用所选任务的默认配置。launch 配置覆盖使用 `lower_config:=... upper_config:=...`。
+
+会话安全检查默认开启。`motion_tasks.launch.py`、`whole_vr.launch.py` 和 `record_all.launch.py` 可用 `safety_checks_enabled:=false` 在启动时关闭会话级倾角/传感器超时检查，任务与硬件保护不变；省略参数则取 session YAML。阈值、触发行为与重启要求见 [g1_motion_session](../g1_motion_session/README.md#配置)。
 
 正式键盘入口、组合 launch 和手动拆分部署是互斥的启动方案，不重复启动 session 或同一任务。已有组合需要额外键盘终端时，执行 `ros2 run lower_velocity_tracking teleop_keyboard`，这是 control-only 入口，只连接已有 session 与任务，不重复启动它们或硬件；其速度由选择 keyboard 来源的下肢任务消费。上肢监控使用 `ros2 launch g1_motion_session dashboard.launch.py`，只连接已有会话。
 

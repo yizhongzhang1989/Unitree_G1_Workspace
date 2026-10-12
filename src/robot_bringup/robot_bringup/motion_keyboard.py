@@ -10,7 +10,7 @@ import tempfile
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='启动速度任务、上肢任务与键盘控制台')
-    parser.add_argument('--upper-task', choices=('float', 'vr', 'vla'), default='float')
+    parser.add_argument('--upper-task', choices=('float', 'vr', 'vla', 'force_feedback'), default='float')
     parser.add_argument('--lower-config', default='')
     parser.add_argument('--upper-config', default='')
     options, ros_arguments = parser.parse_known_args(args)

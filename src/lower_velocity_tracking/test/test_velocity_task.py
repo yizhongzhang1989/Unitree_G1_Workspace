@@ -26,7 +26,6 @@ def task_fixture():
     task._dq = np.zeros(31)
     task._quat, task._omega = (0., 0., 0., 1.), (0., 0., 0.)
     task._registered, task._preparing = True, True
-    task._homes = {}
     task._publish_task_status = Mock()
     task._stopped = True
     task.state = State.STAND
@@ -102,18 +101,18 @@ def test_preparation_waits_for_shared_start_time():
     np.testing.assert_array_equal(task.output.positions[:15], np.ones(15))
 
 
-def test_launch_uses_task_parameters_and_single_threaded_blas(monkeypatch):
-    pytest.importorskip('g1_motion_session.launch_support')
+def test_launch_preserves_config_and_single_threaded_blas(monkeypatch):
     from launch import LaunchContext
 
     launch = runpy.run_path(str(Path(__file__).parents[1] / 'launch/velocity_tracking.launch.py'))
-    factory, parameters = Mock(), Mock(return_value=['/tmp/lower.yaml'])
+    factory = Mock()
     monkeypatch.setitem(launch['_nodes'].__globals__, 'Node', factory)
-    monkeypatch.setitem(launch['_nodes'].__globals__, 'task_parameters', parameters)
     context = LaunchContext()
     context.launch_configurations['config'] = '/tmp/lower.yaml'
     launch['_nodes'](context)
-    parameters.assert_called_once_with('lower_velocity_tracking', '/tmp/lower.yaml')
-    assert factory.call_args.kwargs['parameters'] == ['/tmp/lower.yaml']
+    parameters = factory.call_args.kwargs['parameters']
+    assert [Path(source).name for source in parameters] == [
+        'session.yaml', 'lower_body.yaml', 'lower.yaml', 'default_31dof_param.yaml']
+    assert parameters[-2] == '/tmp/lower.yaml'
     assert factory.call_args.kwargs['additional_env'] == {
         'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'}

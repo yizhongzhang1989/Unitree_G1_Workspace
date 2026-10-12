@@ -492,8 +492,7 @@ def test_launch_uses_existing_settings_with_independent_node(monkeypatch):
     monkeypatch.setitem(launch['_node'].__globals__, 'Node', factory)
 
     def get_package_share_directory(name):
-        _ = name
-        return str(package)
+        return str(package.parent / name)
 
     monkeypatch.setitem(launch['_node'].__globals__, 'get_package_share_directory',
                         get_package_share_directory)
@@ -503,7 +502,8 @@ def test_launch_uses_existing_settings_with_independent_node(monkeypatch):
     assert arguments['executable'] == 'online_rl_bridge'
     sources = arguments['parameters']
     assert sources[0].endswith('g1_motion_session/config/session.yaml')
-    assert sources[-2].endswith('config/arm_ik.yaml')
+    assert sources[1].endswith('g1_motion_session/config/arm_ik.yaml')
+    assert sources[2].endswith('unitree_g1_ros2_control/config/default_31dof_param.yaml')
     parameters = sources[-1]
     assert parameters['task_description'] == ''
     assert parameters['execution_mode'] == 'manual'

@@ -5,7 +5,7 @@
     stand_s: 2.5
     stand_clear_s: 0.4
     stand_clear_roll: 0.7
-    home_s: 2.0
+    safety_checks_enabled: true
     state_timeout_s: 0.2
     tilt_limit_rad: 1.0
     imu_topic: /pelvis_imu_broadcaster/imu

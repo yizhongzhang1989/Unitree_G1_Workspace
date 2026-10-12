@@ -32,6 +32,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
@@ -55,13 +56,19 @@ class Capture(Node):
         self.tf = Buffer()
         self._tf_listener = TransformListener(self.tf, self)
         self.create_subscription(String, '/robot_description',
-                                 lambda m: setattr(self, 'urdf', m.data), LATCHED)
+                                 self._on_description, LATCHED)
         self.create_subscription(JointState, '/joint_states',
-                                 lambda m: self.samples.append(dict(zip(m.name, m.position))), 50)
+                                 self._on_joints, 50)
         self.create_subscription(Image, '/head/camera/color/image_raw',
                                  lambda m: setattr(self, 'color', m), qos_profile_sensor_data)
         self.create_subscription(CameraInfo, '/head/camera/color/camera_info',
                                  lambda m: setattr(self, 'info', m), qos_profile_sensor_data)
+
+    def _on_description(self, message: String) -> None:
+        self.urdf = message.data
+
+    def _on_joints(self, message: JointState) -> None:
+        self.samples.append(dict(zip(message.name, message.position)))
 
     def spin_for(self, seconds: float) -> None:
         end = time.monotonic() + seconds
@@ -76,7 +83,7 @@ class Capture(Node):
 
     def extrinsic(self, parent: str, child: str, timeout: float = 5.0, stamp=None) -> Optional[np.ndarray]:
         """`parent` 到 `child` 的 4x4，查不到返回 None。"""
-        zero = rclpy.time.Time() if stamp is None else rclpy.time.Time.from_msg(stamp)
+        zero = Time() if stamp is None else Time.from_msg(stamp)
         if not self.wait_until(lambda: self.tf.can_transform(parent, child, zero), timeout):
             return None
         tf = self.tf.lookup_transform(parent, child, zero).transform
@@ -115,7 +122,7 @@ def _mktemp(suffix: str) -> str:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument('--window', type=float, default=0.5, help='关节角采样窗口（秒）')
     parser.add_argument('--still', type=float, default=0.01,
                         help='窗口内峰峰值超过这个值就警告手臂在动（rad）')
@@ -138,9 +145,10 @@ def main(argv=None) -> int:
         return 1
 
     # --- 拍照，然后就地采一小段关节角 ---
-    color = cap.color
-    k = cap.info.k
-    camera = PinholeCamera(cap.info.width, cap.info.height, k[0], k[4], k[2], k[5])
+    color, info, urdf = cap.color, cap.info, cap.urdf
+    assert color is not None and info is not None and urdf is not None
+    k = info.k
+    camera = PinholeCamera(info.width, info.height, k[0], k[4], k[2], k[5])
     cap.samples.clear()
     if not cap.wait_until(lambda: cap.samples, 10.0):
         print('收不到 /joint_states', file=sys.stderr)
@@ -171,7 +179,7 @@ def main(argv=None) -> int:
     urdf_path = _mktemp('.urdf')
     try:
         with open(urdf_path, 'w') as fp:
-            fp.write(cap.urdf)
+            fp.write(urdf)
         save_pose(pose_path, joints, camera, args.frame, extrinsic)
         pose_joints, pose_camera, pose_frame, pose_extrinsic = load_pose(pose_path)
         shot = shoot(pose_joints, urdf=urdf_path, mesh_dir=_package_dirs(),
