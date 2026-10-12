@@ -13,7 +13,6 @@ from g1_mocap.motion_model import MotionModel
 
 
 ROOT = Path(__file__).resolve().parents[2]
-URDF = ROOT / 'unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf'
 DEFAULT_Q = np.asarray(yaml.safe_load(
     (ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters'][
         'default_joint_pos'])
@@ -28,8 +27,8 @@ def test_contact_hysteresis_preserves_lift():
     assert contacts[:, 1].all()
 
 
-def test_refinement_reduces_slip_and_preserves_upper_body(monkeypatch):
-    model = MotionModel(str(URDF))
+def test_refinement_reduces_slip_and_preserves_upper_body(monkeypatch, controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     height = model.kin.pelvis_height(DEFAULT_Q, model.feet) + 0.03
     rows = np.tile(np.r_[[0, 0, height], [0, 0, 0, 1], DEFAULT_Q], (21, 1))
     rows[:, 0] += np.linspace(0, 0.04, len(rows))
@@ -47,6 +46,8 @@ def test_refinement_reduces_slip_and_preserves_upper_body(monkeypatch):
     after = metrics(model, output, contacts, weights, targets)
     assert after['support_segment_slip_max_m'] < 0.001
     assert after['penetration_max_m'] < 0.001
+    assert after['support_xy_speed_m_s'] is not None
+    assert before['support_xy_speed_m_s'] is not None
     assert after['support_xy_speed_m_s']['p95'] < before['support_xy_speed_m_s']['p95'] / 10
     np.testing.assert_array_equal(rows, original)
     np.testing.assert_array_equal(output[:, 3:7], rows[:, 3:7])
@@ -57,8 +58,8 @@ def test_refinement_reduces_slip_and_preserves_upper_body(monkeypatch):
     assert geometry(model, output[0])[0].shape == (2, 4, 3)
 
 
-def test_airborne_motion_is_not_glued_to_floor():
-    model = MotionModel(str(URDF))
+def test_airborne_motion_is_not_glued_to_floor(controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     rows = np.tile(np.r_[[0, 0, 1.2], [0, 0, 0, 1], DEFAULT_Q], (12, 1))
     rows[:, 0] = np.linspace(0, 0.1, len(rows))
     output, contacts, _, _, solver = refine(model, rows)
@@ -88,8 +89,8 @@ def test_dynamic_toe_contact_does_not_flatten_heel():
     assert not weights[:, :, 2:].any()
 
 
-def test_dynamic_full_jump_keeps_flight_trajectory():
-    model = MotionModel(str(URDF))
+def test_dynamic_full_jump_keeps_flight_trajectory(controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     height = model.kin.pelvis_height(DEFAULT_Q, model.feet) + 0.03
     rows = np.tile(np.r_[[0, 0, height], [0, 0, 0, 1], DEFAULT_Q], (90, 1))
     lift = np.zeros(len(rows))
@@ -102,6 +103,7 @@ def test_dynamic_full_jump_keeps_flight_trajectory():
     report = metrics(model, output, contacts, weights, targets)
     assert report['penetration_max_m'] < 0.001
     assert report['stable_support_intervals'] > 0
+    assert report['support_xy_speed_m_s'] is not None
     assert report['support_xy_speed_m_s']['p95'] < 0.001
     np.testing.assert_array_equal(output[:, 3:7], rows[:, 3:7])
     np.testing.assert_array_equal(output[:, 19:], rows[:, 19:])
@@ -120,8 +122,8 @@ def test_dynamic_release_returns_to_original_without_target_jump():
                                           points[last_contact:, side, corner])
 
 
-def test_dynamic_full_support_targets_form_rigid_foot():
-    model = MotionModel(str(URDF))
+def test_dynamic_full_support_targets_form_rigid_foot(controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     points = np.zeros((40, 2, 4, 3))
     for side in range(2):
         local = np.array([center for center, radius in model.contacts[side]])
@@ -138,8 +140,8 @@ def test_dynamic_full_support_targets_form_rigid_foot():
 
 
 @pytest.mark.parametrize('pitch', [-0.3, 0.3])
-def test_tilted_support_preserves_unloaded_edge(pitch):
-    model = MotionModel(str(URDF))
+def test_tilted_support_preserves_unloaded_edge(pitch, controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     row = np.r_[[0, 0, 0.8], Rotation.from_euler('y', pitch).as_quat(), DEFAULT_Q]
     initial_points, _ = geometry(model, row)
     row[2] -= initial_points[..., 2].min()
@@ -158,8 +160,8 @@ def test_tilted_support_preserves_unloaded_edge(pitch):
     assert after[..., 2].min() > -0.001
 
 
-def test_one_sequence_uses_same_solver_for_support_roll_flight_landing():
-    model = MotionModel(str(URDF))
+def test_one_sequence_uses_same_solver_for_support_roll_flight_landing(controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     rows = np.tile(np.r_[[0, 0, 0.8], [0, 0, 0, 1], DEFAULT_Q], (120, 1))
     for index, row in enumerate(rows):
         pitch = 0.3 * min(1, max(0, (index - 20) / 20)) if index < 60 else 0.0

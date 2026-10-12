@@ -20,6 +20,7 @@ from nav_msgs.msg import Odometry
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
@@ -153,7 +154,7 @@ def main():
           first.header.frame_id == 'world' and first.child_frame_id == 'torso_link',
           f'{first.header.frame_id} -> {first.child_frame_id}')
     check('原点未设时不广播 world TF',
-          not fx.buffer.can_transform('world', 'pelvis', rclpy.time.Time()))
+          not fx.buffer.can_transform('world', 'pelvis', Time()))
 
     print('\n--- 调 set_origin ---')
     fx.cli.wait_for_service(timeout_sec=5.0)
@@ -180,7 +181,7 @@ def main():
     check('倾角保留（世界 z 轴仍铅垂）', abs(tilt - math.degrees(TILT0)) < 1e-3,
           f'{tilt:.3f}° vs 期望 {math.degrees(TILT0):.3f}°')
     check('广播了 world -> pelvis',
-          fx.buffer.can_transform('world', 'pelvis', rclpy.time.Time()))
+          fx.buffer.can_transform('world', 'pelvis', Time()))
 
     print('\n--- twist 换算（转头 0.4 rad/s + 前进 0.25 m/s）---')
     tw = at0.twist.twist

@@ -97,6 +97,7 @@ def main() -> int:
                 break
             except Exception:                      # noqa: BLE001
                 if node.poll() is not None:
+                    assert node.stdout is not None
                     print('节点退出了:\n', node.stdout.read())
                     return 1
         else:

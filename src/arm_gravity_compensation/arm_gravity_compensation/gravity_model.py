@@ -1,9 +1,8 @@
 """Pinocchio gravity model containing only both arms relative to the torso."""
 
 import copy
-import hashlib
 import xml.etree.ElementTree as ET
-from typing import Dict, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple, TypedDict
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -12,8 +11,29 @@ import pinocchio as pin
 from .constants import ALL_ARM_JOINTS, ARM_JOINTS, FT_SENSOR_LINKS, SIDES
 
 
+class ToolPayload(TypedDict):
+    mass: float
+    com: ArrayLike
 
-def _rpy_matrix(rpy: ArrayLike) -> np.ndarray:
+
+class ArmGravityTable(TypedDict):
+    joints: list[str]
+    axis: list[float]
+    origin_xyz: list[float]
+    origin_rotation: list[float]
+    mass: list[float]
+    com: list[float]
+    payload_origin_xyz: list[float]
+    payload_origin_rotation: list[float]
+
+
+class GravityTable(TypedDict, total=False):
+    imu_to_torso: list[float]
+    left: ArmGravityTable
+    right: ArmGravityTable
+
+
+def _rpy_matrix(rpy: Sequence[float]) -> np.ndarray:
     roll, pitch, yaw = (float(value) for value in rpy)
     cr, sr = np.cos(roll), np.sin(roll)
     cp, sp = np.cos(pitch), np.sin(pitch)
@@ -59,7 +79,7 @@ def imu_to_torso_rotation(urdf_xml: str) -> np.ndarray:
 
 
 def _model_link(source: ET.Element) -> ET.Element:
-    link = ET.Element("link", {"name": source.get("name")})
+    link = ET.Element("link", {"name": source.attrib["name"]})
     inertial = source.find("inertial")
     if inertial is not None:
         link.append(copy.deepcopy(inertial))
@@ -81,8 +101,11 @@ def welded_placement(root: ET.Element, ancestor: str,
     Only fixed joints may appear on the way up: a movable one would make the
     pose depend on a configuration, and every caller here needs a constant.
     """
-    parent_joint = {joint.find("child").get("link"): joint
-                    for joint in root.findall("joint")}
+    parent_joint = {}
+    for joint in root.findall("joint"):
+        child = joint.find("child")
+        assert child is not None
+        parent_joint[child.attrib["link"]] = joint
     rotation = np.eye(3)
     translation = np.zeros(3)
     current = link
@@ -95,16 +118,20 @@ def welded_placement(root: ET.Element, ancestor: str,
         joint_rotation, joint_translation = _origin(joint)
         translation = joint_translation + joint_rotation @ translation
         rotation = joint_rotation @ rotation
-        current = joint.find("parent").get("link")
+        parent = joint.find("parent")
+        assert parent is not None
+        current = parent.attrib["link"]
     return rotation, translation
 
 
 def _descendants(root: ET.Element, link: str) -> Tuple[str, ...]:
-    children: Dict[str, list] = {}
+    children: Dict[str, list[str]] = {}
     for joint in root.findall("joint"):
-        children.setdefault(joint.find("parent").get("link"), []).append(
-            joint.find("child").get("link"))
-    found: list = []
+        parent, child = joint.find("parent"), joint.find("child")
+        assert parent is not None and child is not None
+        children.setdefault(parent.attrib["link"], []).append(
+            child.attrib["link"])
+    found: list[str] = []
     pending = list(children.get(link, ()))
     while pending:
         current = pending.pop()
@@ -123,13 +150,13 @@ def extract_torso_arm_urdf(
     while associating them with the wrist-yaw selection in the dashboard.
     """
     source = ET.fromstring(urdf_xml)
-    links = {link.get("name"): link for link in source.findall("link")}
-    joints = {joint.get("name"): joint for joint in source.findall("joint")}
-    children: Dict[str, list] = {}
+    links = {link.attrib["name"]: link for link in source.findall("link")}
+    joints = {joint.attrib["name"]: joint for joint in source.findall("joint")}
+    children: Dict[str, list[ET.Element]] = {}
     for joint in source.findall("joint"):
         parent = joint.find("parent")
         if parent is not None:
-            children.setdefault(parent.get("link"), []).append(joint)
+            children.setdefault(parent.attrib["link"], []).append(joint)
     missing = [name for name in ALL_ARM_JOINTS if name not in joints]
     if missing or "torso_link" not in links:
         raise ValueError("URDF is missing arm elements: %s" % missing)
@@ -142,13 +169,13 @@ def extract_torso_arm_urdf(
     added_joints = set()
 
     def append_subtree(joint: ET.Element, owner: str = "") -> None:
-        joint_name = joint.get("name")
+        joint_name = joint.attrib["name"]
         if joint_name in added_joints:
             return
         child = joint.find("child")
         if child is None:
             raise ValueError("joint %s has no child" % joint_name)
-        child_name = child.get("link")
+        child_name = child.attrib["link"]
         if child_name not in links:
             raise ValueError("joint %s child link is missing" % joint_name)
         if joint_name in ALL_ARM_JOINTS:
@@ -183,9 +210,9 @@ def _scale_inertial(inertial: ET.Element, scale: float) -> None:
     inertia = inertial.find("inertia")
     if mass is None or inertia is None:
         raise ValueError("inertial is missing mass or inertia")
-    mass.set("value", "%.17g" % (float(mass.get("value")) * scale))
+    mass.set("value", "%.17g" % (float(mass.attrib["value"]) * scale))
     for name in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz"):
-        inertia.set(name, "%.17g" % (float(inertia.get(name)) * scale))
+        inertia.set(name, "%.17g" % (float(inertia.attrib[name]) * scale))
 
 
 def _full_reference_configuration(model, root: ET.Element) -> np.ndarray:
@@ -246,21 +273,23 @@ class TorsoArmGravityModel:
             for side in SIDES
         }
         self._biases = {side: np.zeros(7, dtype=float) for side in SIDES}
-        template_masses = {
-            link.get("name"): float(link.find("inertial").find("mass").get("value"))
-            for link in self._template.findall("link")
-            if link.find("inertial") is not None
-        }
+        template_masses = {}
+        for link in self._template.findall("link"):
+            inertial = link.find("inertial")
+            if inertial is not None:
+                mass = inertial.find("mass")
+                assert mass is not None
+                template_masses[link.attrib["name"]] = float(mass.attrib["value"])
         self.parameter_masses = {
             side: np.array([template_masses[name]
                             for name in self.parameter_links[side]], dtype=float)
             for side in SIDES
         }
-        template_efforts = {
-            joint.get("name"): float(joint.find("limit").get("effort"))
-            for joint in self._template.findall("joint")
-            if joint.find("limit") is not None
-        }
+        template_efforts = {}
+        for joint in self._template.findall("joint"):
+            limit = joint.find("limit")
+            if limit is not None:
+                template_efforts[joint.attrib["name"]] = float(limit.attrib["effort"])
         self.joint_efforts = {
             side: np.array([template_efforts[name] for name in ARM_JOINTS[side]],
                            dtype=float)
@@ -273,7 +302,7 @@ class TorsoArmGravityModel:
         # 没装传感器的 URDF（裸 G1）照样能用，只是没有负载那一路。
         present = {link.get("name") for link in self._template.findall("link")}
         self._wrist_links = {
-            side: next(joint.find("child").get("link")
+            side: next(joint.findall("child")[0].attrib["link"]
                        for joint in self._template.findall("joint")
                        if joint.get("name") == ARM_JOINTS[side][-1])
             for side in SIDES
@@ -440,8 +469,8 @@ class TorsoArmGravityModel:
 
     def gravity_table(
         self,
-        tool: Optional[Mapping[str, Mapping[str, ArrayLike]]] = None,
-    ) -> Dict[str, object]:
+        tool: Optional[Mapping[str, ToolPayload]] = None,
+    ) -> GravityTable:
         """Export the lumped serial chain a runtime controller needs.
 
         Every link welded to a moving body is already merged into that body by
@@ -460,8 +489,9 @@ class TorsoArmGravityModel:
         identified numbers untouched: the split is then bookkeeping only and
         every joint torque stays bit-for-bit what it was.
         """
-        table = {"imu_to_torso": [float(value)
-                                  for value in self.imu_to_torso.ravel()]}
+        table: GravityTable = {
+            "imu_to_torso": self.imu_to_torso.ravel().tolist(),
+        }
         for side in SIDES:
             names, axes, origins, rotations = [], [], [], []
             masses, centres = [], []
@@ -476,9 +506,7 @@ class TorsoArmGravityModel:
                 names.append(name)
                 axes.extend(_joint_axis(self.model.joints[joint_id]).tolist())
                 origins.extend(placement.translation.tolist())
-                rotations.extend(
-                    float(value)
-                    for value in np.asarray(placement.rotation).ravel())
+                rotations.extend(np.asarray(placement.rotation).ravel().tolist())
                 masses.append(float(inertia.mass))
                 centres.extend(np.asarray(inertia.lever, dtype=float).tolist())
             rotation, translation = self.sensor_placement.get(
@@ -495,13 +523,12 @@ class TorsoArmGravityModel:
                 "mass": masses,
                 "com": centres,
                 "payload_origin_xyz": translation.tolist(),
-                "payload_origin_rotation": [float(value)
-                                            for value in rotation.ravel()],
+                "payload_origin_rotation": rotation.ravel().tolist(),
             }
         return table
 
     def _measured_tool_body(self, side: str, mass: float, centre: np.ndarray,
-                            tool: Mapping[str, ArrayLike]) -> Tuple[float, list]:
+                            tool: ToolPayload) -> Tuple[float, list[float]]:
         """Swap the modelled tool of the last body for the weighed one."""
         rotation, translation = self.sensor_placement[side]
         measured_mass = float(tool["mass"])
@@ -525,7 +552,7 @@ class TorsoArmGravityModel:
             inertial = link.find("inertial")
             if inertial is None:
                 continue
-            link_name = link.get("name")
+            link_name = link.attrib["name"]
             if keep is not None and link_name not in keep:
                 link.remove(inertial)
                 continue

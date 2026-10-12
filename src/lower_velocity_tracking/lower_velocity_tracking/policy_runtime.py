@@ -1,0 +1,238 @@
+"""下肢 GRU 策略的观测装配与推理，不依赖 ROS，可离线单测。
+
+对应训练侧 ``G1-Gloria-LowerBody-Flat-GRU``。观测布局必须和该任务 ``actor`` 组逐项
+对齐，顺序也一样（顺序写死在观测向量里，错一位就是错一个策略）：
+
+===  ==================  ====  ==========================================
+序   项                   维度  实机来源
+===  ==================  ====  ==========================================
+0    base_ang_vel          3   盆骨 IMU 角速度（盆骨系）
+1    projected_gravity     3   盆骨 IMU 姿态四元数投影的重力方向
+2    command_twist         3   [vx, vy, wz]
+3    command_height        1   [h]
+4    phase                 2   [sin, cos]，指令接近零时置零
+5    joint_pos            15   q_meas - q_default
+6    joint_vel            15   dq_meas
+===  ==================  ====  ==========================================
+
+共 42 维。**没有 ``actions`` 项**——GRU 的隐状态本来就记得自己上一拍输出了什么，再从
+输入喂回去等于给策略接了一条显式正反馈通路。部署侧因此也不再维护“上一拍动作”这个状态。
+
+隐状态（``h_in`` / ``h_out``，形状 (1,1,32)）逐拍回喂，并在 :meth:`LocomotionPolicy.reset`
+里清零——训练里它就是每个 episode 开头归零的，不清就会把上一次急停前的状态带进下一次接管。
+
+动作到关节目标：``q_target = q_default + action_scale * action``，和训练侧
+``JointPositionActionCfg(use_default_offset=True)`` 一致。
+
+**目标位置故意不按关节行程裁剪**。底层是 PD，``tau = kp*(q_target - q) - kd*dq``，
+关节靠到限位时想要力就只能靠把目标顶到行程外。mjlab 建 <position> 执行器时
+显式设了 ``ctrllimited=False`` + ``inheritrange=0``，注释写得很直白：“clamping ctrl to
+the joint range would produce zero force when the joint is at its limit”。CPU MuJoCo 闭环
+重跑实测：1.0 m/s 前进时 **18.6% 的拍**目标位置在硬行程之外，``waist_roll`` 能到
+−0.763 rad（行程只有 ±0.520）。按行程裁剪 = 把平衡最吃力的那几个关节掍掉。
+
+真正裁的是 MuJoCo 自己那份 informational ``ctrlrange``，即
+``jnt_range ± effort_limit / stiffness``：越过它力矩已经饱和，再大的目标也换不来额外的力，
+所以裁在这里物理上是空操作（上述五个场景里越界率 **0%**），只用来拦真正跑飞的输出。
+
+关节顺序、默认位姿、动作缩放全部从 ONNX 的 metadata 里读，不在这里抄一遍：
+抄一遍就多一个会和权重不同步的副本。metadata 里的 ``joint_names`` 是模型的**全部 31 轴**，
+拿它截前 N 个去猜动作关节会错位（``left_eccentric_joint`` 夹在左右臂中间），所以动作
+关节一律按训练侧写的 ``action_joint_names`` 取；缺这一项直接拒绝启动。
+"""
+
+from __future__ import annotations
+
+import math
+from typing import TYPE_CHECKING, Sequence
+
+import numpy as np
+
+from g1_motion_session.policy_support import PolicySpec, projected_gravity, spec_matches
+
+if TYPE_CHECKING:
+    from onnxruntime import InferenceSession
+
+__all__ = ['PolicySpec', 'projected_gravity', 'spec_matches', 'LocomotionPolicy',
+           'load_policy', 'gait_phase', 'EXPECTED_OBS_TERMS']
+
+# 训练侧 actor 组的项名与维度，用来校验 ONNX 是不是这个任务导出的。
+EXPECTED_OBS_TERMS: tuple[tuple[str, int], ...] = (
+    ('base_ang_vel', 3),
+    ('projected_gravity', 3),
+    ('command_twist', 3),
+    ('command_height', 1),
+    ('phase', 2),
+    ('joint_pos', 15),
+    ('joint_vel', 15),
+)
+
+GAIT_PERIOD_S = 0.6
+"""训练侧 ``phase`` 观测的步态周期。"""
+
+STAND_COMMAND_NORM = 0.1
+"""``|[vx, vy, wz]|`` 低于此值时 phase 置零，与训练侧 ``mdp.phase`` 一致。"""
+
+
+def _metadata(session) -> dict[str, str]:
+    return dict(session.get_modelmeta().custom_metadata_map)
+
+
+def load_policy(path: str) -> tuple[InferenceSession, PolicySpec]:
+    """加载 ONNX 并解析出 :class:`PolicySpec`。
+
+    归一化层已经在导出时折进图里（``obs_normalization=True``），所以这里喂原始
+    观测即可，不要再自己减均值。
+    """
+    import onnxruntime
+
+    options = onnxruntime.SessionOptions()
+    # 50 Hz 的 42->GRU(32)->256->128->15 是微秒级负载，多线程只会引入调度抖动。
+    options.intra_op_num_threads = 1
+    options.inter_op_num_threads = 1
+    session = onnxruntime.InferenceSession(
+        path, options, providers=['CPUExecutionProvider'])
+
+    meta = _metadata(session)
+    missing = {'joint_names', 'default_joint_pos', 'action_scale',
+               'observation_names', 'action_joint_names'} - meta.keys()
+    if missing:
+        raise ValueError(f'{path} 缺少 metadata: {sorted(missing)}')
+
+    obs_terms = tuple(meta['observation_names'].split(','))
+    expected = tuple(name for name, _ in EXPECTED_OBS_TERMS)
+    if obs_terms != expected:
+        raise ValueError(
+            f'观测项不匹配，这个 ONNX 不是 GRU 版下肢任务导出的\n'
+            f'  期望: {expected}\n  实际: {obs_terms}')
+
+    names = meta['joint_names'].split(',')
+    defaults = [float(v) for v in meta['default_joint_pos'].split(',')]
+    scales = np.asarray(
+        [float(v) for v in meta['action_scale'].split(',')], dtype=np.float64)
+    if len(names) != len(defaults):
+        raise ValueError('joint_names 与 default_joint_pos 长度不一致')
+
+    # ``joint_names`` 是模型的**全部** 31 轴，``action_scale`` 只覆盖策略驱动的那几轴，
+    # 拿前 N 个去猜会错位（``left_eccentric_joint`` 夹在左右臂中间）。按名取。
+    action_names = tuple(meta['action_joint_names'].split(','))
+    slot = {name: i for i, name in enumerate(names)}
+    unknown = [name for name in action_names if name not in slot]
+    if unknown:
+        raise ValueError(f'action_joint_names 里的关节不在 joint_names 里: {unknown}')
+    if len(action_names) != len(scales):
+        raise ValueError(
+            f'动作关节 {len(action_names)} 个，但 action_scale 有 {len(scales)} 项')
+
+    # 隐状态输入输出是必需的，没有就不是这个任务的权重，拒绝启动。
+    inputs = session.get_inputs()
+    if len(inputs) != 2:
+        raise ValueError(
+            f'期望两个输入（obs + 隐状态），实际 {len(inputs)} 个: '
+            f'{[i.name for i in inputs]}')
+
+    spec = PolicySpec(
+        joint_names=action_names,
+        default_pos=np.asarray([defaults[slot[n]] for n in action_names],
+                               dtype=np.float64),
+        action_scale=scales,
+        obs_dim=int(inputs[0].shape[-1]),
+        action_dim=len(scales),
+        hidden_name=inputs[1].name,
+        hidden_shape=tuple(int(d) for d in inputs[1].shape),
+    )
+
+    expected_obs = sum(dim for _, dim in EXPECTED_OBS_TERMS)
+    if spec.obs_dim != expected_obs or spec.action_dim != 15:
+        raise ValueError(
+            f'维度不匹配: obs {spec.obs_dim} (期望 {expected_obs}), '
+            f'action {spec.action_dim} (期望 15)')
+    return session, spec
+
+
+def gait_phase(elapsed_s: float, command: Sequence[float],
+               period_s: float = GAIT_PERIOD_S) -> np.ndarray:
+    """步态相位 ``[sin, cos]``，站立指令下置零。"""
+    if float(np.linalg.norm(np.asarray(command[:3], dtype=np.float64))) < STAND_COMMAND_NORM:
+        return np.zeros(2)
+    angle = 2.0 * math.pi * ((elapsed_s % period_s) / period_s)
+    return np.array([math.sin(angle), math.cos(angle)])
+
+
+class LocomotionPolicy:
+    """一拍策略推理。持有隐状态和相位计时器，所以是有状态的。"""
+
+    def __init__(self, session, spec: PolicySpec, *,
+                 control_dt: float,
+                 target_lower: np.ndarray,
+                 target_upper: np.ndarray,
+                 gait_period_s: float = GAIT_PERIOD_S) -> None:
+        if target_lower.shape != (spec.action_dim,) or target_upper.shape != (spec.action_dim,):
+            raise ValueError('目标边界长度必须等于动作维度')
+        if np.any(target_lower >= target_upper):
+            raise ValueError('目标边界上下界颠倒')
+        self._session = session
+        self._spec = spec
+        self._input = session.get_inputs()[0].name
+        self._control_dt = float(control_dt)
+        self._lower = target_lower
+        self._upper = target_upper
+        self._gait_period_s = float(gait_period_s)
+        self._obs = np.zeros((1, spec.obs_dim), dtype=np.float32)
+        self._raw_obs = np.empty(spec.obs_dim, dtype=np.float64)
+        self._steps = 0
+        self._hidden = np.zeros(spec.hidden_shape, dtype=np.float32)
+
+    def reset(self) -> None:
+        """回到刚复位的状态：隐状态清零，相位从 0 重新计时。
+
+        隐状态必须在这里清——训练里它就是每个 episode 开头归零的。不清的话，
+        上一次跑飞/急停时的状态会被带进下一次接管。
+        """
+        self._steps = 0
+        self._hidden[:] = 0.0
+
+    def observe(self, *, joint_pos: np.ndarray, joint_vel: np.ndarray,
+                ang_vel: Sequence[float], quat_xyzw: Sequence[float],
+                command: Sequence[float], _out=None) -> np.ndarray:
+        """按训练顺序拼观测。command 是 ``[vx, vy, wz, height]``。"""
+        obs = np.empty(self._spec.obs_dim) if _out is None else _out
+        obs[0:3] = ang_vel
+        obs[3:6] = projected_gravity(quat_xyzw)
+        obs[6:10] = command
+        obs[10:12] = gait_phase(self._steps * self._control_dt, command, self._gait_period_s)
+        np.subtract(joint_pos, self._spec.default_pos, out=obs[12:27])
+        obs[27:42] = joint_vel
+        return obs
+
+    def step(self, *, joint_pos: np.ndarray, joint_vel: np.ndarray,
+             ang_vel: Sequence[float], quat_xyzw: Sequence[float],
+             command: Sequence[float]) -> np.ndarray:
+        """跑一拍，返回 15 个关节目标位置。
+
+        目标可以、也应该落在关节行程之外（见模块文档）；只裁到力矩已饱和的
+        ``ctrlrange``。
+
+        Raises:
+            ValueError: 输入或网络输出出现非有限值。
+        """
+        obs = self.observe(joint_pos=joint_pos, joint_vel=joint_vel,
+                           ang_vel=ang_vel, quat_xyzw=quat_xyzw, command=command,
+                           _out=self._raw_obs)
+        if not np.all(np.isfinite(obs)):
+            raise ValueError('观测里有非有限值')
+
+        self._obs[0, :] = obs
+        outputs = self._session.run(
+            None, {self._input: self._obs, self._spec.hidden_name: self._hidden})
+        action = np.asarray(outputs[0], dtype=np.float64).reshape(-1)
+        if action.shape != (self._spec.action_dim,) or not np.all(np.isfinite(action)):
+            raise ValueError(f'策略输出非法: {action}')
+        new_hidden = np.asarray(outputs[1], dtype=np.float32)
+        if not np.all(np.isfinite(new_hidden)):
+            raise ValueError('隐状态出现非有限值')
+        self._hidden = new_hidden
+
+        self._steps += 1
+        target = self._spec.default_pos + self._spec.action_scale * action
+        return np.clip(target, self._lower, self._upper)

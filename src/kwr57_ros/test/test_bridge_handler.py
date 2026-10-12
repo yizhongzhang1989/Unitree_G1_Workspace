@@ -2,7 +2,7 @@ import json
 import struct
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from can_msgs.msg import Frame
 
@@ -15,7 +15,7 @@ from kwr57_ros.ft_sensor_node import KWR57DeviceNode
 from kwr57_sensor import WrenchAssembler
 
 
-class _CoreNode:
+class _CoreNode(KWR57DeviceNode):
     """Minimal state needed to exercise KWR57DeviceNode's shared RX core."""
 
     def __init__(self) -> None:
@@ -80,8 +80,8 @@ class Kwr57SharedDataPathTest(unittest.TestCase):
 
     def test_ros_frame_adapter_uses_shared_core(self) -> None:
         calls = []
-        adapter = SimpleNamespace(
-            handle_can_frame=lambda *args, **kwargs: calls.append((args, kwargs)))
+        adapter = KWR57DeviceNode.__new__(KWR57DeviceNode)
+        adapter.handle_can_frame = Mock(side_effect=lambda *args, **kwargs: calls.append((args, kwargs)))
         frame = Frame()
         frame.id = 0x15
         frame.dlc = 8
@@ -137,6 +137,7 @@ class Kwr57HandlerFactoryTest(unittest.TestCase):
         self.assertIs(
             registration.callback(1, message), FrameDisposition.FORWARD)
 
+        assert registration.start is not None and registration.stop is not None
         registration.start()
         registration.stop()
         self.assertEqual((node.activated, node.stopped), (1, 1))

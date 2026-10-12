@@ -103,7 +103,7 @@
     # ctrllimited=False + inheritrange=0，就是为了这个。越过下面这组边界力矩已经饱和，
     # 再大的目标也换不来额外的力，所以裁在这儿物理上是空操作，纯粹用来拦真正跑飞的输出。
     #
-    # 前 15 项与 g1_motion_control/config/motion_control.yaml 逐位相同（同一套模型算的）。
+    # 前 15 项是腿和腰的保护边界，按上述训练模型公式计算。
     target_lower_limits: [-4.721, -1.926, -4.948, -1.490, -2.627, -2.016,
                           -4.721, -4.370, -4.948, -1.490, -2.627, -2.016,
                           -4.808, -2.274, -2.274,
@@ -120,7 +120,7 @@
     control_rate_hz: 50.0
 
     # STAND 阶段把 31 轴从实测位形插值到参考动作第 0 帧，插完才开始放。
-    # 比 g1_motion_control 的 2.5 s 略长：这里手臂也要一起走到位。
+    # 比 g1_motion_session 默认准备的 2.5 s 略长：这里手臂也要一起走到位。
     stand_s: 3.0
 
     # 躯干倾角超过它就急停。与站立任务的终止条件同值。
@@ -161,7 +161,7 @@
     max_anchor_offset_m: 0.3
 
     imu_topic: /pelvis_imu_broadcaster/imu
-    target_topic: /forward_position_controller/commands
+    target_topic: /forward_position_controller/joint_targets
     controller_manager: /controller_manager
     controller_name: forward_position_controller
 

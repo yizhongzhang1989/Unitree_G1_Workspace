@@ -15,7 +15,11 @@ from .motion_capture import JOINT_NAMES
 class MotionModel:
     def __init__(self, urdf_path):
         robot = ET.parse(urdf_path).getroot()
-        children = {joint.find('child').get('link') for joint in robot.findall('joint')}
+        children = set()
+        for joint in robot.findall('joint'):
+            child = joint.find('child')
+            assert child is not None
+            children.add(child.get('link'))
         roots = {link.get('name') for link in robot.findall('link')} - children
         moving = {joint.get('name') for joint in robot.findall('joint')
                   if joint.get('type') != 'fixed'}
@@ -39,9 +43,13 @@ class MotionModel:
                 sphere = collision.find('geometry/sphere')
                 box = collision.find('geometry/box')
                 if sphere is not None:
-                    contacts.append((xyz, float(sphere.get('radius'))))
+                    radius = sphere.get('radius')
+                    assert radius is not None
+                    contacts.append((xyz, float(radius)))
                 elif box is not None:
-                    size = np.fromstring(box.get('size'), sep=' ')
+                    dimensions = box.get('size')
+                    assert dimensions is not None
+                    size = np.fromstring(dimensions, sep=' ')
                     for signs in itertools.product((-0.5, 0.5), repeat=3):
                         contacts.append((xyz + rotation @ (size * signs), 0.0))
                 else:

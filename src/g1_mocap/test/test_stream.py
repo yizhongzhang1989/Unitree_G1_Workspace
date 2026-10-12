@@ -70,10 +70,15 @@ def test_parse_body_rejects_bad_payloads(mutate):
 
 
 def test_body_status_gates_usability():
-    assert parse_body(payload(np.zeros((24, 3)), status=0)).usable is False
-    assert parse_body(payload(np.zeros((24, 3)), status=1)).usable is True
+    invalid = parse_body(payload(np.zeros((24, 3)), status=0))
+    valid = parse_body(payload(np.zeros((24, 3)), status=1))
+    assert invalid is not None and valid is not None
+    assert invalid.usable is False
+    assert valid.usable is True
     # LIMITED 放行：精度降级但数值仍然连续，比直接断流强。
-    assert parse_body(payload(np.zeros((24, 3)), status=2)).usable is True
+    limited = parse_body(payload(np.zeros((24, 3)), status=2))
+    assert limited is not None
+    assert limited.usable is True
 
 
 def test_clock_aligner_absorbs_arrival_jitter():
@@ -115,6 +120,7 @@ def filled_buffer(count: int = 20, step: float = 0.1) -> _RingBuffer:
 
 def test_buffer_interpolates_linearly():
     batch = filled_buffer().sample(np.array([0.35]))
+    assert batch is not None
     assert batch.root_pos[0][0] == pytest.approx(0.35, abs=1e-9)
     assert batch.joint_pos[0][0] == pytest.approx(0.35, abs=1e-9)
 
@@ -122,8 +128,11 @@ def test_buffer_interpolates_linearly():
 def test_buffer_clamps_instead_of_extrapolating():
     """外推出来的速度会直接喂给策略，宁可钳在端点。"""
     buffer = filled_buffer()
-    oldest, newest = buffer.span()
+    span = buffer.span()
+    assert span is not None
+    oldest, newest = span
     batch = buffer.sample(np.array([oldest - 10.0, newest + 10.0]))
+    assert batch is not None
     assert batch.t[0] == pytest.approx(oldest)
     assert batch.t[1] == pytest.approx(newest)
     assert batch.root_pos[1][0] == pytest.approx(newest, abs=1e-9)
@@ -139,10 +148,13 @@ def test_buffer_drops_out_of_order_frames():
 
 def test_buffer_wraps_and_keeps_time_order():
     buffer = filled_buffer(count=200, step=0.01)  # 容量 64，绕了两圈多
-    oldest, newest = buffer.span()
+    span = buffer.span()
+    assert span is not None
+    oldest, newest = span
     assert newest == pytest.approx(1.99)
     assert oldest == pytest.approx(newest - 63 * 0.01)
     batch = buffer.sample(np.linspace(oldest, newest, 17))
+    assert batch is not None
     assert np.all(np.diff(batch.t) > 0)
 
 

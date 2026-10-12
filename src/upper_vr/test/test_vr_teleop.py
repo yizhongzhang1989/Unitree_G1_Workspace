@@ -1,0 +1,919 @@
+"""vr_teleop 的离线校验。不需要真机，也不需要 VR 头显。
+
+只测和安全直接相关的两件事：离合接合的瞬间**不能有位置跳变**（上肢不限速，跳一下
+就是电机全权限的弹动），以及 trigger 到夹爪的映射方向没写反（写反 = 该松手时夹紧）。
+
+节点用 ``__new__`` 造出来、只填这几个方法用到的字段：这里要测的是纯逻辑，不想拉起
+ROS 图、也不想连 VR 桥。
+"""
+
+import threading
+from unittest.mock import Mock
+
+import numpy as np
+import pytest
+from std_msgs.msg import Float64MultiArray
+
+from upper_vr.vr_teleop import (
+    VRTeleop,
+    _axis_map,
+    _frame_mode,
+    _matrix,
+    _quat,
+)
+
+OPEN = 2.76377472169236       # eccentric 全开
+CLOSED = 0.0                  # eccentric 闭合
+UNIT = (0.0, 0.0, 0.0, 1.0)   # 单位四元数 xyzw
+# 参考空间（local-floor）里的“前/上/右”，分别落到躯干 +X / +Z / -Y。
+GRIP_FWD = np.array([0.0, 0.0, -1.0])
+GRIP_UP = np.array([0.0, 1.0, 0.0])
+GRIP_RIGHT = np.array([1.0, 0.0, 0.0])
+# 采集页画的那根 15 cm 朝向线（vr/index.html 里的 (0,0,-0.15)），也就是“滚手腕”的轴。
+GRIP_LINE = np.array([0.0, 0.0, -1.0])
+# gripper_base 的伸出/指向轴（URDF 里 +Z），线应该落到它上面。
+EE_POINT = [0.0, 0.0, 1.0]
+
+
+class _Silent:
+    def info(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+
+class _FakeClient:
+    """只记下被调了几次，不拉 ROS 图。``call_async`` 返回一个可以手动完成的 future。"""
+
+    def __init__(self, ready=True):
+        self.ready, self.calls, self.callbacks = ready, 0, []
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, _request):
+        self.calls += 1
+        self.callbacks.append([])
+        handle = self
+        index = len(self.callbacks) - 1
+
+        class _Future:
+            def add_done_callback(self, callback):
+                handle.callbacks[index].append(callback)
+
+        return _Future()
+
+    def finish(self, index=-1):
+        """把第 ``index`` 次调用当成已返回。"""
+        for callback in self.callbacks[index]:
+            callback(_Result())
+
+
+class _Result:
+    def result(self):
+        return type('R', (), {'success': True, 'message': 'ok'})()
+
+
+def _frame(squeeze, trigger, position, orientation=UNIT):
+    return {side: {'grip': {'position': list(position),
+                            'orientation': list(orientation)},
+                   'buttons': {'squeeze': squeeze, 'trigger': trigger}}
+            for side in ('left', 'right')}
+
+
+def _arms(node, squeeze, trigger, position, orientation=UNIT, limited=None):
+    """跑一帧上肢逻辑；``limited`` 是策略层限速后的可达末端指令。"""
+    node._update_arms(_frame(squeeze, trigger, position, orientation), limited or {})
+
+
+def _spin(axis, angle):
+    """绕 axis 转 angle 的四元数（xyzw）。"""
+    axis = np.asarray(axis, dtype=np.float64)
+    axis = axis / np.linalg.norm(axis)
+    return np.concatenate([axis * np.sin(angle / 2.0), [np.cos(angle / 2.0)]])
+
+
+def _angle_of(rotation):
+    """旋转矩阵的转角。"""
+    return float(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0)))
+
+
+@pytest.fixture
+def node(monkeypatch):
+    teleop = VRTeleop.__new__(VRTeleop)
+    teleop._squeeze_on = 0.5
+    teleop._squeeze_off = 0.4
+    teleop._arm_scale = 1.0
+    # 默认这套（平移看世界、转角看夹爪自身）就是实机验过、一直在用的映射。
+    teleop._pos_frame, teleop._rot_frame = 'world', 'local'
+    teleop._grip_open, teleop._grip_closed = OPEN, CLOSED
+    teleop._clutch = {'left': None, 'right': None}
+    teleop._pose = {'left': np.array([0.30, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]),
+                    'right': np.array([0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])}
+    teleop._grip = np.zeros(2)
+    # A/X 归位：按键沿同真实初值（连上就按着不算一次），服务客户端换成假的。
+    teleop._homing = {'left': None, 'right': None}
+    teleop._home_held = {'left': True, 'right': True}
+    clients = {name: _FakeClient() for name in ('home_left', 'home_right', 'home_cancel')}
+    monkeypatch.setattr(teleop, '_trigger', clients, raising=False)
+    teleop._now = lambda: 100.0
+    monkeypatch.setattr(teleop, 'get_logger', Mock(return_value=_Silent()))
+    return teleop
+
+
+@pytest.mark.parametrize('spec', ['+x +y', 'x y w', '+x +x +z', '+x -y +z', 'x y z t'])
+def test_axis_map_rejects_anything_that_is_not_a_rotation(spec):
+    """不是 det=+1 的轴排列就带镜像，共轭出来的转动会反向——宁可启动就报错。"""
+    with pytest.raises(ValueError):
+        _axis_map(spec)
+
+
+def test_axis_map_reads_the_spec_column_by_column():
+    """三个记号依次是输入系 X / Y / Z 的去向。"""
+    matrix = _axis_map('+z +x +y')
+    assert np.allclose(matrix @ np.array([1.0, 0.0, 0.0]), [0.0, 0.0, 1.0])
+    assert np.allclose(matrix @ np.array([0.0, 1.0, 0.0]), [1.0, 0.0, 0.0])
+    assert np.allclose(matrix @ np.array([0.0, 0.0, 1.0]), [0.0, 1.0, 0.0])
+
+
+def test_below_threshold_does_not_move_the_arm(node):
+    before = node._pose['right'].copy()
+    _arms(node, 0.2, 0.0, [0.5, 0.8, -0.3])
+    assert np.array_equal(node._pose['right'], before)
+
+
+def test_clutch_engages_without_any_jump(node):
+    """接管瞬间必须严格为零位移——这是不限速的上肢唯一的防跳保护。"""
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    assert np.array_equal(node._pose['right'][:3], before)
+    # 松开再按一次，仍然不能跳（此时手柄已经离原点很远）。
+    _arms(node, 1.0, 0.0, [0.9, 1.2, -0.9])
+    _arms(node, 0.0, 0.0, [0.9, 1.2, -0.9])
+    frozen = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, [-0.5, 0.2, 0.5])
+    assert np.array_equal(node._pose['right'][:3], frozen)
+
+
+def test_controller_displacement_maps_to_robot_axes(node):
+    """参考空间的前/上/右（见文件头常量）分别映到机器人 +X / +Z / -Y。"""
+    before = node._pose['right'][:3].copy()
+    start = np.array([0.5, 0.8, -0.3])
+    step = GRIP_FWD * 0.05 + GRIP_UP * 0.05 + GRIP_RIGHT * 0.025
+    _arms(node, 1.0, 0.0, start)
+    _arms(node, 1.0, 0.0, start + step)
+    _arms(node, 1.0, 0.0, start + step * 2)                 # 两帧走前 10、上 10、右 5 cm
+    delta = node._pose['right'][:3] - before
+    assert np.allclose(delta, [0.10, -0.05, 0.10])          # 末端：前 10、右 5、上 10 cm
+
+
+@pytest.mark.parametrize('grip', [
+    UNIT,
+    _spin(GRIP_UP, np.pi),                                     # 转过身面对机器人
+    _spin(GRIP_UP, np.pi / 2),
+    _spin([0.0, 0.0, -1.0], 0.6),                              # 绕指向滚手腕
+    _spin([1.0, 0.0, 0.0], 0.5),                               # 抬手柄头（俯仰）
+])
+def test_world_translation_ignores_how_the_controller_is_held(node, grip):
+    """世界系平移：只看参考空间里的 delta，手柄怎么握、什么时候按 squeeze 都不改答案。
+
+    前三个握法钉的是实机上那个现象：和机器人同向校准好之后**转过身面对机器人**，
+    往自己前方推手（= 参考空间 +Z），末端必须**往回收**。曾经在接合那一帧按手柄朝向
+    脱掉偏航，于是转完身“你的前”又被重新当成“机器人的前”，world 就退化成了局部。
+    后两个是滚转/俯仰：``local-floor`` 重力对齐，竖直方向也不该跟着手腕转。
+    """
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start, grip)                         # 接合
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05, grip)       # 沿参考空间 -Z 推 5 cm
+    assert np.allclose(node._pose['right'][:3] - before, [0.05, 0.0, 0.0])
+    _arms(node, 1.0, 0.0, start - GRIP_FWD * 0.05, grip)       # 反方向：末端要收手
+    assert np.allclose(node._pose['right'][:3] - before, [-0.05, 0.0, 0.0])
+    _arms(node, 1.0, 0.0, start + GRIP_UP * 0.05, grip)        # 直上抬：只该走躯干 +Z
+    assert np.allclose(node._pose['right'][:3] - before, [0.0, 0.0, 0.05])
+
+
+@pytest.mark.parametrize('anchor_spin, want', [
+    (None, [0.0, 0.0, 0.05]),                                   # 伸出轴朝上 -> 末端往上走
+    (_spin([0.0, 1.0, 0.0], np.pi / 2), [0.05, 0.0, 0.0]),      # 伸出轴朝前 -> 末端往前走
+])
+def test_local_position_follows_the_gripper_own_axis(node, anchor_spin, want):
+    """局部平移：手柄当成夹爪本身，沿指向推 = 夹爪沿**自己的伸出轴**前伸。
+
+    同一个手部动作，世界系下两个起始姿态都走机器人正前方（见上一个测例），
+    局部系必须给出两个不同的答案——写反了两者就退化成同一套。
+    """
+    node._pos_frame = 'local'
+    if anchor_spin is not None:
+        node._pose['right'][3:] = anchor_spin
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start)                                # 接合
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05)              # 沿手柄指向推 5 cm
+    assert np.allclose(node._pose['right'][:3] - before, want)
+
+
+def test_position_frames_are_latched_at_clutch_engage(node):
+    """中途 ``ros2 param set`` 换系不能把正在跟的目标掰过去（那就是一次凭空跳变）。"""
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start)                                # 按默认 world 接合
+    node._pos_frame = 'local'                                   # 相当于现场改参数
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05)
+    assert np.allclose(node._pose['right'][:3] - before, [0.05, 0.0, 0.0])   # 仍走 world
+    _arms(node, 0.0, 0.0, start + GRIP_FWD * 0.05)              # 松手
+    _arms(node, 1.0, 0.0, start)                                # 重按 -> 才换成 local
+    before = node._pose['right'][:3].copy()
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05)
+    assert np.allclose(node._pose['right'][:3] - before, [0.0, 0.0, 0.05])
+
+
+def test_release_freezes_the_arm(node):
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.4])
+    _arms(node, 0.0, 0.0, [0.5, 0.8, -0.4])
+    frozen = node._pose['right'].copy()
+    _arms(node, 0.0, 0.0, [-0.9, 1.9, 0.9])
+    assert np.array_equal(node._pose['right'], frozen)
+
+
+# --------------------------------------------------------------------- 离合锚点
+
+def test_clutch_anchors_on_the_limited_pose(node):
+    """锚点取 IK + 关节限速后的可达末端指令，不取飞出可达域的笛卡尔目标。
+
+    目标够不着时两者差几十厘米，锚在目标上会让“松开-挪手-再按”的接力
+    把目标一路累积出可达域（实测 6 轮 ×10 cm 前伸后目标 588 mm / 实际 171 mm）。
+    """
+    node._pose['right'] = np.array([0.90, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0])  # 够不着
+    limited = {'right': [0.30, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start, limited=limited)
+    assert np.allclose(node._pose['right'], limited['right'])
+    # 接合后的位移从限速后的位置起算，不是从那个飞出去的目标起算。
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.05, limited=limited)
+    _arms(node, 1.0, 0.0, start + GRIP_FWD * 0.10, limited=limited)   # 两帧沿指向推 10 cm
+    assert node._pose['right'][0] == pytest.approx(0.40)
+    # 另一侧 status 里没给，退回上一帧目标，同样往前 10 cm，且仍然零跳变。
+    assert np.allclose(node._pose['left'][:3], [0.40, 0.15, 0.05])
+
+
+def test_clutch_falls_back_when_limited_pose_is_missing(node):
+    """status 里没给这一侧时退回上一帧目标，不能抛异常、也不能跳。"""
+    before = node._pose['right'].copy()
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], limited={})
+    assert np.array_equal(node._pose['right'], before)
+
+
+def test_squeeze_hysteresis_keeps_an_engaged_clutch(node):
+    """接合后 squeeze 从 0.5 降到 0.45 不能断开；低于 0.4 才释放。"""
+    _arms(node, 0.6, 0.0, [0.5, 0.8, -0.3])
+    _arms(node, 0.45, 0.0, [0.5, 0.8, -0.31])
+    assert node._clutch['right'] is not None
+    _arms(node, 0.39, 0.0, [0.5, 0.8, -0.31])
+    assert node._clutch['right'] is None
+
+
+def test_webxr_relocalization_does_not_jump_the_target(node):
+    """通信正常但 WebXR 单帧重定位 20 cm：重置原点，末端目标必须逐位不动。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.35])  # 正常前移 5 cm
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    _arms(node, 1.0, 0.0, [0.7, 0.8, -0.35])  # 单帧跳 20 cm
+    for side in ('left', 'right'):
+        assert np.allclose(node._pose[side], before[side])
+
+
+def test_emulated_webxr_position_freezes_and_preserves_clutch(node):
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    frame = _frame(1.0, 0.0, [0.55, 0.8, -0.3])
+    for side in ('left', 'right'):
+        frame[side]['grip']['emulated_position'] = True
+    node._update_arms(frame, {})
+    assert all(node._clutch[side] is not None for side in ('left', 'right'))
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], before[side])
+
+
+def test_flickering_emulated_flag_does_not_swallow_hand_motion(node):
+    """emulated 逐帧抖时不能按比例丢运动。
+
+    曾经在丢 tracking 时把 clutch 的 ``previous`` 作废，于是恢复帧无条件重锚、
+    把跨这一帧的位移整段丢掉：1/2 抖动时手走 900 mm 目标走 **0 mm**（完全冻住），
+    1/3 抖动只走 33%。现在只看与上一帧**真实跟踪到**的位置的差，小步照样积。
+    """
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start)
+    before = node._pose['right'][:3].copy()
+    for step in range(60):
+        frame = _frame(1.0, 0.0, start + GRIP_FWD * (0.003 * (step + 1)))
+        for side in ('left', 'right'):
+            frame[side]['grip']['emulated_position'] = step % 2 == 0
+        node._update_arms(frame, {})
+    assert node._pose['right'][0] - before[0] == pytest.approx(0.180)
+
+
+def test_long_tracking_loss_still_reanchors_without_a_jump(node):
+    """丢一整段后手已挪开很远：靠单帧位移阈值重锚，目标仍逐位不动。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    frozen = {side: pose.copy() for side, pose in node._pose.items()}
+    for _ in range(50):
+        frame = _frame(1.0, 0.0, [0.5, 0.8, -0.3])
+        for side in ('left', 'right'):
+            frame[side]['grip']['emulated_position'] = True
+        node._update_arms(frame, {})
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.6], limited={})     # 恢复时已差 30 cm
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], frozen[side])
+
+
+@pytest.mark.parametrize('missing', ['position', 'orientation'])
+def test_incomplete_grip_frame_freezes_instead_of_raising(node, missing):
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    frame = _frame(1.0, 0.0, [0.6, 0.8, -0.3])
+    for side in ('left', 'right'):
+        del frame[side]['grip'][missing]
+    node._update_arms(frame, {})
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], before[side])
+
+
+@pytest.mark.parametrize('junk', [
+    {'position': None, 'orientation': UNIT},
+    {'position': ['a', 'b', 'c'], 'orientation': UNIT},
+    {'position': [0.0, 0.0], 'orientation': UNIT},
+    {'position': [0.0, float('nan'), 0.0], 'orientation': UNIT},
+    {'position': [0.0, 0.0, 0.0], 'orientation': [0.0, 0.0, 0.0, 0.0]},
+    {'position': [0.0, 0.0, 0.0], 'orientation': 'nope'},
+])
+def test_malformed_grip_never_raises(node, junk):
+    """帧来自默认不鉴权的 WebSocket，任何垃圾都不能把 50 Hz 定时器回调带走。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3])
+    before = {side: pose.copy() for side, pose in node._pose.items()}
+    frame = _frame(1.0, 0.0, [0.6, 0.8, -0.3])
+    for side in ('left', 'right'):
+        frame[side]['grip'] = dict(junk)
+    node._update_arms(frame, {})
+    for side in ('left', 'right'):
+        assert np.array_equal(node._pose[side], before[side])
+
+
+def test_target_mapping_stays_absolute_while_the_clutch_is_engaged(node):
+    """接合期间手↔手臂的映射必须是绝对的：手回到接合位置，目标就回到接合位姿。
+
+    曾经把可达性修正量同步减进锚点，于是够不着的那段位移被吸进锚点、把整个映射
+    平移了：实测（真 URDF + 真 IK）前推 80 cm 再把手原路收回接合点，手臂停在接合点
+    **后方 383 mm**；推出后只缩 5 cm（人手仍够不着）手臂就已经后退 35 mm。
+    """
+    # limited_pose 卡在可达域边界不动，模拟手伸到了够不着的地方。
+    limited = {'right': [0.35, -0.15, 0.05, 0.0, 0.0, 0.0, 1.0],
+               'left': [0.35, 0.15, 0.05, 0.0, 0.0, 0.0, 1.0]}
+    start = np.array([0.5, 0.8, -0.3])
+    _arms(node, 1.0, 0.0, start, limited=limited)
+    engaged = {side: pose.copy() for side, pose in node._pose.items()}
+    for step in range(200):                              # 手沿指向推 60 cm
+        _arms(node, 1.0, 0.0, start + GRIP_FWD * (0.003 * (step + 1)), limited=limited)
+    assert node._pose['right'][0] == pytest.approx(engaged['right'][0] + 0.60, abs=1e-9)
+    for step in range(200):                              # 原路收回
+        _arms(node, 1.0, 0.0, start + GRIP_FWD * (0.6 - 0.003 * (step + 1)), limited=limited)
+    for side in ('left', 'right'):
+        assert np.allclose(node._pose[side], engaged[side], atol=1e-9)
+
+
+# --------------------------------------------------------------------- 姿态
+
+def test_orientation_follows_the_controller(node):
+    """手转了多少度，末端就转多少度（轴系不同，转角必须相等）。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)
+    before = _matrix(node._pose['right'][3:])
+    for axis, angle in (([0, 1, 0], 0.5), ([1, 0, 0], 0.4), ([0, 0, 1], 0.7)):
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin(axis, angle))
+        turn = _matrix(node._pose['right'][3:]) @ before.T
+        assert _angle_of(turn) == pytest.approx(angle, abs=1e-6)
+
+
+def test_clutch_engage_leaves_orientation_untouched(node):
+    """接合那一帧手柄已经是歪的，但末端姿态不能动——相对量从 0 起算。"""
+    before = node._pose['right'].copy()
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin([0.3, 0.5, -0.8], 1.1))
+    assert np.allclose(node._pose['right'], before)
+
+
+def test_wrist_roll_turns_the_gripper_about_its_own_axis(node):
+    """滚手腕就是滚夹爪：转动在手柄系算再右乘，与夹爪当前指向无关。
+
+    曾经是在世界系算完左乘，那等于"绕机器人基座的轴转"——夹爪一旦偏开，同一个
+    手腕动作就不再是绕夹爪自己的轴。这里用两个差别很大的起始朝向钉住这个区别：
+    左乘实现下两次得到的局部转动不可能相同。
+    """
+    for anchor_spin in ([0, 0, 1], [0, 1, 0]):
+        node._clutch['right'] = None
+        node._pose['right'][3:] = _spin(anchor_spin, np.pi / 2)
+        anchor = _matrix(node._pose['right'][3:])
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)          # 接合
+        _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin(GRIP_LINE, 0.4))
+        local = anchor.T @ _matrix(node._pose['right'][3:])
+        # 手柄绕那根朝向线滚 0.4 -> 夹爪绕自己的伸出轴滚 0.4，两个起始朝向下逐位相同。
+        assert np.allclose(local, _matrix(_spin(EE_POINT, 0.4)))
+
+
+@pytest.mark.parametrize('grip_axis, ee_axis', [
+    ([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]),        # 朝向线 -> 伸出轴
+    ([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),        # 穿出手背 -> 张合轴反向
+    ([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]),         # 沿小臂 -> 侧向
+])
+def test_each_grip_rotation_axis_lands_on_its_gripper_axis(node, grip_axis, ee_axis):
+    """三根轴的**转向**都钉住：符号错了就是"手顺时针夹爪逆时针"，实机上很难分辨是哪根。"""
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)              # 接合
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin(grip_axis, 0.4))
+    assert np.allclose(_matrix(node._pose['right'][3:]), _matrix(_spin(ee_axis, 0.4)))
+
+
+def test_quaternion_stays_unit(node):
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], UNIT)
+    _arms(node, 1.0, 0.0, [0.6, 0.9, -0.5], _spin([1, 2, 3], 2.0))
+    for side in ('left', 'right'):
+        assert np.linalg.norm(node._pose[side][3:]) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize('engage', [UNIT, _spin(GRIP_UP, np.pi)])
+@pytest.mark.parametrize('anchor_spin', [
+    None,
+    _spin([0.0, 1.0, 0.0], np.pi / 2),
+    _spin([1.0, 0.0, 0.0], 0.9),
+])
+def test_world_rotation_turns_about_a_torso_fixed_axis(node, anchor_spin, engage):
+    """世界系转角：绕参考空间某根轴拧手 = 绕对应的躯干轴拧夹爪，与夹爪朝向、握法都无关。
+
+    和 ``test_wrist_roll_turns_the_gripper_about_its_own_axis`` 刚好互为对照：那边是
+    右乘、夹爪自身轴上的转动恒定，这边是左乘、躯干轴上的转动恒定。``engage`` 取两个
+    相差 180° 的握法：若还拿接合时刻的偏航去对齐世界系，两者会得到相反的转向。
+    """
+    node._rot_frame = 'world'
+    if anchor_spin is not None:
+        node._pose['right'][3:] = anchor_spin
+    anchor = _matrix(node._pose['right'][3:])
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], engage)                # 接合
+    # 在参考空间里再绕 +X（GRIP_RIGHT）拧 0.4，与接合时怎么握无关。
+    turn = _quat(_matrix(_spin(GRIP_RIGHT, 0.4)) @ _matrix(engage))
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], turn)
+    world = _matrix(node._pose['right'][3:]) @ anchor.T
+    assert np.allclose(world, _matrix(_spin([0.0, -1.0, 0.0], 0.4)))
+
+
+@pytest.mark.parametrize('rot_frame', ['world', 'local'])
+@pytest.mark.parametrize('pos_frame', ['world', 'local'])
+def test_every_frame_combination_engages_without_a_jump(node, pos_frame, rot_frame):
+    """四种搭配都得在接合那一帧严格零位移零转角——上肢不限速，这是唯一的防跳保护。"""
+    node._pos_frame, node._rot_frame = pos_frame, rot_frame
+    node._pose['right'][3:] = _spin([0.2, -0.7, 0.4], 0.8)         # 夹爪起始就是歪的
+    before = node._pose['right'].copy()
+    _arms(node, 1.0, 0.0, [0.5, 0.8, -0.3], _spin([0.3, 0.5, -0.8], 1.1))
+    assert np.allclose(node._pose['right'][:3], before[:3], atol=1e-12)
+    # 四元数可能整体变号，比矩阵才能只盯旋转本身。
+    assert np.allclose(_matrix(node._pose['right'][3:]), _matrix(before[3:]), atol=1e-12)
+
+
+def test_frame_mode_normalizes_and_rejects_typos():
+    """写错宁可启动就报错：静默回退到默认值的话，手感不对时没人知道为什么。"""
+    assert _frame_mode(' World ', 'arm_position_frame') == 'world'
+    for junk in ('gripper', 'body', '', 'wrold'):
+        with pytest.raises(ValueError):
+            _frame_mode(junk, 'arm_position_frame')
+
+
+def test_trigger_maps_to_gripper_the_right_way_round(node):
+    """trigger 0 = 完全打开、1 = 夹紧；而 eccentric 是 0 闭合、2.76 打开，所以是反的。"""
+    _arms(node, 0.0, 0.0, [0, 0, 0])
+    assert node._grip[0] == pytest.approx(OPEN)
+    _arms(node, 0.0, 1.0, [0, 0, 0])
+    assert node._grip[0] == pytest.approx(CLOSED)
+    _arms(node, 0.0, 0.5, [0, 0, 0])
+    assert node._grip[0] == pytest.approx(OPEN / 2.0)
+    # 越界的 trigger 不能把夹爪顶出行程。
+    _arms(node, 0.0, 1.7, [0, 0, 0])
+    assert node._grip[0] == pytest.approx(CLOSED)
+
+
+def test_missing_hand_keeps_its_pose_and_gripper(node):
+    node._grip[:] = [0.7, 1.1]
+    pose = node._pose['left'].copy()
+    frame = _frame(0.0, 0.0, [0.0, 0.0, 0.0])
+    node._update_arms({'left': None, 'right': frame['right']}, {})
+    assert np.array_equal(node._pose['left'], pose)
+    assert node._grip[0] == pytest.approx(0.7)
+
+
+# --------------------------------------------------------------------- 摇杆
+
+@pytest.fixture
+def sticks(node):
+    node._vx_max, node._vy_max, node._wz_max = 0.5, 0.4, 1.5
+    node._deadzone = 0.08
+    node._rate = 50.0
+    node._height_rate = 0.15
+    node._h_lo, node._h_hi = 0.50, 0.78
+    node._height = 0.70
+    node._twist = np.zeros(3)
+    return node
+
+
+def _stick(left, right):
+    return {'left': {'thumbstick': list(left)},
+            'right': {'thumbstick': list(right)}}
+
+
+def test_left_stick_drives_horizontal_velocity(sticks):
+    """xr-standard 的 Y 轴下为正，机器人 X 前 / Y 左，所以推前是 -1、推右也是取负。"""
+    sticks._update_command(_stick([0.0, -1.0], [0.0, 0.0]))     # 推前
+    assert sticks._twist[0] == pytest.approx(0.5)
+    assert sticks._twist[1] == pytest.approx(0.0)
+    sticks._update_command(_stick([1.0, 0.0], [0.0, 0.0]))      # 推右
+    assert sticks._twist[1] == pytest.approx(-0.4)              # 机器人 +y 是左
+    sticks._update_command(_stick([0.0, 1.0], [0.0, 0.0]))      # 推后
+    assert sticks._twist[0] == pytest.approx(-0.5)
+
+
+def test_right_stick_drives_yaw(sticks):
+    sticks._update_command(_stick([0.0, 0.0], [-1.0, 0.0]))     # 推左 = 左转
+    assert sticks._twist[2] == pytest.approx(1.5)
+    sticks._update_command(_stick([0.0, 0.0], [1.0, 0.0]))
+    assert sticks._twist[2] == pytest.approx(-1.5)
+
+
+def test_height_is_absolute_and_clamped(sticks):
+    """高度和键盘的 I/K 一样是绝对量：推着才变，松手停住，不回弹。"""
+    start = sticks._height
+    for _ in range(10):                                          # 推上 10 帧
+        sticks._update_command(_stick([0.0, 0.0], [0.0, -1.0]))
+    assert sticks._height == pytest.approx(start + 10 * 0.15 / 50.0)
+    held = sticks._height
+    for _ in range(10):                                          # 松手
+        sticks._update_command(_stick([0.0, 0.0], [0.0, 0.0]))
+    assert sticks._height == pytest.approx(held)                 # 不回弹
+    for _ in range(1000):                                        # 一直推上
+        sticks._update_command(_stick([0.0, 0.0], [0.0, -1.0]))
+    assert sticks._height == pytest.approx(sticks._h_hi)         # 卡在上界
+    for _ in range(1000):
+        sticks._update_command(_stick([0.0, 0.0], [0.0, 1.0]))
+    assert sticks._height == pytest.approx(sticks._h_lo)
+
+
+def test_deadzone_rejects_drift_without_a_step(sticks):
+    sticks._update_command(_stick([0.05, 0.05], [0.05, 0.05]))   # 模长 < 死区
+    assert np.array_equal(sticks._twist, np.zeros(3))
+    # 刚出死区时速度必须从 0 连续长起来，不能阶跃。
+    sticks._update_command(_stick([0.0, -0.09], [0.0, 0.0]))
+    assert 0.0 < sticks._twist[0] < 0.02
+
+
+def test_missing_thumbstick_is_treated_as_centred(sticks):
+    sticks._update_command({'left': {}, 'right': {}})
+    assert np.array_equal(sticks._twist, np.zeros(3))
+    sticks._update_command({})
+    assert np.array_equal(sticks._twist, np.zeros(3))
+
+
+# --------------------------------------------------------------------- B/Y 状态机
+
+@pytest.fixture
+def buttons(node):
+    """把 _advance 换成计数器，只测边沿检测，不碰 ROS 服务。"""
+    node._button_cooldown = 0.0
+    node._button_stamp = 0.0
+    node._button_held = True          # 与真实初值一致：连上就按着不算一次
+    node._button_down, node._button_used = None, True
+    node._estop_hold = 1e9            # 长按单独测，别把短按那几条带进去
+    node._lock, node._status = threading.Lock(), {}
+    node._trigger['estop'] = _FakeClient()
+    node._now = lambda: next(clock)
+    node._advance = lambda: fired.append(1)
+    fired: list[int] = []
+    clock = iter(range(1, 10_000))
+    node.fired = fired
+    return node
+
+
+def _by(pressed_left, pressed_right):
+    return {'left': {'buttons': {'b_y': pressed_left}},
+            'right': {'buttons': {'b_y': pressed_right}}}
+
+
+def test_both_hands_required(buttons):
+    buttons._check_button(_by(False, False))    # 先松手，解除初始的"按住"
+    buttons._check_button(_by(True, False))
+    buttons._check_button(_by(False, True))
+    assert buttons.fired == []
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+
+
+def test_holding_fires_only_on_release(buttons):
+    """按住期间一步不推：那段时间留给长按急停。"""
+    buttons._check_button(_by(False, False))
+    for _ in range(20):
+        buttons._check_button(_by(True, True))
+    assert buttons.fired == []
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1               # 松手才算一次
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 2
+
+
+@pytest.mark.parametrize('state, fires_on_press', [
+    ('running', True),
+    ('idle', False),
+    ('estop', False),
+    ('stand', False),
+])
+def test_short_press_fires_once_at_the_state_specific_edge(buttons, state, fires_on_press):
+    """running 按下即急停，其余状态松手才推进；松手后都只触发一次"""
+    buttons._status = {'state': state}
+    buttons._check_button(_by(False, False))
+    buttons._check_button(_by(True, True))
+    assert len(buttons.fired) == int(fires_on_press)
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+
+
+def test_holding_both_buttons_estops_from_any_state(buttons):
+    """长按不查 _ADVANCE 表：站立状态下长按也是直接急停，而不是先启动策略。"""
+    buttons._estop_hold = 2.0
+    buttons._status = {'state': 'stand'}
+    buttons._check_button(_by(False, False))
+    for _ in range(5):
+        buttons._check_button(_by(True, True))
+    assert buttons._trigger['estop'].calls == 1
+    assert buttons.fired == []
+    buttons._check_button(_by(False, False))     # 松手不再补一次短按
+    assert buttons.fired == []
+    assert buttons._trigger['estop'].calls == 1  # 也不重复急停
+
+
+def test_a_short_press_never_estops(buttons):
+    buttons._estop_hold = 5.0
+    buttons._check_button(_by(False, False))
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+    assert buttons._trigger['estop'].calls == 0
+
+
+def test_stale_frames_cannot_fake_a_press(buttons):
+    """一次掉帧不能凭空推进状态机——恢复后必须真的松手再按。"""
+    buttons._check_button(_by(False, False))
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+    buttons._check_button(_by(True, True))
+    buttons._check_button(None)                  # 按着的时候掉帧
+    buttons._check_button(_by(True, True))       # 恢复时仍按着
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 1
+    buttons._check_button(_by(True, True))
+    buttons._check_button(_by(False, False))
+    assert len(buttons.fired) == 2
+
+
+def test_a_stale_frame_cancels_the_estop_hold(buttons):
+    """掉帧期间手柄状态未知，不能拿掉帧前的按下时刻继续累计成长按。"""
+    buttons._estop_hold = 3.0
+    buttons._check_button(_by(False, False))
+    buttons._check_button(_by(True, True))
+    buttons._check_button(None)
+    for _ in range(10):
+        buttons._check_button(_by(True, True))
+    assert buttons._trigger['estop'].calls == 0
+
+
+def test_advance_table_covers_the_whole_cycle():
+    """idle/estop -> engage、stand -> start、running -> estop，绕回来能重开。"""
+    from upper_vr.vr_teleop import _ADVANCE
+    assert _ADVANCE['idle'][0] == 'engage'
+    assert _ADVANCE['stand'][0] == 'start'
+    assert _ADVANCE['running'][0] == 'estop'
+    assert _ADVANCE['estop'][0] == 'engage'
+
+
+# --------------------------------------------------------------------- A/X 归位
+
+LIMITED = {'left': [0.31, 0.26, 0.09, 0.0, 0.0, 0.0, 1.0],
+           'right': [0.31, -0.26, 0.09, 0.0, 0.0, 0.0, 1.0]}
+
+
+def _ax(pressed, squeeze=0.0, position=(0.0, 0.0, 0.0)):
+    return {side: {'grip': {'position': list(position), 'orientation': list(UNIT)},
+                   'buttons': {'squeeze': squeeze, 'a_x': side in pressed}}
+            for side in ('left', 'right')}
+
+
+def test_a_x_calls_the_service_for_that_hand_only(node):
+    node._update_arms(_ax(()), LIMITED)               # 先松手，解除初始的"按着"
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_right'].calls == 1
+    assert node._trigger['home_left'].calls == 0
+    assert node._homing['right'] is not None and node._homing['left'] is None
+
+
+def test_holding_a_x_does_not_call_again(node):
+    node._update_arms(_ax(()), LIMITED)
+    for _ in range(20):
+        node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_right'].calls == 1
+
+
+def test_homing_follows_limited_pose_instead_of_driving(node):
+    """归位期间本节点只跟随策略层的指令：自己再发一份就是两个目标对着干。"""
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert np.allclose(node._pose['right'], LIMITED['right'])
+    assert node._clutch['right'] is None
+
+
+def test_squeeze_cancels_homing_and_takes_over_without_a_jump(node):
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    assert node._trigger['home_cancel'].calls == 1
+    # 标志由服务返回时清——取消也走同一条返回路径，不能在这里抢先清掉。
+    assert node._homing['right'] is not None
+    node._trigger['home_right'].finish()
+    assert node._homing['right'] is None
+    here = node._pose['right'][:3].copy()
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    assert np.array_equal(node._pose['right'][:3], here)      # 接合瞬间零位移
+
+
+def test_pressing_a_x_again_cancels(node):
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._trigger['home_cancel'].calls == 1
+    assert node._trigger['home_right'].calls == 1             # 没有重复下单
+
+
+def test_homing_does_not_start_while_the_clutch_is_held(node):
+    node._update_arms(_ax((), squeeze=1.0), LIMITED)
+    node._update_arms(_ax(('right',), squeeze=1.0), LIMITED)
+    assert node._trigger['home_right'].calls == 0
+
+
+def test_service_not_ready_does_not_pretend_to_home(node):
+    node._trigger['home_right'].ready = False
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._homing['right'] is None
+
+
+def test_a_lost_service_reply_eventually_hands_control_back(node):
+    """服务阻塞在策略层，策略层没了的话不能让那只手永远卡在跟随里。"""
+    from upper_vr.vr_teleop import _HOME_TIMEOUT_S
+    node._update_arms(_ax(()), LIMITED)
+    node._update_arms(_ax(('right',)), LIMITED)
+    assert node._homing['right'] is not None
+    node._now = lambda: 100.0 + _HOME_TIMEOUT_S + 1.0
+    node._update_arms(_ax(()), LIMITED)
+    assert node._homing['right'] is None
+
+
+# ------------------------------------------------------------- 断联期间交还上肢
+
+STAND = {'left': [0.15, 0.25, -0.05, *UNIT], 'right': [0.15, -0.25, -0.05, *UNIT]}
+#: 断联期间回放把左臂开到了别处
+MOVED = {'left': [0.30, 0.10, 0.25, *UNIT], 'right': [0.15, -0.25, -0.05, *UNIT]}
+
+
+class _Sent:
+    """``_tick`` 只往 ``data`` 上写，不必为此拉 std_msgs。"""
+
+    data: list = []
+
+
+class _Recorder:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, message):
+        if isinstance(message, Float64MultiArray):
+            self.sent.append(list(message.data))
+            return
+        chunks = {}
+        if message.fields & message.LEFT:
+            chunks['left'] = message.left
+        if message.fields & message.RIGHT:
+            chunks['right'] = message.right
+        if message.fields & message.GRIP:
+            chunks['grip'] = message.grip
+        self.sent.append([float(value) for values in chunks.values() for value in values])
+
+
+@pytest.fixture
+def ticking(node):
+    """补上 ``_tick`` 用得到、``_update_arms`` 用不到的那些字段。"""
+    node._lock = threading.Lock()
+    node._frame, node._frame_stamp, node._timeout = None, 0.0, 0.3
+    node._status = {}
+    node._seeded = node._offline = False
+    node._twist = np.zeros(3)
+    node._rate = 50.0
+    node._height = node._height0 = 0.80
+    node._h_lo, node._h_hi, node._height_rate = 0.50, 0.80, 0.15
+    node._vx_max, node._vy_max, node._wz_max, node._deadzone = 0.4, 0.2, 1.0, 0.05
+    node._button_held, node._button_stamp, node._button_cooldown = True, 0.0, 1.0
+    node._button_down, node._button_used, node._estop_hold = None, True, 1.0
+    node._message, node._publisher = _Sent(), _Recorder()
+    node._lower_publisher = _Recorder()
+    send = node._send
+
+    def record_input(**chunks):
+        base = chunks.pop('base', None)
+        if base is not None:
+            send(base=base)
+        if chunks:
+            node._publisher.sent.append([float(value) for values in chunks.values() for value in values])
+
+    node._send = record_input
+    return node
+
+
+def _live(limited):
+    return {'arms_live': True, 'arm_mode': 'ik', 'limited_pose': limited,
+            'grip': [0.3, 0.3]}
+
+
+def _vr(squeeze, position):
+    frame = {side: {'grip': {'position': list(position), 'orientation': list(UNIT)},
+                    'buttons': {'squeeze': squeeze, 'trigger': 0.0}}
+             for side in ('left', 'right')}
+    return {'session_active': True, **frame}
+
+
+def _teleop_then_disconnect(node):
+    """接管 -> 握 squeeze 把手往前推 30 cm -> 浏览器退出 -> 回放把手臂开走。"""
+    node._status = _live(STAND)
+    node._tick()                                     # 播种
+    node._frame, node._frame_stamp = _vr(1.0, (0.0, 0.0, 0.0)), 100.0
+    node._tick()                                     # 接合
+    for k in range(1, 7):                            # 分帧推，别踩 _MAX_HAND_STEP_M
+        node._frame = _vr(1.0, (0.0, -0.01 * k, -0.05 * k))
+        node._tick()
+    node._frame = None
+    node._tick()
+    node._status = _live(MOVED)
+
+
+def test_a_lost_headset_hands_the_arms_back(ticking):
+    """断联期间照发就是和回放抢同一个目标。策略层的上肢目标没有超时，不发即冻结。"""
+    ticking._status = _live(STAND)
+    for _ in range(20):
+        ticking._tick()
+    assert ticking._publisher.sent == []
+    assert {len(data) for data in ticking._lower_publisher.sent} == {4}
+
+
+def test_nothing_is_published_before_the_arms_are_live(ticking):
+    """``arms_live`` 为假时一帧不发。这是「先按 B/Y 站起来再 squeeze」那套流程的依据，
+    但回放要求 ``arms_live`` 为真，所以回放刚做完时这道闸门是开着的。"""
+    ticking._status = {'arms_live': False, 'arm_mode': 'ik'}
+    ticking._frame, ticking._frame_stamp = _vr(0.0, (0.0, 0.0, 0.0)), 100.0
+    for _ in range(20):
+        ticking._tick()
+    assert ticking._publisher.sent == []
+
+
+def test_stick_command_flows_independently_of_arm_readiness(ticking):
+    ticking._status = {'arms_live': False, 'arm_mode': 'passthrough'}
+    ticking._frame = _vr(0., (0., 0., 0.))
+    ticking._frame['left']['thumbstick'] = [0., -1.]
+    ticking._frame_stamp = 100.
+    ticking._tick()
+    assert ticking._lower_publisher.sent[-1][0] == pytest.approx(.4)
+    assert ticking._publisher.sent == []
+
+
+@pytest.mark.parametrize('squeeze', [0.0, 1.0], ids=['disengage', 'engage'])
+def test_reconnecting_realigns_on_the_current_pose(ticking, squeeze):
+    """恢复第一帧不能拿断联时的陈旧目标一把拽过去（实测 418 mm）。
+
+    握不握 squeeze 都要守：离合只决定 ``_pose`` 会不会被更新，不决定它会不会被发。
+    """
+    _teleop_then_disconnect(ticking)
+    ticking._frame, ticking._frame_stamp = _vr(squeeze, (0.0, -0.06, -0.30)), 100.0
+    ticking._tick()
+    assert np.allclose(ticking._publisher.sent[-1][:7], MOVED['left'])
+
+
+def test_reconnecting_keeps_the_pelvis_height(ticking):
+    """别拿 ``_seeded`` 那条播种路径当重连对齐用：它会把高度复位成参数默认值。"""
+    _teleop_then_disconnect(ticking)
+    ticking._height = 0.55
+    ticking._frame, ticking._frame_stamp = _vr(0.0, (0.0, -0.06, -0.30)), 100.0
+    ticking._tick()
+    assert ticking._lower_publisher.sent[-1][3] == pytest.approx(0.55)

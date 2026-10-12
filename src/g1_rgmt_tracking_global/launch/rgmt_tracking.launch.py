@@ -17,8 +17,8 @@
 本层每次 ``~/engage`` 都会自动调用 ``/g1_localization/set_origin``；服务不可用或
 定位未就绪时拒绝激活 FPC。``odom_only`` 不依赖定位栈，因此跳过这一步。
 
-**不要和 g1_motion_control 同时启动**：两者都往
-``/forward_position_controller/commands`` 写，同时跑就是两个策略抢同一组电机。
+**不要和 g1_motion_session 或独立上下肢任务同时启动**：本层独占
+``/forward_position_controller/joint_targets`` 的 31 轴目标与 FPC 生命周期。
 """
 
 from pathlib import Path

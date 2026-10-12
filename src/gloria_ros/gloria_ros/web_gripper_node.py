@@ -470,7 +470,7 @@ class GloriaWebNode(Node):
                 running=False, phase=phase, target=None, message=message)
             self._record_action("roundtrip", error is None, message)
 
-    def destroy_node(self) -> bool:
+    def destroy_node(self) -> None:
         # 先停止运动线程，再关闭 HTTP 服务，避免销毁期间继续产生 ROS 请求
         self._roundtrip_stop.set()
         thread = self._roundtrip_thread

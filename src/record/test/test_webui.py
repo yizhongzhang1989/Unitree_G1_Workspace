@@ -5,22 +5,35 @@
 """
 
 import io
-import sys
+import re
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from record.webui import _Chunked, make_handler, tree_entries  # noqa: E402
+from record.webui import _Chunked, make_handler, tree_entries
 
 
-class _Node:
-    def get_logger(self):
-        class _Log:
-            def error(self, *a, **k):
-                pass
-        return _Log()
+@pytest.mark.parametrize('body,args', [
+    ({'session': 's1', 't0': '1', 't1': '3'}, ('s1', 1.0, 3.0, 1.0, '')),
+    ({'session': 's1', 't0': 1, 't1': 3, 'speed': '0.5', 'label': 'r0e0'},
+     ('s1', 1.0, 3.0, 0.5, 'r0e0')),
+])
+def test_data_panel_dispatches_replay_actions(monkeypatch, body, args):
+    from record import data_dashboard
+    rec = Mock()
+    rec.start.return_value = {'phase': 'loading'}
+    rec.stop.return_value = {'phase': 'idle'}
+    handler = Mock()
+    monkeypatch.setattr(data_dashboard, 'make_handler', handler)
+    monkeypatch.setattr(data_dashboard, 'Panel', Mock())
+    data_dashboard.panel(rec)
+    actions = handler.call_args.args[1]
+    assert actions['/api/replay/start'](body) == {'phase': 'loading'}
+    assert actions['/api/replay/stop']({}) == {'phase': 'idle'}
+    rec.start.assert_called_once_with(*args)
+    rec.stop.assert_called_once_with()
 
 
 class _Fake:
@@ -44,7 +57,7 @@ class _Fake:
 
 @pytest.fixture
 def handler_class():
-    return make_handler(_Node(), {}, {})
+    return make_handler(Mock(), {}, {})
 
 
 @pytest.fixture
@@ -68,27 +81,15 @@ def test_whole_file(handler_class, blob):
     assert 'video.mp4' in fake.sent['Content-Disposition']
 
 
-def test_range_resumes_from_offset(handler_class, blob):
-    """断点续传：从 1000 接着下，拿到的必须正好是尾巴那一段。"""
+@pytest.mark.parametrize('header,start,end', [
+    ('bytes=1000-', 1000, 2048), ('bytes=10-19', 10, 20), ('bytes=-100', 1948, 2048)])
+def test_range_interval(handler_class, blob, header, start, end):
     fake = _run(handler_class, 'send_file',
-                _Fake({'Range': 'bytes=1000-'}), blob, 'video.mp4')
+                _Fake({'Range': header}), blob, '')
     assert fake.status == 206
-    assert fake.sent['Content-Range'] == 'bytes 1000-2047/2048'
-    assert fake.sent['Content-Length'] == '1048'
-    assert fake.wfile.getvalue() == blob.read_bytes()[1000:]
-
-
-def test_range_closed_interval(handler_class, blob):
-    fake = _run(handler_class, 'send_file',
-                _Fake({'Range': 'bytes=10-19'}), blob, '')
-    assert fake.status == 206 and fake.wfile.getvalue() == blob.read_bytes()[10:20]
-
-
-def test_range_suffix(handler_class, blob):
-    """`bytes=-100` 是「最后 100 字节」，不是「从 0 到 100」。"""
-    fake = _run(handler_class, 'send_file',
-                _Fake({'Range': 'bytes=-100'}), blob, '')
-    assert fake.wfile.getvalue() == blob.read_bytes()[-100:]
+    assert fake.wfile.getvalue() == blob.read_bytes()[start:end]
+    assert fake.sent['Content-Range'] == f'bytes {start}-{end - 1}/2048'
+    assert fake.sent['Content-Length'] == str(end - start)
 
 
 def test_range_past_end_is_416(handler_class, blob):
@@ -148,3 +149,47 @@ def test_chunked_wrapper_terminates():
     stream.write(b'abc')
     stream.close()
     assert sink.getvalue() == b'3\r\nabc\r\n0\r\n\r\n'
+
+
+STATIC = Path(__file__).resolve().parents[1] / 'record/static'
+PAGES = {
+    'data': ('data.html', 'data.js', 'common.js'),
+    'recorder': ('index.html', 'app.js', 'common.js'),
+}
+_BLOCK = re.compile(r'/\*.*?\*/', re.S)
+_LINE = re.compile(r'(?<![:\w])//[^\n]*')
+DEFINED = set(re.findall(r'\.([a-zA-Z][\w-]*)', _BLOCK.sub('', (STATIC / 'app.css').read_text())))
+NOT_STYLING = {'ep', 'episodes', 'split', 'wide', 'panel', 'note', 'acts'}
+
+
+def used_classes(names) -> set:
+    classes = set()
+    for name in names:
+        text = _LINE.sub('', _BLOCK.sub('', (STATIC / name).read_text()))
+        for attribute in re.findall(r'class(?:Name)?\s*=\s*[\'"`]([^\'"`]*)', text):
+            classes |= {value for value in attribute.split() if value and '$' not in value}
+        classes |= set(re.findall(r'classList\.(?:add|toggle|remove)\(\s*[\'"]([\w-]+)', text))
+        for line in text.splitlines():
+            if re.search(r'class(Name|List)?\s*[+=]', line):
+                classes |= set(re.findall(r"['\"]\s+([a-zA-Z][\w-]*)\s*['\"]", line))
+    return {value for value in classes if not value.isupper()}
+
+
+@pytest.mark.parametrize('page', sorted(PAGES))
+def test_every_class_has_a_rule(page):
+    missing = sorted(used_classes(PAGES[page]) - DEFINED - NOT_STYLING)
+    assert not missing, f'{page} 用了但 app.css 里没有：{missing}'
+
+
+def test_class_extraction_covers_dynamic_styles():
+    found = used_classes(('data.js',))
+    assert {'card', 'twist', 'dhead', 'preview', 'mute', 'spacer'} <= found
+
+
+@pytest.mark.parametrize('page', sorted(PAGES))
+def test_ids_referenced_by_js_exist_in_html(page):
+    names = PAGES[page]
+    have = set(re.findall(r'id="([\w-]+)"', (STATIC / names[0]).read_text()))
+    for name in names[1:]:
+        want = set(re.findall(r"\$\(\s*'([\w-]+)'\s*\)", _LINE.sub('', (STATIC / name).read_text())))
+        assert want <= have, f'{page} 缺元素：{sorted(want - have)}'

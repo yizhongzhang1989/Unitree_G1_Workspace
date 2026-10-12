@@ -33,8 +33,6 @@ def panel(rec, port: int = 8221, host: str = '0.0.0.0') -> Panel:
             b['session'], float(b['t0']), float(b['t1']), b.get('label', '')),
         '/api/render/stop': lambda b: rec.stop_render(),
         '/api/render/drop': lambda b: rec.drop_render(b['session'], b.get('label', '')),
-        '/api/control/engage': lambda b: rec.trigger('engage'),
-        '/api/control/estop': lambda b: rec.trigger('estop'),
     }
 
     def raw_file(h, arg):

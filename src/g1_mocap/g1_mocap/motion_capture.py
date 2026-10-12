@@ -9,9 +9,14 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+import numpy.typing as npt
 from scipy.spatial.transform import Rotation, Slerp
+
+if TYPE_CHECKING:
+    from .capture_stream import SourceClip
 
 
 FPS = 50
@@ -34,8 +39,10 @@ class RejectedMotion(ValueError):
 
 
 class MotionClip:
-    def __init__(self, lower, upper, *, max_gap=0.1,
-                 max_root_speed=8.0, max_root_angular_speed=15.0):
+    source: SourceClip | None
+
+    def __init__(self, lower: npt.ArrayLike, upper: npt.ArrayLike, *, max_gap=0.1,
+                 max_root_speed=8.0, max_root_angular_speed=15.0) -> None:
         self.lower = np.asarray(lower, dtype=float)
         self.upper = np.asarray(upper, dtype=float)
         if (self.lower.shape != (29,) or self.upper.shape != (29,)
@@ -48,16 +55,16 @@ class MotionClip:
         self.max_gap = float(max_gap)
         self.max_root_speed = float(max_root_speed)
         self.max_root_angular_speed = float(max_root_angular_speed)
-        self.stamps = []
-        self.rows = []
-        self.epoch = None
+        self.stamps: list[float] = []
+        self.rows: list[npt.NDArray[np.float64]] = []
+        self.epoch: object = None
         self.reason = ''
 
     def reject(self, reason):
         if not self.reason:
             self.reason = str(reason)
 
-    def _check_rows(self, rows):
+    def _check_rows(self, rows: npt.NDArray[np.float64]) -> None:
         if rows.ndim != 2 or rows.shape[1] != 36 or not np.isfinite(rows).all():
             raise RejectedMotion('Expected 36 finite values per frame')
         norms = np.linalg.norm(rows[:, 3:7], axis=1)
@@ -67,7 +74,7 @@ class MotionClip:
         if np.any(joints < self.lower - 1e-8) or np.any(joints > self.upper + 1e-8):
             raise RejectedMotion('Joint angle exceeds the supplied model limits')
 
-    def _check_steps(self, rows, intervals):
+    def _check_steps(self, rows: npt.NDArray[np.float64], intervals: npt.NDArray[np.float64]) -> None:
         if np.any(np.linalg.norm(np.diff(rows[:, :3], axis=0), axis=1)
                   / intervals > self.max_root_speed):
             raise RejectedMotion('Root translation jump')
@@ -76,7 +83,7 @@ class MotionClip:
         if np.any(angles / intervals > self.max_root_angular_speed):
             raise RejectedMotion('Root orientation jump')
 
-    def append(self, stamp, row, epoch):
+    def append(self, stamp: float, row: npt.ArrayLike, epoch: object) -> None:
         if self.reason:
             raise RejectedMotion(self.reason)
         try:
@@ -102,7 +109,7 @@ class MotionClip:
             self.reject(str(exc))
             raise RejectedMotion(self.reason) from exc
 
-    def resample(self):
+    def resample(self) -> npt.NDArray[np.float64]:
         if self.reason:
             raise RejectedMotion(self.reason)
         if len(self.stamps) < 2 or self.stamps[-1] - self.stamps[0] < 2.0 - 1e-8:

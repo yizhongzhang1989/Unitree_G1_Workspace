@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>upper_vla</name>
+  <version>0.1.0</version>
+  <description>
+    VLA 推理服务（POST /api/inference）的独立上肢任务。
+    采三路相机 + 双臂末端位姿 + 头部相机外参发给模型，把返回的绝对末端
+    位姿序列缓存后由本地 50 Hz IK 直接发布 JointTargets 到 FPC。
+  </description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
+  <exec_depend>unitree_g1_ros2_control</exec_depend>
+  <exec_depend>g1_motion_session</exec_depend>
+  <exec_depend>record</exec_depend>
+  <exec_depend>camera_calibration</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-av</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>unitree_g1_description</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+

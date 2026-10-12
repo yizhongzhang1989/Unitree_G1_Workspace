@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, '/workspace/src/g1_rgmt_tracking_global')
 
+
 class Fake:
     """只保留按键状态机需要的那几个字段，不碰 rclpy。"""
 

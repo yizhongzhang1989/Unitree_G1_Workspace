@@ -10,16 +10,30 @@
     ros2 launch robot_bringup end_effectors_single_bus.launch.py
 """
 
-from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch import LaunchContext, LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 
 from robot_bringup.end_effectors.nodes import end_effector_actions
 from robot_bringup.end_effectors.topology import deployed_topology
 
 
-def generate_launch_description() -> LaunchDescription:
+def _nodes(context: LaunchContext):
     buses, kwr57_devices, gloria_devices = deployed_topology("single")
+    return end_effector_actions(
+        buses,
+        kwr57_devices,
+        gloria_devices,
+        LaunchConfiguration("enable_grippers_on_start"),
+        LaunchConfiguration("wrist_left_url").perform(context),
+        LaunchConfiguration("wrist_right_url").perform(context),
+        int(LaunchConfiguration("wrist_image_width").perform(context)),
+        int(LaunchConfiguration("wrist_image_height").perform(context)),
+        int(LaunchConfiguration("wrist_fps").perform(context)),
+    )
+
+
+def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -31,15 +45,5 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("wrist_image_width", default_value="0"),
         DeclareLaunchArgument("wrist_image_height", default_value="240"),
         DeclareLaunchArgument("wrist_fps", default_value="15"),
-        *end_effector_actions(
-            buses,
-            kwr57_devices,
-            gloria_devices,
-            LaunchConfiguration("enable_grippers_on_start"),
-            LaunchConfiguration("wrist_left_url"),
-            LaunchConfiguration("wrist_right_url"),
-            LaunchConfiguration("wrist_image_width"),
-            LaunchConfiguration("wrist_image_height"),
-            LaunchConfiguration("wrist_fps"),
-        ),
+        OpaqueFunction(function=_nodes),
     ])

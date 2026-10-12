@@ -13,14 +13,10 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from tools.format.YB import export as ex
+from tools import resample_video, urdf_fk
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-sys.path.insert(0, str(TOOLS))
-sys.path.insert(0, str(TOOLS / 'format' / 'YB'))
-
-import export as ex                                       # noqa: E402
-import resample_video                                      # noqa: E402
-import urdf_fk                                             # noqa: E402
 
 URDF = """<robot name="t">
   <joint name="fixed_a" type="fixed">
@@ -243,7 +239,8 @@ def test_unify_pose_keeps_translation_and_swaps_xy():
 
 G1_URDF = Path('/workspace/src/unitree_g1_description/model/final.urdf')
 G1_CALIBRATION = Path('/workspace/src/camera_calibration/config/calibration.yaml')
-EXPORT_SOURCE = (Path(ex.__file__)).read_text(encoding='utf-8')
+assert ex.__file__ is not None
+EXPORT_SOURCE = Path(ex.__file__).read_text(encoding='utf-8')
 
 
 @pytest.mark.skipif(not (G1_URDF.is_file() and G1_CALIBRATION.is_file()),

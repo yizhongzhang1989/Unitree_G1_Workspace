@@ -19,10 +19,10 @@ from arm_gravity_compensation.ft_model import (
 
 
 TRUTH = FtCalibration(
-    force_bias=[12.4, -30.1, 7.7],
-    torque_bias=[0.83, -1.24, 0.31],
+    force_bias=np.asarray([12.4, -30.1, 7.7], dtype=float),
+    torque_bias=np.asarray([0.83, -1.24, 0.31], dtype=float),
     mass=0.62,
-    com=[0.004, -0.011, 0.068],
+    com=np.asarray([0.004, -0.011, 0.068], dtype=float),
 )
 
 
@@ -96,6 +96,7 @@ def test_mounting_rotation_is_adopted_only_when_the_data_demands_it():
     assert solution.diagnostics["orientation_estimated"] is True
     np.testing.assert_allclose(solution.calibration.rotation, rotation, atol=1e-9)
     np.testing.assert_allclose(solution.calibration.com, truth.com, atol=1e-9)
+    assert "shape_error" in solution.diagnostics
     assert solution.diagnostics["shape_error"] < 1e-9
 
 
@@ -141,7 +142,7 @@ def test_net_wrench_is_zero_without_a_payload():
 
 
 def test_net_wrench_reports_the_payload_weight_in_the_link_frame():
-    payload = FtCalibration(mass=0.8, com=[0.02, -0.01, 0.11])
+    payload = FtCalibration(mass=0.8, com=np.asarray([0.02, -0.01, 0.11], dtype=float))
     gravity = np.array([0.0, 0.0, -GRAVITY_MAGNITUDE])
     reading = expected_raw(TRUTH, gravity) + TRUTH.polarity * (
         tool_wrench(payload, gravity).reshape(2, 3) @ TRUTH.rotation.T).reshape(6)
@@ -184,7 +185,7 @@ def test_orientation_coverage_survives_the_first_few_samples():
 
 
 def test_payload_estimator_needs_several_orientations_for_the_centre_of_mass():
-    payload = FtCalibration(mass=1.3, com=[0.03, -0.02, 0.09])
+    payload = FtCalibration(mass=1.3, com=np.asarray([0.03, -0.02, 0.09], dtype=float))
     single = PayloadEstimator()
     single.add(*_payload_observation(payload, [0.0, 0.0, -GRAVITY_MAGNITUDE]))
 
@@ -209,9 +210,10 @@ def _payload_observation(payload, gravity):
 def test_calibration_survives_a_dictionary_round_trip():
     rotation = _axis_rotation([0.0, 1.0, 0.0], 0.4)
     original = FtCalibration(
-        force_bias=[1.0, 2.0, 3.0], torque_bias=[0.1, 0.2, 0.3],
-        mass=0.5, com=[0.01, 0.02, 0.03], rotation=rotation, polarity=-1.0,
-        origin=[0.0, 0.0, 0.053])
+        force_bias=np.asarray([1.0, 2.0, 3.0], dtype=float),
+        torque_bias=np.asarray([0.1, 0.2, 0.3], dtype=float),
+        mass=0.5, com=np.asarray([0.01, 0.02, 0.03], dtype=float), rotation=rotation, polarity=-1.0,
+        origin=np.asarray([0.0, 0.0, 0.053], dtype=float))
 
     restored = FtCalibration.from_dict(original.to_dict())
 
@@ -256,8 +258,8 @@ def test_net_torque_is_taken_about_the_link_origin():
     origin = np.array([0.0, 0.0, 0.053])
     tool = FtCalibration(
         force_bias=TRUTH.force_bias, torque_bias=TRUTH.torque_bias,
-        mass=TRUTH.mass, com=[0.004, -0.011, 0.121], origin=origin)
-    payload = FtCalibration(mass=0.9, com=[0.0, 0.0, 0.2], origin=origin)
+        mass=TRUTH.mass, com=np.asarray([0.004, -0.011, 0.121], dtype=float), origin=origin)
+    payload = FtCalibration(mass=0.9, com=np.asarray([0.0, 0.0, 0.2], dtype=float), origin=origin)
     gravity = np.array([0.0, -GRAVITY_MAGNITUDE, 0.0])
     weight = tool_wrench(payload, gravity)
     at_sensor = np.concatenate([
@@ -271,7 +273,7 @@ def test_net_torque_is_taken_about_the_link_origin():
 
 def test_a_sideways_contact_force_is_not_taken_for_a_payload():
     gravity = np.array([0.0, 0.0, -GRAVITY_MAGNITUDE])
-    payload = tool_wrench(FtCalibration(mass=0.9, com=[0.01, 0.0, 0.1]), gravity)
+    payload = tool_wrench(FtCalibration(mass=0.9, com=np.asarray([0.01, 0.0, 0.1], dtype=float)), gravity)
 
     assert gravity_aligned(payload, gravity) is True
     # 同样大小的横向力：投影出来的质量几乎为零，残差却是满量程。

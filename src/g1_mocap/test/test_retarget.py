@@ -483,12 +483,16 @@ def test_stream_passes_previous_solution_and_resets_history(kin, retargeter,
     stream.calibrate()
 
     stream._ingest(pico_payload(positions, t=0.40))
+    assert stream._previous_joint_pos is not None
     first = stream._previous_joint_pos.copy()
     stream._ingest(pico_payload(positions, t=0.42))
+    assert previous[-1] is not None
     np.testing.assert_array_equal(previous[-1], first)
 
     stream._ingest(pico_payload(positions, t=0.41))
     stream._ingest(pico_payload(positions, t=0.44))
+    assert previous[-1] is not None
+    assert stream._previous_joint_pos is not None
     np.testing.assert_array_equal(previous[-1], stream._previous_joint_pos)
 
     stream._note(connected=False)

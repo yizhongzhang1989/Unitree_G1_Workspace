@@ -32,7 +32,7 @@
 
 ```mermaid
 flowchart TB
-  UP["上游命令源（独立进程）<br/>8200 控制器面板 · g1_motion_control"]
+  UP["上游命令源（独立进程）"]
 
   subgraph P1["进程 A：ros2_control_node —— 唯一 controller_manager，500 Hz"]
     direction TB
@@ -54,7 +54,7 @@ flowchart TB
 
   RSP["robot_state_publisher → TF"]
 
-  UP -. "~/commands（31 值）" .-> FPC
+  UP -. "~/joint_targets（mask + 31 值）或 ~/commands（31 值）" .-> FPC
   UP -. "switch_controller" .-> CM
   CM --- CTRL
 
@@ -463,7 +463,7 @@ G1 本体消息的 `dq/tau` 固定为 `0`。URDF 关节范围仍可供上层规�
 本硬件插件的命令输出。Gloria-M 驱动仍保留独立的固件量程确认、`safe_position` 限制和
 反馈超时失能，详见 [`gloria_ros/README.md`](../gloria_ros/README.md)。
 
-`robot_test_dashboard` 中的 FPC 代码只是测试命令生成器，不应搬入本包。Cartesian IK 同样保持在上层（`g1_motion_control`），它输出关节目标但不拥有 hardware interface。只有将来确实需要硬实时 Cartesian servo 时，才应新增独立 C++ ros2_control controller 包，并复用这里的 position interfaces，而不是把 Python IK 或网页逻辑放进硬件插件。
+Cartesian IK、动作规划和网页交互属于上游客户端，不属于本包。上游输出关节目标，不拥有 hardware interface；硬件插件不依赖上游采用哪种任务算法或生命周期管理方式。
 
 启动后先检查，不要直接 Engage：
 

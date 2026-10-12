@@ -366,7 +366,7 @@ def _device(host: str, user: str, password: str, body: str, what: str) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or '腕部相机参数配置').splitlines()[0])
     ap.add_argument('host', nargs='?', help='相机 IP，省略则对两台都做')
     ap.add_argument('what', nargs='?', choices=('fps', 'gop'), help='要改哪个参数')
     ap.add_argument('value', nargs='?', type=int, help='目标值')

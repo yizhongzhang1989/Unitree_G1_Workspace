@@ -1,7 +1,6 @@
 # record — 上肢 VR 遥操作数据采集
 
-三路视频 + 全量信号 + 随机指令生成 + 采集面板。采集端只落原始数据，格式转换与上云
-全部在导出机上做。
+三路视频 + 全量信号 + 随机指令生成 + 采集面板。录制保存原始数据，格式转换与上云使用独立导出工具；DataManager 与内置 `ReplayTask(ArmIKMixin, Node)` 在同一进程、同一 executor 中运行，本地读取录制的末端轨迹，经共享 IK 输出上肢关节目标。数据页面的“回放”会执行真实动作，FPC 必须提前 active；静态预览帧是单独功能，不是回放模式。
 
 ---
 
@@ -17,17 +16,22 @@ flowchart TB
 
   subgraph A["A · 机器人 Orin NX"]
     RS["realsense2_camera<br/>建议 color_format:=YUYV"]
-    MC["motion_control<br/>50 Hz IK"]
-    VR["vr_teleop<br/>头显遥操作"]
+    SESSION["g1_motion_session<br/>注册 / 生命周期"]
+    VR["upper_vr<br/>头显遥操作 + 本地 IK"]
+    FPC["FPC<br/>掩码关节目标"]
     HW["all_data.launch.py<br/>硬件栈 + broadcasters"]
 
-    subgraph REC["record 节点"]
+    subgraph REC["recorder 进程"]
       direction TB
       VID["video.py<br/>腕 -c copy / 头 libx264"]
       SIG["signals.py<br/>话题 → 定宽 float64 表"]
       SES["session.py<br/>三层状态机 + 事件线 + 封口"]
       INS["instruction/<br/>物品库 → 布局 → 摆放样例 → 指令"]
       DASH["dashboard.py :8220"]
+    end
+    subgraph DATA_PROCESS["data_manager 进程 / 共享 executor"]
+      DATA["DataManager :8221"]
+      REPLAY["ReplayTask<br/>末端轨迹 / 本地 IK"]
     end
     DISK[("~/.ros/record/sessions/")]
   end
@@ -40,16 +44,19 @@ flowchart TB
 
   WL & WR -->|"RTSP H.264 1080p"| VID
   HD --> RS -->|"/head/.../image_raw"| VID
-  HW & MC --> SIG
-  VR --> MC
+  HW & VR & FPC --> SIG
+  SESSION -.->|"生命周期"| VR
+  DATA -->|"一次 JSON 请求"| REPLAY
+  REPLAY -->|"独立 status"| DATA
+  DISK -->|"record.replay / motion_control_command"| REPLAY
+  VR & REPLAY --> FPC
   VID & SIG & INS --> SES --> DISK
   DASH -.->|"只读状态 + 发命令"| SES
   BROW <-->|"HTTP 1 Hz 轮询"| DASH
   DISK -->|"rsync over ssh"| TOOLS --> CLOUD
 ```
 
-**架构铁律：录制逻辑全在 ROS 节点里，面板只是观察者 + 命令入口。** 没人开页面、HTTP
-线程崩了，录制照常。
+录制逻辑在 ROS 节点中，面板负责观察与提交命令；页面关闭或 HTTP 线程退出时，录制继续。
 
 ### 三层时间粒度
 
@@ -59,45 +66,44 @@ session   一次连续录制。视频与信号表全程连续写
     └ episode  一个原子动作（一个 verb）。这是交付单位
 ```
 
-**episode 不切文件**，只是 `events.jsonl` 里的一对时间戳。每条 episode 重开 ffmpeg
-会让每段开头 1.2 s 全废（RTSP 冷启动实测值）。
+**episode 不切文件**，只是 `events.jsonl` 里的一对时间戳。每条 episode 重开 ffmpeg 会让每段开头 1.2 s 全废（RTSP 冷启动实测值）。
 
-交付粒度的依据：上游 `pp_g1` 的 skeleton 计数逐项相加恰好等于 episode 数
-（`807+188+181+218+230+75+34+4 = 1737`，`pp_g1_v2` 同样对得上 1986），
-所以对面口径是「一条 episode = 一个 verb」。
+交付粒度的依据：上游 `pp_g1` 的 skeleton 计数逐项相加恰好等于 episode 数（`807+188+181+218+230+75+34+4 = 1737`，`pp_g1_v2` 同样对得上 1986），所以对面口径是「一条 episode = 一个 verb」。
 
 ---
 
 ## 快速开始
 
 ```bash
-ros2 launch record all.launch.py
+ros2 launch robot_bringup record_all.launch.py
 ```
 
-**一条命令起齐六段，Ctrl-C 一起退出。** 它靠 `IncludeLaunchDescription` 把全部子
-launch 内联进同一个 launch 进程，这不是图省事：`G1TopicSystem::stop()` 的卸力斜坡和
-`recorder` 的 session 封口**都只挂在 SIGINT 上**，各开一个终端就得记着挨个 Ctrl-C，
-漏一个要么关节持续吃电流（实测肩部绕组 97 °C），要么 session 没有 `DONE`。
+**组合启动硬件、传感器、运动任务、定位和采集，Ctrl-C 一起退出。** 运动段包含 session、独立下肢策略与独立上肢任务，默认是下肢速度键盘加上肢 VR。`IncludeLaunchDescription` 把子 launch 内联进同一进程，Ctrl-C 让控制栈完成卸力并让 recorder 封口 session。
 
-⚠️ **停它只能对 launch 进程按 Ctrl-C。** `pkill` 发的是 SIGTERM，rclpy 根本不处理。
+键盘在另一个交互终端启动：`ros2 run lower_velocity_tracking teleop_keyboard`，这是 control-only，只连接已有 session 与任务；组合 launch 默认启动速度策略与 VR 上肢任务，不再叠加会启动第二套 session 的运动脚本。
+
+停机在前台终端按 Ctrl-C；脚本需将 SIGINT 发给整个进程组，使硬件卸力与 recorder 封口都能完成。入口保留 40 s 的 SIGTERM 升级等待和 10 s 的 SIGKILL 等待，后台启动先执行 `set -m`。退出约束见 [bringup 使用说明](../robot_bringup/README.md)。
 
 每段都能单独关掉，控制栈已经在跑时就只补缺的那几段：
 
 ```bash
-ros2 launch record all.launch.py hardware:=false motion:=false   # 只补传感器和采集
-ros2 launch record all.launch.py teleop:=false                   # 不要 VR，用键盘
-ros2 launch record all.launch.py data:=false                     # 不起数据管理面板
+ros2 launch robot_bringup record_all.launch.py hardware:=false motion:=false   # 只补传感器和采集
+ros2 launch robot_bringup record_all.launch.py upper_task:=none                # 只用下肢键盘
+ros2 launch robot_bringup record_all.launch.py lower_task:=footstep             # 下肢脚步策略
+ros2 launch robot_bringup record_all.launch.py data:=false                      # 只采集，不起数据管理和回放
 ```
 
 子 launch 自己的参数直接往上传（`output_root:=/data/sessions`、`round_items:=5`……）。
 
-<details><summary>六段分别是什么，以及手动逐条起的写法</summary>
+<details><summary>独立启动各包</summary>
 
 ```bash
 # 1. 硬件栈与控制栈
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
-ros2 launch g1_motion_control motion_control.launch.py
-ros2 launch g1_motion_control vr_teleop.launch.py
+ros2 launch g1_motion_session session.launch.py
+ros2 launch lower_velocity_tracking velocity_tracking.launch.py
+ros2 launch upper_vr vr_teleop.launch.py
+ros2 run lower_velocity_tracking teleop_keyboard
 
 # 2. 头部传感器。一条起两个，**两个都要**：
 #    雷达 -> head_lidar_node 发的 mid360_link->livox_frame 静态 TF 是 torso_pose 的外参，
@@ -109,35 +115,26 @@ ros2 launch head_sensors head_sensors.launch.py color_profile:=1280x720x30 color
 # 3. 世界定位。开录时采集节点会自动钉一次原点，不用手动调
 ros2 launch g1_localization localization.launch.py
 
-# 4. 采集节点 + 面板 + 数据管理
+# 4. 采集节点 + 面板 + 数据管理与内置回放
 ros2 launch record record.launch.py
 ```
 
-各段之间**没有硬性先后**（ROS 2 的发现是动态的，各节点也都自带重试），
-`all.launch.py` 里的 0/6/8/10/12 s 错开只为两件事：Orin NX 上同时冷启 realsense 枚举 +
-point_lio + 四个 spawner 会把 CPU 打满，以及让「等不到数据」的告警不在启动阶段刷屏。
+各包独立运行，通过 ROS 接口连接。bringup 的 `record_all.launch.py` 将硬件与传感器、运动、定位和采集按 0/6/8/12 s 错开，以分散冷启动负载；session launch 与会话内任务 launch 使用共享默认参数。record 启动本包录制和数据管理进程，DataManager 自动创建内置回放节点。VLA 复用本包采集工具，回放复用 g1_motion_session 的共享 IK 与目标输出工具。
 
 </details>
 
-采集面板 `http://<机器人 IP>:8220`，数据管理 `:8221`。只想要采集就 `data:=false`。
+采集面板 `http://<机器人 IP>:8220`，数据管理 `:8221`。默认 `data:=true` 带内置回放；只想要采集就 `data:=false`，只运行 recorder。已有录制数据、只需数据页面与回放时，直接执行 `ros2 run record data_manager`，无需额外 launch 或执行器入口。
 
-两个节点**分开进程但一起启动**：采集必须最简最稳，数据管理要读全盘、解码取帧、删目录，
-负载画像完全不同。但操作者不该记两条命令。互斥靠 `DONE` 天然完成 —— 没封口的
- session 删不掉也放不了。
+录制与数据管理分开进程但一起启动：采集保持独立，数据管理负责读盘、解码取帧、删目录，并在自身进程内持有回放节点。`DONE` 标记限制数据管理操作，未封口的 session 不能删除或回放。
 
 ### 面板上的四件事
 
-1. **数据一览** — 每路的话题、类型、实时频率、已收/已写。开录前先确认没有哑掉的流。
-   帧计数只能发现「流哑了」，发现不了「相机对着墙」—— 那得点「抓一帧看看」。
-   **只在未录制时可用、只抓一帧**：实测连续解码是 65% 单核每路，三路就是两个核，
-   而单帧只要 1.5 s（腕部，RTSP 握手主导）或 0.25 s（头部，帧就在内存里）
-2. **勾选要录哪些** — 默认全勾**除深度图**；点「开始 session」后整块置灰，
-   勾选结果冻结进 `manifest.json`
+1. **数据一览**：每路的话题、类型、实时频率、已收/已写。开录前先确认没有哑掉的流。帧计数只能发现「流哑了」，发现不了「相机对着墙」，需要点「抓一帧看看」。**只在未录制时可用、只抓一帧**：实测连续解码是 65% 单核每路，三路就是两个核，而单帧只要 1.5 s（腕部，RTSP 握手主导）或 0.25 s（头部，帧就在内存里）
+2. **勾选要录哪些**：默认全勾**除深度图**；点「开始 session」后整块置灰，勾选结果冻结进 `manifest.json`
 3. **生成新一轮摆放** — 出一张摆放样例图，照着把真实桌面摆好
 4. **逐条执行 episode** — 开始 → 操作 → 标注成功/失败/丢弃
 
-结束时点「结束 session」，会收尾所有文件、算全目录 sha256、写 `DONE`。
-同步脚本只搬带 `DONE` 的目录。
+结束时点「结束 session」，会收尾所有文件、算全目录 sha256、写 `DONE`。同步脚本只搬带 `DONE` 的目录。
 
 ---
 
@@ -162,8 +159,7 @@ point_lio + 四个 spawner 会把 CPU 打满，以及让「等不到数据」的
   DONE               全目录 sha256
 ```
 
-**信号表是无表头的裸 float64 矩阵**，列信息全在 `schema.json`。采集机是 Orin NX、
-导出机是没有 ROS 的 Windows，两边唯一都有的只有 numpy，所以读一张表必须能退化成：
+**信号表是无表头的裸 float64 矩阵**，列信息全在 `schema.json`。采集机是 Orin NX、导出机是没有 ROS 的 Windows，两边唯一都有的只有 numpy，所以读一张表必须能退化成：
 
 ```python
 np.fromfile(p, np.float64).reshape(-1, ncol)
@@ -181,8 +177,7 @@ verb / obj{id,en,zh} / target{id,en,zh} / prep / arm / arm_to
 instruction_en / instruction_zh / lint_warnings[] / outcome
 ```
 
-字符串是给模型看的，结构化字段是给自己看的 —— 后者决定了以后能不能筛数据、按动作
-切分、改名、查错。方向不可逆：结构化 → 字符串是纯函数，反过来有损。
+字符串是给模型看的，结构化字段是给自己看的，后者决定了以后能不能筛数据、按动作切分、改名、查错。方向不可逆：结构化 → 字符串是纯函数，反过来有损。
 
 ### 一轮里的指令不会重样
 
@@ -194,66 +189,44 @@ instruction_en / instruction_zh / lint_warnings[] / outcome
 | 同一个 `(物品, 动作, 目标)` 一轮只出一次 | 指令文本正是这三者决定的，签名重复 = 屏幕上一模一样的两行 |
 | 不连着两步搬同一件 | 否则整轮都在「拿起 X / 放下 X」 |
 
-**没有合法动作就收工，绝不拿无效步骤凑数**；步数凑不够由 `build_round` 重摆场景解决
-（可达域只有 0.198 m²，四件物里卡进两件大的就真的腾挪不开，实测 200 轮里有 4 轮如此）。
+没有合法动作时结束生成，步数不足时由 `build_round` 重摆场景解决（可达域只有 0.198 m²，四件物里卡进两件大的就真的腾挪不开，实测 200 轮里有 4 轮如此）。
 
-早先的版本在这里退回「原地放回」，于是同一条指令能连出五六遍 —— 实测 **65% 的步骤
-落点等于取件点**。`put_down` 的实际占比仍有约 44%（名义权重只有 6）：相对放置常常没
-地方落，只有「放到桌面另一处」永远有解，它天然是兜底。
+早先的版本在这里退回「原地放回」，于是同一条指令能连出五六遍，实测 **65% 的步骤落点等于取件点**。`put_down` 的实际占比仍有约 44%（名义权重只有 6）：相对放置常常没地方落，只有「放到桌面另一处」永远有解，它天然是兜底。
 
 ---
 ## 导出机侧
 
-数据搬到 B、在 B 上读 session、转成目标格式 —— **全部写在 [tools/README.md](tools/README.md)**，
-连同 Windows 11 的环境配置。那份是给 B 上的人看的，自洽，不用先读本文。
+数据搬到 B、在 B 上读 session、转成目标格式，连同 Windows 11 的环境配置，见 [tools/README.md](tools/README.md)。
 
-要点只留三条：
+导出要点：
 
-- **`tools/` 整个拷过去**，别只拷几个文件；里面刻意不依赖 ROS，有测试用正则守着。
-  面板右上角的「⤓ 导出工具」就是打这一包。
-- **`final.urdf` 要单独拷**，它不在 session 里（「导出工具」那一包已经帮你带上了）。
-  末端位姿和腕相机外参都得靠 FK 现算，而机器人当时用的 URDF 是「`final.urdf` 叠上
-  相机外参」—— `unitree_g1_ros2_control/launch/control.launch.py` 就是这么拼的，
-  两边必须一致。FK 是 `urdf_fk.py`，纯 numpy 手写（B 上没有 pinocchio），
-  已和 pinocchio 逐姿态对拍到双精度舍入。
-- **相机内外参不用拷，它就在 session 里**（`camera_params.yaml`，开录时自动写）。
-  相机会被碰（2026-08-31 头部偏了 13.7°），一份全局标定没法同时解释两批采集，
-  所以导出只认自带的那一份，缺了直接拒绝。
-- **导出格式叫 YB**，规范在 [tools/format/YB/README.md](tools/format/YB/README.md) ——
-  **把数据交给别人时给那一份**。
+- **`tools/` 整个拷过去**，别只拷几个文件；里面刻意不依赖 ROS，有测试用正则守着。面板右上角的「⤓ 导出工具」就是打这一包。
+- **`final.urdf` 要单独拷**，它不在 session 里（「导出工具」那一包已经帮你带上了）。末端位姿和腕相机外参都得靠 FK 现算，而机器人当时用的 URDF 是「`final.urdf` 叠上相机外参」，`unitree_g1_ros2_control/launch/control.launch.py` 就是这么拼的，两边必须一致。FK 是 `urdf_fk.py`，纯 numpy 手写（B 上没有 pinocchio），已和 pinocchio 逐姿态对拍到双精度舍入。
+- **相机内外参不用拷，它就在 session 里**（`camera_params.yaml`，开录时自动写）。相机会被碰（2026-08-31 头部偏了 13.7°），一份全局标定没法同时解释两批采集，所以导出只认自带的那一份，缺了直接拒绝。
+- **导出格式叫 YB**，规范在 [tools/format/YB/README.md](tools/format/YB/README.md)，**把数据交给别人时给那一份**。
 
 机器人上也可以直接在数据管理面板里点「开始转换」，转完就下载（见 §数据管理与回放）。
 
 ### 一路相机只解码一遍
 
-episode 在时间上有序且不重叠，接成一条递增的取帧清单走一趟就够了。逐 episode 各解一次的话，
-一小时的 session 配一百条 episode 就是一百小时的解码。源视频是多少帧率不重要 ——
-`frame_index[k]` 已经算好该取源里的哪一帧，该重复的重复、该跳的跳。
+episode 在时间上有序且不重叠，接成一条递增的取帧清单走一趟就够了。逐 episode 各解一次的话，一小时的 session 配一百条 episode 就是一百小时的解码。`frame_index[k]` 已经算好该取源里的哪一帧，该重复的重复、该跳的跳。
 
 ### 有效率那一行必须看
 
-某路整段没数据时，导出的形状照样完全正常、内容全是 NaN，不看那一行发现不了。
-`fpc_commands` 就这么丢过 —— 订阅端 QoS 写成 RELIABLE，发布端是 BEST_EFFORT，
-两个 session 全录成 0 行。
+某路整段没数据时，导出的形状照样完全正常、内容全是 NaN，不看那一行发现不了。`fpc_commands` 曾因订阅端 QoS 写成 RELIABLE、发布端为 BEST_EFFORT，两个 session 全录成 0 行。
 
 ### 腕相机画面里的那行时间
 
-相机端关不掉（`DeleteOSD` 是空壳、`SetOSD` 不让改类型、格式置空不收、`/IPC` 是 gSOAP
-只吃 SOAP、Web UI 没有 OSD 页）。**所以不盖它，改成让它显示正确的时间**：
+相机端关不掉（`DeleteOSD` 是空壳、`SetOSD` 不让改类型、格式置空不收、`/IPC` 是 gSOAP 只吃 SOAP、Web UI 没有 OSD 页）。**所以不盖它，改成让它显示正确的时间**：
 
 ```bash
 python3 scripts/set_wrist_camera_fps.py --time              # 看差多少
 python3 scripts/set_wrist_camera_fps.py --time-sync --apply # 改走 NTP
 ```
 
-出厂配的是 `time.windows.com` 且模式是 Manual，内网到不了，等于从没对过（两台分别
-停在 2018-01-01，彼此还差三小时）。现在指向 **`192.168.123.161`** —— G1 的机载计算
-单元自己就跑着 NTP（stratum 10），实测它与开发机的时钟差 **0.011 ms**，所以指向它
-就等于和本机同步，不用另装服务端。
+出厂配的是 `time.windows.com` 且模式是 Manual，内网到不了，等于从没对过（两台分别停在 2018-01-01，彼此还差三小时）。现在指向 **`192.168.123.161`**，G1 的机载计算单元自己就跑着 NTP（stratum 10），实测它与开发机的时钟差 **0.011 ms**，所以指向它就等于和本机同步，不用另装服务端。
 
-对好时之后那行字**从污染变成了一个免费的带内时间参考**：画面上的秒进位是一个发生在
-精确整秒的尖锐事件，把它和 `pts.bin` 的到达时刻一减就是管线延迟，不必再靠运动互相关
-估。注意画面上是本地时间（TZ `CST-8` = UTC+8，无夏令时），换算 epoch 要减 8 小时。
+对好时之后那行字是带内时间参考：画面上的秒进位是一个发生在精确整秒的尖锐事件，把它和 `pts.bin` 的到达时刻一减就是管线延迟，不必再靠运动互相关估。注意画面上是本地时间（TZ `CST-8` = UTC+8，无夏令时），换算 epoch 要减 8 小时。
 
 左上角那条 `Camera` 标题能关，已经关了：`--osd-blank osd_title --apply`。
 
@@ -269,39 +242,29 @@ python3 scripts/set_wrist_camera_fps.py --time-sync --apply # 改走 NTP
 | `header`（源端打戳） | `joint_states`、`pelvis_imu`、`head_imu`、四路 `wrench`、`torso_pose`、`dog_odom` | 数据产生的时刻，不含传输抖动。`head_imu` 是 `/utlidar/imu_livox_mid360` 的原始 200 Hz 数据，线加速度单位为 g |
 | `recv`（接收时刻） | `motion_control_command/status`、`secondary_imu` | 消息类型没有 header 字段。**对指令话题这本来就是正确语义** —— 指令是收到那一刻才生效的，不存在更早的「采集时刻」 |
 
-区分这两者只是为了知道对齐精度：源端戳不含传输抖动，接收戳含。实测有 header 的表
-`t_recv − t_header` 的 p50 在 4.6~50.1 ms，抖动量级就是这么大。
-`inspect_session.py` 会如实标出每张表用的是哪种。
+区分这两者只是为了知道对齐精度：源端戳不含传输抖动，接收戳含。实测有 header 的表 `t_recv − t_header` 的 p50 在 4.6~50.1 ms，抖动量级就是这么大。`inspect_session.py` 会如实标出每张表用的是哪种。
 
 头部相机用 RealSense 的时间戳，**只有腕部需要额外处理**——它是网络设备，没有可用时钟。
 
 腕部三步：
 
 1. **收包打戳** — `-use_wallclock_as_timestamps 1 -copyts`，每包到达时打主机墙钟
-2. **等间隔重建** — `fitted_pts()` 丢掉到达时刻，换成一条直线。依据是 `-c copy` 下
-   包数严格等于帧数、帧率由硬件恒定。RTSP over TCP 成簇到达，逐帧时刻不可用，
-   但「第 i 帧采于 t0 + i/fps」可用
+2. **等间隔重建**：`fitted_pts()` 丢掉到达时刻，换成一条直线。依据是 `-c copy` 下包数严格等于帧数、帧率由硬件恒定。RTSP over TCP 成簇到达，逐帧时刻不可用，但「第 i 帧采于 t0 + i/fps」可用
 3. **按时间取帧** — `slice_frames` 与 `slice_table` 用同一对时间戳
 
-**`video_pts()` 默认已经把管线延迟减掉了**，所以 `slice_frames` 取到的帧与信号表
-天然对齐，导出不需要再补。修正只在读的时候做，**落盘文件永远是原始值** —— 标定值
-已经改过两回，烧进文件就没得救。重新标定时用 `video_pts(name, corrected=False)`。
+**`video_pts()` 默认已经把管线延迟减掉了**，所以 `slice_frames` 取到的帧与信号表天然对齐，导出不需要再补。修正只在读的时候做，**落盘文件永远是原始值**，标定值已经改过两回，烧进文件就没得救。重新标定时用 `video_pts(name, corrected=False)`。
 
 ### `pts.bin` 是什么，为什么腕部那份看着像重复
 
 每帧一个 float64 = 8 字节，1335 帧才 10 KB，是 mkv 的 **0.064%**。
 
-腕部那份**确实**与 mkv 内置的 pts 逐帧相同（实测差 0.000 ms）—— `-copyts` 让 mkv
-自己也带上了绝对墙钟。留着它是因为两件事：读它只要 numpy（导出机不必装 ffprobe），
-以及 **mkv 没封口时它仍然完好**（进程被硬杀过一次，靠的就是它）。
+腕部那份与 mkv 内置的 pts 逐帧相同（实测差 0.000 ms），`-copyts` 让 mkv 自己也带上了绝对墙钟。留着它是因为两件事：读它只要 numpy（导出机不必装 ffprobe），以及 **mkv 没封口时它仍然完好**（进程被硬杀过一次，靠的就是它）。
 
-头部那份**不重复**：head.mkv 里是从 0 起算的相对时间，绝对采集时刻只存在 `pts.bin`
-里（RealSense 的硬件时间戳）。
+头部那份**不重复**：head.mkv 里是从 0 起算的相对时间，绝对采集时刻只存在 `pts.bin` 里（RealSense 的硬件时间戳）。
 
 ### 对齐得准不准，用 `verify_alignment` 看
 
-以上都是「设计上应该对齐」。要**验**，就把三路数据画到同一张图上。数据管理面板里
-每条 episode 的「回放」旁边有个**「校验」**按钮，点了就渲；命令行等价物：
+把三路数据画到同一张图上可以验证对齐。数据管理面板里每条 episode 的「回放」旁边有个**「校验」**按钮，点了就渲；命令行等价物：
 
 ```bash
 ros2 run record verify_alignment 20260827_022837                # 第一条 episode
@@ -309,10 +272,7 @@ ros2 run record verify_alignment 20260827_022837 --episode 0:5
 ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 ```
 
-出一段 mp4：实拍的头部画面上压着 **URDF 按当时关节角渲染的轮廓**（左绿右红），
-以及 **IK 指令的目标位姿**（同色系**深色**空心圆 + 一条 +Z 接近方向射线）与**关节角
-正解出来的实际末端**（**亮色**实心点），两点之间连白线。深浅分开是因为对得准时两个
-标记就叠在一起，同色同亮度会互相遮掉。判据：
+出一段 mp4：实拍的头部画面上压着 **URDF 按当时关节角渲染的轮廓**（左绿右红），以及 **IK 指令的目标位姿**（同色系**深色**空心圆 + 一条 +Z 接近方向射线）与**关节角正解出来的实际末端**（**亮色**实心点），两点之间连白线。深浅分开是因为对得准时两个标记就叠在一起，同色同亮度会互相遮掉。判据：
 
 | 看到什么 | 说明什么 |
 |---|---|
@@ -321,20 +281,11 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 | 深色圈离亮点很远、方向乱飘 | 指令表和关节表不在同一时间基准上 |
 | 深色圈稳定领先亮点一小段、射线大致同向 | **正常**，那是控制跟随滞后 |
 
-还会出一份同名 `.txt` 数值报告，其中**最佳时移**最硬：把指令整体平移多少秒才让它离
-实际末端最近。它应该等于控制跟随滞后（百毫秒量级），实测右臂 +0.06 ~ +0.14 s。算出
-几秒钟就说明两张表的时间戳串了。目标整段没怎么动的那条臂测不出时移，报告里会直说。
+还会出一份同名 `.txt` 数值报告，其中**最佳时移**表示把指令整体平移多少秒才让它离实际末端最近。它应该等于控制跟随滞后（百毫秒量级），实测右臂 +0.06 ~ +0.14 s。算出几秒钟就说明两张表的时间戳串了。目标整段没怎么动的那条臂测不出时移，报告里会直说。
 
-**产物就放在这次采集里**：`<session>/verify/<段名>.mp4` + 同名 `.txt`。所以重渲同一段
-是原地覆盖、不会越攒越多，删这次采集时一并带走，在左边文件树里也直接看得见。
-`DONE` 只核对它自己列出的那些文件，多出来的 `verify/` 不影响完整性校验（实测 `全对`）。
-不满意可以在卡片里单独「删除」。
+**产物就放在这次采集里**：`<session>/verify/<段名>.mp4` + 同名 `.txt`。重渲同一段是原地覆盖，删这次采集时一并带走，在左边文件树里也直接看得见。`DONE` 只核对它自己列出的那些文件，多出来的 `verify/` 不影响完整性校验（实测 `全对`）。不满意可以在卡片里单独「删除」。
 
-渲染走 `head_sensors.urdf_view` 的 `silhouette()`（只出轮廓，比逐像素 z-buffer 快约
-40 倍），**640x360 每帧仍要 0.32 s**。所以它是离线一次性工具，`--fps` 默认 10 就是为了
-把帧数压下来；别指望它跟着回放同步出画（差两个数量级）。面板上它和**回放、转换三者
-互斥**，正在渲的时候按钮变成「取消」—— 整段采集能渲十几分钟，没有出口就等于把回放
-也锁死了。
+渲染走 `head_sensors.urdf_view` 的 `silhouette()`（只出轮廓，比逐像素 z-buffer 快约 40 倍），**640x360 每帧仍要 0.32 s**。它是离线一次性工具，`--fps` 默认 10 用于减少渲染帧数。面板上它和**回放、转换三者互斥**，正在渲的时候按钮变成「取消」，可中止耗时渲染并释放回放操作。
 
 三段变换的来源，**只有第一段是我们标定出来的**：
 
@@ -344,29 +295,18 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 | `head_mount_link → d435_link` | session 自带 `camera_params.yaml` 的 `urdf_overrides.d435_joint` | 退回 URDF 名义值：实测相机位置差 16.5 mm、轮廓质心移 10.7 px、掩膜 IoU 只剩 0.65。报告第三行会写「没叠上」，别据此判对齐 |
 | `d435_link → camera_color_optical_frame` | `tools/urdf_fk.py` 的 `HEAD_OPTICAL` | 没有别的来源 —— 那是 realsense-ros 从设备出厂标定读出来发的 TF，标定文件里没这条 |
 | 内参 `fx/fy/cx/cy` | session 自己的 `meta.json` | 也没有别的来源 —— `intrinsics` 段只有两台腕相机，头部在 `cameras.yaml` 里是 `role: reference`，只出外参修正不出内参。而且这份正是采集当时真正发布的那一份 |
-> **夹爪的 mimic 必须夹到各段自己的 `<limit>`。** URDF 的 mimic 只能写线性式，而夹爪是
-> 连杆（非线性）。G1 的做法是把一根滑块拆成 **8 段同轴、origin 全零的 prismatic 串联**，
-> 靠每段先后饱和拼出分段线性样条 —— 实测饱和点 0.3455/0.6910/…/2.7638 正好八等分。
-> **不夹限位时八段相加退化成一条直线**，全开开口从 100 mm 变成 47.6 mm，实拍叠图里
-> 轮廓会从两根手指中间穿过去。`pinocchio` 根本不认 `<mimic>`，所以两边都得自己处理，
-> 判据函数是 `urdf_fk.mimic_clamp`。
+> **夹爪的 mimic 必须夹到各段自己的 `<limit>`。** URDF 的 mimic 只能写线性式，而夹爪是连杆（非线性）。G1 的做法是把一根滑块拆成 **8 段同轴、origin 全零的 prismatic 串联**，靠每段先后饱和拼出分段线性样条，实测饱和点 0.3455/0.6910/…/2.7638 正好八等分。**不夹限位时八段相加退化成一条直线**，全开开口从 100 mm 变成 47.6 mm，实拍叠图里轮廓会从两根手指中间穿过去。`pinocchio` 根本不认 `<mimic>`，所以两边都得自己处理，判据函数是 `urdf_fk.mimic_clamp`。
 ---
 
 ## 数据管理与回放
 
-`:8221` 那个面板，分两块：上面是**数据操作**（左边文件树、右边详情），底下钉着
-**播放进度条**。
+`:8221` 面板分两块：上面是**数据操作**（左边文件树、右边详情），底下是**播放进度条**。
 
-左边是 VSCode 那样的文件树：最外层一行是一次采集，展开是它的目录和文件。
-每行右侧悬停会浮出下载按钮 —— **文件单独下，目录整个打包下**。
-点最外层那一行才会在右边出详情（预览帧、回放、删除、转换）。
+左边文件树最外层一行是一次采集，展开是它的目录和文件。每行右侧悬停会浮出下载按钮，**文件单独下，目录整个打包下**。点最外层那一行才会在右边出详情（预览帧、回放、删除、转换）。
 
-- **预览** — 每条 episode 取中点那一帧（开头往往手还没进画面）。**按需取单帧，不做
-  连续解码**：从已录文件取一帧含 seek 只要 0.21~0.33 s，而连续解码是 65% 单核每路
-- **删除** — 要把 session id 原样打一遍确认。**没有 `DONE` 的删不掉**，那可能正在录
-  或异常中断
-- **校验** — 每条 episode 都有一个，渲一段对齐校验视频直接在卡片里看（见上面
-  「时间对齐」那节）。和回放/转换互斥
+- **预览**：每条 episode 取中点那一帧（开头往往手还没进画面）。**按需取单帧，不做连续解码**：从已录文件取一帧含 seek 只要 0.21~0.33 s，而连续解码是 65% 单核每路
+- **删除**：要把 session id 原样打一遍确认。**没有 `DONE` 的删不掉**，那可能正在录或异常中断
+- **校验**：每条 episode 都有一个，渲一段对齐校验视频直接在卡片里看（见上面「时间对齐」那节）。和回放/转换互斥
 - **下载** — 见下
 - **回放** — 见再下
 
@@ -380,102 +320,104 @@ ros2 run record verify_alignment 20260827_022837 --whole --fps 5
 | 转成 YB 训练格式 | 左边勾上要导的那几次（标题行有「全选 / 全不选」）→ 页顶选格式 → 「开始转换」→ 转完点「下载」 |
 | 几十 GB 整批搬走 | **别用浏览器，用 rsync**（见 [tools/README.md](tools/README.md)） |
 
-**单文件下载支持 `Range`**，浏览器断了会自己续传。**打包下载不支持** ——
-zip 是边算边发的，断了只能重来。所以一小时的采集（5.4 GB）建议逐个文件或走 rsync。
+**单文件下载支持 `Range`**，浏览器断了会自己续传。打包下载的 zip 是边算边发的，断了只能重来。所以一小时的采集（5.4 GB）建议逐个文件或走 rsync。
 
-**勾中的几次采集合并成一份 dataset**，不是一次一个文件夹：episode 文件序号跨 session
-连续，根目录只有一份 `meta.json` 与 `episodes_all.*`。交付单位是数据集，不是某一次采集，
-所以转换栏钉在页顶而不在某一次的详情里。
+**勾中的几次采集合并成一份 dataset**：episode 文件序号跨 session 连续，根目录只有一份 `meta.json` 与 `episodes_all.*`。交付单位是数据集，所以转换栏位于页顶。
 
-**转换是「现转现下」**：转换结果不留在盘上。点「开始转换」后服务端在临时目录里
-转（有进度条，实测 0.13x 实时，一小时素材约 8 分钟），转完出现「下载」链接，
-**下载完成即删除**，链接一次性。中断没下的临时产物有 30 分钟 TTL，节点重启也会清。
+**转换是「现转现下」**：点「开始转换」后服务端在临时目录里转（有进度条，实测 0.13x 实时，一小时素材约 8 分钟），转完出现「下载」链接，**下载完成即删除**，链接一次性。中断没下的临时产物有 30 分钟 TTL，节点重启也会清。
 
-之所以不做成「点一下等着下」：转换太慢，一个 HTTP 请求从头等到尾必然超时。
-之所以不留着：产物极少复用，而一次转换就是十几到几百 MB。
+转换任务异步执行，避免单个 HTTP 请求等待超时；产物通常只下载一次，临时目录与 TTL 用于回收十几到几百 MB 的转换文件。
 
-**转换在服务器上跑，关掉页面不影响它**，回来还能看到进度。
-**转换要抢 3.8 个核**，一次只能跑一个；**正在录制时别起**，会挤掉录制。
-不做硬拦：采集面板开着不等于在录，拦了反而让人没录时也转不了。
+**转换在服务器上跑，关掉页面不影响它**，回来还能看到进度。**转换要抢 3.8 个核**，一次只能跑一个；**正在录制时别起**，会挤掉录制。数据管理操作与录制进程独立，录制期间是否转换由操作者确认。
 
 ### 回放
 
+**点击片段的“回放”会让机器人执行真实动作，FPC 必须已经 active。** DataManager 检查 `/replay/status` 的新鲜状态、`ready=true` 和请求接收者，再向 `/replay/request` 发送一次 JSON `std_msgs/String`。内置 [ReplayTask](record/replay_node.py) 继承 `ArmIKMixin` 与 ROS `Node`，通过 [record.replay](record/replay.py) 本地读取封口数据的 `motion_control_command` 末端轨迹，从当前实测关节经 FK 得到的末端姿态与实测夹爪缓入首动作，经共享本地 IK 输出上肢槽位 15..30 的 `JointTargets`。回放非会话任务，也不重放下肢或记录的关节数组；episode 只指定播放时间区间。
 
+| 请求字段 | 含义 |
+|---|---|
+| `session_path` | 录制 session 的目录路径 |
+| `t0`、`t1` | 录制时间轴上的回放区间 |
+| `speed` | 回放速度倍率 |
+| `label` | 回放片段的显示名称 |
 
-**为什么不按关节回放**：`motion_control` 一直开着并占着 FPC，关节级指令的出口只有它
-一个。想按关节放就得让它退出 `ik` 模式，那会改变整条链路的行为。重发末端位姿走的是
-和当时完全相同的那条路（同一套 IK、同一个出口限速），复现度更高，也不用改控制层。
+新录制默认监听 `/motion_control/tasks` 的 JSON 任务状态与 `/forward_position_controller/joint_targets` 的关节目标，信号提取器按掩码累积部分更新。为兼容历史表结构，`motion_control_command` 保留 base4 + 双臂 pose14 + grip2 共 20 列，前 4 个速度占位列记为 NaN；实机回放使用最后 16 列，位置线性插值、xyzw 四元数最短弧球面插值、夹爪线性插值。`fpc_commands` 作为采集信号保留 59 列，最后 28 个增益占位列和尚未收到的关节目标记为 NaN。
 
-**只发上肢**：长度 14（双臂位姿）+ 长度 2（双夹爪）。**绝不发长度 4 或 20** —— 那会
-带上 `vx/vy/wz/h` 让机器人走路。录的是桌面操作，回放时它该站着不动。
+[DataManager 的 main](record/data_node.py) 创建管理节点与 ReplayTask，并将两个节点加入同一个 executor。`record.launch.py` 默认 `data:=true`，因此自动带回放；`data:=false` 则没有数据管理和回放，只保留 recorder。`ros2 run record data_manager` 同样自动带回放节点。回放使用 `use_global_arguments=False`，不受 data_manager 的 launch `__node` 重命名影响。
 
-三道安全：
+回放加载共享 [arm_ik.yaml](../g1_motion_session/config/arm_ik.yaml) 与自身参数，不加载 session 生命周期配置；关节顺序默认取硬件 canonical31。DataManager 参数 `replay_config` 默认空字符串，需要覆盖 IK 时传可选绝对 YAML 路径，参数写在 YAML 的 `/**` 下的 `ros__parameters` 映射中。默认控制频率 50 Hz、`ramp_s=2.0` 秒，页面从 `/replay/status` 获取就绪、阶段和进度。
 
-1. `arm_mode` 必须是 `ik`。透传模式下那 7 个数会被当成关节角，**把四元数当关节角发
-   下去是一次事故**，不是显示问题
-2. `arms_live` 必须为真，否则上肢还没被接管
-3. 开播前从当前 `limited_pose` **缓入**到录制起点（余弦缓入，两端速度为零）。机器人
-   现在在哪和录制从哪开始可能差很远，直接发第一帧会被出口限速摊成一段全速运动
+```bash
+# 已有硬件栈，由操作者确认或显式激活 FPC
+source scripts/env.sh
+ros2 control list_controllers -c /controller_manager
+ros2 control switch_controllers --activate forward_position_controller --strict -c /controller_manager
 
-停止就是停止发布：上肢指令不设超时，手臂停在原地。要卸力用控制层的 `~/estop`。
+# 录制 + 数据管理与内置回放，然后打开 :8221
+ros2 launch record record.launch.py
 
-> 姿态插值用 slerp 不用线性插值，且点积为负时取反走短弧 —— 缓入段可能有大转角，
-> 线性插值再归一化会让角速度不均匀，取长弧则会绕一大圈。
+# 只需数据页面与回放时改用这一条，不叠加启动
+ros2 run record data_manager
+
+# 可选 IK 覆盖配置，按所需入口选择其一
+ros2 launch record record.launch.py replay_config:=/data/replay.yaml
+ros2 run record data_manager --ros-args -p replay_config:=/data/replay.yaml
+
+# 停止播放，FPC 保持最后目标
+ros2 service call /replay/stop std_srvs/srv/Trigger '{}'
+```
+
+页面只提交一次播放请求或停止播放；`/replay/stop` 停止回放目标发布，FPC 保持最后目标，卸力由操作者通过控制栈单独完成。模型与反馈就绪不代表 FPC 已激活。注意停下其他上肢目标源：这是操作警告，回放不检查目标竞争、不仲裁并发发布，也不强制排除其他发布者；同一槽位按 FPC 最后收到的目标执行。session 的全局 `engage` 仍可能使任务或未登记关节进行准备，回放不会阻止或自动发送该操作。
+
+回放节点继承 DataManager 的 namespace，但 `request_topic`、`status_topic`、`stop_service` 默认是绝对端点 `/replay/request`、`/replay/status`、`/replay/stop`，不会随 namespace 改变。需要隔离端点时显式传 DataManager 参数，内置节点会同步使用这些值；全局模型与关节反馈默认保持不变：
+
+```bash
+ros2 run record data_manager --ros-args -r __ns:=/demo \
+  -p request_topic:=/demo/replay/request \
+  -p status_topic:=/demo/replay/status \
+  -p stop_service:=/demo/replay/stop
+```
+
+[启动边界测试](../robot_bringup/test/test_launch_boundaries.py) 覆盖 record launch 的默认值、`data` 开关与 `replay_config` 转发。
 
 | 误差来源 | 量级 | 状态 |
 |---|---|---|
 | 网络排队 + 内核缓冲 + ffmpeg 调度 | 单帧 p5..p95 跨 23 ms | 第 2 步已消除，残余 ±10 ms |
 | 相机管线（曝光 + ISP + 编码） | 两路都 **110 ms ± 15** | 已标定，见下 |
 
-第二项让视频时间轴整体偏晚一个固定量。`tools/align_video.py` 用图像运动强度 ×
-该臂关节角速度做互相关来标它。参数统一后两台相机的延迟趋于一致：
+第二项让视频时间轴整体偏晚一个固定量。`tools/align_video.py` 用图像运动强度 × 该臂关节角速度做互相关来标它。参数统一后两台相机的延迟趋于一致：
 
 | 采集 | 相机配置 | `wrist_left` | `wrist_right` |
 |---|---|---|---|
 | 2026-08-24 早 | `.97` 30fps/GOP120，`.98` **25fps**/GOP75 | +114 ms（峰高 0.60） | +195 ms（峰高 0.65） |
 | 2026-08-24 晚 | 两台统一 30fps/GOP90 | +101 ms（峰高 0.17） | +115 ms（峰高 0.24） |
 
-**取 110 ms，不确定度 ±15 ms。** 后一次的峰高没到 0.3 的判据线，但几条互相独立的
-证据都指向同一个数：
+**取 110 ms，不确定度 ±15 ms。** 后一次的峰高没到 0.3 的判据线，但几条互相独立的证据都指向同一个数：
 
 - 同一段数据换 4 种机器人侧信号（全 7 轴 / 腕 3 轴 / 肘+腕 / 末端），延迟都落在 98~116 ms
 - 换窗长 4/12/16 s 重算，左路 +100.3 / +103.9 / +101.4，右路 +101.3 / +109.8 / +115.1
 - 参数统一前 `.97` 在高置信度下测得 +114 ms，与本次 +101 一致
-- **改帧率前就预测过** `.98` 的 +195 会向 `.97` 靠拢（那 81 ms 差 ≈ 25 fps 的两个帧
-  周期），改完实测 +115，预测应验
+- **改帧率前就预测过** `.98` 的 +195 会向 `.97` 靠拢（那 81 ms 差 ≈ 25 fps 的两个帧周期），改完实测 +115，预测应验
 
-不修正就是 110 ms 的系统性错位，修正后残余 ±15 ms，所以带着不确定度用。想收紧就再
-采一次单臂数据。
+不修正就是 110 ms 的系统性错位，修正后残余 ±15 ms，所以带着不确定度用。想收紧就再采一次单臂数据。
 
-**机器人侧信号必须用 `joint_states` 的实测速度**，不能用 `motion_control_status` 的
-`limited_pose`：后者是关节指令的正解，机器人跟随指令有滞后，拿它做互相关会把伺服
-跟踪滞后一起算进延迟里 —— 实测系统性偏大 30~45 ms。
+**机器人侧信号必须用 `joint_states` 的实测速度**，不能用 `motion_control_status` 的 `limited_pose`：后者是关节指令的正解，机器人跟随指令有滞后，拿它做互相关会把伺服跟踪滞后一起算进延迟里，实测系统性偏大 30~45 ms。
 
-> **两台相机必须保持一致。** 用 `scripts/set_wrist_camera_fps.py --diff` 自检，
-> 不一致时退出码非零，可直接当检查项。出厂就不一样，不自检发现不了。
-> **改过相机参数就要重标**：延迟直接跟编码参数相关。
+> **两台相机必须保持一致。** 用 `scripts/set_wrist_camera_fps.py --diff` 自检，不一致时退出码非零，可直接当检查项。出厂就不一样，不自检发现不了。**改过相机参数就要重标**：延迟直接跟编码参数相关。
 
-> **标定采集要单臂动。** 一次只动一条臂、幅度大、方向多变，每条 10 s 就够（实测
-> 单臂 10 s 的置信 0.60，而双臂齐动 104 s 只有 0.23）。判据是**同侧至少是异侧的两倍**：
-> 双臂齐动时两条臂的运动混在一起，光看峰高会把串扰当成信号。
+> **标定采集要单臂动。** 一次只动一条臂、幅度大、方向多变，每条 10 s 就够（实测单臂 10 s 的置信 0.60，而双臂齐动 104 s 只有 0.23）。判据是**同侧至少是异侧的两倍**：双臂齐动时两条臂的运动混在一起，光看峰高会把串扰当成信号。
 >
-> 相机是**自动曝光且上限 100 ms**（`MaxExposureTime`），曝光时间本身就是延迟的一部分，
-> 所以标定和采集的光照条件应当接近。
+> 相机是**自动曝光且上限 100 ms**（`MaxExposureTime`），曝光时间本身就是延迟的一部分，所以标定和采集的光照条件应当接近。
 
-包大小那路运动信号信噪比不够（实测置信只有 0.10，帧差是 0.56~0.62），标定一律加
-`--align-frames` 走解码帧差。它连「哪台相机在动」都分不出来（两台包大小差异被码率
-基线淹没），帧差则是 12~21 vs 4~9，一目了然。
+包大小那路运动信号信噪比不够（实测置信只有 0.10，帧差是 0.56~0.62），标定一律加 `--align-frames` 走解码帧差。两台包大小差异被码率基线淹没，帧差则是 12~21 vs 4~9。
 
-> **RTCP 这条路不通。** RTP 标准的 Sender Report 会把媒体时钟映射到发送端 NTP 墙钟，
-> 有它就不需要互相关。实测这两台相机不实现：抓 30 秒收到 4070 个 RTP 包、SR 一个没有，
-> 主动发接收报告催也没用。换成支持 RTCP SR + NTP 的相机可以让整个问题消失。
+> **RTCP 这条路不通。** RTP 标准的 Sender Report 会把媒体时钟映射到发送端 NTP 墙钟，有它就不需要互相关。实测这两台相机不实现：抓 30 秒收到 4070 个 RTP 包、SR 一个没有，主动发接收报告催也没用。换成支持 RTCP SR + NTP 的相机可以让整个问题消失。
 
 ---
 
 ## 桌面几何
 
-用 pinocchio 逐格 IK + 邻格热启动洪水填充实测（腰锁死、工具轴垂直向下 30° 内、
-含自碰撞过滤）：
+用 pinocchio 逐格 IK + 邻格热启动洪水填充实测（腰锁死、工具轴垂直向下 30° 内、含自碰撞过滤）：
 
 ```
 可达区外接矩形  275 mm(纵深) x 900 mm(横向)   其中 80% 可达
@@ -483,8 +425,7 @@ zip 是边算边发的，断了只能重来。所以一小时的采集（5.4 GB�
 近边            x = 0.100（torso_link 系）—— 经验值，实机要拿尺子核
 ```
 
-掩码固化在 `record/data/reach_mask.npz`。**布局与落点一律对掩码判**——用矩形近似会
-得出「5 件承载面全放不下」的假结论，对掩码判则 220 mm 的盘子还有 5 个可放位置。
+掩码固化在 `record/data/reach_mask.npz`。**布局与落点一律对掩码判**，用矩形近似会得出「5 件承载面全放不下」的假结论，对掩码判则 220 mm 的盘子还有 5 个可放位置。
 
 物品库 91 件 active，可达域内可用 83 件。一个 round 建议 **3–5 件**（对面是 5–10 件）。
 
@@ -512,14 +453,10 @@ zip 是边算边发的，断了只能重来。所以一小时的采集（5.4 GB�
 
 ## 已知限制
 
-- **头部相机的管线延迟未标定**（约 30 ms 是估计值）。头相机不随手臂动，互相关这条路
-  对它不适用；要标得靠 D435i 的时间戳语义或外部闪光
+- **头部相机的管线延迟未标定**（约 30 ms 是估计值）。头相机不随手臂动，互相关这条路对它不适用；要标得靠 D435i 的时间戳语义或外部闪光
 - **腕部延迟的不确定度还有 ±15 ms**。要收紧就再采一次单臂数据
-- **两台腕相机经常轮流掉线**。参数已统一（1080p / 30 fps / 3000 kbps / GOP 90 /
-  H264 High），用 `scripts/set_wrist_camera_fps.py --diff` 自检
-- **回放没有视频同步画面**。只重演动作，预览帧是静态的；要逐帧看得自己开播放器。
-  离线看对齐用卡片上的「校验」（见「时间对齐」），**它不适合做成同步画面** ——
-  渲染 0.32 s/帧，比 30 fps 慢两个数量级，而且回放时机器人真的在动，不该再抢 CPU
+- **两台腕相机经常轮流掉线**。参数已统一（1080p / 30 fps / 3000 kbps / GOP 90 / H264 High），用 `scripts/set_wrist_camera_fps.py --diff` 自检
+- **回放没有视频同步画面**。只重演动作，预览帧是静态的；要逐帧看得自己开播放器。离线看对齐用卡片上的「校验」（见「时间对齐」），**它不适合做成同步画面**，渲染 0.32 s/帧，比 30 fps 慢两个数量级，而且回放时机器人真的在动，不该再抢 CPU
 - **A→B 自动同步没接**。`DONE` 已经写了，rsync 还要人工敲一次
 - **图像还没进 h5**，等对面给口径。已导出的 `frame_index` 把对齐钉死了，届时只补取像素
 - 头部深度图默认不录：16UC1 压不了，424x240@30 就是 21 GB/h，比三路彩色加起来还大
@@ -529,10 +466,8 @@ zip 是边算边发的，断了只能重来。所以一小时的采集（5.4 GB�
 ## 测试
 
 ```bash
-python3 -m pytest src/record/test -q          # 124 条，约 55 s
+python3 -m pytest src/record/test -q
 python3 src/record/test/smoke_record.py       # 真机烟测，不接相机也能跑
 ```
 
-其中几条是钉契约的：只有 numpy 也能读出落盘数据、录制中 `kill -9` 后已落盘部分仍是
-整行的整数倍、关节必须按名字重排、以及 Instruction Spec §1.5 要求的发布前批量验收
-（120 个 round、1000+ 条指令、lint 命中必须为 0）。
+其中几条是钉契约的：只有 numpy 也能读出落盘数据、录制中 `kill -9` 后已落盘部分仍是整行的整数倍、关节必须按名字重排、以及 Instruction Spec §1.5 要求的发布前批量验收（120 个 round、1000+ 条指令、lint 命中必须为 0）。

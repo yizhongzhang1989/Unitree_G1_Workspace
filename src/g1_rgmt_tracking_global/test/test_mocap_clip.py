@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
@@ -138,7 +139,7 @@ def accelerating_stream() -> FakeStream:
 
 def make_clip(stream, offsets=CONTRACT_OFFSETS, **kwargs) -> MocapClip:
     return MocapClip(stream, control_dt=CONTROL_DT,
-                     lead_frames=lead_frames_for(offsets),
+                     lead_frames=lead_frames_for(offsets.tolist()),
                      stand_joint_pos=DEFAULT_Q, **kwargs)
 
 
@@ -298,7 +299,7 @@ def test_playhead_lags_by_the_full_lookahead(fake_stream):
     否则 ``+15`` 那个 token 会被钳位成"当前帧"，前瞻整段失效——而且不会报错，
     只是策略突然没有了未来信息。
     """
-    lead = lead_frames_for(CONTRACT_OFFSETS)
+    lead = lead_frames_for(CONTRACT_OFFSETS.tolist())
     assert lead >= int(CONTRACT_OFFSETS.max())
     clip = make_clip(fake_stream)
     clip.align(np.zeros(3), IDENTITY_QUAT)
@@ -327,7 +328,7 @@ def test_playhead_hard_resyncs_after_a_gap(fake_stream):
     clip.reference_window(0, CONTRACT_OFFSETS, np.zeros(3), IDENTITY_QUAT)
     # 隔了 500 拍才回来，相位差 10 s，远超硬同步阈值。
     clip.reference_window(500, CONTRACT_OFFSETS, np.zeros(3), IDENTITY_QUAT)
-    lead = lead_frames_for(CONTRACT_OFFSETS) * CONTROL_DT
+    lead = lead_frames_for(CONTRACT_OFFSETS.tolist()) * CONTROL_DT
     assert fake_stream.span()[1] - clip._last_play == pytest.approx(lead, abs=1e-9)
 
 
@@ -388,7 +389,7 @@ def test_stale_refuses_to_guess_the_clock_domain(fake_stream):
     """
     clip = make_clip(fake_stream, stale_timeout_s=0.3)
     with pytest.raises(TypeError):
-        clip.stale()
+        signature(clip.stale).bind()
 
 
 def test_clip_accepts_a_frame_buffer():
@@ -401,7 +402,7 @@ def test_clip_accepts_a_frame_buffer():
 
     buffer = FrameBuffer(n_joints=len(ACTION_JOINTS), n_keys=len(KEY_BODIES))
     clip = MocapClip(buffer, control_dt=CONTROL_DT,
-                     lead_frames=lead_frames_for(CONTRACT_OFFSETS),
+                     lead_frames=lead_frames_for(CONTRACT_OFFSETS.tolist()),
                      stand_joint_pos=DEFAULT_Q)
     # 还没收到任何 status，也没有帧：必须给出明确理由，而不是当成正常。
     assert clip.stale(0.0) != ''

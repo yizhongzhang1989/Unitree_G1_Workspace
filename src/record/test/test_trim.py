@@ -10,17 +10,13 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
+from tools.format.YB import export as ex
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 HERE = TOOLS / 'format' / 'YB'
-sys.path.insert(0, str(TOOLS))
-sys.path.insert(0, str(HERE))
-
-import export as ex                                        # noqa: E402
 
 HZ = 50.0
 ARMS = ('left', 'right')
@@ -122,11 +118,14 @@ def test_never_widens_past_the_recorded_episode():
 def test_trim_episode_records_what_it_cut():
     """裁掉多少必须打得出来，否则无从判断 h5 里那段是不是被动过。"""
     ses = _session(20.0, move_from=8.0, move_to=12.0, grip_level=2.0)
-    episode = {'t0': 0.0, 't1': 20.0, 'duration': 20.0}
+    episode: dict[str, float | dict[str, float]] = {'t0': 0.0, 't1': 20.0, 'duration': 20.0}
     ex.trim_episode(ses, episode, keep=1.0)
     cut = episode['trim']
+    assert isinstance(cut, dict)
     assert cut['head_s'] > 5.0 and cut['tail_s'] > 5.0
-    assert episode['duration'] == episode['t1'] - episode['t0']
+    start, end = episode['t0'], episode['t1']
+    assert isinstance(start, float) and isinstance(end, float)
+    assert episode['duration'] == end - start
 
 
 def test_missing_status_table_is_not_fatal():

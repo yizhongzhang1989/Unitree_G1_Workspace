@@ -74,8 +74,10 @@ class Editor:
                     lambda: node.color is not None and node.info is not None and node.samples,
                     10.0):
                 raise RuntimeError('收不到头相机、内参或 /joint_states')
-            color = node.color
-            info = node.info
+            color = self.capture_node.color
+            info = self.capture_node.info
+            urdf = self.capture_node.urdf
+            assert color is not None and info is not None and urdf is not None
             node.spin_for(self.window)
             samples = node.samples.copy()
             names = sorted(set.intersection(*(set(sample) for sample in samples)))
@@ -98,7 +100,7 @@ class Editor:
             handle, urdf_path = tempfile.mkstemp(prefix='head_xyz_', suffix='.urdf')
             try:
                 with os.fdopen(handle, 'w') as file:
-                    file.write(node.urdf)
+                    file.write(urdf)
                 renderer = UrdfSceneRenderer(urdf_path, _package_dirs())
             finally:
                 os.unlink(urdf_path)

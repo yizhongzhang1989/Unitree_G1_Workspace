@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    control_rate_hz: 50.0
+    stand_s: 2.5
+    stand_clear_s: 0.4
+    stand_clear_roll: 0.7
+    home_s: 2.0
+    passive_targets: [0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, -0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0]
+    gripper_source: keyboard
+    gripper_joints: [left_eccentric_joint, right_eccentric_joint]
+    gripper_limits: [0.0, 2.76377472169236]

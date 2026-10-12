@@ -83,6 +83,66 @@ def float_array_row(msg, width: int) -> list[float]:
     return [float(v) for v in data] + [NAN] * (width - len(data))
 
 
+class MotionCommandRow:
+    """任务状态末端快照，沿用 20 列；有效部分按同一 task_id 累积。
+
+    无合法更新的消息输出全 NaN，不把缓存当成新快照；缓存仅供后续有效更新。
+    """
+
+    def __init__(self):
+        self.values = [NAN] * 20
+        self.task_id = None
+
+    def __call__(self, msg):
+        try:
+            payload = json.loads(msg.data)
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            return [NAN] * 20
+        if not isinstance(payload, dict):
+            return [NAN] * 20
+        task_id = payload.get('task_id')
+        pose = payload.get('command_pose')
+        if not isinstance(task_id, str) or not task_id or not isinstance(pose, dict):
+            return [NAN] * 20
+        updates = []
+        for value, start, width in ((pose.get('left'), 4, 7),
+                                    (pose.get('right'), 11, 7),
+                                    (payload.get('grip'), 18, 2)):
+            if not isinstance(value, list) or len(value) != width:
+                continue
+            if any(isinstance(item, bool) or not isinstance(item, (int, float))
+                   for item in value):
+                continue
+            try:
+                numbers = [float(item) for item in value]
+            except (ValueError, OverflowError):
+                continue
+            if all(math.isfinite(item) for item in numbers):
+                updates.append((start, numbers))
+        if not updates:
+            return [NAN] * 20
+        if task_id != self.task_id:
+            self.values = [NAN] * 20
+            self.task_id = task_id
+        for start, numbers in updates:
+            self.values[start:start + len(numbers)] = numbers
+        return self.values.copy()
+
+
+class JointTargetsRow:
+    def __init__(self):
+        self.values = [NAN] * 59
+
+    def __call__(self, msg):
+        bits = msg.mask & 0x7FFFFFFF
+        while bits:
+            bit = bits & -bits
+            index = bit.bit_length() - 1
+            self.values[index] = float(msg.positions[index])
+            bits ^= bit
+        return self.values.copy()
+
+
 def wrench_row(msg) -> list[float]:
     w = msg.wrench
     return [w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z]
@@ -209,23 +269,21 @@ def default_specs(joint_order=CANONICAL_JOINTS) -> list[SignalSpec]:
                    joint_state_columns(order),
                    lambda m: joint_state_row(m, order),
                    note='实际末端位姿靠它离线 FK；顺序已重排为规范序'),
-        # QoS 必须 BEST_EFFORT：发布方是 depth=1 的 BEST_EFFORT，RELIABLE 匹配不上。
-        SignalSpec('motion_control_command', '/motion_control/command',
-                   'std_msgs/msg/Float64MultiArray',
+        SignalSpec('motion_control_command', '/motion_control/tasks',
+                   'std_msgs/msg/String',
                    [f'cmd.{i}' for i in range(20)],
-                   lambda m: float_array_row(m, 20), best_effort=True,
-                   note='VR 目标位姿 base4+left7+right7+grip2'),
+                   MotionCommandRow(), best_effort=True, depth=10,
+                   note='上肢任务状态中的末端位姿与夹爪快照，约 10 Hz；非高频原始目标。'
+                        '同一任务有效部分累积，无有效更新记 NaN；历史 base4 列记为 NaN'),
         SignalSpec('motion_control_status', '/motion_control/status',
                    'std_msgs/msg/String', status_columns(), status_row,
                    note='limited_pose 是关节指令的正解，不是实测末端'),
-        # QoS 必须 BEST_EFFORT：发布方是 policy_node 的 depth=1 BEST_EFFORT。
-        SignalSpec('fpc_commands', '/forward_position_controller/commands',
-                   'std_msgs/msg/Float64MultiArray',
+        SignalSpec('fpc_commands', '/forward_position_controller/joint_targets',
+                   'unitree_g1_ros2_control/msg/JointTargets',
                    [f'pos.{n}' for n in order] + [f'kp.{i}' for i in range(14)]
                    + [f'kd.{i}' for i in range(14)],
-                   lambda m: float_array_row(m, 31 + 14 + 14), best_effort=True,
-                   note='关节级指令的唯一出口；发布者是 /motion_control，'
-                        '它只在 stand/run 状态下发，idle/estop 时这一路本来就空'),
+                   JointTargetsRow(), best_effort=True, depth=4,
+                   note='各任务直接发布的掩码关节目标，按接收顺序累积；增益列记为 NaN'),
         _wrench('arm0_wrench_raw', '/arm0/wrench_raw', 'KWR57 原始读数', 200.0),
         _wrench('arm1_wrench_raw', '/arm1/wrench_raw', 'KWR57 原始读数', 200.0),
         _wrench('arm0_wrench_net', '/arm0/wrench_net', '扣掉重力的净力', 0.0),
@@ -246,9 +304,9 @@ def default_specs(joint_order=CANONICAL_JOINTS) -> list[SignalSpec]:
                    ['qx', 'qy', 'qz', 'qw', 'wx', 'wy', 'wz', 'ax', 'ay', 'az'],
                    imu_row, best_effort=True),
         SignalSpec('head_imu', '/utlidar/imu_livox_mid360', 'sensor_msgs/msg/Imu',
-               ['qx', 'qy', 'qz', 'qw', 'wx', 'wy', 'wz', 'ax', 'ay', 'az'],
-               imu_row, best_effort=True,
-               note='Livox MID-360 原始 IMU，线加速度单位为 g，约 200 Hz'),
+                   ['qx', 'qy', 'qz', 'qw', 'wx', 'wy', 'wz', 'ax', 'ay', 'az'],
+                   imu_row, best_effort=True,
+                   note='Livox MID-360 原始 IMU，线加速度单位为 g，约 200 Hz'),
         SignalSpec('secondary_imu', '/secondary_imu', 'unitree_hg/msg/IMUState',
                    ['qw', 'qx', 'qy', 'qz', 'wx', 'wy', 'wz',
                     'ax', 'ay', 'az', 'roll', 'pitch', 'yaw'],

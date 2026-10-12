@@ -16,7 +16,6 @@
   <exec_depend>arm_gravity_compensation</exec_depend>
   <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>gloria_ros</exec_depend>
-  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>robot_test_dashboard</exec_depend>
   <exec_depend>unitree_g1_description</exec_depend>
   <exec_depend>unitree_g1_ros2_control</exec_depend>
@@ -27,6 +26,15 @@
   <exec_depend>unitree_api</exec_depend>
   <exec_depend>unitree_hg</exec_depend>
   <exec_depend>ros2launch</exec_depend>
+  <exec_depend>g1_motion_session</exec_depend>
+  <exec_depend>lower_velocity_tracking</exec_depend>
+  <exec_depend>lower_footstep_tracking</exec_depend>
+  <exec_depend>upper_vr</exec_depend>
+  <exec_depend>upper_vla</exec_depend>
+  <exec_depend>upper_float</exec_depend>
+  <exec_depend>head_sensors</exec_depend>
+  <exec_depend>g1_localization</exec_depend>
+  <exec_depend>record</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

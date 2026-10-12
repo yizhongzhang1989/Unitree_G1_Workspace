@@ -39,13 +39,14 @@ import sys
 import termios
 import time
 import tty
+from typing import cast
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from unitree_api.msg import Request, Response
-from unitree_hg.msg import LowCmd, LowState
+from unitree_hg.msg import LowCmd, LowState, MotorCmd
 
 SPORT_REQUEST_TOPIC = "/api/sport/request"
 SPORT_RESPONSE_TOPIC = "/api/sport/response"
@@ -177,14 +178,16 @@ def build_arm_sdk_command(positions: dict, weight: float) -> LowCmd:
     官方明确“除 12-28 和 29 外其余元素均无效”，/arm_sdk 与 /lowcmd 不是同一条处理路径。
     """
     command = LowCmd()
+    # ROS 固定数组实际为列表，补齐生成代码缺少的类型，不复制消息
+    motors = cast(list[MotorCmd], command.motor_cmd)
     for index, (_, kp, kd) in UPPER_BODY.items():
-        motor = command.motor_cmd[index]
+        motor = motors[index]
         motor.q = positions[index]
         motor.dq = 0.0
         motor.tau = 0.0
         motor.kp = kp
         motor.kd = kd
-    command.motor_cmd[WEIGHT_SLOT].q = weight
+    motors[WEIGHT_SLOT].q = weight
     return command
 
 
@@ -272,8 +275,11 @@ class SportApi:
         self._replies = {}
         node.create_subscription(
             Response, SPORT_RESPONSE_TOPIC,
-            lambda m: self._replies.setdefault(m.header.identity.id, m),
+            self._on_reply,
             QoSProfile(depth=10))
+
+    def _on_reply(self, message: Response) -> None:
+        self._replies.setdefault(message.header.identity.id, message)
 
     def call(self, api_id: int, parameter: str = "", timeout_s: float = 3.0):
         """返回 (status_code, data)，超时返回 None"""
@@ -349,7 +355,7 @@ class Keyboard:
         return self
 
     def __exit__(self, *_exc) -> None:
-        if self._saved is not None:
+        if self._fd is not None and self._saved is not None:
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
 
     @property

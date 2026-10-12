@@ -1,0 +1,37 @@
+/**:
+  ros__parameters:
+    arm_joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+    base_frame: torso_link
+    left_tip_frame: left_gripper_base
+    right_tip_frame: right_gripper_base
+    ik_max_iters: 10
+    ik_damping: 0.05
+    ik_tol_pos: 0.001
+    ik_tol_ori: 0.0035
+    ik_max_step_pos: 0.1
+    ik_max_step_ori: 0.5
+    ik_rotation_weight: 0.01
+    ik_limit_upper: [+.inf, +.inf, +.inf, 1.4, +.inf, +.inf, +.inf,
+                     +.inf, +.inf, +.inf, 1.4, +.inf, +.inf, +.inf]
+    ik_null_gain: [0.0, 0.05, 0.20, 0.20, 0.20, 0.0, 0.0,
+                   0.0, 0.05, 0.20, 0.20, 0.20, 0.0, 0.0]
+    ik_null_target: [0.0, +0.34, 0.0, 0.0, 0.0, 0.0, 0.0,
+                     0.0, -0.34, 0.0, 0.0, 0.0, 0.0, 0.0]
+    ik_null_gate: [0.6, 1.2]
+    ik_rescue_err: 0.01
+    ik_rescue_giveup: 3
+    arm_rate_limit: 10.0

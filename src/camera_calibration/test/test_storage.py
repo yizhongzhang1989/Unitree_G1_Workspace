@@ -26,6 +26,7 @@ def test_empty_calibration_has_the_expected_shape(store):
 def test_intrinsic_roundtrip(store):
     store.put_intrinsic('camera_left', ENTRY)
     found = storage.find_intrinsic(store.read_calibration(), 'camera_left', 1920, 1080)
+    assert found is not None
     assert found['camera_matrix'] == ENTRY['camera_matrix']
     assert 'stamp' in found
 
@@ -50,6 +51,7 @@ def test_scale_relation_enables_conversion(store):
         'from': [1920, 1080], 'to': [640, 360], 'kind': 'scale', 'ratio': 1 / 3})
 
     found = storage.find_intrinsic(store.read_calibration(), 'camera_left', 640, 360)
+    assert found is not None
     matrix = np.asarray(found['camera_matrix']).reshape(3, 3)
     assert matrix[0, 0] == pytest.approx(500.0)
     assert matrix[0, 2] == pytest.approx(320.0)
@@ -85,6 +87,7 @@ def test_anisotropic_scale_uses_separate_ratios(store):
         'from': [640, 360], 'to': [426, 240], 'kind': 'scale', 'source': 'ffmpeg'})
 
     found = storage.find_intrinsic(store.read_calibration(), 'camera_left', 426, 240)
+    assert found is not None
     matrix = np.asarray(found['camera_matrix']).reshape(3, 3)
     assert matrix[0, 0] == pytest.approx(500.0 * 426 / 640)
     assert matrix[1, 1] == pytest.approx(502.0 * 240 / 360)

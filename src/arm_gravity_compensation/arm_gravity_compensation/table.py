@@ -4,15 +4,20 @@
 纯 numpy 的一份，节点导入它不会把整个刚体动力学库拉进来。
 """
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Dict
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import ArrayLike
 import yaml
 
+if TYPE_CHECKING:
+    from .gravity_model import ArmGravityTable, GravityTable
 
-def load_gravity_table(path: str) -> Dict[str, object]:
+
+def load_gravity_table(path: str) -> GravityTable:
     """Read the exported file, with or without its ROS parameter wrapper."""
     with open(Path(path).expanduser(), "r", encoding="utf-8") as stream:
         document = yaml.safe_load(stream)
@@ -36,10 +41,10 @@ def axis_rotation(axis: ArrayLike, angle: float) -> np.ndarray:
             (1.0 - np.cos(angle)) * (cross @ cross))
 
 
-def gravity_from_table(table: Dict[str, object], side: str, q: ArrayLike,
+def gravity_from_table(table: GravityTable, side: str, q: ArrayLike,
                        gravity: ArrayLike) -> np.ndarray:
     """Joint torques the exported chain produces, without the torque bias."""
-    chain = table[side]
+    chain: ArmGravityTable = table[side]
     angles = np.asarray(q, dtype=float)
     gravity_vector = np.asarray(gravity, dtype=float)
     masses = np.asarray(chain["mass"], dtype=float)
@@ -73,10 +78,10 @@ def gravity_from_table(table: Dict[str, object], side: str, q: ArrayLike,
     return torque
 
 
-def sensor_orientation_from_table(table: Dict[str, object], side: str,
+def sensor_orientation_from_table(table: GravityTable, side: str,
                                   q: ArrayLike) -> np.ndarray:
     """Rotation from the force sensor frame to the torso frame."""
-    chain = table[side]
+    chain: ArmGravityTable = table[side]
     if "payload_origin_rotation" not in chain:
         raise ValueError(
             "gravity table predates the force sensor mount; re-export it")

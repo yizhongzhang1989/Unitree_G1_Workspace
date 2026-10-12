@@ -126,14 +126,20 @@ def test_final_urdf_groups_payload_and_exports_same_tree(tmp_path):
     assert len(wrist_links) == 8
     assert len(output_root.findall("link")) == len(source_root.findall("link"))
     assert len(output_root.findall("joint")) == len(source_root.findall("joint"))
-    assert abs(float(output_links["left_kwr57b_link"].find(
-        "inertial/mass").get("value")) - 0.286) < 1e-12
     source_inertial = source_links["left_kwr57b_link"].find("inertial")
     output_inertial = output_links["left_kwr57b_link"].find("inertial")
-    assert output_inertial.find("origin").get("xyz") == "0 0 0.0265"
+    assert source_inertial is not None and output_inertial is not None
+    mass = output_inertial.find("mass")
+    origin = output_inertial.find("origin")
+    source_tensor = source_inertial.find("inertia")
+    output_tensor = output_inertial.find("inertia")
+    assert mass is not None and origin is not None
+    assert source_tensor is not None and output_tensor is not None
+    assert abs(float(mass.attrib["value"]) - 0.286) < 1e-12
+    assert origin.get("xyz") == "0 0 0.0265"
     for name in ("ixx", "ixy", "ixz", "iyy", "iyz", "izz"):
-        source_value = float(source_inertial.find("inertia").get(name))
-        output_value = float(output_inertial.find("inertia").get(name))
+        source_value = float(source_tensor.attrib[name])
+        output_value = float(output_tensor.attrib[name])
         assert abs(output_value - source_value * 1.1) < 1e-15
     identification = updated["links"]["left_kwr57b_link"]["inertial"][
         "identification"]

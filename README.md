@@ -6,14 +6,16 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 |---|---|
 | `robot_bringup` | 组合整机或末端设备的生产 launch |
 | `unitree_g1_ros2_control` | 把 FPC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
-| `g1_motion_control` | FPC 之上的整机 31 轴运动控制层：下肢 15 轴走 ONNX 策略（输入 `vx/vy/w/h`），上肢 14 轴走双臂 IK，夹爪 2 轴透传；内附 VR / 键盘遥操 |
-| `canalystii_native_bridge`、`gloria_ros`、`camera_node`、`can_bridge_ros` | CAN 适配器、夹爪协议和相机设备通信<br>已经被 `canalystii_native_bridge` 取代 |
+| `g1_motion_session` | 协调任务注册、接管、准备与启停；上下肢任务各自直接向 FPC 发布掩码关节目标 |
+| `lower_velocity_tracking`、`lower_footstep_tracking` | 下肢 15 轴 ONNX 策略，分别提供速度与脚步跟踪 |
+| `upper_vr`、`upper_vla`、`upper_float` | 上肢双臂与夹爪任务：VR、本地 IK 的 VLA 执行与手臂浮动 |
+| `canalystii_native_bridge`、`gloria_ros`、`camera_node` | 生产 CAN 适配器、夹爪协议和相机设备通信；`can_bridge_ros` 保留为独立调试入口 |
 | `head_sensors` | 头部传感器：Livox MID-360 雷达接入（TF、空点过滤、IMU 单位修正）+ RealSense D435i（官方 realsense2_camera） |
 | `g1_localization` | 头部雷达世界定位：Point-LIO 之上只暴露 `~/set_origin` 与 `~/torso_pose` 两个接口，另可广播 `world -> pelvis` |
 | `unitree_g1_description` | URDF、mesh、关节限位和 ros2_control 资源声明 |
 | `arm_gravity_compensation` | 基于 LowState/头部 IMU、Pinocchio 和纯 `tau` LowCmd 的双臂重力参数标定 |
-| Dashboards | 将人工操作转换为控制器命令；不直接驱动硬件 |
-| `g1_motion_control` | 整机 31 轴运动控制层 + 遥操台（在 FPC 之上） |
+| Dashboards | 整机页面连接已有控制器；末端页面另有直接夹爪控制，不能与整机控制同时作为命令源 |
+| `record` | 数据录制、管理、导出与同进程内置末端轨迹 IK 回放 |
 
 
 ## 快速开始
@@ -111,7 +113,7 @@ python3 scripts/set_wrist_camera_fps.py --osd-blank osd_title --apply
 
 | 接口 | 类型 | 说明 |
 |---|---|---|
-| `~/set_origin` | `std_srvs/Trigger` | 把此刻的躯干位姿钉成世界原点，响应带原点时间戳 |
+| `~/set_origin` | `std_srvs/Trigger` | XY/yaw 取此刻躯干，z=0 取雷达拟合地面，响应带原点时间戳 |
 | `~/torso_pose` | `nav_msgs/Odometry` | `world` → `torso_link` 的位姿与速度，10 Hz |
 
 外加一条可关的 TF `world -> pelvis`。**只能挂 pelvis**：URDF 的根是 pelvis，整棵树里只有它没有父；`torso_link` 的父已被 `waist_pitch_joint` 占着，再发一份就是两个 publisher 抢同一个 child，而 **tf2 不保证取哪一个、且完全静默**。挂 pelvis 不损失精度：下游查 `world -> torso_link` 时 tf2 会用同一份腰角走回来，两者精确抵消（实测 48% 的帧逐位相等，p50 1.14 mm）。
@@ -131,7 +133,7 @@ python3 scripts/set_wrist_camera_fps.py --osd-blank osd_title --apply
 
 本项目不编译 `unitree_go` 和 `unitree_ros2_example`。
 
-`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、FPC 和状态 broadcaster：FPC 只校验全量位置命令的维度与有限值，controller 将目标写入 position interface，`G1TopicSystem` 不限制有限 target 的数据范围，直接补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。这是因为阻抗控制需要通过目标位置相对反馈位置的偏移产生力矩。
+`unitree_g1_description` 只提供整机模型资源。`unitree_g1_ros2_control` 提供统一硬件插件、FPC 和状态 broadcaster：FPC 接收掩码 `JointTargets` 和已有全量数组，校验目标有效性并保持未更新关节；controller 将目标写入 position interface，`G1TopicSystem` 不限制有限 target 的数据范围，直接补齐 MIT 参数并生成 G1 `/lowcmd` 与左右 Gloria-M `MitCommand`。这是因为阻抗控制需要通过目标位置相对反馈位置的偏移产生力矩。
 
 
 ## 目录
@@ -160,7 +162,13 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── robot_test_dashboard/     [git submodule] 机器人测试 Dashboard
     ├── unitree_g1_description/   整机 description 包（model/ 为 URDF submodule）
     ├── arm_gravity_compensation/ 双臂重力参数采点、EM 标定与 Web 工作流
-    ├── g1_motion_control/     整机 31 轴运动控制层 + 遥操台（在 FPC 之上）
+    ├── g1_motion_session/        任务注册与生命周期、共享本地 IK 与监控页
+    ├── lower_velocity_tracking/  下肢速度策略与键盘控制业务
+    ├── lower_footstep_tracking/  下肢脚步策略与计划消息
+    ├── upper_vr/                 上肢 VR 与摇杆速度输入
+    ├── upper_vla/                上肢 VLA 与本地 IK 执行
+    ├── upper_float/              上肢实测位置跟随与夹爪控制
+    ├── record/                   录制、数据管理、导出与内置 IK 回放
     ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和 FPC
     └── unitree_ros2/             [git submodule] 官方消息结构（仅构建 unitree_api、unitree_hg）
 ```
@@ -168,7 +176,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
 - SDK 保留：`CAN-SDK`（模块 `can_sdk`）、`KWR57-SDK`（模块 `kwr57_sensor`）和 `gloria_m_sdk` 均可脱离 ROS 使用；ROS 封装只复用基础 I/O 和设备协议，不重复实现。
 - 三个 SDK 均不作为 ROS 包，且不由 colcon 构建；`scripts/env.sh` 统一把它们的源码目录加入 `PYTHONPATH`。ROS 节点不需要先安装本地 SDK，也不在节点代码中修改 `sys.path`。
 - `can_sdk` 刻意不提供多订阅：直连 SDK 的 `recv()` 是单消费者语义；它和 `can_bridge_ros` 只用于独立调试，生产多设备系统由 `canalystii_native_bridge` 成为唯一 USB 所有者。
-- 夹爪 SDK 整体声明 Python≥31.1；本项目只使用其 `protocol_mit`/`types` 逻辑，不打开 SDK 的串口转 CAN 传输层。由于 Python 导入包子模块时仍会执行上游 `gloria_m_sdk/__init__.py`，运行环境当前仍需提供上游依赖 `pyserial`。
+- 本项目只使用夹爪 SDK 的 `protocol_mit`/`types` 逻辑，不打开 SDK 的串口转 CAN 传输层。由于 Python 导入包子模块时仍会执行上游 `gloria_m_sdk/__init__.py`，运行环境当前仍需提供上游依赖 `pyserial`。
 
 
 ## 开发容器
@@ -199,7 +207,7 @@ VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY
 ### 进容器
 ```bash
 .devcontainer/dev.sh                # 交互 shell
-.devcontainer/dev.sh <命令...>      # 一次性执行，退出即销毁
+.devcontainer/dev.sh ros2 pkg list  # 一次性执行，退出即销毁
 ```
 关键运行参数（都在 `docker-compose.yml` 里）：
 
@@ -220,6 +228,7 @@ VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY
 宿主内核开了 `CONFIG_RT_GROUP_SCHED`（cgroup v1），**非根 cgroup 的实时带宽默认为 0**，此时 `sched_setscheduler()` 一律返回 EPERM——`privileged` 和 `RLIMIT_RTPRIO` 都救不了。`ros2_control_node` 会因此退回 SCHED_OTHER，500 Hz 控制环和 Flask、IK、相机编码抢同一批时间片。
 
 dockerd 必须先拿到实时带宽，它才会在建容器时把配额递归写到 `/docker` 父 cgroup：
+**以下在宿主执行，重启 Docker 前先正常停止机器人控制与其他容器任务。**
 ```bash
 sudo cp /etc/docker/daemon.json /etc/docker/daemon.json.bak
 # 往 daemon.json 里加 "cpu-rt-period": 1000000 与 "cpu-rt-runtime": 950000
@@ -289,6 +298,17 @@ ros2 launch robot_bringup whole_body_dashboard.launch.py
 # http://<机器人 IP>:8200
 ```
 
+运动控制则在另一终端选择一套组合，不与 Dashboard 同时向同一关节发目标：
+```bash
+ros2 run robot_bringup teleop_keyboard                         # 默认：下肢键盘 + 上肢浮动
+ros2 launch robot_bringup whole_vr.launch.py                    # 全身 VR
+ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=vr   # 仅上肢 VR
+ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=vla  # 仅上肢 VLA
+```
+组合只启动任务与唯一 session，不启动硬件、不自动接管。默认键盘按 G 接管，准备结束双臂即可浮动；Enter 只启动下肢策略。已有组合需额外键盘时用 `ros2 run lower_velocity_tracking teleop_keyboard`，不再启动第二套任务。VLA 的相机、服务与显式推理 start 见 [upper_vla](src/upper_vla/README.md)，完整入口见 [robot_bringup](src/robot_bringup/README.md)。
+
+录制使用 `ros2 launch record record.launch.py`，全链编排使用 `ros2 launch robot_bringup record_all.launch.py`；已有硬件或运动组合时关闭相应阶段，避免重复启动。数据页面内置 IK 回放执行真实动作，FPC 须提前 active，其他目标源须停止；回放不检查竞争，停止后保持最后目标。完整说明见 [record](src/record/README.md)。
+
 ### 其他启动方式
 双臂重力参数初始化与手拉采点页面（默认不允许输出 `/lowcmd`）：
 ```bash
@@ -348,7 +368,7 @@ ros2 launch robot_bringup end_effectors_dashboard.launch.py topology:=dual
 # http://<机器人 IP>:8770
 ```
 
-8770 默认是监视模式：显示相机、KWR57 和 Gloria 反馈，但不创建 `MitCommand` publisher，也不调用夹爪 enable/disable。它可以和 8200 同时运行。仅在 `scope:=end_effectors`、没有任何 ros2_control 夹爪 controller 时，才可显式追加 `allow_gripper_control:=true` 恢复独立末端控制；不要在整机控制期间打开该参数。
+8770 显示相机、KWR57 和 Gloria 反馈，也创建 `MitCommand` publisher 并提供夹爪 enable/disable 与手动控制。该路径绕过 controller manager 的资源 claim，**只配 `scope:=end_effectors` 使用，不能与整机 ros2_control 同时作为夹爪命令源**。
 
 整机 Dashboard 只发现 controller、执行 Engage/Disengage，并向 FPC 的 `/forward_position_controller/commands` 发送目标，不创建 manager 或控制适配器。G1 wrapper 只把切换超时放宽到 30 秒并做切换后状态校验（硬件接管会阻塞做夹爪使能和运控释放）。
 
@@ -369,7 +389,7 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 
 | 路径 | 边界 | 是否 DDS | 说明 |
 |---|---|---|---|
-| Dashboard/IK -> `/forward_position_controller/commands` | 外部应用 -> controller | 是 | 外部目标输入；controller 收到后进入实时缓冲 |
+| 任务 -> `/forward_position_controller/joint_targets`，完整数组工具 -> `~/commands` | 外部应用 -> controller | 是 | 掩码与全量目标合入同一实时缓冲，session 不转发任务目标 |
 | controller -> command interface -> `G1TopicSystem::write()` | 同一 `ros2_control_node` | 否 | 直接内存接口与函数调用 |
 | `G1TopicSystem` -> `/lowcmd` -> G1 | PC2 -> Unitree 低层 | 是 | Unitree 官方低层接口；LowCmd 组包和 CRC 在硬件插件进程内完成 |
 | `G1TopicSystem` -> `MitCommand` -> Gloria 节点 | ros2_control -> 独立夹爪进程 | 是，100 Hz | 默认 controller claim 两侧 eccentric interface；单侧反馈超时只停止该侧 |
@@ -385,7 +405,7 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 |---|---|---|
 | `robot_bringup/all_data.launch.py` | 末端拓扑；`scope:=whole_body` 时再包含唯一 ros2_control 栈 | 推荐生产入口 |
 | `robot_bringup/end_effectors_*_bus.launch.py` | 单/双总线 bridge、KWR57、Gloria-M 和相机 | 末端拓扑底层入口 |
-| `robot_bringup/end_effectors_dashboard.launch.py` | 8770 末端监视网页；默认不创建夹爪命令源 | 可与 8200 同时运行 |
+| `robot_bringup/end_effectors_dashboard.launch.py` | 8770 末端监控与直接夹爪控制网页 | 仅独立末端栈，不与整机控制同时作为命令源 |
 | `robot_bringup/whole_body_dashboard.launch.py` | 仅 8200 controller Dashboard | 已有真实 manager 时联调 |
 | `unitree_g1_ros2_control/control.launch.py` | 唯一 manager、硬件插件、RSP、broadcaster、inactive FPC | 独立整机控制入口 |
 | `unitree_g1_description/description.launch.py` | 仅模型、RSP 和 TF | 已有 `/joint_states` 时查看模型 |
@@ -408,7 +428,7 @@ ros2_control 插入的是同进程控制抽象，不是一个 DDS relay。`contr
 - `enable_grippers_on_start:=true` 只配置并使能设备；controller 激活仍会重新执行完整安全事务。需要上电保持失能时传入 `false`。
 - BEST_EFFORT 高频话题可使用 `ros2 topic echo --qos-reliability best_effort`；KWR57 的 1 kHz 订阅建议使用 `rclcpp`、BEST_EFFORT 和 `KEEP_LAST(64)`。
 - 世界定位要 `robot_state_publisher` 在跑：`torso_link → livox_frame` 的外参是从 TF 读的（`mid360_joint` 是 fixed）。查不到就只打告警、不发位姿。
-- `g1_localization/config/point_lio_g1.yaml` 里有三个改了就坏的地方，动之前先看那里的注释：`lidar_type` 必须是 2（上游把 AVIA 分支连同 livox 依赖一起注释了，填 1 一个点都收不到，而它自带的 `mid360.yaml` 正是填的 1）；`satu_acc: 29.42` 是按 m/s² 换算过的（饱和判定用的是归一化**前**的读数，照抄上游的 3.0 会开机即误判 IMU 饱和）；`blind: 1.0` 用来剔雷达自己所在的头部外壳和抬起的手臂。
+- `g1_localization/config/point_lio_g1.yaml` 里有三个改了就坏的地方，动之前先看那里的注释：`lidar_type` 必须是 2（上游把 AVIA 分支连同 livox 依赖一起注释了，填 1 一个点都收不到，而它自带的 `mid360.yaml` 正是填的 1）；`satu_acc: 3.0` 与 `acc_norm: 1.0` 配套用于原始 g 单位 IMU，改用 m/s² 输入时两项须同时改为约 `29.42` 与 `9.81`，因为饱和判断发生在单位换算前；`blind: 1.0` 用来剔雷达自己所在的头部外壳和抬起的手臂。
 - `~/torso_pose` 的**协方差恒为 0**（Point-LIO 默认路径不填），只有 `pose.covariance[0] = -1` 有意义，表示世界原点还没设。判有效性要**按帧判**：调完 `set_origin` 之后队列里的残留帧仍带 -1。
 - 装 `ros-humble-pcl-ros` 会连带拉进一大片依赖（Ubuntu 不拆 PCL 的 dev 子包，`libpcl-dev` 把 visualization 组件连同 VTK9+Qt5 一起拉进来），**实测解压后占 951 MB**。已写进 Dockerfile，重建镜像时注意这段耗时与体积。
 

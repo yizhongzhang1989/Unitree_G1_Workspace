@@ -4,11 +4,11 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
+from typing import cast
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, build_opener
 
-from unitree_hg.msg import IMUState, LowState
+from unitree_hg.msg import IMUState, LowState, MotorState
 
 from robot_bringup.lowlevel.dashboard_node import (
     G1_JOINT_NAMES,
@@ -30,7 +30,8 @@ def _lowstate() -> LowState:
     message.mode_machine = 5
     message.tick = 4321
     message.crc = 0xDEADBEEF
-    for index, motor in enumerate(message.motor_state):
+    motors = [MotorState() for _ in range(MOTOR_SLOTS)]
+    for index, motor in enumerate(motors):
         motor.mode = 1
         motor.q = index / 10.0
         motor.dq = -index / 100.0
@@ -38,7 +39,8 @@ def _lowstate() -> LowState:
         motor.vol = 47.5
         motor.temperature = [40 + index, 50 + index]
         motor.sensor = [index, index * 2]
-    message.motor_state[13].motorstate = 0x200
+    motors[13].motorstate = 0x200
+    message.motor_state = motors
     message.wireless_remote = list(range(40))
     return message
 
@@ -50,6 +52,7 @@ class MotorRowsTest(unittest.TestCase):
         self.assertTrue(all(len(row) == len(MOTOR_FIELDS) for row in rows))
         column = {field: index for index, field in enumerate(MOTOR_FIELDS)}
         row = rows[13]
+        assert isinstance(row, list)
         self.assertAlmostEqual(row[column['q']], 1.3, places=6)
         self.assertAlmostEqual(row[column['dq']], -0.13, places=6)
         self.assertAlmostEqual(row[column['tau_est']], 3.25, places=6)
@@ -71,10 +74,13 @@ class MotorRowsTest(unittest.TestCase):
     def test_non_finite_values_survive_json(self) -> None:
         """json 会把 NaN 写成非法字面量，浏览器 JSON.parse 直接抛。"""
         message = _lowstate()
-        message.motor_state[2].q = math.nan
-        message.motor_state[3].tau_est = math.inf
+        self.assertIsInstance(message.motor_state, list)
+        motors = cast(list[MotorState], message.motor_state)
+        motors[2].q = math.nan
+        motors[3].tau_est = math.inf
         column = {field: index for index, field in enumerate(MOTOR_FIELDS)}
         rows = motor_rows(message)
+        assert isinstance(rows[2], list) and isinstance(rows[3], list)
         self.assertIsNone(rows[2][column['q']])
         self.assertIsNone(rows[3][column['tau_est']])
         self.assertNotIn('NaN', json.dumps(rows))
@@ -111,7 +117,8 @@ class HeaderAndImuTest(unittest.TestCase):
 
 class ConfigurationTest(unittest.TestCase):
     def _validate(self, port: int, idle: float) -> None:
-        stub = SimpleNamespace(_idle_release=idle)
+        stub = LowLevelDashboard.__new__(LowLevelDashboard)
+        stub._idle_release = idle
         LowLevelDashboard._validate_configuration(stub, port)
 
     def test_accepts_sane_values(self) -> None:
@@ -134,7 +141,7 @@ class PathContainmentTest(unittest.TestCase):
                 self.assertIsNone(under(base, relative))
 
 
-class _FakeDashboard:
+class _FakeDashboard(LowLevelDashboard):
     def __init__(self) -> None:
         self.polls = 0
 

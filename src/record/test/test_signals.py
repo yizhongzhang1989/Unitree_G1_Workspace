@@ -8,8 +8,10 @@ import json
 import math
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import cast
 
 import pytest
+from std_msgs.msg import String
 
 from record import signals as sig
 
@@ -144,16 +146,167 @@ def test_specs_are_unique_and_column_widths_match():
 
 
 def test_command_topics_are_best_effort():
-    """两条指令话题的发布方都是 BEST_EFFORT，用 RELIABLE 订阅会一条都收不到。
-
-    `fpc_commands` 就是这么丢的：20260821 和 20260824 两个 session 都录成 0 行，
-    直到导出时 action/joint_space 全 NaN 才发现。发布方在
-    `g1_motion_control/policy_node.py` 里是 depth=1 BEST_EFFORT。
-    """
+    """BEST_EFFORT 订阅兼容任务状态的 RELIABLE 发布者与关节目标。"""
     by = {s.key: s for s in sig.default_specs()}
     assert by['motion_control_command'].best_effort
     assert len(by['motion_control_command'].columns) == 20
     assert by['fpc_commands'].best_effort
+
+
+def _task_message(command_pose=None, *, task_id='/upper_vr', **fields):
+    return String(data=json.dumps(dict(
+        fields, task_id=task_id,
+        command_pose={} if command_pose is None else command_pose)))
+
+
+def test_upper_task_commands_accumulate_in_historical_layout():
+    spec = {s.key: s for s in sig.default_specs()}['motion_control_command']
+    assert spec.topic == '/motion_control/tasks'
+    assert spec.type_name == 'std_msgs/msg/String'
+    assert spec.columns == [f'cmd.{index}' for index in range(20)]
+    first = spec.row(_task_message({'left': [.3] * 7}))
+    second = spec.row(_task_message({'right': [-.2] * 7}, grip=[.4, .5]))
+    assert first[4:11] == second[4:11] == [.3] * 7
+    assert all(math.isnan(value) for value in first[:4])
+    assert second[11:] == [-.2] * 7 + [.4, .5]
+    assert len(first) == len(second) == 20
+
+
+def test_motion_command_complete_snapshot_and_grip_partial_update():
+    extract = sig.MotionCommandRow()
+    first = extract(_task_message({'left': list(range(7)), 'right': [.2] * 7},
+                                  grip=[.4, .5], command=[1., 2., 3., 4.]))
+    second = extract(_task_message(grip=[.6, .7]))
+    assert all(math.isnan(value) for value in first[:4] + second[:4])
+    assert first[4:18] == second[4:18] == list(range(7)) + [.2] * 7
+    assert first[18:] == [.4, .5]
+    assert second[18:] == [.6, .7]
+    assert all(isinstance(value, float) for value in first)
+
+
+@pytest.mark.parametrize('data', [
+    'not json', 'null', '[]',
+    json.dumps({'task_id': '/upper_vr', 'command_pose': None}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': None}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': [.2] * 6}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': [True] * 7}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': ['.2'] * 7}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': [float('nan')] * 7}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': [float('inf')] * 7}}),
+    json.dumps({'task_id': '/upper_vr', 'command_pose': {'left': [10 ** 400] * 7}}),
+    json.dumps({'task_id': None, 'command_pose': {'left': [.2] * 7}}),
+    json.dumps({'task_id': '', 'command_pose': {'left': [.2] * 7}}),
+    json.dumps({'task_id': '/upper_float', 'joint_positions': [.2] * 14,
+                'grip': [.6, .7]}),
+    json.dumps({'task_id': '/lower_velocity_tracking', 'command': [.2] * 4}),
+])
+def test_motion_command_invalid_payload_is_not_a_fresh_cached_snapshot(data):
+    extract = sig.MotionCommandRow()
+    extract(_task_message({'left': [.3] * 7}, grip=[.4, .5]))
+    row = extract(String(data=data))
+    assert len(row) == 20
+    assert all(math.isnan(value) for value in row)
+    resumed = extract(_task_message({'right': [-.2] * 7}))
+    assert resumed[4:] == [.3] * 7 + [-.2] * 7 + [.4, .5]
+
+
+@pytest.mark.parametrize('field,invalid', [
+    ('left', None), ('right', []), ('grip', [1.]),
+    ('left', [True] * 7), ('right', [float('-inf')] * 7), ('grip', [float('nan')] * 2)])
+def test_motion_command_invalid_field_preserves_other_valid_updates(field, invalid):
+    extract = sig.MotionCommandRow()
+    extract(_task_message({'left': [.3] * 7, 'right': [-.2] * 7}, grip=[.4, .5]))
+    pose = {'left': [.6] * 7, 'right': [.7] * 7}
+    grip = [.8, .9]
+    if field == 'grip':
+        grip = invalid
+    else:
+        pose[field] = invalid
+    row = extract(_task_message(pose, grip=grip))
+    expected = [.3] * 7 if field == 'left' else [.6] * 7
+    expected += [-.2] * 7 if field == 'right' else [.7] * 7
+    expected += [.4, .5] if field == 'grip' else [.8, .9]
+    assert row[4:] == expected
+    assert len(row) == 20
+
+
+def test_motion_command_task_switch_does_not_mix_sources():
+    extract = sig.MotionCommandRow()
+    extract(_task_message({'left': [.3] * 7}, grip=[.4, .5]))
+    row = extract(_task_message({'right': [-.2] * 7}, task_id='/upper_vla'))
+    assert all(math.isnan(value) for value in row[:11] + row[18:])
+    assert row[11:18] == [-.2] * 7
+
+
+def test_motion_command_recorder_callback_writes_fixed_width_without_warnings():
+    from record.recorder_node import Recorder, _import_msg
+
+    spec = {entry.key: entry for entry in sig.default_specs()}['motion_control_command']
+    assert _import_msg(spec.type_name) is String
+    rows = []
+    stats = {'received': 0, 'last': 0., 'written': 0}
+    node = NS(stats={spec.key: stats}, specs={spec.key: spec},
+              writers={spec.key: NS(append=rows.append)}, _last_write={},
+              get_logger=lambda: NS(warn=pytest.fail))
+    for message in (_task_message({'left': [.3] * 7}), String(data='not json'),
+                    _task_message({'right': [-.2] * 7})):
+        Recorder._on_signal(cast(Recorder, node), spec.key, message)
+    assert stats['received'] == stats['written'] == 3
+    assert all(len(row) == 22 and math.isnan(row[1]) for row in rows)
+    assert all(math.isnan(value) for value in rows[1][2:])
+    assert rows[2][6:20] == [.3] * 7 + [-.2] * 7
+
+
+def test_alignment_uses_historical_pose_and_grip_columns():
+    import numpy as np
+    from record import verify_alignment as alignment
+
+    row = np.asarray(sig.MotionCommandRow()(_task_message(
+        {'left': list(range(7)), 'right': list(range(7, 14))}, grip=[.4, .5])))
+    assert row[alignment.LEFT].tolist() == list(range(7))
+    assert row[alignment.RIGHT].tolist() == list(range(7, 14))
+    assert row[alignment.GRIP].tolist() == [.4, .5]
+
+
+def test_alignment_missing_snapshots_are_not_filled_or_projected():
+    import numpy as np
+    from record import verify_alignment as alignment
+
+    times = np.array([1., 2., 3.])
+    data = np.array([[1., 2., 3.], [np.nan] * 3, [4., 5., 6.]])
+    sampled, age = alignment.sample_at(times, data, np.array([1.5, 2.5, 3.5]), False)
+    np.testing.assert_equal(sampled, data)
+    np.testing.assert_equal(age, [.5, .5, .5])
+    camera = alignment.PinholeCamera(640, 480, 500., 500., 320., 240.)
+    assert alignment.project(np.full((2, 3), np.nan), np.eye(3), np.zeros(3), camera) is None
+    sampled, age = alignment.sample_at(np.array([]), np.empty((0, 20)), times, False)
+    assert sampled.shape == (3, 20)
+    assert np.isnan(sampled).all() and np.isnan(age).all()
+
+
+def test_alignment_shift_ignores_missing_targets_and_handles_no_overlap():
+    import numpy as np
+    from record import verify_alignment as alignment
+
+    times = np.array([1., 2., 3.])
+    data = np.array([[1., 2., 3.], [np.nan] * 3, [4., 5., 6.]])
+    shift, distance = alignment.best_shift(times, data, times, data)
+    assert math.isfinite(shift) and distance == 0.
+    result = alignment.best_shift(times, np.full((3, 3), np.nan), times, data)
+    assert all(math.isnan(value) for value in result)
+
+
+def test_joint_target_rows_accumulate_masked_positions():
+    spec = {s.key: s for s in sig.default_specs()}['fpc_commands']
+    assert spec.topic == '/forward_position_controller/joint_targets'
+    assert spec.type_name == 'unitree_g1_ros2_control/msg/JointTargets'
+    first = spec.row(NS(mask=1 << 3, positions=[.3] * 31))
+    second = spec.row(NS(mask=1 << 30, positions=[-.4] * 31))
+    assert first[3] == second[3] == .3
+    assert second[30] == -.4
+    assert all(math.isnan(second[index]) for index in [0, 29, 31, 58])
+    assert len(first) == len(second) == len(spec.columns) == 59
 
 
 def test_high_rate_topics_are_throttled():
@@ -183,8 +336,10 @@ def test_dog_odom_subscribes_with_depth_one():
     """
     by = {s.key: s for s in sig.default_specs()}
     assert by['dog_odom'].depth == 1
-    # 其余都是低频或已抽稀，默认深度是给卡顿留的余量
-    assert all(s.depth == 50 for s in sig.default_specs() if s.key != 'dog_odom')
+    assert by['fpc_commands'].depth == 4
+    assert by['motion_control_command'].depth == 10
+    assert all(s.depth == 50 for s in sig.default_specs()
+               if s.key not in ('dog_odom', 'fpc_commands', 'motion_control_command'))
 
 
 def test_dog_odom_has_no_origin_flag():

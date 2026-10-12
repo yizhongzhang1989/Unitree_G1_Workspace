@@ -4,8 +4,9 @@
 
 **不负责摆姿势。** 姿势用现成的手段摆好再跑这个：
 
-    ros2 launch robot_bringup gravity_float_demo.launch.py   # 手推手臂到任意姿态
+    ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=float
     ros2 launch head_sensors head_camera.launch.py
+    ros2 service call /motion_control/engage std_srvs/srv/Trigger '{}'
     ros2 run head_sensors verify_head_view --out /tmp/verify
 
 关节角在 `--window` 秒内采样取均值。**不是为了降噪** —— 静止时 `/joint_states` 的

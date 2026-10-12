@@ -71,7 +71,9 @@ def resample(source, plans: list[Plan], height: int = 0,
         ['ffmpeg', '-v', 'error', '-i', str(source), *scale,
          '-f', 'rawvideo', '-pix_fmt', PIX_FMT, '-'],
         stdout=subprocess.PIPE)
-    reader = _Reader(decoder.stdout, size[0] * size[1] * 3 // 2, on_progress)
+    stdout = decoder.stdout
+    assert stdout is not None
+    reader = _Reader(stdout, size[0] * size[1] * 3 // 2, on_progress)
     try:
         return [_write(plan, reader, size, fps, crf) for plan in plans]
     finally:
@@ -80,7 +82,7 @@ def resample(source, plans: list[Plan], height: int = 0,
         # 关管道会让 ffmpeg 去写 trailer 再报 Broken pipe，把真错误淹在噪声里。
         if decoder.poll() is None:
             decoder.kill()
-        decoder.stdout.close()
+        stdout.close()
         decoder.wait()
 
 
@@ -93,6 +95,8 @@ def _write(plan: Plan, reader: '_Reader', size, fps: float, crf: int) -> dict:
          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf),
          '-pix_fmt', PIX_FMT, str(plan.path)],
         stdin=subprocess.PIPE)
+    stdin = encoder.stdin
+    assert stdin is not None
     held = exhausted = 0
     try:
         for index in plan.frames:
@@ -105,9 +109,9 @@ def _write(plan: Plan, reader: '_Reader', size, fps: float, crf: int) -> dict:
                 exhausted += int(index >= 0)
             if frame is None:
                 raise RuntimeError(f'{plan.path.name} 开头就没有可用的帧')
-            encoder.stdin.write(frame)
+            stdin.write(frame)
     finally:
-        encoder.stdin.close()
+        stdin.close()
         encoder.wait()
     return {'file': plan.path.name, 'frames': len(plan.frames),
             'width': size[0], 'height': size[1],

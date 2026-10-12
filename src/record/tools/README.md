@@ -26,6 +26,7 @@ tools/
   session_reader.py    读 session 的唯一入口
   inspect_session.py   看一眼 / 校验 sha256 / 估视频偏移
   urdf_fk.py           纯 numpy 正运动学（B 上没有 pinocchio）
+  head_extrinsic.py    头部外参修订与双 IMU 颈角估计
   align_video.py       标定视频管线延迟
   resample_video.py    视频重采样到统一栅格
   converters.py        格式注册表 —— A 的面板和 B 的命令行读的是同一份

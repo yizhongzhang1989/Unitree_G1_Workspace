@@ -1,13 +1,13 @@
 """G1 全身动作跟踪节点（RGMT + 全局位置）：读一段参考动作，输出 31 轴关节位置目标。
 
-和同工作区的 ``g1_motion_control`` 是**并列**的一层，不要同时启动——两者都往
-``/forward_position_controller/commands`` 写，同时跑就是两个策略抢同一组电机。
+和同工作区的 ``g1_motion_session`` 及其上下肢任务是**并列**的一层，不要同时启动——两者都往
+``/forward_position_controller/joint_targets`` 写，同时跑就是两个策略抢同一组电机。
 
 分工：
 * 29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动；
 * 2 个夹爪偏心轴由 VR trigger 控制；策略训练时没有它们，观测恒填 0。
 
-状态机与 ``g1_motion_control`` 一致，便于同一套操作流程::
+操作入口沿用 ``g1_motion_session`` 的 engage/start/estop 命名，本节点的状态流程为::
 
     IDLE --engage--> (激活控制器) --start--> STAND --(插值到位)--> RUNNING
                                                  任何时候 estop --> ESTOP
@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import rclpy
 from controller_manager_msgs.srv import SwitchController
+from unitree_g1_ros2_control.msg import JointTargets
 from g1_mocap_msgs.msg import MocapControllers, MocapFrame, MocapStatus
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
@@ -48,7 +49,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, JointState
-from std_msgs.msg import Float64MultiArray, String
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 from .motion_library import MotionLibrary
@@ -162,7 +163,7 @@ class RgmtTrackingNode(Node):
         self._gripper_targets = np.full(2, self._gripper_open)
         self._tracking = False
         self._mocap_had_tracking = False
-        self._mocap_align_pending = None
+        self._mocap_align_pending: tuple[np.ndarray, np.ndarray, float] | None = None
         self._stand_tracks_mocap = False
         self._controllers_stamp = 0.0
         self._controllers_timeout = float(p('mocap_controllers_timeout_s', 0.2)
@@ -236,13 +237,14 @@ class RgmtTrackingNode(Node):
         # 必须 BEST_EFFORT：RELIABLE 订阅收不到 BEST_EFFORT 发布者（反过来可以），
         # 而 g1_localization 的 ~/torso_pose 正是 BEST_EFFORT，写成 RELIABLE 时
         # 一条都收不到，只在发现的那一刻打一次 incompatible QoS 警告。
-        # FPC 那侧的 ~/commands 也是 BEST_EFFORT depth=1。
+        # FPC 那侧的 ~/joint_targets 也是 BEST_EFFORT depth=1。
         stream = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
                             reliability=ReliabilityPolicy.BEST_EFFORT)
-        self._message = Float64MultiArray()
+        self._message = JointTargets(mask=0x7FFFFFFF)
+        self._message_positions = np.frombuffer(self._message.positions, dtype=np.float64)
         self._publisher = self.create_publisher(
-            Float64MultiArray,
-            p('target_topic', '/forward_position_controller/commands')
+            JointTargets,
+            p('target_topic', '/forward_position_controller/joint_targets')
             .get_parameter_value().string_value, stream)
         self._status_publisher = self.create_publisher(String, '~/status', 10)
 
@@ -293,7 +295,7 @@ class RgmtTrackingNode(Node):
             f'{len(spec.window_offsets)}x{spec.token_dim}; 里程计 {self._odom.mode}; '
             f'参考源 {source}')
 
-    def _build_mocap_clip(self, spec, action_joints: list[str]):
+    def _build_mocap_clip(self, spec, action_joints: list[str]) -> MocapClip:
         """接实时动捕。数据来自 ``g1_mocap`` 的 ``/mocap/frame``，本节点不碰头显。
 
         动捕那边的 29 轴顺序未必和策略一致，所以每帧都拿 ``joint_names`` 校一遍：
@@ -387,6 +389,8 @@ class RgmtTrackingNode(Node):
             pending = self._mocap_align_pending if mode == 'live' else None
         accepted = gate.push(message, mode=mode)
         if accepted and pending is not None:
+            clip = self._mocap_clip
+            assert clip is not None
             payload = gate.last_payload
             if payload is None:
                 return
@@ -394,7 +398,7 @@ class RgmtTrackingNode(Node):
             orientation = payload.anchor.orientation
             reference_ground_z = min(
                 point.z for point in payload.key_body_positions[-2:])
-            self._mocap_clip.align_from_reference(
+            clip.align_from_reference(
                 pending[0], pending[1],
                 pending[2],
                 float(message.header.stamp.sec) + message.header.stamp.nanosec * 1e-9,
@@ -538,7 +542,7 @@ class RgmtTrackingNode(Node):
     # 服务
     ##
 
-    def _on_engage(self, _request, response):
+    def _on_engage(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         with self._lock:
             if self._state not in (State.IDLE, State.ESTOP):
                 response.success, response.message = False, f'当前状态 {self._state.value}'
@@ -574,7 +578,7 @@ class RgmtTrackingNode(Node):
             self._odom.reset_lidar_origin(origin_stamp)
         return True, result.message
 
-    def _on_start(self, _request, response):
+    def _on_start(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         with self._lock:
             if self._state is not State.IDLE:
                 response.success, response.message = False, f'当前状态 {self._state.value}'
@@ -610,7 +614,7 @@ class RgmtTrackingNode(Node):
             if self._mocap_clip is None:
                 self._clip.align(pose, torso_quat)
             else:
-                self._clip.align(
+                self._mocap_clip.align(
                     pose, torso_quat,
                     self._robot_ground_z(measured, pelvis_quat, pose))
             self._state = State.STAND
@@ -618,7 +622,7 @@ class RgmtTrackingNode(Node):
         response.message = f'STAND 中，{self._stand_s:.1f}s 后开始放 {self._clip.name}'
         return response
 
-    def _on_estop(self, _request, response):
+    def _on_estop(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         response.success = self._estop('人工急停')
         response.message = self._reason
         return response
@@ -736,15 +740,19 @@ class RgmtTrackingNode(Node):
                 return
             goal = np.empty(len(self._joints))
             goal[self._gripper_slots] = gripper_targets
-            goal[self._action_slots] = clip.live_joint_pos() \
-                if stand_tracks_mocap else clip.stand_joint_pos()
+            if stand_tracks_mocap:
+                from .mocap_clip import MocapClip
+                assert isinstance(clip, MocapClip)
+                goal[self._action_slots] = clip.live_joint_pos()
+            else:
+                goal[self._action_slots] = clip.stand_joint_pos()
             alpha = min(stand_elapsed / max(self._stand_s, 1e-3), 1.0)
             targets[:] = stand_from + alpha * (goal - stand_from)
             if alpha >= 1.0:
                 # squeeze 在 start 前或 STAND 中已经接合时，把 RUNNING 边界视为
                 # 有效接合点。start 的对齐只供固定站姿使用，不能覆盖实时参考的锚。
                 if self._mocap_clip is not None and tracking:
-                    clip.align(
+                    self._mocap_clip.align(
                         torso_pos, torso_quat,
                         self._robot_ground_z(measured, base_quat, torso_pos))
                 with self._lock:
@@ -785,7 +793,7 @@ class RgmtTrackingNode(Node):
                         self._state = State.IDLE
                         self._stand_from = None
 
-        self._message.data = targets.tolist()
+        np.copyto(self._message_positions, targets)
         self._publisher.publish(self._message)
 
     def _stale(self) -> str:

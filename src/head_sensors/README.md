@@ -44,15 +44,16 @@ ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 ```
 
 ### 校准头部安装角
-头是可转的，撞歪了就这么校：**跑 `verify_head_view` 看轮廓 → 手动转头 → 再跑一次**，直到轮廓贴合。四个终端，前三个一直开着：
+头是可转的，撞歪了就这么校：**跑 `verify_head_view` 看轮廓 → 手动转头 → 再跑一次**，直到轮廓贴合。四个终端，前三个一直开着；已有运动组合时复用，不重复启动 session：
 ```bash
 # 1. 整机栈 —— verify_head_view 要 /robot_description 和 /joint_states
 ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual
 # 2. 头部相机 —— 同时提供 d435_link -> camera_color_optical_frame 的 TF
 ros2 launch head_sensors head_camera.launch.py
-# 3. 让手臂进画。手推到任意姿态，不进画就没东西可比
-ros2 launch robot_bringup gravity_float_demo.launch.py
-# 4. 拍照对照。转一次头跑一次
+# 3. 上肢浮动任务
+ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=float
+# 4. 接管，等准备完成后手推手臂进画，再拍照对照；转一次头跑一次拍照
+ros2 service call /motion_control/engage std_srvs/srv/Trigger '{}'
 ros2 run head_sensors verify_head_view --out /tmp/verify
 ```
 
@@ -208,7 +209,7 @@ ros2 run head_sensors head_tf
 
 | 决定 | 为什么 |
 |---|---|
-| **不摆姿势** | 摆姿势已经有 `gravity_float_demo`，重新发明一遍等于多一份要维护的控制代码和安全面 |
+| **不摆姿势** | 由现有上肢任务控制姿势，浮动使用 `upper_float`；验证工具只读，不另建控制链 |
 | 模型取自 **`/robot_description`** 而不是磁盘 | 广播那份才是机器人实际在跑的模型。磁盘 `final.urdf` 写的是相对 mesh 路径，广播的是 `package://`，两份不是同一个文件。收不到广播直接报错退出 |
 | 关节角在窗口内取均值 | **不是为了降噪** —— 静止时 `/joint_states` 标准差实测只有 0.00002 rad，平均毫无意义。窗口是用来发现「拍照那一刻手臂还在动」，峰峰值超 `--still` 就警告 |
 | 外参从 **TF** 读 `torso_link -> camera_color_optical_frame` | 完整链包含动态头角、传感器固定安装关系和相机光学中心偏移；不能只取 `d435_link` 到光学 frame 的固定段 |

@@ -5,7 +5,7 @@
                        ├─► [ 本节点：stdlib HTTP + 静态页 ] ◄─轮询─ 浏览器
     /lf/secondary_imu ─┘                                    (表格 + 时序曲线)
 
-和 ``g1_motion_control`` 的监控页分工：那边只管 IK 与末端位姿，这边把电机的
+和 ``g1_motion_session`` 的监控页分工：那边只管 IK 与末端位姿，这边把电机的
 每一个字段都铺出来（``tau_est`` / ``vol`` / ``sensor`` / ``mode`` 旧页都没有），
 外加 LowState 头部与两颗 IMU。
 

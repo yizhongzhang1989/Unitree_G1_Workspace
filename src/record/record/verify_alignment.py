@@ -7,11 +7,9 @@
   或者头部相机的挂载外参不对（session 自带 `camera_params.yaml` 里的 `d435_joint`）。
 * **目标点（深色空心圆）离实际末端（亮色实心点）很远且方向乱飘** —— 指令表与关节表
   不在同一时间基准上，或者位姿根本不是 `torso_link` 系的。
-  正常情况是目标稳定地领先实际一小段（控制跟随滞后），两者的接近方向射线大致同向。
+    两者的接近方向射线应大致同向；目标与实测的领先关系还取决于目标记录的时刻。
 
-控制台还会给出一份数值报告，其中「最佳时移」是最硬的那条：把指令整体平移多少秒
-才让它离实际末端最近。它应该等于控制跟随的滞后（百毫秒量级）。要是算出几秒钟、
-或者是个负得离谱的数，那就不是跟随滞后，是两张表的时间戳串了。
+控制台报告「最佳时移」：把记录目标整体平移多少秒才让它离实际末端最近。新录制的目标来自 `/motion_control/tasks` 中约 10 Hz 的末端任务状态快照，不是高频原始位姿指令。接收时间包含状态发布周期与传输延迟，因此该值只是快照与实测的表观时差，不能单独解释为控制跟随滞后。缺失目标不画，也不参与距离与时移统计。
 
     ros2 run record verify_alignment 20260827_022837                 # 第一条 episode
     ros2 run record verify_alignment 20260827_022837 --episode 0:3
@@ -36,13 +34,15 @@ import numpy as np
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
 from head_sensors.urdf_view import PinholeCamera, UrdfSceneRenderer
-from record.replay import GRIP, LEFT, RIGHT
+from record.replay_source import _load, open_session
 
-sys.path.insert(0, str(Path(get_package_share_directory('record')) / 'tools'))
-import urdf_fk                                             # noqa: E402
-from session_reader import Session                         # noqa: E402
+urdf_fk = _load('urdf_fk')
 
-#: 指令位姿的参考系与末端 link，取自 `g1_motion_control/config/motion_control.yaml`。
+LEFT = slice(4, 11)
+RIGHT = slice(11, 18)
+GRIP = slice(18, 20)
+
+#: 指令位姿的参考系与末端 link，取自 `g1_motion_session/config/arm_ik.yaml`。
 BASE_FRAME = 'torso_link'
 TIP = {'left': 'left_gripper_base', 'right': 'right_gripper_base'}
 #: BGR。和 `verify_head_view` 一致：左绿右红。轮廓与实测末端用亮色，
@@ -161,9 +161,11 @@ def sample_at(t_src: np.ndarray, data: np.ndarray, when: np.ndarray,
               interpolate: bool):
     """把 `data` 取到 `when` 上，返回 `(值, 该时刻离最近样本多久)`。
 
-    关节角插值（信号连续，插值比就近取更准）；指令**零阶保持**（指令是收到那一刻
-    生效的，两条指令之间机器人执行的就是前一条，插出来的中间值从没被下发过）。
+    关节角插值（信号连续，插值比就近取更准）；目标快照**零阶保持**，不制造两次状态
+    发布之间未记录的中间目标。NaN 行保留缺失语义，不用更早的有效样本补成新快照。
     """
+    if t_src.size == 0:
+        return np.full((when.size, *data.shape[1:]), np.nan), np.full(when.size, np.nan)
     index = np.clip(np.searchsorted(t_src, when, side='right') - 1, 0, t_src.size - 1)
     age = when - t_src[index]
     if not interpolate:
@@ -178,15 +180,19 @@ def best_shift(t_cmd: np.ndarray, target: np.ndarray,
                when: np.ndarray, actual: np.ndarray) -> tuple[float, float]:
     """指令整体平移多少秒时离实际末端最近，返回 `(时移, 那时的中位距离)`。
 
-    正数 = 指令领先实际，也就是控制跟随的滞后。**这是最能说明两张表同不同基准的
-    一个数** —— 跟随滞后是百毫秒量级的，算出几秒就说明时间戳串了。
+    正数表示记录目标领先实测。任务状态快照含发布延迟，该数不是纯控制跟随滞后。
+    只统计有限目标与实测；没有有效重叠时返回两个 NaN。
     """
     grid = np.arange(-1.0, 1.0001, 0.02)
     scores = []
     for shift in grid:
         shifted, _ = sample_at(t_cmd, target, when - shift, interpolate=False)
-        scores.append(np.median(np.linalg.norm(shifted - actual, axis=1)))
-    pick = int(np.argmin(scores))
+        valid = np.isfinite(shifted).all(axis=1) & np.isfinite(actual).all(axis=1)
+        scores.append(np.median(np.linalg.norm(shifted[valid] - actual[valid], axis=1))
+                      if valid.any() else np.nan)
+    if not np.isfinite(scores).any():
+        return float('nan'), float('nan')
+    pick = int(np.nanargmin(scores))
     return float(grid[pick]), float(scores[pick])
 
 
@@ -205,6 +211,7 @@ def decode(mkv: Path, first: int, count: int, width: int, height: int):
          '-i', str(mkv), '-frames:v', str(count), '-vf', f'scale={width}:{height}',
          '-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'bgr24', 'pipe:1'],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    assert proc.stdout is not None and proc.stderr is not None
     size = width * height * 3
     try:
         while True:
@@ -235,15 +242,18 @@ class Writer:
              '-i', 'pipe:0', '-c:v', 'libx264', '-preset', 'veryfast',
              '-crf', '23', '-pix_fmt', 'yuv420p', str(path)],
             stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert self.proc.stdin is not None and self.proc.stderr is not None
+        self.input = self.proc.stdin
+        self.errors = self.proc.stderr
 
     def write(self, image: np.ndarray) -> None:
-        self.proc.stdin.write(image.tobytes())
+        self.input.write(image.tobytes())
 
     def close(self) -> None:
-        self.proc.stdin.close()
+        self.input.close()
         if self.proc.wait() != 0:
             raise RuntimeError('编码失败: '
-                               + self.proc.stderr.read().decode('utf-8', 'replace')[:300])
+                               + self.errors.read().decode('utf-8', 'replace')[:300])
 
 
 # --------------------------------------------------------------------- 画面
@@ -251,9 +261,9 @@ class Writer:
 
 def project(points: np.ndarray, cam_rot: np.ndarray, cam_pos: np.ndarray,
             camera: PinholeCamera) -> np.ndarray | None:
-    """世界系点 -> 像素。任何一个点在相机后面就返回 None（整组不画）。"""
+    """世界系点 -> 像素。缺失点或任何点在相机后面时整组不画。"""
     cam = (np.atleast_2d(points) - cam_pos) @ cam_rot
-    if (cam[:, 2] <= 0.02).any():
+    if not np.isfinite(cam).all() or (cam[:, 2] <= 0.02).any():
         return None
     return np.stack([camera.fx * cam[:, 0] / cam[:, 2] + camera.cx,
                      camera.fy * cam[:, 1] / cam[:, 2] + camera.cy], axis=1)
@@ -320,7 +330,7 @@ def _quat(quat) -> np.ndarray:
 # --------------------------------------------------------------------- 主流程
 
 
-def pick_window(session: Session, args) -> tuple:
+def pick_window(session, args) -> tuple:
     """选出要渲染的时间窗，返回 `(t0, t1, 标题)`。"""
     if args.t0 and args.t1:
         return args.t0, args.t1, args.label or 'custom window'
@@ -353,7 +363,7 @@ def _share(package: str, *parts: str) -> Path | None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description='录制画面的关节与目标对齐校验')
     parser.add_argument('session', help='session id（在 --root 下找）或目录路径')
     parser.add_argument('--root', default=str(Path.home() / '.ros' / 'record' / 'sessions'))
     parser.add_argument('--episode', default='', help='轮次:序号，如 0:3。默认第一条')
@@ -378,7 +388,7 @@ def main(argv=None) -> int:
 
 def run(args) -> int:
     root = Path(args.session)
-    session = Session(root if root.is_dir() else Path(args.root) / args.session)
+    session = open_session(root if root.is_dir() else Path(args.root) / args.session)
     urdf = Path(args.urdf) if args.urdf else _share(
         'unitree_g1_description', 'model', 'final.urdf')
     if urdf is None or not urdf.is_file():
@@ -424,6 +434,8 @@ def run(args) -> int:
               f'模型 : {urdf}',
               f'标定 : {calibrated}',
               f'相机 : {camera}（出厂内参，取自 meta.json）',
+              '目标 : 历史 20 列末端表；新录制为约 10 Hz 任务状态快照。'
+              '最佳时移包含状态发布延迟，不代表纯控制跟随滞后',
               f'窗口 : {t1 - t0:.2f} s，头部 {frames.size} 帧 -> 渲染 {pick.size} 帧'
               f'（每 {step} 帧取一），约 {pick.size * 0.33:.0f} s']
     for line in report:
@@ -488,19 +500,27 @@ def run(args) -> int:
 
     say(f'关节 : {t_joint.size / (t_joint[-1] - t_joint[0]):.0f} Hz，'
         f'取样最大滞后 {1000 * joint_age.max():.0f} ms')
-    say(f'指令 : {t_cmd.size / (t_cmd[-1] - t_cmd[0]):.0f} Hz，'
-        f'取样最大滞后 {1000 * cmd_age.max():.0f} ms')
+    if t_cmd.size > 1 and t_cmd[-1] > t_cmd[0]:
+        say(f'目标表 : {t_cmd.size / (t_cmd[-1] - t_cmd[0]):.0f} Hz，'
+            f'取样最大滞后 {1000 * cmd_age.max():.0f} ms')
+    else:
+        say(f'目标表 : {t_cmd.size} 条，样本不足以计算频率')
     for side, columns_at in (('left', LEFT), ('right', RIGHT)):
-        distance = np.linalg.norm(target[side][:, :3] - actual[side], axis=1)
-        travel = np.ptp(target[side][:, :3], axis=0).max()
+        valid = np.isfinite(target[side]).all(axis=1) & np.isfinite(actual[side]).all(axis=1)
+        if not valid.any():
+            say(f'{side:5s}: 这段没有有效末端目标，跳过距离与时移统计')
+            continue
+        distance = np.linalg.norm(target[side][valid, :3] - actual[side][valid], axis=1)
+        travel = np.ptp(target[side][valid, :3], axis=0).max()
         line = (f'{side:5s}: 目标-实际 中位 {1000 * np.median(distance):.0f} mm，'
                 f'p95 {1000 * np.percentile(distance, 95):.0f} mm')
         # 目标不动时任何时移给出的距离都一样，argmin 只会落在网格边界上，是个假数。
         if travel < 0.05:
             say(line + f'；这条臂整段只动了 {1000 * travel:.0f} mm，时移测不出来')
             continue
-        shift, tight = best_shift(t_cmd, cmd_data[:, columns_at][:, :3],
-                                  when, actual[side])
+        source = cmd_data[:, columns_at].copy()
+        source[~np.isfinite(source).all(axis=1)] = np.nan
+        shift, tight = best_shift(t_cmd, source[:, :3], when, actual[side])
         say(line + f'；最佳时移 {shift:+.2f} s 时降到 {1000 * tight:.0f} mm')
     # 报告和视频摆在一起：光看图判不出「差多少毫米」，而这份数只在 stdout 里的话，
     # 换个终端、隔一天回来看那段视频就没依据了。

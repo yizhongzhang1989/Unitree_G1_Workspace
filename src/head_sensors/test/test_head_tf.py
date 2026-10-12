@@ -40,16 +40,12 @@ def test_launch_node_name(launch_path):
     assert head_nodes == [('head_tf', 'head_tf')]
 
 
-def test_stale_and_zero_transform():
+def test_stale_and_zero_transform(monkeypatch):
     rclpy.init()
     node = HeadTF()
     messages = []
 
-    class Publisher:
-        def sendTransform(self, message):
-            messages.append(message)
-
-    node.broadcaster = Publisher()
+    monkeypatch.setattr(node.broadcaster, 'sendTransform', messages.append)
     try:
         assert node.get_name() == 'head_tf'
         node.publish()

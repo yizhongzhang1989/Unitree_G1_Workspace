@@ -20,6 +20,7 @@ def _load(name):
     必须先注册进 sys.modules：@dataclass 会去 sys.modules[cls.__module__] 找命名空间。
     """
     spec = importlib.util.spec_from_file_location(name, TOOLS / f'{name}.py')
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
