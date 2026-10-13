@@ -1,0 +1,15 @@
+/**:
+  ros__parameters:
+    lower_source: planner
+    policy_path: package://lower_footstep_tracking/config/policy.onnx
+    foot_sole_offsets: [0.04, 0.0, -0.035, 0.04, 0.0, -0.035]
+    waist_output_cutoff_hz: 10.0
+    footstep_web_host: 0.0.0.0
+    footstep_web_port: 8210
+    footstep_localization_mode: fused
+    footstep_browser_timeout_s: 2.0
+    odom_topic: /dog_odom
+    lidar_pose_topic: /g1_localization/torso_pose
+    odom_timeout_s: 0.2
+    lidar_timeout_s: 1.0
+    lidar_correction_tau_s: 2.0

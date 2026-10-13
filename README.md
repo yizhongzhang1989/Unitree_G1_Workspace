@@ -7,7 +7,7 @@ Unitree G1 的 ROS 2 Humble 工作区，覆盖整机位置控制、IK、双夹�
 | `robot_bringup` | 组合整机或末端设备的生产 launch |
 | `unitree_g1_ros2_control` | 把 FPC 的关节位置补齐为 G1 `LowCmd` 和夹爪 MIT 命令，并接入状态反馈 |
 | `g1_motion_session` | 协调任务注册、接管、准备与启停；上下肢任务各自直接向 FPC 发布掩码关节目标 |
-| `lower_velocity_tracking`、`lower_footstep_tracking` | 下肢 15 轴 ONNX 策略，分别提供速度与脚步跟踪 |
+| `lower_velocity_tracking`、[lower_footstep_tracking](src/lower_footstep_tracking/README.md) | 下肢 15 轴 ONNX 策略 |
 | `upper_vr`、`upper_vla`、`upper_float` | 上肢双臂与夹爪任务：VR、本地 IK 的 VLA 执行与手臂浮动 |
 | [upper_force_feedback](src/upper_force_feedback/README.md) | 双臂实测位置互换，利用现有 PD 实现双向力反馈耦合 |
 | `canalystii_native_bridge`、`gloria_ros`、`camera_node` | 生产 CAN 适配器、夹爪协议和相机设备通信；`can_bridge_ros` 保留为独立调试入口 |
@@ -169,6 +169,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
     ├── upper_vr/                 上肢 VR 与摇杆速度输入
     ├── upper_vla/                上肢 VLA 与本地 IK 执行
     ├── upper_float/              上肢实测位置跟随与夹爪控制
+    ├── upper_force_feedback/     双臂位置互换力反馈
     ├── record/                   录制、数据管理、导出与内置 IK 回放
     ├── unitree_g1_ros2_control/  G1/Gloria/KWR57 统一硬件插件和 FPC
     └── unitree_ros2/             [git submodule] 官方消息结构（仅构建 unitree_api、unitree_hg）
