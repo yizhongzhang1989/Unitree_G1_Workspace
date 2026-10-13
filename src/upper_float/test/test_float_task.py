@@ -10,6 +10,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+from std_srvs.srv import Trigger
 from unitree_g1_ros2_control.msg import JointTargets
 
 from g1_motion_session.msg import MotionEvent
@@ -49,6 +50,16 @@ def test_measured_arms_direct_fpc_with_gripper_hold_and_home(ros_args, gripper_s
         targets, masks = [], []
         stream = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         observer.create_subscription(JointTargets, task.target_topic, targets.append, stream)
+        freeze = observer.create_client(Trigger, '/upper_float/freeze')
+        unfreeze = observer.create_client(Trigger, '/upper_float/unfreeze')
+
+        def call(client):
+            wait(executor, client.service_is_ready)
+            future = client.call_async(Trigger.Request())
+            wait(executor, future.done)
+            response = future.result()
+            assert isinstance(response, Trigger.Response)
+            return response
 
         def register(request, response):
             masks.append(request.mask)
@@ -73,6 +84,8 @@ def test_measured_arms_direct_fpc_with_gripper_hold_and_home(ros_args, gripper_s
         task._on_event(MotionEvent(command='engage', epoch=1, start_time=task.now()))
         task._control()
         assert task.state is State.STAND and task._preparing
+        assert not call(freeze).success
+        assert not call(unfreeze).success
         np.testing.assert_array_equal(task.output.positions, measured)
         task.stand_start = task.now() - task.stand_s
         task._tick_lifecycle()
@@ -90,12 +103,50 @@ def test_measured_arms_direct_fpc_with_gripper_hold_and_home(ros_args, gripper_s
                      [float('nan'), 1.0], [1.0, float('inf')], [float('-inf'), 1.0]):
             task._on_gripper(Float64MultiArray(data=data))
             np.testing.assert_array_equal(task.output.positions, expected)
+
+        posed = measured + 0.15
+        feedback.publish(JointState(name=task.joints31, position=posed.tolist()))
+        wait(executor, lambda: np.array_equal(task._q, posed))
+        assert call(freeze).success
+        assert task.status()['frozen'] is True
+        np.testing.assert_array_equal(task.output.positions[15:29], posed[15:29])
+        moved = posed + 0.2
+        feedback.publish(JointState(name=task.joints31, position=moved.tolist()))
+        wait(executor, lambda: np.array_equal(task._q, moved))
+        assert call(freeze).success
+        task._on_gripper(Float64MultiArray(data=[1.0, 1.0]))
+        task._control()
+        frozen_target = task.output.positions.copy()
+        np.testing.assert_array_equal(frozen_target[15:29], posed[15:29])
+        np.testing.assert_array_equal(frozen_target[29:], [1.0, 1.0])
+        wait(executor, lambda: any(np.array_equal(message.positions, frozen_target) for message in targets))
+        assert call(unfreeze).success
+        assert call(unfreeze).success
+        assert task.status()['frozen'] is False
+        task._control()
+        resumed_target = task.output.positions.copy()
+        np.testing.assert_array_equal(resumed_target[15:29], moved[15:29])
+        wait(executor, lambda: any(np.array_equal(message.positions, resumed_target) for message in targets))
+        task._joint_stamp = time.monotonic() - task._state_timeout - 1.0
+        assert not call(freeze).success
+        assert task.status()['frozen'] is False
+        task._joint_stamp = time.monotonic()
+        task._q[15] = float('nan')
+        assert not call(freeze).success
+        task._q[:] = moved
+        assert call(freeze).success
         task._on_event(MotionEvent(command='stop', epoch=2))
+        assert not call(freeze).success
+        assert not call(unfreeze).success
         held = task.output.positions.copy()
         task._q[:] += 0.1
         task._control()
         task._on_gripper(Float64MultiArray(data=[1.0, 1.0]))
         np.testing.assert_array_equal(task.output.positions, held)
+        task._on_event(MotionEvent(command='engage', epoch=3, start_time=task.now()))
+        task.stand_start = task.now() - task.stand_s
+        task._tick_lifecycle()
+        assert task.state is State.RUNNING and task.status()['frozen'] is False
     finally:
         if executor is not None:
             executor.shutdown()

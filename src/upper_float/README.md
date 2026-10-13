@@ -41,11 +41,17 @@ ros2 launch upper_float float.launch.py
 - FPC：`/forward_position_controller/joint_targets`，掩码仅15至30槽位。
 - 生命周期：`/motion_control/register`、`/motion_control/events`、`/motion_control/tasks`。
 - 反馈：`/joint_states`，不依赖 IMU 或 IK。
+- 冻结/解冻：`/upper_float/freeze`、`/upper_float/unfreeze`，类型 `std_srvs/srv/Trigger`，仅准备完成且任务运行时接受。冻结锁存调用时最新实测双臂角度并持续发布保持目标，重复冻结不重新锁存；解冻恢复跟随实测。冻结不影响夹爪输入、腰腿任务或公共停止/急停，再次接管并完成准备后默认恢复浮动。首次冻结要求反馈新鲜且双臂角度有限，保持能力取决于已有硬件增益，不改变增益或补偿配置。
 - 夹爪任务输入：`std_msgs/msg/Float64MultiArray.data`，默认左右顺序对应 `gripper_joints`，单位为弧度。仅接受长度2且全部有限的数组，按 `gripper_limits` 裁剪；空数组、其它长度或非有限值保持当前目标。仅在 `RUNNING` 且准备完成后生效。
-- 状态：`upper_executor=float`、`arm_mode=passthrough`、`upper_source=none` 表示手臂跟随实测反馈；`gripper_source` 标识夹爪输入来源。
+- 状态：`upper_executor=float`、`arm_mode=passthrough`、`upper_source=none` 表示浮动任务；`frozen` 标识双臂是否冻结，`gripper_source` 标识夹爪输入来源。
+
+摆到位后冻结双臂，需要重新手动摆动时解冻：
+```bash
+ros2 service call /upper_float/freeze std_srvs/srv/Trigger '{}'
+ros2 service call /upper_float/unfreeze std_srvs/srv/Trigger '{}'
+```
 
 任务运行后可单次发送夹爪目标：
-
 ```bash
 ros2 topic pub --once /motion_control/upper/input/keyboard std_msgs/msg/Float64MultiArray '{data: [1.0, 1.0]}'
 ```

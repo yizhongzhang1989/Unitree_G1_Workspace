@@ -5,6 +5,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float64MultiArray
+from std_srvs.srv import Trigger
 
 from g1_motion_session.task_base import State, TaskBase
 
@@ -31,10 +32,43 @@ class FloatTask(TaskBase):
         self.create_subscription(Float64MultiArray, topic, self._on_gripper,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT),
                                  callback_group=self.control_group)
+        self._frozen = False
+        self.create_service(Trigger, '~/freeze', self._freeze, callback_group=self.control_group)
+        self.create_service(Trigger, '~/unfreeze', self._unfreeze, callback_group=self.control_group)
         self.create_timer(self.dt, self._control, callback_group=self.control_group)
 
     def prepared(self, snapshot) -> None:
+        self._frozen = False
         self.state = State.RUNNING
+
+    def _freeze(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        with self.execution_lock, self.lock:
+            if not self._registered or self.state is not State.RUNNING or self._preparing:
+                response.message = 'Arm floating task is not running'
+                return response
+            if not self._frozen:
+                reason = self.stale_reason()
+                if reason or not np.isfinite(self._q[self.arm_slots]).all():
+                    response.message = reason or 'Arm joint positions are not finite'
+                    return response
+                self.output.positions[self.arm_slots] = self._q[self.arm_slots]
+                self._frozen = True
+                self._control()
+            response.success = True
+            response.message = 'Arms frozen at measured positions'
+            self._publish_task_status()
+        return response
+
+    def _unfreeze(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
+        with self.execution_lock, self.lock:
+            if not self._registered or self.state is not State.RUNNING or self._preparing:
+                response.message = 'Arm floating task is not running'
+                return response
+            self._frozen = False
+            response.success = True
+            response.message = 'Arm floating resumed'
+            self._publish_task_status()
+        return response
 
     def _on_gripper(self, message: Float64MultiArray) -> None:
         grip = np.asarray(message.data, dtype=float)
@@ -50,11 +84,13 @@ class FloatTask(TaskBase):
             if self.state is not State.RUNNING or self._preparing:
                 return
             target = self.output.positions.copy()
-            target[self.arm_slots] = self._q[self.arm_slots]
+            if not self._frozen:
+                target[self.arm_slots] = self._q[self.arm_slots]
             self.publish_target(target)
 
     def status(self) -> dict[str, bool | str | list[float]]:
         return dict(upper_ready=True, upper_executor='float', arm_mode='passthrough',
+                    frozen=self._frozen,
                     upper_source='none', gripper_source=self.gripper_source,
                     grip=self.output.positions[self.gripper_slots].tolist(),
                     joint_positions=self.output.positions[self.arm_slots].tolist())
