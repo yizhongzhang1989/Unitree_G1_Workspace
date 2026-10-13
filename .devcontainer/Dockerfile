@@ -25,6 +25,20 @@ RUN set -eux; \
     printf '%s\n' '[global]' 'index-url = https://mirrors.aliyun.com/pypi/simple/' \
       'trusted-host = mirrors.aliyun.com' > /etc/pip.conf
 
+# 构建时读取 Node 官方最新稳定版本，并使用对应的 NodeSource 主版本通道。
+RUN set -eux; \
+    node_major="$(curl -fsSL https://nodejs.org/dist/index.json \
+      | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["version"].split(".")[0].lstrip("v"))')"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg; \
+    chmod a+r /etc/apt/keyrings/nodesource.gpg; \
+    printf '%s\n' "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${node_major}.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list; \
+    rm -rf /var/lib/apt/lists/*
+
 # 一层装完，失败时能从日志里一眼看出缺哪个包。pip 与 apt 同层：pip 走 socks5h 代理
 # 需要 PySocks（由 python3-socks 提供），分层写会让"先装依赖再用"这件事依赖层序，
 # 合在一起才是自洽的。
@@ -32,6 +46,7 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y \
       build-essential cmake git gdb \
+      nodejs \
       less vim nano sudo \
       iproute2 iputils-ping net-tools usbutils can-utils \
       adb \
