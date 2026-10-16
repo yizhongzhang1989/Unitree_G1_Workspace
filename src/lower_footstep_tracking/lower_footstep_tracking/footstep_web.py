@@ -20,7 +20,8 @@ from g1_motion_session.task_base import State
 from g1_rgmt_tracking_global.odometry import OdometryFuser
 from g1_rgmt_tracking_global.rotations import quat_from_xyzw, quat_to_mat, torso_quat_from_pelvis
 from .footstep_task import FootstepTask
-from .footstep_planner import Footstep, WorldFootstepQueue, direction_steps, route_steps, standing_step
+from .footstep_planner import (
+    Footstep, WorldFootstepQueue, direction_steps, mean_yaw, route_steps, standing_step)
 
 
 STATIC = Path(__file__).with_name('static')
@@ -75,6 +76,9 @@ class FootstepWebAPI:
                 task.runtime.controller = None
                 self.revision += 1
                 return dict(ok=True)
+            if action == 'theta':
+                task.runtime.set_theta(math.radians(float(payload['theta_deg'])))
+                return dict(ok=True, revision=self.revision)
             queue = task.runtime.controller
             if queue is None:
                 raise ValueError('Complete engage preparation before planning footsteps')
@@ -97,6 +101,8 @@ class FootstepWebAPI:
                 reason = task.stale_reason() or task.localization_error()
                 if reason:
                     raise ValueError(reason)
+                if 'theta_deg' in payload:
+                    task.runtime.set_theta(math.radians(float(payload['theta_deg'])))
                 queue.start(float(payload.get('frequency', 1.2)))
             elif action == 'pause':
                 queue.request_pause()
@@ -114,7 +120,7 @@ class FootstepWebAPI:
                     if direction == 'stand':
                         steps = [standing_step(feet, queue.next_side(), float(payload.get('width', .24)))]
                     else:
-                        heading = task.runtime.robot_pose[2]
+                        heading = mean_yaw(task.runtime.feet)
                         side = queue.next_side()
                         if direction == 'rotate':
                             if queue.pending:
@@ -291,7 +297,7 @@ class FootstepWebTask(FootstepTask):
         self.runtime.reset(self.snapshot(), self.now())
         self.runtime.controller = WorldFootstepQueue(
             self.runtime.scheduler, assumed_landing=self.localization_mode == 'planned',
-            reference_yaw=float(self.runtime.robot_pose[2]))
+            reference_yaw=mean_yaw(self.runtime.feet))
         self.api.revision += 1
 
     def start(self, snapshot):

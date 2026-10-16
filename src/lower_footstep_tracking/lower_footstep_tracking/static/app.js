@@ -21,6 +21,8 @@ let queueSignature = '';
 let busy = false;
 let noticeUntil = 0;
 let drawnLabels = [];
+let thetaPending = null;
+let thetaBusy = false;
 const radians = degrees => degrees * Math.PI / 180;
 const degrees = radiansValue => radiansValue * 180 / Math.PI;
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -49,10 +51,16 @@ async function command(action, data = {}) {
     if (!emergency) busy = false;
   }
 }
+function meanYaw(feet) {
+  if (!feet?.length) return snapshot?.footstep.robot_pose?.[2] || 0;
+  const cosine = Math.cos(feet[0][2]) + Math.cos(feet[1][2]);
+  const sine = Math.sin(feet[0][2]) + Math.sin(feet[1][2]);
+  return Math.hypot(cosine, sine) <= 1e-6 ? feet[0][2] : Math.atan2(sine, cosine);
+}
 function currentCamera() {
   const robot = snapshot?.footstep.robot_pose || [0,0,0];
   const position = camera || robot;
-  return [position[0],position[1],robot[2]];
+  return [position[0],position[1],meanYaw(snapshot?.footstep.feet)];
 }
 function local(pose, anchor = currentCamera()) {
   const deltaX = pose[0] - anchor[0], deltaY = pose[1] - anchor[1];
@@ -220,11 +228,32 @@ canvas.addEventListener('pointermove',event=>{
 function finishDrag(){const wasRoute=drag?.type==='route';drag=null;if(wasRoute)refreshRoutePreview();}
 canvas.addEventListener('pointerup',finishDrag);
 canvas.addEventListener('pointercancel',finishDrag);
+async function updateTheta() {
+  const theta = Number(element('theta').value);
+  element('theta-label').value = `${theta}°`;
+  thetaPending = theta;
+  if (thetaBusy) return;
+  thetaBusy = true;
+  try {
+    while (thetaPending !== null) {
+      const value = thetaPending; thetaPending = null;
+      const response = await fetch('/api/command', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'theta',theta_deg:value})});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    }
+    await poll();
+  } catch (error) {
+    notify(error.message, true);
+  } finally {
+    thetaBusy = false;
+  }
+}
 document.querySelectorAll('[data-mode]').forEach(button=>button.addEventListener('click',()=>{mode=button.dataset.mode;document.querySelectorAll('[data-mode]').forEach(item=>item.classList.toggle('selected',item===button));}));
 document.querySelectorAll('[data-direction]').forEach(button=>button.addEventListener('click',()=>command('simple',{direction:button.dataset.direction,distance:Number(element('distance').value),yaw_deg:Number(element('turn').value),width:Number(element('width').value),revision:snapshot?.revision})));
-document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>command(button.dataset.command,{frequency:Number(element('frequency').value)})));
+document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>command(button.dataset.command,{frequency:Number(element('frequency').value),theta_deg:Number(element('theta').value)})));
 element('frequency').addEventListener('input',()=>{element('frequency-label').value=`${Number(element('frequency').value).toFixed(2)} Hz`;});
 element('frequency').addEventListener('change',()=>{if(snapshot?.queue?.state==='walking')command('frequency',{frequency:Number(element('frequency').value)});});
+element('theta').addEventListener('input',updateTheta);
 element('localization').addEventListener('change',()=>command('localization',{mode:element('localization').value}));
 for(const id of ['spacing','width','follow'])element(id).addEventListener('change',()=>{if(route.length)refreshRoutePreview();});
 element('commit').addEventListener('click',async()=>{
@@ -262,6 +291,8 @@ function render() {
   element('task-state').textContent=snapshot.preparing?'预备插值':labels[snapshot.task_state]||snapshot.task_state;
   element('queue-state').textContent=queue?labels[queue.state]||queue.state:'未初始化';
   element('phase').textContent=foot.phase.toFixed(2);element('actual-frequency').textContent=foot.frequency.toFixed(2);
+  const thetaDeg=Math.round(degrees(foot.theta??0));element('actual-theta').textContent=String(thetaDeg);
+  if(!thetaBusy){element('theta').value=String(thetaDeg);element('theta-label').value=`${thetaDeg}°`;}
   element('hold').textContent=queue?.state==='standing'?`${queue.hold_elapsed.toFixed(1)} s`:'—';
   element('localization').value=snapshot.localization; element('localization').disabled=!['IDLE','STOPPED','ERROR'].includes(snapshot.task_state);
   element('localization-warning').hidden=snapshot.localization!=='planned';element('map-empty').hidden=Boolean(queue);
