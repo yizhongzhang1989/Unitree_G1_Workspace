@@ -22,6 +22,12 @@ def world(pose, anchor):
                      math.remainder(anchor[2] + pose[2], math.tau)))
 
 
+def mean_yaw(feet):
+    cosine = sum(math.cos(pose[2]) for pose in feet)
+    sine = sum(math.sin(pose[2]) for pose in feet)
+    return float(feet[0][2]) if math.hypot(cosine, sine) <= 1e-6 else math.atan2(sine, cosine)
+
+
 @dataclass
 class Footstep:
     side: int
@@ -38,9 +44,7 @@ def validate_steps(steps, feet, *, single=False, initial_yaw=None, reference_yaw
     if reference_yaw is not None and not math.isfinite(reference_yaw):
         raise ValueError('Reference heading must be finite')
     placed = [False, False]
-    yaw = (math.atan2(sum(math.sin(pose[2]) for pose in current),
-                      sum(math.cos(pose[2]) for pose in current))
-           if initial_yaw is None else initial_yaw)
+    yaw = mean_yaw(current) if initial_yaw is None else initial_yaw
     for index, step in enumerate(steps):
         if step.side not in (0, 1) or step.pose.shape != (3,) or not np.all(np.isfinite(step.pose)):
             raise ValueError('Each footstep needs left=0/right=1 and finite x, y, yaw')
@@ -53,10 +57,10 @@ def validate_steps(steps, feet, *, single=False, initial_yaw=None, reference_yaw
             spacing = offset
         width = spacing[1] * (1 if step.side == 0 else -1)
         maximum_width, maximum_distance = (.30, .35) if single else (.36, .48)
-        if not .12 - 1e-9 <= width <= maximum_width + 1e-9:
+        if width > maximum_width + 1e-9:
             side_name = 'left' if step.side == 0 else 'right'
-            raise ValueError(f'Step {index + 1} ({side_name}): Foot spacing {width:.3f} m must be '
-                             f'0.12..{maximum_width:.2f} m with correct side in the planning support frame')
+            raise ValueError(f'Step {index + 1} ({side_name}): Foot spacing {width:.3f} m exceeds '
+                             f'{maximum_width:.2f} m in the planning support frame')
         if np.linalg.norm(offset[:2]) > maximum_distance + 1e-9:
             raise ValueError(f'Footstep planar displacement exceeds {maximum_distance:.2f} m')
         maximum_yaw = math.pi / 6 if single else math.pi / 2
@@ -78,8 +82,7 @@ def simple_steps(feet, side, direction, distance, yaw=0., align=True, *, single=
         raise ValueError('Distance must be finite and nonnegative; yaw must be finite')
     feet = np.asarray(feet, dtype=float)
     if heading is None:
-        heading = math.atan2(sum(math.sin(pose[2]) for pose in feet),
-                             sum(math.cos(pose[2]) for pose in feet))
+        heading = mean_yaw(feet)
     if not math.isfinite(heading):
         raise ValueError('Reference heading must be finite')
     if direction == 'rotate':
@@ -111,12 +114,11 @@ def direction_steps(feet, side, direction, distance, yaw=0., *, heading=None, pr
         raise ValueError('Unknown step direction')
     if not math.isfinite(distance) or distance < 0. or not math.isfinite(yaw):
         raise ValueError('Distance must be finite and nonnegative; yaw must be finite')
-    if not math.isfinite(width) or not .12 <= width <= .36:
-        raise ValueError('Foot spacing must be 0.12..0.36 m')
+    if not math.isfinite(width) or not 0. <= width <= .36:
+        raise ValueError('Foot spacing must be 0.00..0.36 m')
     feet = np.asarray(feet, dtype=float)
     if heading is None:
-        heading = math.atan2(sum(math.sin(pose[2]) for pose in feet),
-                             sum(math.cos(pose[2]) for pose in feet))
+        heading = mean_yaw(feet)
     if not math.isfinite(heading):
         raise ValueError('Reference heading must be finite')
     delta = {'forward': (distance, 0.), 'backward': (-distance, 0.),
@@ -148,8 +150,8 @@ def direction_steps(feet, side, direction, distance, yaw=0., *, heading=None, pr
 
 
 def standing_step(feet, side, width=.24):
-    if not math.isfinite(width) or not .12 <= width <= .36:
-        raise ValueError('Standing foot spacing must be 0.12..0.36 m')
+    if not math.isfinite(width) or not 0. <= width <= .36:
+        raise ValueError('Standing foot spacing must be 0.00..0.36 m')
     pose = world((0., width if side == 0 else -width, 0.), feet[1 - side])
     step = Footstep(side, pose, True)
     validate_steps([step], feet)
@@ -160,7 +162,7 @@ def route_steps(points, feet, side, spacing=.18, width=.24, follow_heading=True)
     points = np.asarray(points, dtype=float)
     if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2 or not np.all(np.isfinite(points)):
         raise ValueError('Route needs at least two finite XY points in drawing order')
-    if not .02 <= spacing <= .35 or not .12 <= width <= .36:
+    if not .02 <= spacing <= .35 or not 0. <= width <= .36:
         raise ValueError('Invalid route spacing or stance width')
     lengths = np.linalg.norm(np.diff(points, axis=0), axis=1)
     keep = np.r_[True, lengths > 1e-6]
@@ -172,8 +174,7 @@ def route_steps(points, feet, side, spacing=.18, width=.24, follow_heading=True)
     if cumulative[-1] > 50.:
         raise ValueError('Route exceeds 50 m')
     distances = np.arange(spacing, cumulative[-1], spacing).tolist() + [float(cumulative[-1])]
-    initial_heading = math.atan2(sum(math.sin(pose[2]) for pose in feet),
-                                 sum(math.cos(pose[2]) for pose in feet))
+    initial_heading = mean_yaw(feet)
     steps = []
     current = np.array(feet, dtype=float, copy=True)
     for distance in distances:
@@ -220,9 +221,7 @@ class WorldFootstepQueue:
         self.hold_elapsed = 0.
         self.stop_phase = None
         self.stop_requested = False
-        self.initial_yaw = math.atan2(
-            sum(math.sin(pose[2]) for pose in scheduler.slots[:2]),
-            sum(math.cos(pose[2]) for pose in scheduler.slots[:2]))
+        self.initial_yaw = mean_yaw(scheduler.slots[:2])
         self._ramp_start = 0.
         self._stop_elapsed = 0.
         self._stop_frequency = 0.

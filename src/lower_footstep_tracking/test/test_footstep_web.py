@@ -9,19 +9,22 @@ import numpy as np
 import pytest
 
 from g1_motion_session.task_base import State
+from lower_footstep_tracking.footstep_policy import FootstepPolicy
 from lower_footstep_tracking.footstep_web import FootstepWebAPI, FootstepWebTask, make_server
 from test_footstep_planner import finish, queue
-from lower_footstep_tracking.footstep_planner import Footstep, relative, validate_steps, world
+from lower_footstep_tracking.footstep_planner import Footstep, mean_yaw, relative, validate_steps, world
 
 
 def make_api():
     controller = queue()
     controller.reference_yaw = 0.
-    runtime = SimpleNamespace(controller=controller, robot_pose=np.zeros(3))
+    runtime = SimpleNamespace(controller=controller, feet=controller.scheduler.slots[:2],
+                              robot_pose=np.zeros(3), theta=0.)
+    runtime.set_theta = lambda theta: FootstepPolicy.set_theta(runtime, theta)
     runtime.status = lambda: {'footstep': {
-        'feet': runtime.controller.scheduler.slots[:2].tolist(),
+        'feet': runtime.feet.tolist(),
         'robot_pose': runtime.robot_pose.tolist(), 'phase': runtime.controller.scheduler.phase,
-        'frequency': runtime.controller.scheduler.frequency,
+        'frequency': runtime.controller.scheduler.frequency, 'theta': runtime.theta,
         'anchor': runtime.controller.scheduler.anchor.tolist()}}
 
     def session_command(command):
@@ -30,6 +33,7 @@ def make_api():
                 if task.state is State.RUNNING:
                     raise ValueError('Stop preview tracking before engaging')
                 runtime.controller = queue()
+                runtime.feet = runtime.controller.scheduler.slots[:2]
                 task.state = State.STAND
             elif command == 'start':
                 if task.state is not State.STAND:
@@ -54,6 +58,12 @@ def make_api():
 
 def test_api_append_edit_pause_and_reject_stale_revision():
     api = make_api()
+    assert api.status()['footstep']['theta'] == pytest.approx(0.)
+    api.command(dict(action='theta', theta_deg=-45.))
+    assert api.status()['footstep']['theta'] == pytest.approx(-math.pi / 4)
+    with pytest.raises(ValueError, match='theta'):
+        api.command(dict(action='theta', theta_deg=91.))
+    assert api.status()['footstep']['theta'] == pytest.approx(-math.pi / 4)
     api.command(dict(action='simple', direction='forward', distance=.1, revision=0))
     assert len(api.status()['queue']['pending']) == 2
     with pytest.raises(ValueError, match='Queue changed'):
@@ -61,7 +71,8 @@ def test_api_append_edit_pause_and_reject_stale_revision():
     api.command(dict(action='clear', revision=1))
     api.task.runtime.controller.kind = 'continuous'
     api.command(dict(action='route', points=[[0., 0.], [1., 0.]], revision=2))
-    api.command(dict(action='walk'))
+    api.command(dict(action='walk', theta_deg=30.))
+    assert api.status()['footstep']['theta'] == pytest.approx(math.pi / 6)
     api.command(dict(action='pause'))
     assert api.task.runtime.controller.stop_requested
     committed = api.status()['queue']['committed']
@@ -101,8 +112,8 @@ def test_direction_buttons_step_from_current_support_with_staggered_feet(directi
                                       [0., 0., 0.]]
     controller.scheduler.anchor_side = support_side
     controller.has_walked = has_walked
-    controller.reference_yaw = -.1278201221774715
-    api.task.runtime.robot_pose[2] = controller.reference_yaw
+    controller.reference_yaw = mean_yaw(controller.scheduler.slots[:2])
+    api.task.runtime.robot_pose[2] = .8
     feet = controller.tail_feet()
     measured = controller.scheduler.slots[:2].copy()
     api.command(dict(action='simple', direction=direction, distance=.1, width=width,
@@ -128,13 +139,14 @@ def test_direction_buttons_step_from_current_support_with_staggered_feet(directi
 
 
 @pytest.mark.parametrize('committed', [False, True])
-def test_appended_direction_uses_torso_heading_and_tail_support(committed):
+def test_appended_direction_uses_mean_foot_heading_and_tail_support(committed):
     api = make_api()
     controller = api.task.runtime.controller
     controller.append([Footstep(0, np.array((0., .12, .6)))])
     if committed:
         api.command(dict(action='walk'))
-    api.task.runtime.robot_pose[2] = -.2
+    api.task.runtime.feet = np.array(((0., .12, -.1), (0., -.12, -.3)))
+    api.task.runtime.robot_pose[2] = .9
     support = controller.tail_feet()[0].copy()
     api.command(dict(action='simple', direction='forward', distance=.1, revision=api.status()['revision']))
     first, following = list(controller.pending)[-2:]
@@ -165,10 +177,10 @@ def test_initial_custom_step_checks_body_frame_without_rotating_measured_hold_ta
     body = np.array((1., -2., body_yaw))
     api.task.runtime.robot_pose[:] = body
     controller.reference_yaw = body_yaw
-    controller.scheduler.slots[:2] = [world((0., .12, -.5), body), world((0., -.12, -.5), body)]
+    controller.scheduler.slots[:2] = [world((0., .12, .5), body), world((0., -.12, .5), body)]
     measured = controller.scheduler.slots[:2].copy()
-    steps = [dict(side=1, pose=world((.21, -.10, -.6), body).tolist()),
-             dict(side=0, pose=world((.38, .16, -.6), body).tolist())]
+    steps = [dict(side=1, pose=world((.21, -.22, 0.), body).tolist()),
+             dict(side=0, pose=world((.38, .02, 0.), body).tolist())]
     with pytest.raises(ValueError, match='spacing'):
         validate_steps([Footstep(1, np.array(steps[0]['pose']))], measured)
     api.command(dict(action='custom', steps=steps, revision=api.status()['revision']))
@@ -191,9 +203,12 @@ def test_initial_body_spacing_does_not_bypass_measured_foot_yaw_limit():
 
 def test_spacing_rejection_identifies_step_and_keeps_queue_unchanged():
     api = make_api()
+    api.command(dict(action='custom', steps=[dict(side=0, pose=[.1, -.067, 0.])], revision=0))
+    assert len(api.status()['queue']['pending']) == 1
+    api.command(dict(action='clear', revision=api.status()['revision']))
     before = api.status()
-    with pytest.raises(ValueError, match=r'Step 1 \(left\): Foot spacing 0\.040 m'):
-        api.command(dict(action='custom', steps=[dict(side=0, pose=[.1, -.08, 0.])], revision=0))
+    with pytest.raises(ValueError, match=r'Step 1 \(left\): Foot spacing 0\.400 m'):
+        api.command(dict(action='custom', steps=[dict(side=0, pose=[.1, .28, 0.])], revision=before['revision']))
     assert api.status()['queue'] == before['queue']
     assert api.status()['revision'] == before['revision']
 

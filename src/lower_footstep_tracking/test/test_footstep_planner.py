@@ -33,8 +33,9 @@ def test_route_drawing_order_and_atomic_validation():
     assert backward[-1].pose[0] == pytest.approx(-.6)
     sideways = route_steps([[0., 0.], [0., .6]], FEET, 0)
     assert sideways[-1].pose[2] == pytest.approx(math.pi / 2)
+    validate_steps([Footstep(0, np.array((.1, -.067, 0.)))], FEET)
     with pytest.raises(ValueError, match='spacing'):
-        validate_steps([Footstep(0, np.array((.1, -.1, 0.)))], FEET)
+        validate_steps([Footstep(0, np.array((.1, .3, 0.)))], FEET)
     with pytest.raises(ValueError, match='alternate'):
         validate_steps([forward[0], forward[0]], FEET)
 
@@ -54,7 +55,7 @@ def test_right_angle_route_generates_feasible_footsteps():
     steps = route_steps([[0., 0.], [.6, 0.], [.6, .6]], FEET, 0)
     feet = validate_steps(steps, FEET)
     assert len(steps) == 7
-    assert steps[3].pose[2] == pytest.approx(0.)
+    assert steps[3].pose[2] == pytest.approx(math.pi / 2)
     assert steps[3].pose[1] < steps[4].pose[1]
     assert steps[-1].pose[2] == pytest.approx(math.pi / 2)
     result = queue()

@@ -136,7 +136,7 @@ class FootstepPolicy:
         if control_dt != contract['control_dt_s']:
             raise ValueError('footstep control period must match the model contract')
         if [(port.name, port.shape) for port in self._session.get_inputs()] != [
-                ('obs', [1, 78]), ('h_in', [1, 1, 64])]:
+                ('obs', [1, 79]), ('h_in', [1, 1, 64])]:
             raise ValueError('footstep ONNX input contract mismatch')
         if contract['footsteps']['slots'] != ['L_next', 'R_next']:
             raise ValueError('footstep model requires fixed left/right next landing slots')
@@ -148,13 +148,14 @@ class FootstepPolicy:
         self.spec = PolicySpec(
             joint_names=tuple(actions['joint_names']),
             default_pos=np.asarray(actions['default_joint_pos']) - self._offsets[:15],
-            action_scale=np.asarray(actions['scale']), obs_dim=78, action_dim=15,
+            action_scale=np.asarray(actions['scale']), obs_dim=79, action_dim=15,
             hidden_name='h_in', hidden_shape=(1, 1, 64))
         self._joint_slots = [joints.index(name) for name in contract['joint_names']]
         self._dt = control_dt
         self._first_swing = first_swing
         self.scheduler = FootstepScheduler(contract, control_dt)
-        self._obs = np.empty((1, 78), dtype=np.float32)
+        self.theta = 0.
+        self._obs = np.empty((1, 79), dtype=np.float32)
         self._hidden = np.zeros((1, 1, 64), dtype=np.float32)
         self._feed = {'obs': self._obs, 'h_in': self._hidden}
         self._model = None
@@ -175,6 +176,7 @@ class FootstepPolicy:
         scheduler = self.scheduler
         return {'footstep': {
             'phase': scheduler.phase, 'frequency': scheduler.frequency,
+            'theta': self.theta,
             'anchor_id': scheduler.anchor_id, 'anchor_side': scheduler.anchor_side,
             'anchor': scheduler.anchor.tolist(), 'slots': scheduler.slots.tolist(),
             'feet': self.feet.tolist(),
@@ -253,14 +255,23 @@ class FootstepPolicy:
         self._origin_rotation[:] = _rotation(-feet[self.scheduler.anchor_side, 2])
         feet = self.observe(state)
         self.scheduler.reset(feet, self._first_swing)
+        self.theta = 0.
         self._hidden.fill(0.)
         self._feed['h_in'] = self._hidden
         self._last_command = now
 
-    def set_footsteps(self, anchor_id, frequency, sides, poses, now):
+    def set_theta(self, theta):
+        theta = float(theta)
+        if not math.isfinite(theta) or not -math.pi / 2 - 1e-9 <= theta <= math.pi / 2 + 1e-9:
+            raise ValueError('footstep theta must be within [-pi/2, pi/2] rad')
+        self.theta = float(np.clip(theta, -math.pi / 2, math.pi / 2))
+
+    def set_footsteps(self, anchor_id, frequency, sides, poses, now, theta=None):
         if self.controller is not None:
             raise ValueError('World queue owns footsteps; legacy plans are disabled in web mode')
         self.scheduler.set_plan(sides, poses, frequency, anchor_id)
+        if theta is not None:
+            self.set_theta(theta)
         self._last_command = now
 
     def step(self, state, now):
@@ -275,6 +286,7 @@ class FootstepPolicy:
         obs[70] = self.scheduler.phase
         obs[71] = self.scheduler.frequency
         self.scheduler.encode(obs[72:78])
+        obs[78] = self.theta
         if not np.all(np.isfinite(obs)):
             raise ValueError('footstep observation contains non-finite values')
         actions, hidden = self._session.run(None, self._feed)

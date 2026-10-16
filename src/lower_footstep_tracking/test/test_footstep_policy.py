@@ -69,18 +69,20 @@ def test_real_footstep_model_observation_and_recurrent_standing():
     assert np.any(policy._feed['h_in'] != hidden)
     np.testing.assert_allclose(policy._obs[0, :29], state.position[:29] + encoder_offset)
     assert policy.scheduler.phase == phase and policy.scheduler.frequency == 0.
-    assert policy.spec.obs_dim == 78 and policy._obs.shape == (1, 78)
+    assert policy.spec.obs_dim == 79 and policy._obs.shape == (1, 79)
+    assert policy.theta == 0. and policy._obs[0, 78] == pytest.approx(0.)
     standing = np.empty(6)
     policy.scheduler.encode(standing)
     np.testing.assert_allclose(policy._obs[0, 72:78], standing)
     hidden_before_plan = policy._feed['h_in'].copy()
     goals = np.array(((.3, .2, .1), (.4, 0., -.2)))
-    policy.set_footsteps(policy.scheduler.anchor_id, 1., [0, 1], goals.reshape(-1), .04)
+    policy.set_footsteps(policy.scheduler.anchor_id, 1., [0, 1], goals.reshape(-1), .04, theta=.35)
     np.testing.assert_array_equal(policy._feed['h_in'], hidden_before_plan)
     expected_obs = policy._obs.copy()
     expected_obs[0, 70] = (phase + math.tau * .02) % math.tau
     expected_obs[0, 71] = 1.
     expected_obs[0, 72:78] = goals.reshape(-1)
+    expected_obs[0, 78] = .35
     actions, expected_hidden = policy._session.run(
         None, {'obs': expected_obs, 'h_in': hidden_before_plan})
     assert isinstance(actions, np.ndarray)
@@ -143,9 +145,13 @@ def test_world_fk_transform_and_managed_standing_preserves_gru():
     assert not np.allclose(actual, local)
     policy.scheduler.reset(actual)
     policy.controller = WorldFootstepQueue(policy.scheduler)
+    policy.set_theta(-math.pi / 4)
     policy.step(state, .02)
+    assert policy._obs[0, 78] == pytest.approx(-math.pi / 4)
     hidden = policy._feed['h_in'].copy()
     policy.step(state, .04)
     assert np.any(policy._feed['h_in'] != hidden)
+    with pytest.raises(ValueError, match='theta'):
+        policy.set_theta(math.pi / 2 + .01)
     with pytest.raises(ValueError, match='World queue'):
         policy.set_footsteps(policy.scheduler.anchor_id, 1., [], [], .04)

@@ -83,12 +83,13 @@ class FootstepTask(TaskBase):
                     self.get_logger().error(f'脚步模型绑定失败: {error}')
 
     def on_plan(self, message):
-        self.set_plan(message.anchor_id, message.frequency, message.sides, message.poses)
+        self.set_plan(message.anchor_id, message.frequency, message.sides, message.poses, message.theta)
 
-    def set_plan(self, anchor_id, frequency, sides, poses):
+    def set_plan(self, anchor_id, frequency, sides, poses, theta=0.):
         with self.execution_lock:
             try:
-                self.runtime.set_footsteps(anchor_id, frequency, sides, poses, self.now())
+                self.runtime.set_footsteps(
+                    anchor_id, frequency, sides, poses, self.now(), theta=theta)
             except ValueError as error:
                 self.get_logger().warning(f'脚步计划拒绝: {error}', throttle_duration_sec=1.)
 
