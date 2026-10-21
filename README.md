@@ -191,7 +191,7 @@ Unitree_G1_Workspace/             一个 colcon workspace
 |---|---|
 | `Dockerfile` | 镜像定义 |
 | `docker-compose.yml` | **运行参数的唯一来源**，devcontainer 与 `dev.sh` 共用，不抄两份 |
-| `devcontainer.json` | 只写 `dockerComposeFile` + `service` + 扩展列表 |
+| `devcontainer.json` | Compose 服务、VS Code 扩展与设置、远程代理环境 |
 | `dev.sh` | `dev.sh build` 构建镜像，`dev.sh [命令]` 进容器；给普通 SSH 会话、开机自启和 CI 用，VS Code 里用不到 |
 
 ROS 环境不在这里：它定义在工作区的 [`scripts/env.sh`](scripts/env.sh)，镜像的 ENTRYPOINT 和 `~/.bashrc` 都引用它。那份文件**不 COPY 进镜像**，直接用挂载进来的那一份，改了立刻生效、不用重建镜像。
@@ -200,11 +200,11 @@ ROS 环境不在这里：它定义在工作区的 [`scripts/env.sh`](scripts/env
 ```bash
 .devcontainer/dev.sh build       # 产出 g1-humble:latest，约 2 GB
 ```
-本机直连不到镜像站（`mirrors.aliyun.com` 只能经代理访问，`mirrors.ustc.edu.cn` 和 `pypi.org` 则完全不可达），`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `socks5h://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
+本机直连不到镜像站（`mirrors.aliyun.com` 只能经代理访问，`mirrors.ustc.edu.cn` 和 `pypi.org` 则完全不可达），`dev.sh build` 会自动把宿主的 `ALL_PROXY`（如 `http://127.0.0.1:1080`）作为构建期 `http_proxy`/`https_proxy` 传入；这些只在构建期生效，不会写进镜像。代理地址不同时用 `G1_BUILD_PROXY=... .devcontainer/dev.sh build` 覆盖。
 
 compose 里 `build.network: host` 是必需的——BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，`127.0.0.1` 不是宿主的 loopback，代理会连不上。
 
-VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY`，所以 compose 里把默认值写成了 `socks5h://127.0.0.1:1080`；代理地址不是这个的话，先跑一次 `dev.sh build` 把镜像做好再进容器。
+VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY`，所以 compose 里把默认值写成了 `http://127.0.0.1:1080`；代理地址不是这个的话，先跑一次 `dev.sh build` 把镜像做好再进容器。
 
 ### 进容器
 ```bash

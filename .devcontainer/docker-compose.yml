@@ -7,15 +7,15 @@ services:
       context: .
       dockerfile: Dockerfile
       # BuildKit 的 RUN 步骤默认跑在自己的网络沙箱里，127.0.0.1 不是宿主的 loopback，
-      # 下面那个 SOCKS 代理就连不上。必须显式共享宿主网络栈。
+      # 下面那个 HTTP 代理就连不上。必须显式共享宿主网络栈。
       network: host
       args:
-        # 本机直连不到镜像站，构建期必须借宿主的 SOCKS 代理。默认值不能留空：
+        # 本机直连不到镜像站，构建期必须借宿主的 HTTP 代理。默认值不能留空：
         # VS Code 的 "Reopen/Rebuild in Container" 不经过 dev.sh，拿不到 G1_BUILD_PROXY，
         # 留空就会无代理构建 → apt 索引全拉不到 → 几十个包一起 "Unable to locate"。
-        http_proxy: ${G1_BUILD_PROXY:-socks5h://127.0.0.1:1080}
-        https_proxy: ${G1_BUILD_PROXY:-socks5h://127.0.0.1:1080}
-        all_proxy: ${G1_BUILD_PROXY:-socks5h://127.0.0.1:1080}
+        http_proxy: ${G1_BUILD_PROXY:-http://127.0.0.1:1080}
+        https_proxy: ${G1_BUILD_PROXY:-http://127.0.0.1:1080}
+        all_proxy: ${G1_BUILD_PROXY:-http://127.0.0.1:1080}
         no_proxy: localhost,127.0.0.1
         USER_NAME: ${G1_USER_NAME:-unitree}
         USER_UID: ${G1_USER_UID:-1000}
@@ -31,15 +31,16 @@ services:
     # ros2 launch 退出时来不及回收的子节点被 PID 1 收养后会永久停在僵尸态，只吃 PID 表项
     # 不释放（实测反复启停 all_data.launch.py 8 次积累 75 个）。init 会插入 tini 代为回收。
     init: true
-    # 运行期代理必须显式传入，VS Code Server/Copilot 不会读取构建期 ARG，也不会继承宿主 shell。
+    # 运行期默认使用 Remote Proxy 的 HTTP 端口，不继承宿主可能残留的 SOCKS 配置。
+    # 代理地址不同时显式设置 G1_RUNTIME_PROXY；VS Code 的 remoteEnv 需同步修改。
     environment:
-      HTTP_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
-      HTTPS_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
-      ALL_PROXY: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      HTTP_PROXY: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
+      HTTPS_PROXY: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
+      ALL_PROXY: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
       NO_PROXY: localhost,127.0.0.1,::1
-      http_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
-      https_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
-      all_proxy: ${G1_RUNTIME_PROXY:-${ALL_PROXY:-}}
+      http_proxy: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
+      https_proxy: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
+      all_proxy: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
       no_proxy: localhost,127.0.0.1,::1
     # 让 ros2_control_node 拿得到 SCHED_FIFO 和 mlockall——Humble 相对 Foxy 的主要实时收益
     ulimits:
