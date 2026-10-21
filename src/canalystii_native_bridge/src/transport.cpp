@@ -296,8 +296,9 @@ struct CanalystiiTransport::Impl
         send_command(channel, make_init_1mbps_command());
       }
     } catch (const std::exception & exception) {
-      // 固件被中止过的传输挂死之后就停在这些状态里，纯软件救不回来
-      throw std::runtime_error(std::string(exception.what()) + "；请手动拔插一次 CANalyst-II 的 USB 线");
+      throw std::runtime_error(
+              std::string(exception.what()) +
+              "；USB 重新枚举后可重试打开，连续失败时请停止 bridge 并检查 USB 连接");
     }
   }
 

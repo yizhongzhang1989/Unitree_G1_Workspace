@@ -38,6 +38,16 @@
 
 网页端口：`8770` 末端联调、`8200` 整机 controller、`8210` 底层只读、`8010`/`8011` 相机自带页。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，`localhost` 常先解析到 IPv6 `::1`，表现为页面能开、数据不来。远程转发 `ssh -L 8770:127.0.0.1:8770 user@robot`，其余端口同理。
 
+### CANalyst-II USB 自动重连
+
+单/双总线入口及 `all_data.launch.py` 在 bridge 初始化或 transport 故障（退出码 `1`）后，不再立即关闭整栈：旧 bridge 完成收尾后等待 1 秒，仅重启 bridge 和进程内 KWR57，重新打开 USB。每次 launch 最多重试 3 次，预算不随运行时间重置；耗尽后仍统一关闭数据栈。正常退出、异常信号或 Ctrl+C 不触发重连，关闭过程中也不会重新拉起进程。
+
+重连不重启 controller manager、夹爪或相机，不重放旧 bridge 队列，不做 USB reset，也不自动重新接管运动或使能夹爪。反馈超时与夹爪失能保护保持原样；超时后的夹爪需人工确认后重新使能。重连期间数据确实中断，任务仍需处理反馈过期；这不是无缝恢复运动的保证。持续 USB 故障应检查 Hub、供电、线缆及宿主机内核日志，详见 [bridge 重连边界](../canalystii_native_bridge/README.md#usb-故障后的有界重连)。
+
+生产 KWR57 不在启动时自动 tare，固定文件标定保留；运行期软件 tare 偏置不会跨 bridge 进程重启保留，重连告警会明确提醒，依赖它的使用者需重新确认零位。
+
+无硬件回归：`python3 -m pytest -q src/robot_bringup/test/test_bridge_reconnect.py src/robot_bringup/test/test_end_effectors_nodes.py`。测试使用普通子进程模拟故障/恢复，覆盖重试次数、恢复时保留其他节点、预算耗尽关闭整栈和关闭期间取消待重连，不启动真实 bridge。
+
 ## 运动与采集
 
 会话内上肢任务为 `upper_vr`、`upper_vla`、`upper_float`、[upper_force_feedback](../upper_force_feedback/README.md)，下肢任务为 `lower_velocity_tracking` 或 `lower_footstep_tracking`。各任务认领关节并直接向 FPC 发布掩码目标，`g1_motion_session` 协调注册与生命周期。`lower_task` 可选 `velocity/footstep/none`，`upper_task` 可选 `vr/vla/float/force_feedback/none`。直接调用 `motion_tasks.launch.py` 默认为下肢 velocity、上肢 VR；正式键盘入口默认为下肢 velocity、上肢 float，两者是不同的默认组合。
@@ -436,4 +446,3 @@ robot_bringup/
 │   └── exit_debug_mode.py               卸力斜坡 + 交还运控模式
 └── test/                                无硬件回归测试（拓扑、launch 边界、各 Dashboard）
 ```
-

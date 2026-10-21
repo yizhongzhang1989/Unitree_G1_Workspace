@@ -25,6 +25,7 @@ int main(int argc, char ** argv)
   executor.spin();
 
   bridge->shutdown_transport();
+  const int exit_code = bridge->transport_failed() ? 1 : 0;
   for (const auto & device : bridge->device_nodes()) {
     executor.remove_node(device);
   }
@@ -33,5 +34,5 @@ int main(int argc, char ** argv)
   if (rclcpp::ok()) {
     rclcpp::shutdown();
   }
-  return 0;
+  return exit_code;
 }

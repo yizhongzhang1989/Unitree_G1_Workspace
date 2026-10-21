@@ -1,11 +1,14 @@
 """构造末端设备 CAN bridge、力传感器、夹爪和相机节点"""
 
 import os
-from typing import Sequence, Union
+from typing import Optional, Sequence, Union
 
 from ament_index_python.packages import get_package_share_directory
+from launch import LaunchContext
 from launch.actions import IncludeLaunchDescription, Shutdown
+from launch.events.process import ProcessExited
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.logging import get_logger
 from launch.substitution import Substitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -16,6 +19,9 @@ from robot_bringup.end_effectors.topology import (
     Kwr57Device,
     build_bridge_parameters,
 )
+
+_BRIDGE_RECONNECT_LIMIT = 3
+_BRIDGE_RECONNECT_DELAY = 1.0
 
 
 def build_bridge_node_parameters(
@@ -35,12 +41,39 @@ def build_bridge_node_parameters(
 def bridge(buses: Sequence[CanBus], kwr57_devices: Sequence[Kwr57Device],
               gloria_devices: Sequence[GloriaDevice]) -> Node:
     """从末端拓扑直接构造原生 bridge"""
+    reconnect_attempts = 0
+
+    def on_exit(event: ProcessExited, context: LaunchContext) -> Optional[Shutdown]:
+        nonlocal reconnect_attempts
+        if context.is_shutdown:
+            return None
+        if event.returncode != 1:
+            return Shutdown(reason=(
+                f"native CANalyst-II bridge exited with code {event.returncode}"))
+        if reconnect_attempts >= _BRIDGE_RECONNECT_LIMIT:
+            reason = (
+                "native CANalyst-II bridge exhausted "
+                f"{_BRIDGE_RECONNECT_LIMIT} reconnect attempts")
+            get_logger("canalystii_reconnect").error(
+                reason + "; shutting down launched system")
+            return Shutdown(reason=reason)
+        reconnect_attempts += 1
+        get_logger("canalystii_reconnect").warning(
+            "CANalyst-II bridge failed; reconnect attempt "
+            f"{reconnect_attempts}/{_BRIDGE_RECONNECT_LIMIT} "
+            f"in {_BRIDGE_RECONNECT_DELAY:.1f} s. "
+            "Feedback watchdogs remain active; timed-out grippers "
+            "must be explicitly re-enabled. "
+            "KWR57 runtime software tare is not retained across process restarts.")
+        return None
+
     return Node(
         package="canalystii_native_bridge", executable="native_bridge_node",
         name="can_bridge_ros", output="screen", emulate_tty=True,
         parameters=[build_bridge_node_parameters(
             buses, kwr57_devices, gloria_devices)],
-        on_exit=Shutdown(reason="native CANalyst-II bridge exited"),
+        respawn=True, respawn_delay=_BRIDGE_RECONNECT_DELAY,
+        on_exit=on_exit,
     )
 
 

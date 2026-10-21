@@ -134,13 +134,21 @@ KWR57 只有连续的 `base -> base+1 -> base+2` 才能组成一个六轴样本�
 
 正常 Ctrl+C 的完整关闭：`signal_handler` → 宽限期（TX 静默即提前结束）→ KWR57 停流 → 停 CAN 通道 → transfer 自然收尾 → 收尾统计 → 退出，不应出现 launch 的 `escalating to SIGTERM`。停通道的命令必须赶在事件线程收摊之前发：`libusb_bulk_transfer` 是同步调用，需要有人替它处理 libusb 事件，事件线程没了就必然 250 ms 超时。
 
-打开阶段的任何失败（找不到设备、认领接口失败、初始化命令超时）都归到同一个结论，报错统一带上 **「请手动拔插一次 CANalyst-II 的 USB 线」**：
+打开阶段失败（找不到设备、认领接口失败、初始化命令超时）不等于必须物理拔插。上游 Hub 重新枚举后，重新打开设备可能恢复；报错保留原始 USB 原因并提示检查连接：
 
 ```
-[FATAL] [can_bridge_ros]: CANalyst-II 04d8:0053 was not found or could not be opened；请手动拔插一次 CANalyst-II 的 USB 线
+[FATAL] [can_bridge_ros]: CANalyst-II 04d8:0053 was not found or could not be opened；USB 重新枚举后可重试打开，连续失败时请停止 bridge 并检查 USB 连接
 ```
 
 实测（2026-08-11，双 KWR57 1 kHz 满载）：修复前固件在第 2~4 次拆除即挂死；修复后连续 39 次启停零死亡，每轮关闭后用标准控制请求探测设备均为存活。
+
+### USB 故障后的有界重连
+
+bridge 初始化或运行期 transport 故障以退出码 `1` 退出；正常 SIGINT 收尾仍返回 `0`。通过 `robot_bringup` 的单/双总线入口（包括 `all_data.launch.py`）启动时，launch 在旧进程完成收尾后等待 1 秒，只重启 bridge 及其进程内 KWR57 节点，重新 open/claim/init/start USB/CAN 通道。每次 launch 最多重启 3 次，预算在该 launch 生命周期内不重置；再次失败则关闭整个 launch。直接 `ros2 run canalystii_native_bridge native_bridge_node` 不自动重连。
+
+重启不继承旧进程的 RX/TX 队列、KWR57 半包或运行期软件 tare 偏置，不重启 controller manager、夹爪或相机，不调用 USB reset。生产 KWR57 配置保持 `tare_on_start:=false`，避免进程重启触发重新调零；文件中的固定标定不受影响，但依赖运行期 tare 的使用者必须在重连后重新确认零位。夹爪的反馈超时与失能保护不变，重连间隔不会放宽任何超时，也不会发送夹爪使能或运动恢复请求；已经超时失能的夹爪需确认现场状态后显式重新使能。其他节点会经历真实数据中断，不能把进程重启当作反馈连续或运动恢复的保证。
+
+Ctrl+C 或 launch 已开始关闭时不重启；意外的正常退出或信号终止仍关闭整个 launch，不把崩溃信号当作 USB 故障循环重试。每次重连记录告警，耗尽预算时记录关闭原因。该策略不能修复 Hub 供电、线缆或 USB 主控故障，持续失败仍需查宿主机内核日志和物理连接。
 
 每个 `kwr57_device_specs` 对象支持以下字段：
 
@@ -237,7 +245,7 @@ colcon test --packages-select canalystii_native_bridge --event-handlers console_
 colcon test-result --verbose --test-result-base build/canalystii_native_bridge
 ```
 
-当前纯软件测试结果为 `21 tests, 0 failures`，覆盖协议布局、合法零帧 USB 包、KWR57 严格组包与重同步、左右状态独立、公平 TX 队列、配置冲突和 RX route。软件测试不会打开 USB，也不能替代主动硬件验收。
+纯软件测试覆盖协议布局、合法零帧 USB 包、KWR57 严格组包与重同步、左右状态独立、公平 TX 队列、配置冲突和 RX route。`test_bridge_usb_failure_exit` 将模拟 USB I/O 链接进测试版 bridge，在 channel 1 注入 `LIBUSB_TRANSFER_ERROR`，验证与生产程序相同的启动/收尾路径最终返回退出码 `1`。软件测试不会打开真实 USB，也不能替代主动硬件验收。
 
 ## 启动与安全约束
 推荐始终从夹爪失能状态启动生产双总线拓扑：

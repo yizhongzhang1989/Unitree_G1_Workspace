@@ -33,11 +33,12 @@ target_include_directories(canalystii_protocol PUBLIC
 )
 target_link_libraries(canalystii_protocol PkgConfig::LIBUSB yaml-cpp)
 
-add_executable(native_bridge_node
+set(native_bridge_sources
   src/kwr57_device_node.cpp
   src/main.cpp
   src/native_bridge_node.cpp
 )
+add_executable(native_bridge_node ${native_bridge_sources})
 target_include_directories(native_bridge_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -73,6 +74,21 @@ if(BUILD_TESTING)
   target_link_libraries(test_transport canalystii_protocol)
   ament_add_gtest(test_config test/test_config.cpp)
   target_link_libraries(test_config canalystii_protocol)
+  add_executable(test_bridge_usb_failure
+    ${native_bridge_sources}
+    test/usb_failure_stub.cpp
+  )
+  ament_target_dependencies(test_bridge_usb_failure
+    can_msgs geometry_msgs rclcpp std_msgs std_srvs
+  )
+  target_link_libraries(test_bridge_usb_failure canalystii_protocol)
+  add_test(
+    NAME test_bridge_usb_failure_exit
+    COMMAND ${CMAKE_COMMAND}
+      -DBRIDGE=$<TARGET_FILE:test_bridge_usb_failure>
+      -DLOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/usb_failure_test_logs
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/check_bridge_failure.cmake
+  )
 endif()
 
 ament_export_include_directories(include)
