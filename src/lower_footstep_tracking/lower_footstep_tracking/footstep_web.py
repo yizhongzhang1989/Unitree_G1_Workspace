@@ -86,13 +86,15 @@ class FootstepWebAPI:
             if action in ('route', 'route_preview', 'simple', 'custom', 'replace', 'clear'):
                 if int(payload.get('revision', -1)) != self.revision:
                     raise ValueError('Queue changed; refresh before editing')
+            start_feet = (task.runtime.feet if task.localization_mode == 'planned'
+                          and queue.state == 'standing' else None)
             if action in ('route', 'route_preview'):
-                steps = route_steps(payload['points'], queue.tail_feet(), queue.next_side(),
+                steps = route_steps(payload['points'], queue.tail_feet(start_feet=start_feet), queue.next_side(),
                                     float(payload.get('spacing', .18)), float(payload.get('width', .24)),
                                     bool(payload.get('follow_heading', True)))
                 if action == 'route_preview':
                     return dict(ok=True, revision=self.revision, steps=[step.json() for step in steps])
-                queue.append(steps)
+                queue.append(steps, start_feet=start_feet)
                 self._sync_revision()
                 return dict(ok=True, revision=self.revision)
             if action == 'walk':
@@ -103,20 +105,20 @@ class FootstepWebAPI:
                     raise ValueError(reason)
                 if 'theta_deg' in payload:
                     task.runtime.set_theta(math.radians(float(payload['theta_deg'])))
-                queue.start(float(payload.get('frequency', 1.2)))
+                queue.start(float(payload.get('frequency', 1.2)), start_feet=start_feet)
             elif action == 'pause':
                 queue.request_pause()
             elif action == 'frequency':
                 frequency = float(payload['frequency'])
                 if not math.isfinite(frequency) or not .8 <= frequency <= 1.8:
                     raise ValueError('Frequency must be 0.8..1.8 Hz')
-                if queue.kind == 'single' or queue.stop_requested or queue.state == 'closing':
+                if queue.kind == 'single' or queue.stop_requested or queue.stop_phase is not None:
                     raise ValueError('Frequency is frozen during single-step and stopping')
                 queue.target_frequency = frequency
             elif action in ('simple', 'custom', 'replace', 'clear'):
                 if action == 'simple':
                     direction = payload['direction']
-                    feet = queue.tail_feet(planning=direction != 'stand')
+                    feet = queue.tail_feet(planning=direction != 'stand', start_feet=start_feet)
                     if direction == 'stand':
                         steps = [standing_step(feet, queue.next_side(), float(payload.get('width', .24)))]
                     else:
@@ -134,17 +136,17 @@ class FootstepWebAPI:
                             math.radians(float(payload.get('yaw_deg', 15.))),
                             heading=heading, preserve_yaw=queue.has_walked,
                             width=float(payload.get('width', .24)))
-                    queue.append(steps)
+                    queue.append(steps, start_feet=start_feet)
                 elif action in ('custom', 'replace'):
                     steps = [Footstep(int(step['side']), np.asarray(step['pose'], dtype=float),
                                       bool(step.get('closing', False)))
                              for step in payload['steps']]
                     if action == 'custom':
-                        queue.append(steps)
+                        queue.append(steps, start_feet=start_feet)
                     else:
-                        queue.replace_pending(steps)
+                        queue.replace_pending(steps, start_feet=start_feet)
                 else:
-                    queue.replace_pending([])
+                    queue.replace_pending([], start_feet=start_feet)
             else:
                 raise ValueError('Unknown command')
             self._sync_revision()

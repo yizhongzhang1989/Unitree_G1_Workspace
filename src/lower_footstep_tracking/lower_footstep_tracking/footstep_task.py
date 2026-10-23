@@ -1,6 +1,7 @@
 """Footstep input, standing and recurrent execution for the lower joint mask."""
 
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.logging import get_logging_directory
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
@@ -140,6 +142,20 @@ class FootstepTask(TaskBase):
                     lower_source=self.source,
                     command=[round(float(value), 3) for value in self.runtime.command],
                     **self.runtime.status())
+
+    def destroy_node(self):
+        try:
+            if self.runtime.stop_trace:
+                path = Path(get_logging_directory()) / f'footstep_stop_{os.getpid()}.npz'
+                try:
+                    self.runtime.save_stop_trace(path)
+                except OSError as error:
+                    self.get_logger().error(f'停步诊断保存失败: {error}')
+                else:
+                    self.get_logger().info(f'停步诊断已保存: {path}')
+        finally:
+            destroyed = super().destroy_node()
+        return destroyed
 
 
 def main(args=None):

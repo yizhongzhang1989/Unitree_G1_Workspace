@@ -2,7 +2,7 @@
 const element = id => document.getElementById(id);
 const canvas = element('map');
 const context = canvas.getContext('2d');
-const labels = {IDLE:'未接管',STAND:'预备完成',RUNNING:'跟踪中',STOPPED:'已停止',ERROR:'故障',standing:'站立保持',starting:'升频起步',walking:'行走',closing:'收脚降频'};
+const labels = {IDLE:'未接管',STAND:'预备完成',RUNNING:'跟踪中',STOPPED:'已停止',ERROR:'故障',standing:'站立保持',starting:'升频起步',walking:'行走',stopping:'按计划停车'};
 let snapshot = null;
 let mode = 'select';
 let draft = [];
@@ -146,7 +146,7 @@ function draw() {
     queue.committed.forEach((step,index)=>footprint(step,'committed',index));
   }
   if (snapshot?.queue) {
-    (snapshot.footstep.slots?.slice(0,2)||[]).forEach((pose,side)=>footprint({pose,side},'hold',side));
+    if(snapshot.localization!=='planned') (snapshot.footstep.slots?.slice(0,2)||[]).forEach((pose,side)=>footprint({pose,side},'hold',side));
     snapshot.footstep.feet.forEach((pose,side)=>footprint({pose,side},'actual',side));
     const anchor=screen(snapshot.footstep.anchor);context.strokeStyle='#08755b';context.lineWidth=1.8;context.beginPath();context.arc(...anchor,8,0,2*Math.PI);context.stroke();
     drawArrow(snapshot.footstep.robot_pose,headingHandle(snapshot.footstep.robot_pose),'#253b32');
@@ -270,7 +270,7 @@ element('edit-pending').addEventListener('click',()=>{if(draft.length||route.len
 let confirmAction=null;
 function confirm(title,text,callback){element('confirm-title').textContent=title;element('confirm-text').textContent=text;confirmAction=callback;element('confirm-dialog').showModal();}
 element('confirm-dialog').addEventListener('close',()=>{if(element('confirm-dialog').returnValue==='ok')confirmAction?.();confirmAction=null;});
-element('clear-pending').addEventListener('click',()=>confirm('清空待执行脚步？','已承诺落点不会改变。行走中的机器人仍会完成收脚。',()=>command('clear',{revision:snapshot.revision})));
+element('clear-pending').addEventListener('click',()=>confirm('清空待执行脚步？','已承诺落点不会改变。完成已承诺脚步后停车，不自动补步。',()=>command('clear',{revision:snapshot.revision})));
 element('estop').addEventListener('click',()=>command('estop'));
 function renderQueue(queue) {
   const signature=JSON.stringify([queue?.committed,queue?.pending]);if(signature===queueSignature)return;queueSignature=signature;
@@ -296,6 +296,7 @@ function render() {
   element('hold').textContent=queue?.state==='standing'?`${queue.hold_elapsed.toFixed(1)} s`:'—';
   element('localization').value=snapshot.localization; element('localization').disabled=!['IDLE','STOPPED','ERROR'].includes(snapshot.task_state);
   element('localization-warning').hidden=snapshot.localization!=='planned';element('map-empty').hidden=Boolean(queue);
+  element('hold-legend').hidden=snapshot.localization==='planned';
   const allowed={engage:!['RUNNING','STAND'].includes(snapshot.task_state),track:snapshot.task_state==='STAND'&&!snapshot.preparing&&snapshot.ready,walk:snapshot.task_state==='RUNNING'&&queue?.state==='standing'&&queue.pending.length>0,pause:queue&&['starting','walking'].includes(queue.state),release:['RUNNING','STAND','ERROR'].includes(snapshot.task_state)};
   document.querySelectorAll('[data-command]').forEach(button=>{button.disabled=!allowed[button.dataset.command];});
   document.querySelectorAll('[data-direction]').forEach(button=>{button.disabled=!queue;});

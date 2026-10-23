@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -7,6 +8,7 @@ import numpy as np
 import onnxruntime
 import pytest
 
+from lower_footstep_tracking.footstep_planner import Footstep, WorldFootstepQueue
 from lower_footstep_tracking.footstep_policy import FootstepPolicy, FootstepScheduler
 
 
@@ -21,6 +23,17 @@ def scheduler():
     result = FootstepScheduler(CONTRACT)
     result.reset(np.array(((0., .1, 0.), (0., -.1, 0.))))
     return result
+
+
+def standing_policy(encoder_offset=0.):
+    policy = FootstepPolicy(MODEL, joints=CONTRACT['joint_names'], control_dt=.02,
+                            sole_offsets=[0., 0., -.035] * 2, encoder_offsets=[encoder_offset] * 29)
+    policy.bind_description((ROOT / 'src/unitree_g1_description/model/final.urdf').read_text())
+    state = SimpleNamespace(position=np.array(CONTRACT['default_joint_pos']) - encoder_offset,
+                            velocity=np.zeros(29), orientation=(0., 0., 0., 1.),
+                            angular_velocity=(0., 0., 0.))
+    policy.reset(state, 0.)
+    return policy, state
 
 
 def test_touchdown_consumes_fixed_side_and_reanchors_without_moving_targets():
@@ -62,11 +75,17 @@ def test_real_footstep_model_observation_and_recurrent_standing():
     phase = policy.scheduler.phase
     first = policy.step(state, .02)
     hidden = policy._feed['h_in'].copy()
+    standing_obs = policy._obs.copy()
+    standing_actions, standing_hidden = policy._session.run(
+        None, {'obs': standing_obs, 'h_in': hidden})
     second = policy.step(state, .04)
     assert first.shape == second.shape == (15,)
     assert np.all(np.isfinite(second))
     assert np.any(hidden)
     assert np.any(policy._feed['h_in'] != hidden)
+    np.testing.assert_array_equal(policy._obs, standing_obs)
+    np.testing.assert_allclose(second, policy.spec.default_pos + policy.spec.action_scale * standing_actions[0])
+    np.testing.assert_array_equal(policy._feed['h_in'], standing_hidden)
     np.testing.assert_allclose(policy._obs[0, :29], state.position[:29] + encoder_offset)
     assert policy.scheduler.phase == phase and policy.scheduler.frequency == 0.
     assert policy.spec.obs_dim == 79 and policy._obs.shape == (1, 79)
@@ -92,6 +111,9 @@ def test_real_footstep_model_observation_and_recurrent_standing():
     np.testing.assert_allclose(target, np.asarray(CONTRACT['actions']['default_joint_pos']) - encoder_offset
                                + np.asarray(CONTRACT['actions']['scale']) * actions[0])
     np.testing.assert_array_equal(policy._feed['h_in'], expected_hidden)
+    policy.reset(state, .08)
+    assert not np.any(policy._feed['h_in'])
+    np.testing.assert_allclose(policy.step(state, .10), first)
 
 
 def test_stop_consumes_current_landing_before_freezing_holds():
@@ -112,6 +134,41 @@ def test_stop_consumes_current_landing_before_freezing_holds():
     np.testing.assert_allclose(encoded, (result.slots[:2] - result.anchor).reshape(-1))
 
 
+@pytest.mark.parametrize('kind,count', [('continuous', 1), ('continuous', 6), ('single', 2)])
+def test_real_model_receives_zero_frequency_at_final_managed_touchdown(kind, count):
+    policy, state = standing_policy()
+    policy.controller = WorldFootstepQueue(policy.scheduler, assumed_landing=True)
+    queue = policy.controller
+    feet = policy.feet.copy()
+    steps = [Footstep(index % 2, feet[index % 2] + np.array((.05 * (index + 1), 0., 0.)))
+             for index in range(count)]
+    queue.append(steps, kind=kind)
+    queue.start(1.8)
+    final_phase = queue.phase + count * math.pi
+    for tick in range(1000):
+        policy.step(state, (tick + 1) * .02)
+        if not queue.committed:
+            assert not queue.pending and queue.state == 'standing'
+            assert queue.phase == pytest.approx(final_phase, abs=1e-12)
+            assert policy._obs[0, 70] == pytest.approx(final_phase % math.tau, abs=1e-6)
+            assert policy._obs[0, 71] == 0.
+            holds = np.empty(6)
+            policy.scheduler.encode(holds)
+            np.testing.assert_allclose(policy._obs[0, 72:78], holds, atol=1e-6)
+            break
+    else:
+        raise AssertionError('Final managed touchdown was not reached')
+    hidden = policy._feed['h_in'].copy()
+    anchor, slots = policy.scheduler.anchor.copy(), policy.scheduler.slots.copy()
+    for hold_tick in range(20):
+        policy.step(state, (tick + hold_tick + 2) * .02)
+        assert queue.phase == pytest.approx(final_phase, abs=1e-12)
+        assert policy._obs[0, 71] == 0.
+        np.testing.assert_array_equal(policy.scheduler.anchor, anchor)
+        np.testing.assert_array_equal(policy.scheduler.slots, slots)
+    assert not np.array_equal(policy._feed['h_in'], hidden)
+
+
 def test_invalid_frequency_and_stale_anchor_do_not_mutate_plan():
     result = scheduler()
     before = result.slots.copy()
@@ -124,15 +181,7 @@ def test_invalid_frequency_and_stale_anchor_do_not_mutate_plan():
 
 
 def test_world_fk_transform_and_managed_standing_preserves_gru():
-    from lower_footstep_tracking.footstep_planner import WorldFootstepQueue
-
-    policy = FootstepPolicy(MODEL, joints=CONTRACT['joint_names'], control_dt=.02,
-                            sole_offsets=[0., 0., -.035] * 2, encoder_offsets=[0.] * 29)
-    policy.bind_description((ROOT / 'src/unitree_g1_description/model/final.urdf').read_text())
-    state = SimpleNamespace(position=np.array(CONTRACT['default_joint_pos']),
-                            velocity=np.zeros(29), orientation=(0., 0., 0., 1.),
-                            angular_velocity=(0., 0., 0.))
-    policy.reset(state, 0.)
+    policy, state = standing_policy()
     local = policy.observe(state)
     correction = np.array((2., -1., .7))
     rotation = np.array(((0., -1., 0.), (1., 0., 0.), (0., 0., 1.)))
@@ -155,3 +204,51 @@ def test_world_fk_transform_and_managed_standing_preserves_gru():
         policy.set_theta(math.pi / 2 + .01)
     with pytest.raises(ValueError, match='World queue'):
         policy.set_footsteps(policy.scheduler.anchor_id, 1., [], [], .04)
+
+
+def test_stop_trace_is_bounded_freezes_after_one_second_and_replays_exactly(tmp_path):
+    policy, state = standing_policy(encoder_offset=.1)
+    for tick in range(100):
+        policy.step(state, (tick + 1) * .02)
+    assert not policy.stop_trace
+    with pytest.raises(ValueError, match='No walking'):
+        policy.save_stop_trace(tmp_path / 'empty.npz')
+    policy.controller = WorldFootstepQueue(policy.scheduler, assumed_landing=True)
+    feet = policy.feet.copy()
+    steps = [Footstep(index % 2, feet[index % 2] + np.array((.03 * (index + 1), 0., 0.)))
+             for index in range(9)]
+    policy.controller.append(steps)
+    policy.controller.start()
+    for tick in range(1000):
+        policy.step(state, 2. + (tick + 1) * .02)
+        if policy.controller.state == 'standing':
+            break
+    else:
+        raise AssertionError('Queue did not stop')
+    stop_time = 2. + (tick + 1) * .02
+    for index in range(100):
+        policy.step(state, stop_time + (index + 1) * .02)
+    assert len(policy.stop_trace) == policy.stop_trace.maxlen == 150
+    assert policy.stop_trace[-1][0] == pytest.approx(stop_time + .98)
+    assert policy._trace_tail == 0
+    path = tmp_path / 'stop.npz'
+    policy.save_stop_trace(path)
+    with np.load(path, allow_pickle=False) as trace:
+        assert trace['obs'].shape == (150, 1, 79)
+        assert trace['h_in'].shape == (150, 1, 1, 64)
+        assert trace['target'].shape == (150, 15)
+        assert trace['foot_relative_pelvis'].shape == (150, 2, 3)
+        assert trace['contract_version'].item() == CONTRACT['version']
+        assert trace['model_sha256'].item() == hashlib.sha256(MODEL.read_bytes()).hexdigest()
+        np.testing.assert_array_equal(trace['encoder_offsets'], np.full(29, .1))
+        np.testing.assert_array_equal(trace['obs'][-50:, 0, 71], np.zeros(50))
+        for index in (0, 99, 100, 149):
+            actions, _ = policy._session.run(
+                None, {'obs': trace['obs'][index], 'h_in': trace['h_in'][index]})
+            expected = trace['action_default_pos'] + trace['action_scale'] * actions[0]
+            np.testing.assert_array_equal(trace['target'][index], expected)
+        times = trace['time_s'].copy()
+    policy.step(state, stop_time + 3.)
+    policy.save_stop_trace(path)
+    with np.load(path, allow_pickle=False) as trace:
+        np.testing.assert_array_equal(trace['time_s'], times)

@@ -116,3 +116,29 @@ def test_waist_output_lowpass_frequency_response_and_restart(task, enabled):
     task.control()
     np.testing.assert_allclose(task.output.positions[:15], .2, atol=1e-15)
     task.estop.assert_not_called()
+
+
+@pytest.mark.parametrize('write_error', [False, True])
+def test_shutdown_saves_trace_or_reports_io_error_and_still_destroys_node(
+        task, tmp_path, monkeypatch, write_error):
+    logger, destroyed = Mock(), Mock()
+    task.get_logger = lambda: logger
+    task.runtime.stop_trace = [object()]
+    if write_error:
+        task.runtime.save_stop_trace.side_effect = OSError('disk unavailable')
+    monkeypatch.setattr(
+        import_module('lower_footstep_tracking.footstep_task'), 'get_logging_directory', lambda: tmp_path)
+    monkeypatch.setattr(
+        FootstepTask.__bases__[0], 'destroy_node', lambda node: destroyed(node))
+    task.destroy_node()
+    path = task.runtime.save_stop_trace.call_args.args[0]
+    assert path.parent == tmp_path and path.name.startswith('footstep_stop_')
+    assert path.suffix == '.npz'
+    if write_error:
+        logger.error.assert_called_once()
+        assert 'disk unavailable' in logger.error.call_args.args[0]
+        logger.info.assert_not_called()
+    else:
+        logger.info.assert_called_once()
+        logger.error.assert_not_called()
+    destroyed.assert_called_once_with(task)

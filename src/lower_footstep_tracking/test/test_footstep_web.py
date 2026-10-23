@@ -96,10 +96,111 @@ def test_stand_button_appends_next_foot_alignment_without_starting():
     with pytest.raises(ValueError, match='Queue changed'):
         api.command(dict(action='simple', direction='stand', revision=before['revision']))
     api.command(dict(action='walk'))
-    finish(api.task.runtime.controller)
+    landed = finish(api.task.runtime.controller)
+    assert [side for side, _ in landed] == [0, 1]
     feet = api.status()['footstep']['feet']
     np.testing.assert_allclose(feet[0], [.2, .12, 0.], atol=1e-12)
     np.testing.assert_allclose(relative(feet[1], feet[0]), [0., -.12, 0.], atol=1e-12)
+
+
+@pytest.mark.parametrize('direction', ['forward', 'stand', 'rotate'])
+def test_unlocalized_new_plan_uses_current_feet_not_old_plan(direction):
+    api = make_api()
+    controller = api.task.runtime.controller
+    controller.scheduler.slots[:2, 0] = 2.
+    current = np.array(((.03, .14, .1), (0., -.11, -.1)))
+    api.task.runtime.feet = current.copy()
+    revision = api.status()['revision']
+    api.command(dict(action='simple', direction=direction, distance=.1, yaw_deg=15.,
+                     width=.24, revision=revision))
+    steps = list(controller.pending)
+    if direction == 'stand':
+        expected = world((0., .24, 0.), current[1])
+        assert len(steps) == 1
+        np.testing.assert_allclose(steps[0].pose, expected, atol=1e-12)
+    elif direction == 'rotate':
+        np.testing.assert_allclose(np.mean([step.pose[:2] for step in steps], axis=0),
+                                   current[:, :2].mean(axis=0), atol=1e-12)
+    else:
+        expected = world((0., .24, 0.), current[1])
+        expected[:2] += [.1, 0.]
+        np.testing.assert_allclose(steps[0].pose[:2], expected[:2], atol=1e-12)
+    np.testing.assert_array_equal(controller.scheduler.slots[:2, 0], [2., 2.])
+    np.testing.assert_array_equal(api.task.runtime.feet, current)
+
+
+@pytest.mark.parametrize('localization', ['planned', 'fused'])
+@pytest.mark.parametrize('has_walked', [False, True])
+def test_walk_uses_current_start_stance_only_without_localization(localization, has_walked):
+    api = make_api()
+    api.task.localization_mode = localization
+    controller = api.task.runtime.controller
+    if has_walked:
+        controller.has_walked = True
+        controller.phase = controller.scheduler.touchdown[1]
+        controller.scheduler.phase = controller.phase
+    phase = controller.phase
+    before = controller.scheduler.slots[:2].copy()
+    controller.append([Footstep(0, np.array((.1, .12, 0.)))])
+    api.task.runtime.feet = np.array(((.02, .15, .1), (.03, -.13, -.1)))
+    goal = controller.pending[0].pose.copy()
+    api.command(dict(action='walk'))
+    expected = api.task.runtime.feet if localization == 'planned' else before
+    np.testing.assert_array_equal(controller.scheduler.slots[:2], expected)
+    np.testing.assert_array_equal(controller.scheduler.anchor, expected[1])
+    if has_walked:
+        assert controller.phase == phase
+    assert len(controller.committed) == 1
+    np.testing.assert_array_equal(controller.committed[0][1].pose, goal)
+
+
+def test_unlocalized_appending_keeps_existing_goal_as_tail_support():
+    api = make_api()
+    controller = api.task.runtime.controller
+    goal = Footstep(0, np.array((.2, .12, 0.)))
+    controller.append([goal])
+    api.task.runtime.feet = np.array(((.02, .14, 0.), (.01, -.13, 0.)))
+    api.command(dict(action='simple', direction='forward', distance=.1, width=.24,
+                     revision=api.status()['revision']))
+    steps = list(controller.pending)
+    assert [step.side for step in steps] == [0, 1, 0]
+    np.testing.assert_array_equal(steps[0].pose, goal.pose)
+    np.testing.assert_allclose(steps[1].pose, [.3, -.12, 0.], atol=1e-12)
+    np.testing.assert_allclose(steps[2].pose, [.3, .12, 0.], atol=1e-12)
+
+
+def test_unlocalized_start_revalidates_against_current_feet_without_moving_goals():
+    api = make_api()
+    controller = api.task.runtime.controller
+    controller.append([Footstep(0, np.array((.1, .12, 0.)))])
+    pending = [step.json() for step in controller.pending]
+    slots, anchor, phase = controller.scheduler.slots.copy(), controller.scheduler.anchor.copy(), controller.phase
+    api.task.runtime.feet = np.array(((.02, .15, 0.), (-1., -.13, 0.)))
+    with pytest.raises(ValueError, match='displacement'):
+        api.command(dict(action='walk'))
+    assert controller.state == 'standing' and controller.phase == phase
+    assert [step.json() for step in controller.pending] == pending
+    np.testing.assert_array_equal(controller.scheduler.slots, slots)
+    np.testing.assert_array_equal(controller.scheduler.anchor, anchor)
+    assert not controller.committed
+
+
+@pytest.mark.parametrize('action', ['route_preview', 'route', 'custom', 'replace'])
+def test_unlocalized_plan_validation_uses_current_feet(action):
+    api = make_api()
+    controller = api.task.runtime.controller
+    controller.scheduler.slots[:2, 0] = 2.
+    api.task.runtime.feet = np.array(((0., .12, 0.), (0., -.12, 0.)))
+    payload = dict(action=action, revision=api.status()['revision'],
+                   points=[[0., 0.], [.3, 0.]],
+                   steps=[dict(side=0, pose=[.1, .12, 0.])])
+    result = api.command(payload)
+    if action == 'route_preview':
+        assert result['steps'] and not controller.pending
+    else:
+        assert controller.pending
+        validate_steps(list(controller.pending), api.task.runtime.feet)
+    np.testing.assert_array_equal(controller.scheduler.slots[:2, 0], [2., 2.])
 
 
 @pytest.mark.parametrize('direction,support_side,has_walked,width', [
@@ -112,9 +213,12 @@ def test_direction_buttons_step_from_current_support_with_staggered_feet(directi
                                       [0., 0., 0.]]
     controller.scheduler.anchor_side = support_side
     controller.has_walked = has_walked
+    if has_walked:
+        controller.phase = controller.scheduler.touchdown[support_side]
+        controller.scheduler.phase = controller.phase
     controller.reference_yaw = mean_yaw(controller.scheduler.slots[:2])
     api.task.runtime.robot_pose[2] = .8
-    feet = controller.tail_feet()
+    feet = controller.tail_feet(start_feet=api.task.runtime.feet)
     measured = controller.scheduler.slots[:2].copy()
     api.command(dict(action='simple', direction=direction, distance=.1, width=width,
                      revision=api.status()['revision']))
@@ -131,11 +235,11 @@ def test_direction_buttons_step_from_current_support_with_staggered_feet(directi
         for step in steps:
             assert step.pose[2] == measured[step.side, 2]
     np.testing.assert_array_equal(controller.scheduler.slots[:2], measured)
-    validate_steps(steps, feet)
+    expected = validate_steps(steps, feet)
     api.command(dict(action='walk'))
-    finish(controller)
-    np.testing.assert_allclose(relative(controller.scheduler.slots[0], controller.scheduler.slots[1]),
-                               [0., .24, 0.], atol=1e-12)
+    landed = finish(controller)
+    assert [side for side, _ in landed] == [step.side for step in steps]
+    np.testing.assert_array_equal(controller.scheduler.slots[:2], expected)
 
 
 @pytest.mark.parametrize('committed', [False, True])
@@ -213,7 +317,7 @@ def test_spacing_rejection_identifies_step_and_keeps_queue_unchanged():
     assert api.status()['revision'] == before['revision']
 
 
-def test_automatic_closing_invalidates_preview_when_pending_is_empty():
+def test_stopping_preserves_preview_without_adding_footsteps():
     api = make_api()
     api.command(dict(action='simple', direction='forward', distance=.1, revision=0))
     api.command(dict(action='walk'))
@@ -223,24 +327,27 @@ def test_automatic_closing_invalidates_preview_when_pending_is_empty():
     payload = dict(points=[[.1, 0.], [.5, 0.]], revision=revision)
     preview = api.command(dict(action='route_preview', **payload))
     side = controller.next_side()
-    for _ in range(100):
-        controller.tick(.02, controller.scheduler.slots[:2].copy())
-        if controller.state == 'closing':
-            break
-    assert controller.state == 'closing'
-    assert not controller.pending
-    assert controller.next_side() != side
-    assert preview['steps'][0]['side'] == side
-    with pytest.raises(ValueError, match='Queue changed'):
-        api.command(dict(action='route', **payload))
-    closing_revision = api.status()['revision']
-    landing = controller.committed[0][0]
     for _ in range(1000):
         controller.tick(.02, controller.scheduler.slots[:2].copy())
-        if controller.phase >= landing - 1e-9:
+        assert api.status()['revision'] == revision
+        assert not controller.pending
+        assert controller.next_side() == side
+        if controller.state == 'standing':
             break
-    assert controller.phase >= landing - 1e-9
-    assert api.status()['revision'] == closing_revision
+    assert controller.state == 'standing'
+    assert not controller.committed
+    assert preview['steps'][0]['side'] == side
+    api.command(dict(action='route', **payload))
+    assert [step.json() for step in controller.pending] == preview['steps']
+
+
+def test_frequency_is_frozen_during_finite_queue_stopping_profile():
+    api = make_api()
+    api.command(dict(action='custom', steps=[dict(side=0, pose=[.1, .12, 0.])], revision=0))
+    api.command(dict(action='walk'))
+    with pytest.raises(ValueError, match='Frequency is frozen'):
+        api.command(dict(action='frequency', frequency=1.8))
+    assert len(finish(api.task.runtime.controller)) == 1
 
 
 @pytest.mark.parametrize('points,count', [

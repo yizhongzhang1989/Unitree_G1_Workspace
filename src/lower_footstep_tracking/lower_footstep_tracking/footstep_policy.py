@@ -2,8 +2,10 @@
 
 from collections import deque
 from collections.abc import Callable
+import hashlib
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import onnxruntime
@@ -131,6 +133,7 @@ class FootstepPolicy:
         options.inter_op_num_threads = 1
         self._session = onnxruntime.InferenceSession(
             str(path), options, providers=['CPUExecutionProvider'])
+        self._model_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         self.contract = json.loads(self._session.get_modelmeta().custom_metadata_map['footstep_contract'])
         contract = self.contract
         if control_dt != contract['control_dt_s']:
@@ -156,8 +159,7 @@ class FootstepPolicy:
         self.scheduler = FootstepScheduler(contract, control_dt)
         self.theta = 0.
         self._obs = np.empty((1, 79), dtype=np.float32)
-        self._hidden = np.zeros((1, 1, 64), dtype=np.float32)
-        self._feed = {'obs': self._obs, 'h_in': self._hidden}
+        self._feed = {'obs': self._obs, 'h_in': np.zeros((1, 1, 64), dtype=np.float32)}
         self._model = None
         self._origin_rotation = np.eye(3)
         self._foot_positions = np.zeros((2, 3))
@@ -167,6 +169,8 @@ class FootstepPolicy:
         self.world_transform: Callable[..., tuple[np.ndarray, np.ndarray]] | None = None
         self.feet = np.zeros((2, 3))
         self.robot_pose = np.zeros(3)
+        self.stop_trace = deque(maxlen=round(3. / control_dt))
+        self._trace_tail = 0
 
     @property
     def ready(self):
@@ -256,8 +260,8 @@ class FootstepPolicy:
         feet = self.observe(state)
         self.scheduler.reset(feet, self._first_swing)
         self.theta = 0.
-        self._hidden.fill(0.)
-        self._feed['h_in'] = self._hidden
+        self._feed['h_in'].fill(0.)
+        self._trace_tail = 0
         self._last_command = now
 
     def set_theta(self, theta):
@@ -289,10 +293,30 @@ class FootstepPolicy:
         obs[78] = self.theta
         if not np.all(np.isfinite(obs)):
             raise ValueError('footstep observation contains non-finite values')
+        h_in = self._feed['h_in']
         actions, hidden = self._session.run(None, self._feed)
         if not isinstance(actions, np.ndarray) or not isinstance(hidden, np.ndarray):
             raise ValueError('footstep inference must return dense arrays')
         if not np.all(np.isfinite(actions)) or not np.all(np.isfinite(hidden)):
             raise ValueError('footstep inference contains non-finite values')
         self._feed['h_in'] = hidden
-        return self.spec.default_pos + self.spec.action_scale * actions[0]
+        target = self.spec.default_pos + self.spec.action_scale * actions[0]
+        if self.scheduler.frequency > 0. or self._trace_tail:
+            self.stop_trace.append((now, self._obs.copy(), h_in.copy(), target.copy(),
+                                    feet.copy(), self._foot_positions.copy()))
+            self._trace_tail = (round(1. / self._dt) if self.scheduler.frequency > 0.
+                                else self._trace_tail - 1)
+        return target
+
+    def save_stop_trace(self, path):
+        if not self.stop_trace:
+            raise ValueError('No walking or stopping samples have been captured')
+        times, observations, hidden, targets, feet, foot_relative_pelvis = zip(*self.stop_trace)
+        np.savez_compressed(
+            path, time_s=times, obs=np.stack(observations), h_in=np.stack(hidden),
+            target=np.stack(targets), feet=np.stack(feet),
+            foot_relative_pelvis=np.stack(foot_relative_pelvis),
+            model_sha256=self._model_sha256, contract_version=self.contract['version'],
+            joint_names=self.contract['joint_names'], action_joint_names=self.spec.joint_names,
+            action_default_pos=self.spec.default_pos, action_scale=self.spec.action_scale,
+            encoder_offsets=self._offsets, sole_offsets=self._sole_offsets, control_dt_s=self._dt)

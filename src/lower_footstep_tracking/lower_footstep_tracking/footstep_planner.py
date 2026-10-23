@@ -222,28 +222,28 @@ class WorldFootstepQueue:
         self.stop_phase = None
         self.stop_requested = False
         self.initial_yaw = mean_yaw(scheduler.slots[:2])
-        self._ramp_start = 0.
-        self._stop_elapsed = 0.
-        self._stop_frequency = 0.
-        self._single_duration = 0.
+        self._profile_duration = None
+        self._profile_frequency = 0.
+        self._profile_ramp = .25
         self.has_walked = False
 
-    def _planning_start_feet(self):
-        feet = self.scheduler.slots[:2].copy()
-        if not self.has_walked and self.reference_yaw is not None:
+    def _planning_start_feet(self, start_feet=None, *, planning=True):
+        feet = np.array(self.scheduler.slots[:2] if start_feet is None else start_feet,
+                        dtype=float, copy=True)
+        if feet.shape != (2, 3) or not np.all(np.isfinite(feet)):
+            raise ValueError('Starting feet must contain two finite x, y, yaw poses')
+        if planning and start_feet is None and not self.has_walked and self.reference_yaw is not None:
             feet[:, 2] = self.reference_yaw
         return feet
 
-    def tail_feet(self, *, planning=True):
-        feet = self.tail_committed_feet(planning=planning)
+    def tail_feet(self, *, planning=True, start_feet=None):
+        feet = self.tail_committed_feet(planning=planning, start_feet=start_feet)
         for step in self.pending:
             feet[step.side] = step.pose
         return feet
 
-    def _validate(self, steps, *, include_pending=False, single=False):
-        feet = self.scheduler.slots[:2].copy()
-        for _, step in self.committed:
-            feet[step.side] = step.pose
+    def _validate(self, steps, *, include_pending=False, single=False, start_feet=None):
+        feet = self.tail_committed_feet(planning=False, start_feet=start_feet)
         if include_pending:
             for step in self.pending:
                 feet[step.side] = step.pose
@@ -258,7 +258,7 @@ class WorldFootstepQueue:
             return 1 - self.committed[-1][1].side
         return self._next_landing()[1]
 
-    def append(self, steps, *, kind='continuous'):
+    def append(self, steps, *, kind='continuous', start_feet=None):
         if not steps:
             raise ValueError('Footstep list is empty')
         if len(self.pending) + len(steps) > 1000:
@@ -272,12 +272,12 @@ class WorldFootstepQueue:
         can_choose_first = self.state == 'standing' and not self.pending and not self.committed
         if steps[0].side != self.next_side() and kind != 'single' and not can_choose_first:
             raise ValueError('First new footstep does not match the next alternating side')
-        self._validate(steps, include_pending=True, single=kind == 'single')
+        self._validate(steps, include_pending=True, single=kind == 'single', start_feet=start_feet)
         self.pending.extend(Footstep(step.side, step.pose.copy(), step.closing) for step in steps)
         if self.state == 'standing':
             self.kind = kind
 
-    def replace_pending(self, steps):
+    def replace_pending(self, steps, *, start_feet=None):
         if self.committed:
             expected = 1 - self.committed[-1][1].side
         elif self.pending:
@@ -288,7 +288,7 @@ class WorldFootstepQueue:
             raise ValueError('Edited queue must retain alternating foot order')
         if self.kind == 'single' and len(steps) not in (0, 1, 2):
             raise ValueError('Single-step action contains one or two landings')
-        self._validate(steps, single=self.kind == 'single')
+        self._validate(steps, single=self.kind == 'single', start_feet=start_feet)
         self.pending = deque(Footstep(step.side, step.pose.copy(), step.closing) for step in steps)
 
     def _next_landing(self):
@@ -310,7 +310,6 @@ class WorldFootstepQueue:
             if self.pending[0].side != side:
                 raise ValueError('Queued side does not match phase schedule')
             self.committed.append((landing, self.pending.popleft()))
-        self._preview()
 
     def _preview(self):
         self.scheduler.slots[2:] = self.scheduler.slots[:2]
@@ -320,21 +319,27 @@ class WorldFootstepQueue:
                     self.scheduler.slots[side + 2] = step.pose
                     break
 
-    def start(self, frequency=1.2):
+    def start(self, frequency=1.2, *, start_feet=None):
         if self.state != 'standing' or not self.pending:
             raise ValueError('Start requires standing and a nonempty queue')
         if not math.isfinite(frequency) or not .8 <= frequency <= 1.8:
             raise ValueError('Cruise frequency must be 0.8..1.8 Hz')
-        if self.kind == 'single':
-            side = self.pending[0].side
-            expected = self._next_landing()[1]
-            if self.has_walked and side != expected:
-                raise ValueError('Single step must use the next swing side at the frozen phase')
-        self._validate(list(self.pending), single=self.kind == 'single')
+        if self.has_walked:
+            landing, side = self._next_landing()
+            liftoff = self.phase + (self.scheduler.liftoff[side] - self.phase) % math.tau
+            if self.pending[0].side != side or liftoff > landing:
+                raise ValueError('First footstep must use the next swing side at the frozen phase')
+        self._validate(list(self.pending), single=self.kind == 'single', start_feet=start_feet)
+        if start_feet is not None:
+            self.scheduler.slots[:2] = self._planning_start_feet(start_feet, planning=False)
+            if self.has_walked:
+                self.scheduler.anchor[:] = self.scheduler.slots[self.scheduler.anchor_side]
+                self.scheduler.anchor_id += 1
         self.target_frequency = frequency
         self.stop_requested = False
         self.stop_phase = None
         self.elapsed = 0.
+        self._profile_duration = None
         self.state = 'starting'
         if not self.has_walked:
             first_side = self.pending[0].side
@@ -343,21 +348,14 @@ class WorldFootstepQueue:
             self.scheduler.anchor_side = 1 - first_side
             self.scheduler.anchor[:] = self.scheduler.slots[1 - first_side]
             self.scheduler.anchor_id += 1
-        landing, side = self._next_landing()
-        liftoff = self.phase + (self.scheduler.liftoff[side] - self.phase) % math.tau
-        if liftoff > landing:
-            self.committed.append((landing, Footstep(side, self.scheduler.slots[side].copy())))
-            landing += math.pi
-            side = 1 - side
-        if self.pending[0].side != side:
-            self.committed.append((landing, Footstep(side, self.scheduler.slots[side].copy())))
         self._commit()
-        if self.kind == 'single':
-            self.stop_phase = self.committed[-1][0] + .05 * math.pi
-            equivalent = (self.stop_phase - self.phase) / (math.tau * frequency)
-            self._single_duration = equivalent + .25
-            if equivalent < .25:
-                raise ValueError('Single-step phase span is too short for the frequency ramps')
+        if self.kind == 'single' or not self.pending:
+            self.stop_phase = self.committed[-1][0]
+            cycles = (self.stop_phase - self.phase) / math.tau
+            self._profile_ramp = .25 if self.kind == 'single' else .5
+            # Fit both ramps inside the planned phase span instead of adding a landing.
+            self._profile_frequency = min(frequency, cycles / self._profile_ramp)
+            self._profile_duration = cycles / self._profile_frequency + self._profile_ramp
         self._preview()
         self.has_walked = True
 
@@ -367,27 +365,24 @@ class WorldFootstepQueue:
 
     def _begin_stop(self):
         if not self.committed:
-            raise ValueError('No committed landing available for closing')
-        landing, last = self.committed[-1]
-        side = 1 - last.side
-        if last.closing:
-            closing = self.tail_committed_feet()[side].copy()
-        else:
-            closing = world((0., .24 if side == 0 else -.24, 0.), last.pose)
-        validate_steps([Footstep(side, closing)], self.tail_committed_feet(), initial_yaw=self.initial_yaw)
-        self.committed.append((landing + math.pi, Footstep(side, closing, True)))
-        self.stop_phase = landing + math.pi + .05 * math.pi
-        self._stop_frequency = self.scheduler.frequency
-        self._stop_elapsed = 0.
-        equivalent = (self.stop_phase - self.phase) / (math.tau * self._stop_frequency)
-        self._ramp_start = equivalent - .25
-        if self._ramp_start < 0.:
+            raise ValueError('No committed landing available for stopping')
+        landing = self.committed[-1][0]
+        frequency = self.scheduler.frequency
+        ramp = .5
+        equivalent = (landing - self.phase) / (math.tau * frequency)
+        duration = equivalent + 1.5 * ramp
+        if duration < 2. * ramp:
             raise ValueError('Insufficient phase span for continuous stop ramp')
-        self.state = 'closing'
-        self._preview()
+        self.stop_phase = landing
+        self._profile_frequency = frequency
+        self._profile_ramp = ramp
+        self._profile_duration = duration
+        # Enter the shared profile after its acceleration ramp, already at cruise speed.
+        self.elapsed = ramp
+        self.state = 'stopping'
 
-    def tail_committed_feet(self, *, planning=True):
-        feet = self._planning_start_feet() if planning else self.scheduler.slots[:2].copy()
+    def tail_committed_feet(self, *, planning=True, start_feet=None):
+        feet = self._planning_start_feet(start_feet, planning=planning)
         for _, step in self.committed:
             feet[step.side] = step.pose
         return feet
@@ -408,20 +403,20 @@ class WorldFootstepQueue:
             self.hold_elapsed += dt
             scheduler.frequency = 0.
             return
-        if self.kind == 'single':
-            before = self._profile_area(self.elapsed, self.target_frequency, .25, self._single_duration)
-            after = self._profile_area(self.elapsed + dt, self.target_frequency, .25, self._single_duration)
+        if (self.kind == 'continuous' and self._profile_duration is not None
+                and self.state == 'starting' and self.pending and not self.stop_requested):
+            self._profile_duration = None
+            self.stop_phase = None
+            self.state = 'walking'
+        if self._profile_duration is not None:
+            before = self._profile_area(
+                self.elapsed, self._profile_frequency, self._profile_ramp, self._profile_duration)
+            after = self._profile_area(
+                self.elapsed + dt, self._profile_frequency, self._profile_ramp, self._profile_duration)
             frequency = (after - before) / dt
             self.elapsed += dt
-        elif self.state == 'closing':
-            before = max(0., self._stop_elapsed - self._ramp_start)
-            after = max(0., self._stop_elapsed + dt - self._ramp_start)
-            before, after = min(before, .5), min(after, .5)
-            integral = dt - ((after * after - before * before) / 1.)
-            if self._stop_elapsed + dt > self._ramp_start + .5:
-                integral -= self._stop_elapsed + dt - max(self._stop_elapsed, self._ramp_start + .5)
-            frequency = max(0., self._stop_frequency * integral / dt)
-            self._stop_elapsed += dt
+            if self.kind == 'continuous' and self.elapsed >= self._profile_ramp - 1e-9:
+                self.state = 'stopping'
         elif self.state == 'starting':
             self.elapsed += dt
             frequency = self.target_frequency * min(self.elapsed / .5, 1.)
@@ -443,10 +438,12 @@ class WorldFootstepQueue:
             scheduler.anchor[:] = step.pose if self.assumed_landing else feet[step.side]
             scheduler.anchor_side = step.side
             scheduler.anchor_id += 1
-            if self.kind == 'continuous' and self.state != 'closing' and not self.stop_requested:
+            if self.kind == 'continuous' and self.state != 'stopping' and not self.stop_requested:
                 self._commit()
         self._preview()
         if self.stop_phase is not None and self.phase >= self.stop_phase - 1e-9:
+            self.phase = self.stop_phase
+            scheduler.phase = self.phase % math.tau
             self.state = 'standing'
             self.hold_elapsed = 0.
             scheduler.frequency = 0.
