@@ -132,8 +132,10 @@ def parse(urdf: str, base: str) -> dict:
             'axis': _floats(axis.get('xyz') if axis is not None else None, (1, 0, 0)),
         }
         if limit is not None and limit.get('lower') and limit.get('upper'):
-            item['limit'] = [float(limit.get('lower')), float(limit.get('upper'))]
-        children.setdefault(parent.get('link'), []).append(item)
+            lower, upper = limit.get('lower'), limit.get('upper')
+            assert lower is not None and upper is not None
+            item['limit'] = [float(lower), float(upper)]
+        children.setdefault(parent.attrib['link'], []).append(item)
     if base not in children:
         raise ValueError(f'URDF 里 {base} 没有子关节，base 写错了？')
 

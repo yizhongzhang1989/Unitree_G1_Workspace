@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from arm_gravity_compensation.constants import ARM_JOINTS
-from arm_gravity_compensation.gravity_model import TorsoArmGravityModel
+from arm_gravity_compensation.gravity_model import ToolPayload, TorsoArmGravityModel
 from arm_gravity_compensation.table import (gravity_from_table,
                                             sensor_orientation_from_table)
 
@@ -25,6 +25,7 @@ def test_gravity_table_reproduces_pinocchio_for_both_arms():
         "right", np.full(len(model.parameter_links["right"]), 1.12),
         np.linspace(-0.2, 0.2, 7))
     table = model.gravity_table()
+    assert "left" in table
     random = np.random.RandomState(5)
 
     for _ in range(50):
@@ -88,12 +89,13 @@ def test_measured_tool_keeps_every_joint_torque_when_it_matches_the_model():
         "left", np.full(len(model.parameter_links["left"]), 1.3),
         np.zeros(7))
     baseline = model.gravity_table()
+    assert "left" in baseline
     rotation, translation = model.sensor_placement["left"]
     mass, moment = model.distal_inertia("left")
-    tool = {"left": {"mass": mass,
-                     "com": rotation.T @ (moment / mass - translation)}}
+    tool = {"left": ToolPayload(mass=mass, com=rotation.T @ (moment / mass - translation))}
 
     table = model.gravity_table(tool=tool)
+    assert "left" in table
     random = np.random.RandomState(17)
 
     np.testing.assert_allclose(
@@ -114,18 +116,19 @@ def test_measured_tool_moves_the_torque_when_the_gripper_is_heavier():
     model = TorsoArmGravityModel.from_urdf_file(str(FINAL_URDF))
     rotation, translation = model.sensor_placement["right"]
     mass, moment = model.distal_inertia("right")
-    heavier = {"right": {"mass": mass + 0.25,
-                         "com": rotation.T @ (moment / mass - translation)}}
+    heavier = {"right": ToolPayload(mass=mass + 0.25, com=rotation.T @ (moment / mass - translation))}
 
     table = model.gravity_table(tool=heavier)
+    baseline = model.gravity_table()
+    assert "right" in table and "right" in baseline
     gravity = np.array([0.0, 0.0, -9.81])
     q = np.zeros(7)
 
     assert table["right"]["mass"][6] == pytest.approx(
-        model.gravity_table()["right"]["mass"][6] + 0.25)
+        baseline["right"]["mass"][6] + 0.25)
     assert np.max(np.abs(
         gravity_from_table(table, "right", q, gravity) -
-        gravity_from_table(model.gravity_table(), "right", q, gravity)
+        gravity_from_table(baseline, "right", q, gravity)
     )) > 0.05
 
 

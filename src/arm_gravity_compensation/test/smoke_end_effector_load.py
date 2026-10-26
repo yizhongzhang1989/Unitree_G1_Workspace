@@ -31,10 +31,10 @@ TABLE = "/tmp/smoke_gravity_table.yaml"
 CALIBRATION = "/tmp/smoke_ft_calibration.yaml"
 
 TOOL = FtCalibration(
-    force_bias=[11.0, -27.5, 6.25], torque_bias=[0.75, -1.125, 0.25],
-    mass=0.72, com=[0.006, -0.009, 0.128], polarity=-1.0,
-    origin=[0.0, 0.0, 0.053])
-PAYLOAD = FtCalibration(mass=0.85, com=[0.01, -0.02, 0.19])
+    force_bias=np.asarray([11.0, -27.5, 6.25], dtype=float), torque_bias=np.asarray([0.75, -1.125, 0.25], dtype=float),
+    mass=0.72, com=np.asarray([0.006, -0.009, 0.128], dtype=float), polarity=-1.0,
+    origin=np.asarray([0.0, 0.0, 0.053], dtype=float))
+PAYLOAD = FtCalibration(mass=0.85, com=np.asarray([0.01, -0.02, 0.19], dtype=float))
 POSE = np.array([0.35, 0.2, -0.15, 0.9, 0.3, -0.25, 0.4,
                  -0.35, -0.2, 0.15, 0.9, -0.3, 0.25, -0.4])
 
@@ -96,7 +96,9 @@ class Harness(Node):
             while not future.done():
                 assert time.monotonic() < deadline, "parameter change timed out"
                 rclpy.spin_once(self, timeout_sec=0.05)
-            assert all(result.successful for result in future.result().results)
+            response = future.result()
+            assert response is not None
+            assert all(result.successful for result in response.results)
         finally:
             self.destroy_client(client)
 
@@ -130,7 +132,7 @@ class Harness(Node):
 
 
 def main():
-    assert os.environ.get("ROS_DOMAIN_ID") == "187" and os.environ.get("ROS_LOCALHOST_ONLY") == "1", "use isolated domain 187, localhost only"
+    assert os.environ.get("ROS_DOMAIN_ID") == "218" and os.environ.get("ROS_LOCALHOST_ONLY") == "1", "use isolated domain 218, localhost only"
     model = prepare()
     log = open("/tmp/smoke_end_effector_load.log", "w", encoding="utf-8")
     # 独立会话 + 独立日志：``ros2 run`` 会再 fork 一层，孙进程继承管道的话，

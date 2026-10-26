@@ -17,6 +17,7 @@ def test_auto_capture_requires_motion_then_settle():
     assert capture.update(1.2, moving, zero) is None
     captured = capture.update(1.8, moving, zero)
 
+    assert captured is not None
     np.testing.assert_allclose(captured, moving)
     assert capture.update(2.8, moving, zero) is None
 

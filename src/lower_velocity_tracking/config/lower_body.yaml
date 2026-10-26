@@ -1,0 +1,67 @@
+/**:
+  ros__parameters:
+    # 31 轴顺序由 TaskBase 从控制栈公共参数加载，可通过 joints override。
+
+    # 策略权重。训练侧 scripts/train.py 每次存档都会重新导出 policy.onnx，
+    # 换策略只要覆盖这个文件；关节顺序、默认位姿、动作缩放都从它的 metadata 里读，
+    # 和下面的 policy_joints 对不上会直接拒绝启动。
+    policy_path: package://lower_velocity_tracking/config/policy.onnx
+    lower_source: keyboard
+
+    # 策略控制的 15 轴，顺序必须与 ONNX metadata 的 action_joint_names 逐项一致
+    #（不是 joint_names 的前 15 项，那是全部 31 轴，截前 N 个会错位）。
+    # 正好是真机电机索引 0..14。
+    policy_joints:
+      - left_hip_pitch_joint
+      - left_hip_roll_joint
+      - left_hip_yaw_joint
+      - left_knee_joint
+      - left_ankle_pitch_joint
+      - left_ankle_roll_joint
+      - right_hip_pitch_joint
+      - right_hip_roll_joint
+      - right_hip_yaw_joint
+      - right_knee_joint
+      - right_ankle_pitch_joint
+      - right_ankle_roll_joint
+      - waist_yaw_joint
+      - waist_roll_joint
+      - waist_pitch_joint
+
+    # 失控保护边界 = 训练模型里 MuJoCo 算的 ctrlrange（jnt_range ± effort_limit / stiffness）。
+    # 换权重后要重算：effort_limit / stiffness == ONNX metadata 的 action_scale / 0.25，
+    # jnt_range 取 URDF 的 <limit>。抄错了不会报错，只是保护网变松。
+    #
+    # **故意不是关节行程限位。** 底层是 PD：tau = kp*(q_target - q) - kd*dq，关节靠到行程
+    # 边上还想要力，就只能把目标顶到行程之外。mjlab 建 <position> 执行器时显式设了
+    # ctrllimited=False + inheritrange=0，就是为了这个。
+    #
+    # CPU MuJoCo 闭环重跑，目标位置超出硬 jnt_range 的比例：
+    #   站立 2.0% / 前进 0.5 m/s 9.8% / 前进 1.0 m/s 18.6% / 蹲行 10.2% / 转身 1.8%
+    #   越界最多的正是 waist_roll、ankle_roll、ankle_pitch——撑平衡最吃力的那几个。
+    #   waist_roll 目标能到 -0.763 rad，而行程只有 ±0.520。
+    # 同一批数据里超出下面这组 ctrlrange 的比例是 0%：越过它力矩已饱和，再大的目标也
+    # 换不来额外的力，所以裁在这儿物理上是空操作，纯粹用来拦真正跑飞的输出。
+    target_lower_limits: [-4.721, -1.926, -4.948, -1.490, -2.627, -2.016,
+                          -4.721, -4.370, -4.948, -1.490, -2.627, -2.016,
+                          -4.808, -2.274, -2.274]
+    target_upper_limits: [+5.070, +4.370, +4.948, +4.282, +2.278, +2.016,
+                          +5.070, +1.926, +4.948, +4.282, +2.278, +2.016,
+                          +4.808, +2.274, +2.274]
+
+    # 指令限幅 [vx_lo, vx_hi, vy_lo, vy_hi, wz_lo, wz_hi, h_lo, h_hi]。
+    # 训练分布（play 模式）是 vx[-0.5,1.0] vy[-0.5,0.5] wz[-1.57,1.57] h[0.52,0.79]，
+    # 下面这组基本开到了训练分布，只把 vx 上界留在 0.8。
+    #
+    # 高度上界 0.78：在编译出来的模型上量过，足底 site 正好落在鞋底，所以这个数就是
+    # 卷尺量的骨盆离地高度。完全直腿是 0.7919 m 的硬上限，0.78 给承载留下约 1 cm 屈膝。大于0.78视为站直
+    # 下界 0.50 对应膝关节弯 115 度。
+    command_limits: [-0.5, 0.8, -0.5, 0.5, -1.5, 1.5, 0.50, 0.79]
+
+    # 指令限速。高度这一项不是"可选的平滑"：训练里高度指令按 0.15 m/s 缓变
+    # （BaseHeightCommandCfg.max_rate），策略从没见过高度阶跃。
+    linear_accel_limit: 1.5
+    angular_accel_limit: 3.0
+    height_rate_limit: 0.15
+    initial_height: 0.74
+    command_timeout_s: 0.5

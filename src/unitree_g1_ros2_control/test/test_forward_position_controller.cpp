@@ -16,7 +16,7 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
+#include "unitree_g1_ros2_control/msg/joint_targets.hpp"
 #include "unitree_g1_ros2_control/forward_position_controller.hpp"
 
 namespace unitree_g1_ros2_control {
@@ -153,6 +153,17 @@ TEST_F(ForwardPositionControllerTest, forwards_finite_position_commands_unchange
     publish_and_expect(0.08, 0.08);
     publish_and_expect(-0.08, -0.08);
     publish_and_expect(0.2, 0.2);
+    std_msgs::msg::Float64MultiArray invalid;
+    invalid.data = {std::nan("")};
+    publisher->publish(invalid);
+    const auto hold_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < hold_deadline) {
+        executor.spin_some();
+        controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+        std::this_thread::yield();
+    }
+    EXPECT_DOUBLE_EQ(command_position, 0.2);
+    EXPECT_EQ(controller.get_node()->get_current_state().label(), "active");
 
     state_position = -0.1;
     ASSERT_EQ(controller.get_node()->deactivate().label(), "inactive");
@@ -160,6 +171,93 @@ TEST_F(ForwardPositionControllerTest, forwards_finite_position_commands_unchange
     EXPECT_DOUBLE_EQ(command_position, -0.1);
 
     EXPECT_EQ(controller.get_node()->deactivate().label(), "inactive");
+    controller.release_interfaces();
+}
+
+TEST_F(ForwardPositionControllerTest, accumulates_masked_targets_between_updates) {
+    std::array<double, 31> measured;
+    std::array<double, 31> commanded{};
+    measured.fill(0.1);
+    std::vector<std::string> names;
+    std::vector<hardware_interface::CommandInterface> commands;
+    std::vector<hardware_interface::StateInterface> states;
+    for (std::size_t index = 0; index < measured.size(); ++index) {
+        names.push_back("joint_" + std::to_string(index));
+        commands.emplace_back(names.back(), hardware_interface::HW_IF_POSITION, &commanded[index]);
+        states.emplace_back(names.back(), hardware_interface::HW_IF_POSITION, &measured[index]);
+    }
+    ForwardPositionController controller;
+    ASSERT_EQ(controller.init("masked_targets_test"), controller_interface::return_type::OK);
+    controller.get_node()->set_parameter(rclcpp::Parameter("joints", names));
+    ASSERT_EQ(controller.configure().label(), "inactive");
+    std::vector<hardware_interface::LoanedCommandInterface> loaned_commands;
+    std::vector<hardware_interface::LoanedStateInterface> loaned_states;
+    for (auto& command : commands) loaned_commands.emplace_back(command);
+    for (auto& state : states) loaned_states.emplace_back(state);
+    controller.assign_interfaces(std::move(loaned_commands), std::move(loaned_states));
+    ASSERT_EQ(controller.get_node()->activate().label(), "active");
+    auto harness = std::make_shared<rclcpp::Node>("masked_targets_harness");
+    auto publisher = harness->create_publisher<msg::JointTargets>(
+        "/masked_targets_test/joint_targets", rclcpp::QoS(1).best_effort());
+    auto second_publisher = harness->create_publisher<msg::JointTargets>(
+        "/masked_targets_test/joint_targets", rclcpp::QoS(1).best_effort());
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(harness);
+    executor.add_node(controller.get_node()->get_node_base_interface());
+    const auto discovery = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while ((!publisher->get_subscription_count() || !second_publisher->get_subscription_count()) &&
+            std::chrono::steady_clock::now() < discovery) {
+        executor.spin_some();
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(publisher->get_subscription_count(), 1U);
+    ASSERT_EQ(second_publisher->get_subscription_count(), 1U);
+    msg::JointTargets first;
+    first.mask = 1U << 3;
+    first.positions[3] = 0.3;
+    msg::JointTargets second;
+    second.mask = 1U << 30;
+    second.positions[30] = -0.4;
+    publisher->publish(first);
+    second_publisher->publish(second);
+    const auto received = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+    while (std::chrono::steady_clock::now() < received) {
+        executor.spin_some();
+        std::this_thread::yield();
+    }
+    controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    EXPECT_DOUBLE_EQ(commanded[3], 0.3);
+    EXPECT_DOUBLE_EQ(commanded[30], -0.4);
+    const auto send = [&](std::uint32_t mask, std::size_t index, double value) {
+        msg::JointTargets message;
+        message.mask = mask;
+        message.positions.fill(std::nan(""));
+        message.positions[index] = value;
+        publisher->publish(message);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+        while (std::chrono::steady_clock::now() < deadline) {
+            executor.spin_some();
+            std::this_thread::yield();
+        }
+    };
+    send(1U << 3, 3, 0.3);
+    send(1U << 30, 30, -0.4);
+    controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    for (std::size_t index = 0; index < commanded.size(); ++index) {
+        EXPECT_DOUBLE_EQ(commanded[index], index == 3 ? 0.3 : index == 30 ? -0.4 : 0.1);
+    }
+    send(0, 3, 0.9);
+    controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    EXPECT_DOUBLE_EQ(commanded[3], 0.3);
+    measured.fill(-0.2);
+    ASSERT_EQ(controller.get_node()->deactivate().label(), "inactive");
+    ASSERT_EQ(controller.get_node()->activate().label(), "active");
+    send(1U << 8, 8, 0.5);
+    controller.update(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.002));
+    EXPECT_DOUBLE_EQ(commanded[3], -0.2);
+    EXPECT_DOUBLE_EQ(commanded[8], 0.5);
+    EXPECT_DOUBLE_EQ(commanded[30], -0.2);
+    controller.get_node()->deactivate();
     controller.release_interfaces();
 }
 
@@ -229,16 +327,16 @@ TEST_F(ForwardPositionControllerTest, reapplies_gravity_offset_without_a_new_com
     ASSERT_EQ(controller.on_activate(rclcpp_lifecycle::State()), CallbackReturn::SUCCESS);
 
     auto publisher_node = std::make_shared<rclcpp::Node>("gravity_fpc_test_publisher");
-    auto publisher = publisher_node->create_publisher<std_msgs::msg::Float64MultiArray>(
-        "/gravity_forward_position_controller/commands",
+    auto publisher = publisher_node->create_publisher<msg::JointTargets>(
+        "/gravity_forward_position_controller/joint_targets",
         rclcpp::QoS(rclcpp::KeepLast(1)).best_effort());
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(controller.get_node()->get_node_base_interface());
     executor.add_node(publisher_node);
 
-    std_msgs::msg::Float64MultiArray message;
-    message.data.assign(kGravityJoints.size(), 0.0);
-    message.data.back() = 0.25;  // waist_yaw_joint must be forwarded untouched
+    msg::JointTargets message;
+    message.mask = (1U << kGravityJoints.size()) - 1;
+    message.positions[kGravityJoints.size() - 1] = 0.25;
     const double expected = -kMass * kGravity * kLever / kStiffness;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (command_positions[0] != expected &&

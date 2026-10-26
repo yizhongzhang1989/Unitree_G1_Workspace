@@ -7,11 +7,12 @@ import time
 
 import numpy as np
 import rclpy
-from g1_mocap_msgs.msg import MocapFrame, MocapStatus
+from g1_mocap.msg import MocapFrame, MocapStatus
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from std_srvs.srv import Trigger
 
 from .capture_stream import CaptureStream
@@ -19,41 +20,42 @@ from .mocap_node import fill_pose, to_points
 from .motion_capture import JOINT_NAMES, save_motion, validate_label
 from .motion_model import MotionModel
 from .retarget import Retargeter
+from .retarget import RetargetResult
+from .skeleton import BodyFrame, ControllerState
 from .urdf import DEFAULT_URDF, resolve_package_path
 
 
 class MotionCaptureNode(Node):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('motion_capture')
 
-        def parameter(name, default):
-            return self.declare_parameter(name, default).value
+        parameter = self.declare_parameter
 
-        configured_joints = parameter('joints', Parameter.Type.STRING_ARRAY)
+        configured_joints = parameter('joints', Parameter.Type.STRING_ARRAY).get_parameter_value().string_array_value
         if tuple(configured_joints) != JOINT_NAMES:
             raise ValueError('Configured joints differ from the motion CSV contract')
-        urdf = resolve_package_path(parameter('urdf_path', DEFAULT_URDF))
+        urdf = resolve_package_path(parameter('urdf_path', DEFAULT_URDF).get_parameter_value().string_value)
         kinematics = MotionModel(urdf).kin
-        self.key_bodies = list(parameter('key_bodies', Parameter.Type.STRING_ARRAY))
-        landmark_iterations = parameter('landmark_iterations', 2)
+        self.key_bodies = list(parameter('key_bodies', Parameter.Type.STRING_ARRAY).get_parameter_value().string_array_value)
+        landmark_iterations = parameter('landmark_iterations', 2).get_parameter_value().integer_value
         retargeter = Retargeter(
             kinematics, key_bodies=self.key_bodies,
-            anchor_body=parameter('anchor_body', 'torso_link'),
-            default_joint_pos=np.asarray(parameter('default_joint_pos', Parameter.Type.DOUBLE_ARRAY)),
-            foot_ground_clearance_m=parameter('foot_ground_clearance_m', 0.03),
+            anchor_body=parameter('anchor_body', 'torso_link').get_parameter_value().string_value,
+            default_joint_pos=np.asarray(parameter('default_joint_pos', Parameter.Type.DOUBLE_ARRAY).get_parameter_value().double_array_value),
+            foot_ground_clearance_m=parameter('foot_ground_clearance_m', 0.03).get_parameter_value().double_value,
             landmark_iterations=landmark_iterations)
-        self.directory = parameter('output_dir', '~/motions_dataset')
-        self.category = validate_label(parameter('category', 'locomotion'))
-        self.action = validate_label(parameter('action', 'walk_forward'))
-        self.model_confirmed = parameter('model_confirmed', False)
-        self.max_duration = float(parameter('max_duration_s', 60.0))
+        self.directory = parameter('output_dir', '~/motions_dataset').get_parameter_value().string_value
+        self.category = validate_label(parameter('category', 'locomotion').get_parameter_value().string_value)
+        self.action = validate_label(parameter('action', 'walk_forward').get_parameter_value().string_value)
+        self.model_confirmed = parameter('model_confirmed', False).get_parameter_value().bool_value
+        self.max_duration = float(parameter('max_duration_s', 60.0).get_parameter_value().double_value)
         if not 2.0 <= self.max_duration <= 60.0:
             raise ValueError('max_duration_s must be between 2 and 60')
         self.quality = dict(
-            max_gap=parameter('max_gap_s', 0.1),
-            max_root_speed=parameter('max_root_speed_m_s', 8.0),
-            max_root_angular_speed=parameter('max_root_angular_speed_rad_s', 15.0))
-        self.controller_buttons = parameter('controller_buttons', True)
+            max_gap=parameter('max_gap_s', 0.1).get_parameter_value().double_value,
+            max_root_speed=parameter('max_root_speed_m_s', 8.0).get_parameter_value().double_value,
+            max_root_angular_speed=parameter('max_root_angular_speed_rad_s', 15.0).get_parameter_value().double_value)
+        self.controller_buttons = parameter('controller_buttons', True).get_parameter_value().bool_value
         self.commands = queue.SimpleQueue()
         self.buttons = (False, False)
         self.last_outcome = 'Idle; calibrate before starting'
@@ -63,8 +65,9 @@ class MotionCaptureNode(Node):
         self.stream = CaptureStream(
             retargeter, limits=kinematics.limits(),
             landmark_iterations=landmark_iterations,
-            host=parameter('host', '0.0.0.0'), port=parameter('port', 18001),
-            token=parameter('token', ''), log=self.get_logger().info)
+            host=parameter('host', '0.0.0.0').get_parameter_value().string_value,
+            port=parameter('port', 18001).get_parameter_value().integer_value,
+            token=parameter('token', '').get_parameter_value().string_value, log=self.get_logger().info)
         self.stream.on_preview = self._preview
         self.stream.on_controllers = self._controllers
         for name, callback in (('calibrate', self._calibrate), ('start', self._start),
@@ -80,10 +83,10 @@ class MotionCaptureNode(Node):
             'Calibrate standing still, then ~/start; ~/stop validates and saves. '
             'Right A: start/stop; right B: discard. No robot control is started.')
 
-    def _preview(self, stamped, raw, result):
+    def _preview(self, stamped: float, raw: BodyFrame, result: RetargetResult) -> None:
         message = MocapFrame()
         offset = self.get_clock().now().nanoseconds * 1e-9 - time.monotonic()
-        message.header.stamp = rclpy.time.Time(seconds=stamped + offset).to_msg()
+        message.header.stamp = Time(seconds=stamped + offset).to_msg()
         message.header.frame_id = 'mocap_capture_world'
         message.seq = raw.seq & 0xFFFFFFFF
         message.body_status, message.body_message = raw.status, raw.message
@@ -96,7 +99,7 @@ class MotionCaptureNode(Node):
         message.human_joints = to_points(raw.positions)
         self.frame_publisher.publish(message)
 
-    def _controllers(self, controllers):
+    def _controllers(self, controllers: tuple[ControllerState, ControllerState]) -> None:
         right = controllers[1]
         buttons = (right.connected and right.a_x, right.connected and right.b_y)
         if self.controller_buttons:
@@ -110,7 +113,7 @@ class MotionCaptureNode(Node):
                     self.commands.put(('stop' if clip is not None else 'start', clip))
         self.buttons = buttons
 
-    def _calibrate(self, request, response):
+    def _calibrate(self, request: Trigger.Request | None, response: Trigger.Response) -> Trigger.Response:
         try:
             calibration = self.stream.calibrate()
             response.success = True
@@ -119,7 +122,7 @@ class MotionCaptureNode(Node):
             response.success, response.message = False, str(exc)
         return response
 
-    def _start(self, request, response):
+    def _start(self, request: Trigger.Request | None, response: Trigger.Response) -> Trigger.Response:
         try:
             if not self.model_confirmed:
                 raise RuntimeError('Confirm the client model with model_confirmed:=true at launch')
@@ -131,7 +134,7 @@ class MotionCaptureNode(Node):
             response.success, response.message = False, str(exc)
         return response
 
-    def _stop(self, request, response):
+    def _stop(self, request: Trigger.Request | None, response: Trigger.Response) -> Trigger.Response:
         try:
             with self.stream.capture_lock:
                 self.stream.seal()
@@ -151,7 +154,7 @@ class MotionCaptureNode(Node):
         self.get_logger().info(self.last_outcome)
         return response
 
-    def _discard(self, request, response):
+    def _discard(self, request: Trigger.Request | None, response: Trigger.Response) -> Trigger.Response:
         try:
             self.stream.finish()
             self.last_outcome = 'Take discarded; nothing written'
@@ -163,7 +166,7 @@ class MotionCaptureNode(Node):
         self.get_logger().info(self.last_outcome)
         return response
 
-    def _capture_status(self, request, response):
+    def _capture_status(self, request: Trigger.Request | None, response: Trigger.Response) -> Trigger.Response:
         with self.stream.capture_lock:
             clip = self.stream.clip
             if clip is None:
@@ -175,7 +178,7 @@ class MotionCaptureNode(Node):
         response.success = True
         return response
 
-    def _tick(self):
+    def _tick(self) -> None:
         while not self.commands.empty():
             command, expected_clip = self.commands.get()
             if self.stream.clip is not expected_clip:
@@ -200,7 +203,7 @@ class MotionCaptureNode(Node):
         if complete:
             self._stop(None, Trigger.Response())
 
-    def _status(self):
+    def _status(self) -> None:
         stats = self.stream.stats()
         message = MocapStatus()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -222,7 +225,7 @@ class MotionCaptureNode(Node):
         super().destroy_node()
 
 
-def main():
+def main() -> None:
     rclpy.init()
     node = None
     try:

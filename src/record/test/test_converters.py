@@ -15,11 +15,22 @@ import sys
 from pathlib import Path
 
 import pytest
+from tools import converters
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-sys.path.insert(0, str(TOOLS))
 
-import converters                                          # noqa: E402
+
+def test_setup_py_ships_every_tools_file():
+    setup = (TOOLS.parent / 'setup.py').read_text()
+    wanted = {path.relative_to(TOOLS).as_posix() for path in TOOLS.rglob('*')
+              if path.is_file() and '__pycache__' not in path.parts}
+    covered = set()
+    for pattern in re.findall(r"glob\(os\.path\.join\(([^)]*)\)\)", setup):
+        parts = [value.strip().strip("'\"") for value in pattern.split(',')]
+        if parts[0] == 'tools':
+            covered.update(path.relative_to(TOOLS).as_posix() for path in TOOLS.glob('/'.join(parts[1:]))
+                           if path.is_file())
+    assert wanted <= covered, f'setup.py 没装这些：{sorted(wanted - covered)}'
 
 
 def test_no_ros_dependency():

@@ -2,7 +2,6 @@
 
 import json
 import threading
-from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -79,11 +78,12 @@ def test_bad_file_does_not_hide_valid_recordings(tmp_path, defect):
 
 
 def test_http_motion_routes(tmp_path):
-    from g1_mocap.dashboard_node import _Handler, _Server
+    from g1_mocap.dashboard_node import DashboardNode, _Handler, _Server
     write_motion(tmp_path / 'motions' / 'good.csv')
     (tmp_path / 'motions' / 'bad.csv').write_text('1,2,3\n')
     server = _Server(('127.0.0.1', 0), _Handler)
-    server.dashboard = SimpleNamespace(motions=MotionLibrary(tmp_path))
+    server.dashboard = DashboardNode.__new__(DashboardNode)
+    server.dashboard.motions = MotionLibrary(tmp_path)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     base = f'http://127.0.0.1:{server.server_port}'
@@ -106,11 +106,12 @@ def test_http_motion_routes(tmp_path):
 
 
 def test_http_archive_route(tmp_path):
-    from g1_mocap.dashboard_node import _Handler, _Server
+    from g1_mocap.dashboard_node import DashboardNode, _Handler, _Server
     path = tmp_path / 'motions' / 'good.csv'
     write_motion(path)
     server = _Server(('127.0.0.1', 0), _Handler)
-    server.dashboard = SimpleNamespace(motions=MotionLibrary(tmp_path))
+    server.dashboard = DashboardNode.__new__(DashboardNode)
+    server.dashboard.motions = MotionLibrary(tmp_path)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     base = f'http://127.0.0.1:{server.server_port}'

@@ -16,9 +16,9 @@ URDF = ROOT / 'unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf
 CONFIG = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/mocap']['ros__parameters']
 
 
-def test_joint_order_and_standing_floor():
+def test_joint_order_and_standing_floor(controlled_urdf):
     assert tuple(CONFIG['joints']) == JOINT_NAMES
-    model = MotionModel(str(URDF))
+    model = MotionModel(str(controlled_urdf))
     joints = np.array(CONFIG['default_joint_pos'])
     height = model.kin.pelvis_height(joints, model.feet) + CONFIG['foot_ground_clearance_m']
     row = np.r_[[0, 0, height], [0, 0, 0, 1], joints]
@@ -29,8 +29,8 @@ def test_joint_order_and_standing_floor():
     np.testing.assert_allclose(model.foot_heights(raised[None, :]), heights + 0.25, atol=1e-12)
 
 
-def test_rotated_foot_includes_collision_origin():
-    model = MotionModel(str(URDF))
+def test_rotated_foot_includes_collision_origin(controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     joints = np.array(CONFIG['default_joint_pos'])
     row = np.r_[[1, 2, 0.8], Rotation.from_euler('xyz', [0.3, 0.4, 0.2]).as_quat(), joints]
     actual = model.foot_heights(row[None, :])

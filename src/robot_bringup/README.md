@@ -1,12 +1,25 @@
 # `robot_bringup`
-`robot_bringup` 只组合本仓库已有节点，不实现 CAN 协议、视频处理或控制器。末端设备实现在 `robot_bringup/end_effectors/`；`unitree_g1_description` 提供模型资源，`unitree_g1_ros2_control` 提供真实的 ros2_control `SystemInterface`、C++ controller 与 broadcaster。
+`robot_bringup` 组合本仓库已有节点，并提供正式安装的运动键盘启动入口，不实现 CAN 协议、视频处理或控制器。上下肢组合启动与键盘入口集中在本包，任务与键盘控制业务由各功能包实现。末端设备实现在 `robot_bringup/end_effectors/`；`unitree_g1_description` 提供模型资源，`unitree_g1_ros2_control` 提供真实的 ros2_control `SystemInterface`、C++ controller 与 broadcaster。
 
 ## 全部入口
-每个终端先 `source scripts/env.sh`，下表命令可直接复制运行。硬件与控制栈只由 `all_data.launch.py` 启动，Dashboard 一律单独起。
+以下命令在工作区根目录执行，每个终端先 `source scripts/env.sh`；已加载 Humble 与所需 SDK 环境时也可 `source install/setup.bash`。运动组合只启动任务与一个 session，不启动硬件、不自动接管；硬件与控制栈由 `all_data.launch.py` 显式另起，Dashboard 另起。每次只选择一套包含 session 的运动方案。
 
 | 命令 | 实际启动 |
 |---|---|
 | `ros2 launch robot_bringup all_data.launch.py scope:=whole_body topology:=dual` | **推荐整机入口**（同时也是全部默认值）：末端拓扑 + 唯一真实 `controller_manager` + 统一硬件插件 + broadcaster + URDF + inactive FPC + 末端负载链 |
+| `ros2 run robot_bringup teleop_keyboard` | **默认键盘入口**：一套 session + 下肢速度 + 上肢浮动 + 当前交互终端键盘控制台，硬件另起 |
+| `ros2 run robot_bringup teleop_keyboard --upper-task vr` | 下肢键盘速度 + 上肢 VR + session + 键盘控制台 |
+| `ros2 run robot_bringup teleop_keyboard --upper-task vla` | 下肢键盘速度 + 上肢 VLA + session + 键盘控制台，VLA 推理仍需手动 start |
+| `ros2 launch robot_bringup motion_tasks.launch.py upper_task:=vla` | session + 下肢速度 + 上肢 VLA，VLA 推理仍需手动 start |
+| `ros2 run lower_velocity_tracking teleop_keyboard` | control-only：只连接现有 session 与任务，不启动任务或硬件 |
+| `ros2 launch robot_bringup motion_tasks.launch.py` | session + 下肢速度策略 + 上肢 VR，各任务直接发布 FPC 关节目标 |
+| `ros2 launch robot_bringup whole_vr.launch.py` | session + 上肢 VR + 摇杆速度跟踪，不重复启动硬件 |
+| `ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=float` | session + 独立上肢浮动，腰腿保持默认目标 |
+| `ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=force_feedback` | session + 双臂位置互换力反馈，腰腿和夹爪保持默认目标 |
+| `ros2 launch robot_bringup motion_tasks.launch.py lower_task:=footstep upper_task:=vla` | session + 脚步策略 + `upper_vla`；VLA 保持 `/vla_bridge` 服务 |
+| `ros2 launch record record.launch.py` | 录制 + 数据管理与内置回放，回放前已有 FPC 必须 active |
+| `ros2 run record data_manager` | 只启动数据页面与内置回放，无需额外执行器入口 |
+| `ros2 launch robot_bringup record_all.launch.py` | 硬件、传感器、运动任务、定位、录制和数据管理与内置回放，统一退出 |
 | `ros2 launch robot_bringup all_data.launch.py scope:=end_effectors topology:=dual` | 只启末端拓扑：bridge、进程内 KWR57、Gloria-M、左右相机 |
 | `ros2 launch robot_bringup all_data.launch.py scope:=whole_body end_effector_load:=false` | 整机但不启净力/负载估计，重力补偿退回标称工具重量 |
 | `ros2 launch robot_bringup all_data.launch.py enable_grippers_on_start:=false` | 同上，但两只 Gloria-M 上电保持失能 |
@@ -18,14 +31,80 @@
 | `ros2 launch robot_bringup whole_body_dashboard.launch.py` | controller 测试网页 `8200`；连接已有 manager |
 | `ros2 launch robot_bringup lowlevel_dashboard.launch.py` | `LowState` 只读监控页 `8210`；不依赖本仓库任何东西 |
 | `ros2 launch robot_bringup lowlevel_dashboard.launch.py lowstate_topic:=/lowstate secondary_imu_topic:=/secondary_imu` | 同上，改订 1040 Hz 高频流，代价接近一个核 |
-| `ros2 launch robot_bringup gravity_float_demo.launch.py` | 激活 FPC 并让双臂进入可徒手推动的失重状态；连接已有 manager |
-| `ros2 control switch_controllers --deactivate forward_position_controller` | 停掉 demo 遗留的 active FPC |
 | `ros2 param set /forward_position_controller compensation_scale 0.0` | 临时关掉手臂重力补偿 |
 | `ros2 run robot_bringup enter_debug_mode` | 释放运控模式、交出 `/lowcmd`；走 ros2_control 时不需要 |
 | `ros2 run robot_bringup exit_debug_mode` | 卸力斜坡 + 交还 `ai` 模式；控制栈被强杀后的兜底 |
 | `kill -INT -- -"$(ps -o pgid= -p "$(pgrep -f 'ros2 launch robot_bringup all_data' \| head -1)" \| tr -d ' ')"` | 正确停控制栈（**发给进程组**）；**绝不要 `pkill`**，原因见下文 |
 
 网页端口：`8770` 末端联调、`8200` 整机 controller、`8210` 底层只读、`8010`/`8011` 相机自带页。**本机访问用 `127.0.0.1` 而不是 `localhost`**：节点只绑 IPv4 `0.0.0.0`，`localhost` 常先解析到 IPv6 `::1`，表现为页面能开、数据不来。远程转发 `ssh -L 8770:127.0.0.1:8770 user@robot`，其余端口同理。
+
+### CANalyst-II USB 自动重连
+
+单/双总线入口及 `all_data.launch.py` 在 bridge 初始化或 transport 故障（退出码 `1`）后，不再立即关闭整栈：旧 bridge 完成收尾后等待 1 秒，仅重启 bridge 和进程内 KWR57，重新打开 USB。每次 launch 最多重试 3 次，预算不随运行时间重置；耗尽后仍统一关闭数据栈。正常退出、异常信号或 Ctrl+C 不触发重连，关闭过程中也不会重新拉起进程。
+
+重连不重启 controller manager、夹爪或相机，不重放旧 bridge 队列，不做 USB reset，也不自动重新接管运动或使能夹爪。反馈超时与夹爪失能保护保持原样；超时后的夹爪需人工确认后重新使能。重连期间数据确实中断，任务仍需处理反馈过期；这不是无缝恢复运动的保证。持续 USB 故障应检查 Hub、供电、线缆及宿主机内核日志，详见 [bridge 重连边界](../canalystii_native_bridge/README.md#usb-故障后的有界重连)。
+
+生产 KWR57 不在启动时自动 tare，固定文件标定保留；运行期软件 tare 偏置不会跨 bridge 进程重启保留，重连告警会明确提醒，依赖它的使用者需重新确认零位。
+
+无硬件回归：`python3 -m pytest -q src/robot_bringup/test/test_bridge_reconnect.py src/robot_bringup/test/test_end_effectors_nodes.py`。测试使用普通子进程模拟故障/恢复，覆盖重试次数、恢复时保留其他节点、预算耗尽关闭整栈和关闭期间取消待重连，不启动真实 bridge。
+
+## 运动与采集
+
+会话内上肢任务为 `upper_vr`、`upper_vla`、`upper_float`、[upper_force_feedback](../upper_force_feedback/README.md)，下肢任务为 `lower_velocity_tracking` 或 `lower_footstep_tracking`。各任务认领关节并直接向 FPC 发布掩码目标，`g1_motion_session` 协调注册与生命周期。`lower_task` 可选 `velocity/footstep/none`，`upper_task` 可选 `vr/vla/float/force_feedback/none`。直接调用 `motion_tasks.launch.py` 默认为下肢 velocity、上肢 VR；正式键盘入口默认为下肢 velocity、上肢 float，两者是不同的默认组合。
+
+[record](../record/README.md) 的 DataManager 在自身进程内创建 ReplayTask，两个节点共用 executor。回放读取 `motion_control_command` 末端轨迹，从当前实测姿态缓入首动作，通过共享本地 IK 输出上肢槽位 15..30 的 `JointTargets`。`record.launch.py` 默认 `data:=true` 自动带数据管理与回放；`data:=false` 只启动 recorder。只需数据页面与回放时执行 `ros2 run record data_manager`。回放复用 g1_motion_session 的 IK 工具，非会话任务。
+
+**数据页面的“回放”执行真实动作，FPC 必须提前 active。** 注意停下其他目标源：回放不检查竞争或强制排除发布者，同一槽位按 FPC 最后收到的目标执行，session 的准备操作也可能发布目标。默认请求、状态与停止接口为 `/replay/request`、`/replay/status`、`/replay/stop`；停止回放后 FPC 保持最后目标。可选绝对 YAML 参数 `replay_config` 用于覆盖共享 IK，namespace 不改变默认绝对端点。完整接口与配置见 [record 使用说明](../record/README.md)。
+
+默认交互入口如下，硬件在另一终端用 `all_data.launch.py` 显式启动或复用既有栈：
+
+```bash
+source scripts/env.sh
+ros2 run robot_bringup teleop_keyboard
+```
+
+正式键盘入口由 [motion_keyboard.py](robot_bringup/motion_keyboard.py) 的 `main` 实现，以 `teleop_keyboard=robot_bringup.motion_keyboard:main` 安装。它支持 `--upper-task {float,vr,vla,force_feedback}`、`--lower-config`、`--upper-config`，未知参数交给键盘节点作为 ROS 参数，任务参数与默认配置保持不变：
+
+```bash
+ros2 run robot_bringup teleop_keyboard --upper-task vr
+ros2 run robot_bringup teleop_keyboard --upper-task force_feedback
+ros2 run robot_bringup teleop_keyboard --lower-config /workspace/src/lower_velocity_tracking/config/lower_body.yaml --upper-config /workspace/src/upper_float/config/upper_float.yaml
+ros2 run robot_bringup teleop_keyboard --ros-args -p vx_step:=0.05
+```
+
+键盘入口启动任务，不自动 `engage` 或 `start`；上肢 VLA 推理仍通过 `ros2 run upper_vla vla_cli` 手动 `/start`。退出时控制台先请求 `/motion_control/estop`，再向本入口创建的任务进程组发送 SIGINT，让任务与 session 收尾，不停止既有硬件进程。任务 launch 日志写入启动时显示的临时文件。
+
+不需要组合键盘时，直接选择以下一套 launch；每套只包含一个 session，以 Ctrl+C 退出自身组合，硬件继续由独立终端管理：
+
+```bash
+# 上肢 VR 与 VR 摇杆下肢速度输入，lower_source 为 vr
+ros2 launch robot_bringup whole_vr.launch.py
+
+# 下肢速度与上肢 VLA，推理另行显式 start
+ros2 launch robot_bringup motion_tasks.launch.py upper_task:=vla
+
+# 独立上肢浮动，腰腿由 session 默认目标管理
+ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=float
+```
+
+`whole_vr.launch.py` 使用下肢 `lower_vr.yaml`，将 `lower_source` 设为 `vr`；其余组合使用所选任务的默认配置。launch 配置覆盖使用 `lower_config:=... upper_config:=...`。
+
+会话安全检查默认开启。`motion_tasks.launch.py`、`whole_vr.launch.py` 和 `record_all.launch.py` 可用 `safety_checks_enabled:=false` 在启动时关闭会话级倾角/传感器超时检查，任务与硬件保护不变；省略参数则取 session YAML。阈值、触发行为与重启要求见 [g1_motion_session](../g1_motion_session/README.md#配置)。
+
+正式键盘入口、组合 launch 和手动拆分部署是互斥的启动方案，不重复启动 session 或同一任务。已有组合需要额外键盘终端时，执行 `ros2 run lower_velocity_tracking teleop_keyboard`，这是 control-only 入口，只连接已有 session 与任务，不重复启动它们或硬件；其速度由选择 keyboard 来源的下肢任务消费。上肢监控使用 `ros2 launch g1_motion_session dashboard.launch.py`，只连接已有会话。
+
+`record_all.launch.py` 是 [采集全链入口](launch/record_all.launch.py)：硬件与头部传感器在 0 s 启动，运动任务在 6 s、定位在 8 s、录制在 12 s 启动。默认录制头部图像为 `1280x720x30 / YUYV`，腕相机由 recorder 复制原码流；完整参数和数据格式见 [record 使用说明](../record/README.md)。`upper_vla` 依赖 record 的工具，全链编排保持在 bringup。
+
+```bash
+ros2 launch robot_bringup record_all.launch.py
+ros2 launch robot_bringup record_all.launch.py hardware:=false motion:=false
+ros2 launch robot_bringup record_all.launch.py lower_task:=footstep upper_task:=vr
+ros2 launch robot_bringup record_all.launch.py data:=false
+```
+
+各阶段开关为 `hardware/sensors/motion/localization/record`，参数如 `output_root:=/data/sessions`、`round_items:=5` 继续传给子 launch。硬件已运行时只补缺失阶段，避免重复 controller manager 或设备节点；已有运动组合或 session 时设 `motion:=false`，不再叠加第二套运动会话。采集入口需要键盘时使用上述 control-only 命令。
+
+同一个 launch 的 Ctrl-C 会让硬件完成卸力斜坡，并让 recorder 等 ffmpeg 冲完缓冲、计算校验并写入 `DONE`。采集入口保留 `sigterm_timeout:=40` 和 `sigkill_timeout:=10`。脚本停机必须将 SIGINT 发给整个前台进程组；只向 launch PID 发 SIGINT 可能留下节点。后台启动先使用 `set -m`，避免子 shell 将 SIGINT 设为忽略。不要用 SIGTERM 或 SIGKILL 替代正常收尾。
 
 ## 末端设备结构
 `all_data.launch.py scope:=end_effectors topology:=dual` 的实际数据流如下；8770 Dashboard 是独立进程，用户需要时再手动启动：
@@ -204,7 +283,7 @@ Dashboard 以 BEST_EFFORT、`KEEP_LAST(64)` raw 订阅两路 `WrenchStamped`，�
 单独跑网页节点时默认仍连本机 `8010/8011`；相机服务在其他主机或端口时设置 `left_camera_url`、`right_camera_url`，`end_effectors_dashboard.launch.py` 还暴露 `camera_timeout_s`、`camera_stream_timeout_s` 和 `camera_poll_period_s`。双总线四设备接线下两栏都应在线；单侧离线时按页面显示的总线和设备节点查对应通道。
 
 ## 底层数据监控页
-把 `LowState` 的每一个字段铺出来，包括 `g1_motion_control` 那个页面没有的力矩、电压、`sensor` 和 `mode`：
+把 `LowState` 的每一个字段铺出来，包括 `g1_motion_session` 上肢监控页之外的力矩、电压、`sensor` 和 `mode`：
 ```bash
 source scripts/env.sh
 ros2 launch robot_bringup lowlevel_dashboard.launch.py
@@ -258,43 +337,25 @@ Dashboard wrapper 只把切换超时放宽到 30 秒并做切换后状态校验�
 ros2 param set /forward_position_controller compensation_scale 0.0
 ```
 
-`robot_test_dashboard` 不是 controller 实现，只是通用测试客户端：对 FPC 生成限速后的 `Float64MultiArray`。IK 也不属于 Dashboard 或硬件插件，双臂 IK 在 `g1_motion_control` 里。
+`robot_test_dashboard` 是通用测试客户端，对 FPC 生成限速后的 `Float64MultiArray`。双臂 IK 由独立上肢任务调用公共 IK 工具，`g1_motion_session` 统筹生命周期并提供上肢监控页；键盘业务由 `lower_velocity_tracking` 实现，监控页的姿态权重写入当前上肢任务的参数服务。
 
 Gloria-M 使用 `kp=10`、`kd=5`。`kd=5` 是 SDK `pack_mit_command()` 将 12 bit 字段映射到 `[0,5]` 后的最大值；输入 10 会在 SDK 层被夹到 5，因此统一节点启动时拒绝超出该范围的配置。
 
 默认模型根帧为 `pelvis`，TCP 为 `right_gripper_base`。没有真实 ros2_control 栈时，页面会等待 `/robot_description`、`/joint_states`、TF 和 `/controller_manager`。
 
-### 手臂失重 demo
-先按上面启动整机数据与控制栈，再单独启动 demo：
+### 手臂浮动
+已有整机硬件栈时，启动唯一 session 与上肢浮动任务，另一终端显式接管：
 ```bash
 source scripts/env.sh
-ros2 launch robot_bringup gravity_float_demo.launch.py
+ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=float
+```
+```bash
+ros2 service call /motion_control/engage std_srvs/srv/Trigger '{}'
 ```
 
-它做两件事：把 `forward_position_controller` 切到 active（重力补偿已内置在它里，不需要第二个 controller），然后启动 `gravity_float_demo` 节点。
+准备完成后，`upper_float` 将14个手臂关节的实测角持续交给 FPC，由现有重力补偿与阻尼承担浮动控制；腰腿进入 session 默认站姿并保持，夹爪保持最后目标。完整接口见 [upper_float](../upper_float/README.md)。
 
-该节点把 **14 个手臂关节**的目标持续跟随 `/joint_states` 的实测值。controller 随后写出 `q_cmd = q_meas + G(q_meas)/kp`，电机实际施加：
-```
-tau = kp*(q_cmd - q_meas) - kd*dq = G(q_meas) - kd*dq
-```
-
-位置项恰好抵消，只剩重力项和阻尼：手臂在任意姿态都能自撑自重，你只需克服阻尼就能推动它。
-
-**其余 17 个关节（腿、腰、夹爪）只在启动时快照一次，之后锁死。** 重力前馈对非手臂关节是透传的，如果它们也跟随实测值，力矩就只剩 `-kd*dq`，腿会发软。浮动关节列表由 launch 从重力表 `left.joints` / `right.joints` 读出，与 controller 实际补偿的范围严格一致。
-
-启动瞬间有 2 s 斜坡（controller 的 `offset_ramp_s`），在此期间手臂会从下垂位置逐渐抬起到持平。
-
-**不要让手臂长时间停在水平位附近。** 肩 pitch 没有减速自锁，保持姿态全靠持续电流，手臂水平伸出时约 20 N·m，是最恶劣的持续工况。实测悬停数分钟后 `left_shoulder_pitch` 绕组到 97 °C。补偿越准电机越会老实地一直顶着，热负荷比标定时高一个量级。用完及时退出调试模式，玩的时候优先把手臂放低。
-
-电机失去命令后不再接受位置指令，`tau_est` 掉到约 0，只剩绕组阻尼——**手感是“紧”而不是“软”**，很容易误判成软件把命令锁死了。字段含义见 [G1.md](../../G1.md) 的「MotorState.mode 与故障字段」。
-
-停止：`Ctrl-C` 后 launch 自己收尾——先把 `forward_position_controller` 切回 inactive，再跑一遍 `exit_debug_mode`（2 s 卸力斜坡 + 交还 `ai`），手臂缓降到自然下垂位。两步都必须做：controller 还 active 时它的 1 kHz 流会把斜坡想降掉的增益一帧帧顶回去。
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `release_on_exit` | `true` | 退出时停 controller + 卸力 + 交还 `ai` |
-
-交还 `ai` 之后总线不再独占，**再跑一次 demo 需要先重新进调试模式**（重启控制栈，或 `enter_debug_mode`）。要连着玩几轮就加 `release_on_exit:=false`，但那样手臂会保持最后一帧持续吃电流，必须自己盯着卸力。
+**不要让手臂长时间停在水平位附近。** 保持姿态需要持续电流，曾实测肩部绕组到 97 °C。用完请求 `/motion_control/estop` 停用 FPC；需要关闭整机栈时，在硬件终端 Ctrl+C，等待硬件卸力并交还 `ai`。仅停止目标发布不等于卸力。
 
 ### 进入调试模式
 用 ros2_control 时不需要这一步：`G1TopicSystem` 在 Engage 时自己走 MotionSwitcher `CheckMode`(1001) → `ReleaseMode`(1003)。**只有绕开 controller、自己发 `/lowcmd` 时才需要显式切换**。
@@ -337,10 +398,7 @@ ros2 run robot_bringup enter_debug_mode
 > kill -INT -- -"$(ps -o pgid= -p "$LP" | tr -d ' ')"
 > ```
 >
-> ❗ 2026-08-26 更正：之前写的「只发给 launch 进程，由它转发」是错的。**`ros2 launch`
-> 在关闭路径上从不主动发 SIGINT**（见 `launch/actions/execute_local.py` 的
-> `__get_shutdown_timer_actions`，它只挂 SIGTERM / SIGKILL 两级升级定时器）。Ctrl-C 能用
-> 是因为内核把 SIGINT 送给前台进程组的每一个成员。只发给 launch 进程等于绕开了这套清理。
+> 2026-08-26 更正：之前写的「只发给 launch 进程，由它转发」是错的。**`ros2 launch` 在关闭路径上从不主动发 SIGINT**（见 `launch/actions/execute_local.py` 的 `__get_shutdown_timer_actions`，它只挂 SIGTERM / SIGKILL 两级升级定时器）。Ctrl-C 能用是因为内核把 SIGINT 送给前台进程组的每一个成员。只发给 launch 进程等于绕开了这套清理。
 
 控制栈被强杀、崩溃或从未启动时该路径不会执行，关节会保持最后一帧命令持续吃电流。用这个工具兜底：
 ```bash
@@ -373,8 +431,7 @@ robot_bringup/
 │   ├── end_effector_load.launch.py      净力补偿 + 负载估计两节点
 │   ├── end_effectors_dashboard.launch.py   纯末端 Web Dashboard（8770）
 │   ├── whole_body_dashboard.launch.py   纯整机控制器测试 Dashboard（8200）
-│   ├── lowlevel_dashboard.launch.py     纯底层只读监控页（8210）
-│   └── gravity_float_demo.launch.py     激活 FPC 并跟随实测值的失重 demo
+│   └── lowlevel_dashboard.launch.py     纯底层只读监控页（8210）
 ├── robot_bringup/
 │   ├── end_effectors/
 │   │   ├── topology.py                  末端部署清单、设备模型、参数生成和冲突检查
@@ -385,9 +442,7 @@ robot_bringup/
 │   │   ├── dashboard_node.py            LowState 只读监控节点
 │   │   └── static/                      8210 页面（HTML/CSS/JS + 曲线组件）
 │   ├── dashboard_compat_node.py         8200 页面的 controller 切换 wrapper
-│   ├── gravity_float_demo.py            失重 demo 节点
 │   ├── enter_debug_mode.py              释放运控模式
 │   └── exit_debug_mode.py               卸力斜坡 + 交还运控模式
 └── test/                                无硬件回归测试（拓扑、launch 边界、各 Dashboard）
 ```
-

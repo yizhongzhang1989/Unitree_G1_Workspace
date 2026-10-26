@@ -15,11 +15,10 @@ from test_retarget import DEFAULT_Q, KEY_BODIES, skeleton_from_pose
 
 
 ROOT = Path(__file__).resolve().parents[2]
-URDF = ROOT / 'unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf'
 
 
-def test_source_replay_uses_live_retargeter_and_resamples(tmp_path, monkeypatch):
-    model = MotionModel(str(URDF))
+def test_source_replay_uses_live_retargeter_and_resamples(tmp_path, monkeypatch, controlled_urdf):
+    model = MotionModel(str(controlled_urdf))
     retargeter = Retargeter(
         model.kin, key_bodies=KEY_BODIES, anchor_body='torso_link',
         default_joint_pos=DEFAULT_Q, landmark_iterations=2)

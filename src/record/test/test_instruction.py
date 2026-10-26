@@ -13,13 +13,19 @@ import pytest
 
 from record.instruction.builder import build_round
 from record.instruction.generator import MIN_TRAVEL_M, RELATIVE, simulate
-from record.instruction.layout import layout_scene
-from record.instruction.library import LIBRARY_SUBDIR, ItemLibrary
+from record.instruction.layout import Placement, layout_scene
+from record.instruction.library import LIBRARY_SUBDIR, Item, ItemLibrary
 from record.instruction.templates import (NAMED_POSITIONS, Instruction, join_steps,
                                           lint)
 from record.table_geometry import load_geometry
 
 pytestmark = pytest.mark.usefixtures('library')
+
+
+def _item(placement: Placement) -> Item:
+    item = placement.item
+    assert isinstance(item, Item)
+    return item
 
 
 @pytest.fixture(scope='session')
@@ -157,7 +163,7 @@ def test_layout_respects_mask_and_spacing(library, geometry):
     placed = layout_scene(items, geometry, rng=rng)
     assert placed
     for p in placed:
-        w, d = p.item.footprint(p.pose)
+        w, d = _item(p).footprint(p.pose)
         assert geometry.footprint_fits(p.cx, p.cy, w, d, p.rotation)
     from record.table_geometry import aabb_overlap
     for a in range(len(placed)):
@@ -265,7 +271,7 @@ def test_move_freezes_pick_position(library, geometry):
     moves, _ = simulate(placed, geometry, n_moves=10, rng=rng)
     seen = {}
     for m in moves:
-        key = m.obj.item.item_id
+        key = _item(m.obj).item_id
         if key in seen:
             assert m.pick_from == seen[key], '同一物品的第二次取件位置应等于上次落点'
         seen[key] = m.drop
@@ -317,10 +323,11 @@ def test_buried_items_are_never_picked_again(library, geometry):
     moves, state = simulate(placed, geometry, n_moves=12, rng=rng)
     buried_at = {}
     for k, m in enumerate(moves):
-        if m.obj.item.item_id in buried_at:
-            pytest.fail(f'第 {k} 步又搬动了已埋葬的 {m.obj.item.name_en}')
+        item = _item(m.obj)
+        if item.item_id in buried_at:
+            pytest.fail(f'第 {k} 步又搬动了已埋葬的 {item.name_en}')
         if m.action == 'place_in':
-            buried_at[m.obj.item.item_id] = k
+            buried_at[item.item_id] = k
 
 
 def test_occupied_containers_are_never_moved(library, geometry):
@@ -330,9 +337,9 @@ def test_occupied_containers_are_never_moved(library, geometry):
     moves, _ = simulate(placed, geometry, n_moves=12, rng=rng)
     holding = set()
     for m in moves:
-        assert m.obj.item.item_id not in holding, '搬动了装着东西的容器'
+        assert _item(m.obj).item_id not in holding, '搬动了装着东西的容器'
         if m.action in ('place_in', 'place_on') and m.target is not None:
-            holding.add(m.target.item.item_id)
+            holding.add(_item(m.target).item_id)
 
 
 def test_relative_pair_never_reused(library, geometry):
@@ -343,7 +350,8 @@ def test_relative_pair_never_reused(library, geometry):
     seen = set()
     for m in moves:
         if m.action in RELATIVE:
-            pair = frozenset({m.obj.item.item_id, m.target.item.item_id})
+            assert m.target is not None
+            pair = frozenset({_item(m.obj).item_id, _item(m.target).item_id})
             assert pair not in seen, '同一对物品重复做了相对放置'
             seen.add(pair)
 
@@ -356,7 +364,7 @@ def test_every_drop_stays_reachable_and_clear(library, geometry):
     moves, _ = simulate(placed, geometry, n_moves=10, rng=rng)
     for m in moves:
         if m.action in RELATIVE or m.action == 'put_down':
-            w, d = m.obj.item.footprint(m.obj.pose)
+            w, d = _item(m.obj).footprint(m.obj.pose)
             assert geometry.footprint_fits(m.drop[0], m.drop[1], w, d,
                                            m.obj.rotation), '落点跑出可达域'
 

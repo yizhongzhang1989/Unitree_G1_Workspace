@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
+from geometry_msgs.msg import Point, Pose
 
 from .rotations import (
     quat_apply,
@@ -21,13 +23,13 @@ from .rotations import (
 
 @dataclass(frozen=True)
 class _FramePayload:
-    joint_positions: object
-    root: object
-    anchor: object
-    key_body_positions: object
+    joint_positions: Sequence[float] | np.ndarray
+    root: Pose | SimpleNamespace
+    anchor: Pose | SimpleNamespace
+    key_body_positions: Sequence[Point | SimpleNamespace]
 
     @classmethod
-    def from_message(cls, message):
+    def from_message(cls, message) -> _FramePayload:
         return cls(
             joint_positions=message.joint_positions,
             root=message.root,
@@ -35,7 +37,7 @@ class _FramePayload:
             key_body_positions=message.key_body_positions,
         )
 
-    def at_stamp(self, header):
+    def at_stamp(self, header) -> SimpleNamespace:
         return SimpleNamespace(
             header=header,
             joint_positions=self.joint_positions,
@@ -54,7 +56,7 @@ def _pose_arrays(pose) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def _pose(position: np.ndarray, quat_wxyz: np.ndarray):
+def _pose(position: np.ndarray, quat_wxyz: np.ndarray) -> SimpleNamespace:
     return SimpleNamespace(
         position=SimpleNamespace(x=float(position[0]), y=float(position[1]),
                                  z=float(position[2])),
@@ -123,7 +125,7 @@ class MocapFrameGate:
                     quat_mul(target_quat, quat_conj(source_quat)))
                 self._live_pos = target_pos - quat_apply(self._live_quat, source_pos)
 
-        def transform_pose(pose):
+        def transform_pose(pose) -> SimpleNamespace:
             position, quat = _pose_arrays(pose)
             return _pose(
                 self._live_pos + quat_apply(self._live_quat, position),

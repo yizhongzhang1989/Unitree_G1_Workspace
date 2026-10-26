@@ -1,22 +1,23 @@
 """Strict source behavior without opening a socket."""
 
 import time
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pytest
+from aiohttp import web
 
 from g1_mocap.capture_stream import CaptureStream
+from g1_mocap.retarget import RetargetCalibration, Retargeter, RetargetResult
 from g1_mocap.skeleton import BodyFrame
 from g1_mocap.stream import MocapStream
 
 
-def source():
-    stream = CaptureStream(SimpleNamespace(), limits=(np.full(29, -3), np.full(29, 3)),
+def source() -> CaptureStream:
+    stream = CaptureStream(Retargeter.__new__(Retargeter), limits=(np.full(29, -3), np.full(29, 3)),
                            log=lambda message: None)
-    stream._device = SimpleNamespace(closed=False)
-    stream._calibration = SimpleNamespace(
+    stream._device = web.WebSocketResponse()
+    stream._calibration = RetargetCalibration(
         scale=1.0, pelvis_ref_z=0.8, stand_height=0.8,
         pelvis_fix=np.eye(3), torso_fix=np.eye(3),
         joint_bias=np.zeros(29), joint_target=np.zeros(29),
@@ -29,9 +30,11 @@ def frame(stamp=1.0, seq=1, status=1):
     return BodyFrame(stamp, seq, np.zeros((24, 3)), status, 0, np.tile(np.eye(3), (24, 1, 1)))
 
 
-def result():
-    return SimpleNamespace(root_pos=np.array([0.0, 0.0, 0.8]),
-                           root_quat=np.array([1.0, 0.0, 0.0, 0.0]), joint_pos=np.zeros(29))
+def result() -> RetargetResult:
+    return RetargetResult(t=0.0, root_pos=np.array([0.0, 0.0, 0.8]),
+                          root_quat=np.array([1.0, 0.0, 0.0, 0.0]), joint_pos=np.zeros(29),
+                          anchor_pos=np.zeros(3), anchor_quat=np.array([1.0, 0.0, 0.0, 0.0]),
+                          key_pos=np.zeros((0, 3)))
 
 
 def test_calibration_is_blocked_and_take_rejected():
@@ -47,7 +50,7 @@ def test_start_requires_fresh_calibration():
     stream._calibration = None
     with pytest.raises(RuntimeError):
         stream.begin()
-    stream._calibration = object()
+    stream._calibration = RetargetCalibration.__new__(RetargetCalibration)
     stream.last_valid_arrival = time.monotonic() - 1
     with pytest.raises(RuntimeError):
         stream.begin()
@@ -84,9 +87,12 @@ def test_uses_raw_timestamp_and_xyzw():
     clip = stream.finish()
     assert clip.stamps == [12.0]
     np.testing.assert_array_equal(clip.rows[0][3:7], [0, 0, 0, 1])
+    assert clip.source is not None
     assert clip.source.timestamps == [12.0]
     np.testing.assert_array_equal(clip.source.positions[0], frame(stamp=12.0).positions)
-    np.testing.assert_array_equal(clip.source.orientations[0], frame(stamp=12.0).rotations)
+    raw = frame(stamp=12.0)
+    assert raw.rotations is not None
+    np.testing.assert_array_equal(clip.source.orientations[0], raw.rotations)
 
 
 def test_missing_sequence_invalidates_take():
@@ -109,7 +115,7 @@ def test_failed_retarget_and_reconnection_rejected():
         stream._ingest({})
     assert 'retargeted' in stream.finish().reason
     stream.begin()
-    stream._device = object()
+    stream._device = web.WebSocketResponse()
     with patch('g1_mocap.capture_stream.parse_body', return_value=frame()), \
             patch.object(MocapStream, '_ingest'):
         stream._ingest({})
@@ -143,6 +149,7 @@ def test_default_recording_continues_after_thirty_seconds():
     for stamp in np.arange(2791) / 90:
         stream._capture_frame(stamp, frame(stamp=stamp), result())
     assert not stream.complete
+    assert stream.clip is not None
     assert stream.clip.stamps[-1] == 31.0
     assert not stream.clip.reason
 

@@ -10,14 +10,16 @@
 CPU，还会在两次 FK 落在不同的 joint_states 采样上时悄悄错开。
 """
 
+from functools import partial
 from pathlib import Path
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
+from builtin_interfaces.msg import Time
 from geometry_msgs.msg import InertiaStamped, Vector3Stamped, WrenchStamped
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.executors import ExternalShutdownException
@@ -63,10 +65,10 @@ class PayloadEstimatorNode(Node):
         self._estimation_enabled = self.declare_parameter(
             "estimation_enabled", False).get_parameter_value().bool_value
 
-        self._gravity: Dict[str, Optional[np.ndarray]] = {
+        self._gravity: Dict[str, Optional[tuple[float, float, float]]] = {
             side: None for side in SIDES}
         self._gravity_stamp = {side: 0.0 for side in SIDES}
-        self._previous = {side: None for side in SIDES}
+        self._previous: Dict[str, Optional[np.ndarray]] = {side: None for side in SIDES}
         self._sampled = {side: 0.0 for side in SIDES}
         self._estimators = {
             side: PayloadEstimator(forgetting=forgetting) for side in SIDES}
@@ -91,13 +93,13 @@ class PayloadEstimatorNode(Node):
                 Vector3Stamped, self.declare_parameter(
                     "%s_gravity_topic" % side, gravity
                 ).get_parameter_value().string_value,
-                (lambda message, side=side: self._on_gravity(side, message)),
+                partial(self._on_gravity, side),
                 sensor_qos))
             self._inputs.append(self.create_subscription(
                 WrenchStamped, self.declare_parameter(
                     "%s_net_topic" % side, net
                 ).get_parameter_value().string_value,
-                (lambda message, side=side: self._on_wrench(side, message)),
+                partial(self._on_wrench, side),
                 sensor_qos))
         if not self._outputs:
             raise RuntimeError("no side is calibrated; nothing to estimate")
@@ -106,7 +108,7 @@ class PayloadEstimatorNode(Node):
         self.add_on_set_parameters_callback(self._on_parameters)
         self.create_timer(self._period, self._publish_disabled)
 
-    def _on_parameters(self, parameters):
+    def _on_parameters(self, parameters: Sequence[Parameter]) -> SetParametersResult:
         for parameter in parameters:
             if parameter.name == "estimation_enabled" and parameter.type_ != Parameter.Type.BOOL:
                 return SetParametersResult(
@@ -117,7 +119,7 @@ class PayloadEstimatorNode(Node):
                 self._clear_estimates()
         return SetParametersResult(successful=True)
 
-    def _clear_estimates(self):
+    def _clear_estimates(self) -> None:
         for side, estimator in self._estimators.items():
             estimator.reset()
             self._previous[side] = None
@@ -126,7 +128,7 @@ class PayloadEstimatorNode(Node):
         for side in self._outputs:
             self._publish(side, FT_SENSOR_LINKS[side], stamp)
 
-    def _publish_disabled(self):
+    def _publish_disabled(self) -> None:
         if not self._estimation_enabled:
             stamp = self.get_clock().now().to_msg()
             for side in self._outputs:
@@ -143,10 +145,10 @@ class PayloadEstimatorNode(Node):
         return {side: FtCalibration.from_dict(document[side]).com
                 for side in SIDES if side in document}
 
-    def _on_reload(self, request, response):
+    def _on_reload(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         try:
             replacement = self._load_tool_com(
-                self.get_parameter("ft_calibration").value)
+                self.get_parameter("ft_calibration").get_parameter_value().string_value)
             if not all(side in replacement for side in self._outputs):
                 raise ValueError("calibration is missing an active side")
             self._tool_com = replacement
@@ -199,7 +201,7 @@ class PayloadEstimatorNode(Node):
         return mass < self._minimum_mass or gravity_aligned(
             wrench, gravity, tolerance=self._parallel_tolerance)
 
-    def _publish(self, side: str, frame: str, stamp) -> None:
+    def _publish(self, side: str, frame: str, stamp: Time) -> None:
         if not self._estimation_enabled:
             message = InertiaStamped()
             message.header.stamp = stamp
@@ -226,7 +228,7 @@ class PayloadEstimatorNode(Node):
         message.inertia.com.z = float(centre[2])
         self._outputs[side].publish(message)
 
-    def _on_reset(self, _request, response):
+    def _on_reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         self._clear_estimates()
         response.success = True
         response.message = "payload estimate cleared"

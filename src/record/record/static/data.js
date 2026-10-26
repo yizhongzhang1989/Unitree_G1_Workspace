@@ -3,6 +3,7 @@
 let PICKED = null;      // 当前选中的那次录制，右边详情跟着它
 let DETAIL = null;      // 它的详情，避免每次轮询都重拉
 let PLAYING = false;
+let READY = false;
 let NOW = { session: '', label: '' };   // 正在放哪一段，用于列表高亮
 let SIG = '';           // 上一次渲染的列表指纹，没变就不重建 DOM
 let CSIG = '';          // 同上，转换与校验渲染进度的指纹
@@ -204,8 +205,9 @@ function shots(sid, streams, at) {
 
 function playBtn(label, sid, t0, t1) {
   const b = document.createElement('button');
+  b.dataset.act = 'play';
   b.textContent = '回放';
-  b.disabled = PLAYING;
+  b.disabled = PLAYING || RENDER.running || !READY;
   b.onclick = async () => {
     try {
       const r = await post('/api/replay/start', {
@@ -352,7 +354,8 @@ function syncDetail() {
                                      && RENDER.label === el.dataset.label);
     for (const b of el.querySelectorAll('.top button')) {
       if (b.dataset.locked) continue;
-      b.disabled = PLAYING || (b.dataset.act === 'verify' ? busy : RENDER.running);
+      b.disabled = PLAYING || (b.dataset.act === 'verify' ? busy : RENDER.running)
+        || (b.dataset.act === 'play' && !READY);
     }
   }
 }
@@ -599,7 +602,6 @@ async function loadDetail() {
   }
 }
 
-let LIVE = false;       // 上肢是否已接管 —— 决定底部那个按钮是 engage 还是急停
 let LAST_PROG = 0;
 
 function transport(st) {
@@ -614,19 +616,9 @@ function transport(st) {
     ? `${ramping ? '缓入中' : '回放中'} · ${st.label || '整段'}`
     : (st.session ? `已停 · ${st.label || '整段'}` : '未在回放');
   $('clock').textContent = `${clock(st.elapsed)} / ${clock(st.duration)}`;
-  $('ready').textContent = st.ready ? '就绪，选一段回放' : st.blocked;
+  $('ready').textContent = st.ready ? '模型和关节反馈就绪' : st.blocked;
   $('ready').className = 'hint' + (st.ready ? '' : ' warn');
   $('btn-stop').disabled = !st.playing;
-
-  LIVE = st.arms_live;
-  const fresh = st.status_age >= 0 && st.status_age <= 1;
-  const b = $('btn-arm');
-  b.textContent = LIVE ? '急停卸力' : '接管上肢';
-  b.className = LIVE ? 'danger' : 'ok';
-  // 已接管时永远能按急停 —— 哪怕状态话题哑了，那正是最需要它的时候
-  b.disabled = !LIVE && !fresh;
-  b.title = LIVE ? '立刻卸力，手臂会掉下来'
-                 : (fresh ? '激活 FPC 并插值到站立位姿' : '控制层没有数据，控制栈起了吗');
 }
 
 async function refresh() {
@@ -638,6 +630,7 @@ async function refresh() {
   const wasPlaying = PLAYING;
   const wasRendering = RENDER.running;
   PLAYING = st.playing;
+  READY = st.ready === true;
   NOW = { session: st.session, label: st.label };
   CONVERT = data.convert || CONVERT;
   RENDER = data.render || RENDER;
@@ -665,11 +658,11 @@ async function refresh() {
   }
 
   if (st.error) banner('回放出错：' + st.error, 'bad', true);
-  else if (st.playing) banner('回放中 —— 手放在急停上', 'live', true);
+  else if (st.playing) banner('回放中', 'live', true);
   else if (CONVERT.running) banner(`转换中：${CONVERT.session} → ${CONVERT.format}`, 'live', true);
   else if (RENDER.running) banner(`渲染校验视频：${RENDER.session} · ${RENDER.label || '整段'}`
                                   + ` ${Math.round((RENDER.progress || 0) * 100)}%`, 'live', true);
-  else if (wasPlaying) banner('回放结束，手臂停在原地', '', true);
+  else if (wasPlaying) banner('回放结束，保持最后目标', '', true);
   else banner(`盘余 ${st.disk_free_gb} GB`, '', true);
 }
 
@@ -681,32 +674,12 @@ async function loadRaw(id) {
 }
 
 $('btn-stop').onclick = async () => {
-  try { await post('/api/replay/stop'); banner('已停止，手臂保持在原地'); refresh(); }
+  try { await post('/api/replay/stop'); banner('已停止回放，保持最后目标'); refresh(); }
   catch (err) { banner(err.message, 'bad'); }
 };
 
 $('pick-all').onclick = () => pickAll(true);
 $('pick-none').onclick = () => pickAll(false);
-
-$('btn-arm').onclick = async () => {
-  if (LIVE) {
-    // 急停不加确认：要按它的时候没工夫再点一个弹窗
-    try {
-      const r = await post('/api/control/estop');
-      banner('已急停：' + (r.result.message || 'ok'), 'bad');
-    } catch (err) { banner('急停失败！' + err.message, 'bad'); }
-  } else {
-    if (!confirm('接管上肢会让机器人真的动：激活 FPC 并在 2.5 s 内插值到默认站立位姿。\n\n'
-                + '只调手臂时机器人必须被吊起或另行支撑 —— 下肢只是被位置环钉住，没人在平衡。\n\n'
-                + '确认周围无人、手臂没卡在腿上？')) return;
-    banner('接管中，站立插值约 2.5 s…');
-    try {
-      const r = await post('/api/control/engage');
-      banner('已接管：' + (r.result.message || 'ok'), 'live');
-    } catch (err) { banner('接管失败：' + err.message, 'bad'); }
-  }
-  refresh();
-};
 
 refresh();
 setInterval(refresh, 1000);

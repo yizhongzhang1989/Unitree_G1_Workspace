@@ -6,16 +6,51 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from typing import Callable, Literal, Protocol, TypedDict, cast
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 from scipy.ndimage import median_filter
-from scipy.optimize import least_squares
+from scipy.optimize import OptimizeResult, least_squares as _scipy_least_squares
 from scipy.spatial.transform import Rotation
 
 from .motion_capture import FPS, save_motion
 from .motion_model import MotionModel
 from .source_replay import retarget_source
 from .urdf import DEFAULT_URDF, resolve_package_path
+
+
+class _ContactLeastSquares(Protocol):
+    def __call__(
+        self, fun: Callable[[NDArray[np.float64]], NDArray[np.float64]],
+        x0: ArrayLike, *, bounds: tuple[ArrayLike, ArrayLike],
+        max_nfev: int | None, x_scale: ArrayLike | Literal['jac'],
+        ftol: float | None, xtol: float | None, gtol: float | None,
+    ) -> OptimizeResult: ...
+
+
+least_squares = cast(_ContactLeastSquares, _scipy_least_squares)
+
+
+class Distribution(TypedDict):
+    p50: float
+    p95: float
+    max: float
+
+
+class ContactMetrics(TypedDict):
+    support_metric_basis: str
+    stable_support_intervals: int
+    penetration_max_m: float
+    support_xy_speed_m_s: Distribution | None
+    support_anchor_error_m: Distribution | None
+    support_segment_slip_max_m: float
+    joint_speed_rad_s: Distribution | None
+    leg_speed_rad_s: Distribution | None
+    transition_leg_speed_rad_s: Distribution | None
+    leg_acceleration_rad_s2: Distribution | None
+    root_speed_m_s: Distribution | None
+    contact_intervals: dict[str, list[list[float]]]
 
 
 def geometry(model, row):
@@ -149,7 +184,7 @@ def refine(model, rows, *, max_nfev=400):
         unconverged_frames=np.flatnonzero(~np.asarray(successes)).tolist())
 
 
-def metrics(model, rows, contacts, weights, targets):
+def metrics(model, rows, contacts, weights, targets) -> ContactMetrics:
     points = np.array([geometry(model, row)[0] for row in rows])
     tracked = points.reshape(len(points), -1, 3)
     masks = contacts.reshape(len(points), -1)
@@ -168,26 +203,29 @@ def metrics(model, rows, contacts, weights, targets):
             offset = tracked[start:end, channel, :2] - tracked[start, channel, :2]
             slips.append(float(np.linalg.norm(offset, axis=1).max()))
 
-    def distribution(values):
-        return dict(zip(('p50', 'p95', 'max'), np.percentile(values, [50, 95, 100]).tolist())) if np.size(values) else None
+    def distribution(values) -> Distribution | None:
+        if not np.size(values):
+            return None
+        percentiles = np.percentile(values, [50, 95, 100]).tolist()
+        return {'p50': percentiles[0], 'p95': percentiles[1], 'max': percentiles[2]}
 
-    return dict(
-        support_metric_basis='individual_contact_points',
-        stable_support_intervals=int(supported.sum()),
-        penetration_max_m=float(max(0, -points[..., 2].min())),
-        support_xy_speed_m_s=distribution(support_speed),
-        support_anchor_error_m=distribution(contact_error),
-        support_segment_slip_max_m=max(slips, default=0.0),
-        joint_speed_rad_s=distribution(np.abs(np.diff(rows[:, 7:], axis=0)) * FPS),
-        leg_speed_rad_s=distribution(np.abs(np.diff(rows[:, 7:19], axis=0)) * FPS),
-        transition_leg_speed_rad_s=distribution(
+    return {
+        'support_metric_basis': 'individual_contact_points',
+        'stable_support_intervals': int(supported.sum()),
+        'penetration_max_m': float(max(0, -points[..., 2].min())),
+        'support_xy_speed_m_s': distribution(support_speed),
+        'support_anchor_error_m': distribution(contact_error),
+        'support_segment_slip_max_m': max(slips, default=0.0),
+        'joint_speed_rad_s': distribution(np.abs(np.diff(rows[:, 7:], axis=0)) * FPS),
+        'leg_speed_rad_s': distribution(np.abs(np.diff(rows[:, 7:19], axis=0)) * FPS),
+        'transition_leg_speed_rad_s': distribution(
             np.abs(np.diff(rows[:, 7:19], axis=0))[transition_steps] * FPS),
-        leg_acceleration_rad_s2=distribution(np.abs(np.diff(rows[:, 7:19], n=2, axis=0)) * FPS**2),
-        root_speed_m_s=distribution(np.linalg.norm(np.diff(rows[:, :3], axis=0), axis=1) * FPS),
-        contact_intervals={
+        'leg_acceleration_rad_s2': distribution(np.abs(np.diff(rows[:, 7:19], n=2, axis=0)) * FPS**2),
+        'root_speed_m_s': distribution(np.linalg.norm(np.diff(rows[:, :3], axis=0), axis=1) * FPS),
+        'contact_intervals': {
             f'{("left", "right")[channel // points.shape[2]]}_{channel % points.shape[2]}':
             [[start / FPS, end / FPS] for start, end in intervals(masks[:, channel])]
-            for channel in range(tracked.shape[1])})
+            for channel in range(tracked.shape[1])}}
 
 
 def main():

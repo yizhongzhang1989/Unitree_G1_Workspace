@@ -1,13 +1,15 @@
 #ifndef UNITREE_G1_ROS2_CONTROL__FORWARD_POSITION_CONTROLLER_HPP_
 #define UNITREE_G1_ROS2_CONTROL__FORWARD_POSITION_CONTROLLER_HPP_
 
-#include <atomic>
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "controller_interface/controller_interface.hpp"
+#include "unitree_g1_ros2_control/msg/joint_targets.hpp"
 #include "rclcpp/subscription.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
@@ -18,7 +20,7 @@
 
 namespace unitree_g1_ros2_control {
 
-/// Writes the latest full finite position command to the hardware, with the
+/// Writes the accumulated masked position targets to the hardware, with the
 /// calibrated arm gravity folded into the arm slots.
 ///
 /// The feed-forward lives inside this loop rather than in a controller in front
@@ -47,17 +49,21 @@ private:
         rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
     struct CommandSample {
-        std::vector<double> positions;
-        std::uint64_t sequence;
+        std::array<double, 31> positions{};
+        std::uint64_t sequence{0};
     };
 
     void write_command(const std::vector<double>& positions);
+    void receive_command(std::uint32_t mask, const double* positions);
 
     std::vector<std::string> joint_names_;
     std::uint64_t processed_sequence_{0};
-    std::atomic<std::uint64_t> next_sequence_{1};
-    realtime_tools::RealtimeBuffer<std::shared_ptr<CommandSample>> command_buffer_;
-    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr command_subscription_;
+    std::uint32_t joint_mask_{0};
+    std::mutex command_mutex_;
+    CommandSample pending_command_;
+    realtime_tools::RealtimeBuffer<CommandSample> command_buffer_;
+    rclcpp::Subscription<msg::JointTargets>::SharedPtr command_subscription_;
+    rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr full_command_subscription_;
 
     GravityFeedforward gravity_;
     AdaptiveStiffness stiffness_;

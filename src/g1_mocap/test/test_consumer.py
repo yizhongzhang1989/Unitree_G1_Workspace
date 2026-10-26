@@ -57,13 +57,16 @@ def test_time_axis_comes_from_the_stamp():
     调度抖动搅进速度差分里。
     """
     buffer = filled()
-    oldest, newest = buffer.span()
+    span = buffer.span()
+    assert span is not None
+    oldest, newest = span
     assert oldest == pytest.approx(0.0, abs=1e-6)
     assert newest == pytest.approx(1.9, abs=1e-6)
 
 
 def test_interpolates_between_frames():
     batch = filled().sample(np.array([0.35]))
+    assert batch is not None
     assert batch.root_pos[0][0] == pytest.approx(0.35, abs=1e-6)
     assert batch.joint_pos[0][0] == pytest.approx(0.35, abs=1e-6)
     assert batch.key_pos[0][0][0] == pytest.approx(0.35, abs=1e-6)
@@ -71,8 +74,11 @@ def test_interpolates_between_frames():
 
 def test_clamps_instead_of_extrapolating():
     buffer = filled()
-    oldest, newest = buffer.span()
+    span = buffer.span()
+    assert span is not None
+    oldest, newest = span
     batch = buffer.sample(np.array([oldest - 5.0, newest + 5.0]))
+    assert batch is not None
     assert batch.t[0] == pytest.approx(oldest)
     assert batch.t[1] == pytest.approx(newest)
 
@@ -89,6 +95,7 @@ def test_quaternion_order_is_converted():
     buffer.push_frame(message)
     buffer.push_frame(frame(0.1))
     batch = buffer.sample(np.array([0.0]))
+    assert batch is not None
     assert batch.root_quat[0] == pytest.approx([half, 0.0, 0.0, half], abs=1e-9)
 
 

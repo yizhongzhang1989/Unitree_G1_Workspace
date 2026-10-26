@@ -32,7 +32,7 @@
 
 ```mermaid
 flowchart TB
-  UP["上游命令源（独立进程）<br/>8200 控制器面板 · g1_motion_control"]
+  UP["上游命令源（独立进程）"]
 
   subgraph P1["进程 A：ros2_control_node —— 唯一 controller_manager，500 Hz"]
     direction TB
@@ -54,7 +54,7 @@ flowchart TB
 
   RSP["robot_state_publisher → TF"]
 
-  UP -. "~/commands（31 值）" .-> FPC
+  UP -. "~/joint_targets（mask + 31 值）或 ~/commands（31 值）" .-> FPC
   UP -. "switch_controller" .-> CM
   CM --- CTRL
 
@@ -96,7 +96,7 @@ flowchart TB
 | | `forward_position_controller`（FPC） |
 |---|---|
 | plugin type | `unitree_g1_forward_command_controller/ForwardCommandController` |
-| **输入**（DDS） | 话题 `~/commands`<br/>`std_msgs/Float64MultiArray`，31 个绝对位置<br/>BEST_EFFORT · KEEP_LAST(1) |
+| **输入**（DDS） | `~/joint_targets`：`unitree_g1_ros2_control/JointTargets`，`uint32 mask` + `float64[31] positions`，BEST_EFFORT · KEEP_LAST(4)<br/>已有完整数组工具使用 `~/commands`：`std_msgs/Float64MultiArray`，BEST_EFFORT · KEEP_LAST(1) |
 | **输出** | 写 command interface（含重力偏移） |
 | claim 的 command interface | 31 × `<joint>/position`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` |
 | 读的 state interface | 31 × `<joint>/position`<br/>+ 4 × `torso_imu/orientation.{x,y,z,w}`<br/>+ 14 × `<arm_joint>/kp`、14 × `kd` |
@@ -436,9 +436,11 @@ ros2 launch unitree_g1_ros2_control control.launch.py topology:=dual
 - `forward_position_controller`：已配置但 inactive；
 - `left_ft_broadcaster`、`right_ft_broadcaster`：已注册但默认不启动。
 
-`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`，命令话题为 `/forward_position_controller/commands`，消息类型为 `std_msgs/msg/Float64MultiArray`。它从公共参数文件读取 31 个 `joints`，只写硬件 position interface，G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
+`forward_position_controller` 类型为 `unitree_g1_forward_command_controller/ForwardCommandController`。局部关节目标入口为 `/forward_position_controller/joint_targets`，消息类型为 `unitree_g1_ros2_control/msg/JointTargets`；`mask` 的第 `i` 位选择更新 `positions[i]`，顺序与公共参数文件的 31 个 `joints` 一致。激活时从实测位置初始化目标 buffer，收到消息只覆盖选中的位置，其他目标保持。已有完整数组工具继续使用 `/forward_position_controller/commands` 的 `std_msgs/msg/Float64MultiArray`，两个入口合并到同一目标 buffer。G1 和 Gloria-M 的 MIT 帧仍统一由 `G1TopicSystem::write()` 产生。
 
-FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也只暴露最新样本；短暂调度繁忙后不会依次执行过时 setpoint。可靠发布者仍可与该订阅匹配。
+FPC 的掩码入口使用 BEST_EFFORT、`KEEP_LAST(4)`，短接收队列容纳多个任务同拍发布的部分目标；完整数组入口仍为 `KEEP_LAST(1)`。非实时回调先累积已收到的部分更新，再写入固定大小实时缓冲。实时环读取最新完整目标，不逐条回放消息、不动态分配，也不等待非实时回调锁。DDS 尚未交付的消息仍可能被丢弃，持续控制应持续发送所控制关节的完整目标。
+
+没有新目标时，FPC 保持最后接受的位置目标，并继续按控制周期计算补偿和写入硬件；目标消息是否持续到达不改变控制器的激活状态。停用控制器通过 controller manager 显式执行。
 
 ### 命令校验与输出
 
@@ -448,7 +450,7 @@ FPC 的流式命令订阅使用 BEST_EFFORT、`KEEP_LAST(1)`，实时缓冲也�
 | 层 | 当前规则 | 非法或超限时的动作 |
 |---|---|---|
 | FPC 激活 | 当前配置必须获得 31 个 command interface 和 31 个 position state interface，且激活时全部位置反馈为有限值 | 条件不满足则拒绝激活；成功激活时用当前反馈初始化 31 个 command interface |
-| FPC 命令样本 | `Float64MultiArray` 必须恰好包含 31 个有限值 | 任一值为 `NaN/Inf` 或宽度错误时丢弃整个样本，command interface 保持上一个已接受目标 |
+| FPC 命令样本 | `JointTargets` 只检查掩码选中的值；完整数组入口必须恰好包含 31 个有限值 | 选中值为 `NaN/Inf` 或完整数组宽度错误时丢弃整个样本；未选中值忽略 |
 | FPC 目标范围 | 不读取 URDF min/max，不限制目标与反馈误差、相邻目标跳变、速度或加速度，也没有命令超时回填 | 合法的 31 维目标原样写入 hardware position interface；没有新样本时继续保持原目标 |
 | `G1TopicSystem` 本体输出 | 每个已 claim 的 G1 目标必须有限；不读取 URDF min/max，不限制目标范围、目标与反馈误差或相邻目标跳变 | 任一已 claim 本体目标为 `NaN/Inf` 时，本次 `write()` 不发布整帧 `LowCmd`，本周期后续夹爪输出也不执行；任意有限目标原样写入对应 `LowCmd.q` |
 | `G1TopicSystem` 夹爪输出 | 每侧在自己的 100 Hz 输出周期内检查反馈 freshness 和目标有限性，不限制目标范围 | stale 或 `NaN/Inf` 只跳过对应侧；任意有限目标原样写入 `MitCommand.q`，不影响本体和另一侧 |
@@ -461,7 +463,7 @@ G1 本体消息的 `dq/tau` 固定为 `0`。URDF 关节范围仍可供上层规�
 本硬件插件的命令输出。Gloria-M 驱动仍保留独立的固件量程确认、`safe_position` 限制和
 反馈超时失能，详见 [`gloria_ros/README.md`](../gloria_ros/README.md)。
 
-`robot_test_dashboard` 中的 FPC 代码只是测试命令生成器，不应搬入本包。Cartesian IK 同样保持在上层（`g1_motion_control`），它输出关节目标但不拥有 hardware interface。只有将来确实需要硬实时 Cartesian servo 时，才应新增独立 C++ ros2_control controller 包，并复用这里的 position interfaces，而不是把 Python IK 或网页逻辑放进硬件插件。
+Cartesian IK、动作规划和网页交互属于上游客户端，不属于本包。上游输出关节目标，不拥有 hardware interface；硬件插件不依赖上游采用哪种任务算法或生命周期管理方式。
 
 启动后先检查，不要直接 Engage：
 

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import call, patch
 
 from launch import LaunchContext
-from launch.actions import IncludeLaunchDescription, Shutdown
+from launch.actions import IncludeLaunchDescription
 from launch.substitutions import LaunchConfiguration
 from launch.utilities import (
     normalize_to_list_of_substitutions,
@@ -40,7 +40,9 @@ class EndEffectorsNodesTest(unittest.TestCase):
         self.assertEqual(arguments["package"], "canalystii_native_bridge")
         self.assertEqual(arguments["executable"], "native_bridge_node")
         self.assertEqual(arguments["name"], "can_bridge_ros")
-        self.assertIsInstance(arguments["on_exit"], Shutdown)
+        self.assertTrue(callable(arguments["on_exit"]))
+        self.assertTrue(arguments["respawn"])
+        self.assertEqual(arguments["respawn_delay"], 1.0)
         self.assertEqual(len(arguments["parameters"]), 1)
         self.assertEqual(arguments["parameters"][0]["channel_ids"], [0])
         self.assertNotIn("interface", arguments["parameters"][0])

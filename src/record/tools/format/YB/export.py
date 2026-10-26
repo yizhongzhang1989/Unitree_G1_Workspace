@@ -101,7 +101,7 @@ IDLE_GRIP_RAD = 0.28                # ≈ 行程的 10%
 ORIGIN = 'torso_link'
 WORLD_AXES = '+X forward, +Y left, +Z up (REP-103)'
 
-#: 夹爪偏心轴的行程（rad），取自 `g1_motion_control/config/motion_control.yaml`
+#: 夹爪偏心轴的行程（rad），取自 `upper_vr/config/upper_body.yaml`
 #: 的 `gripper_limits`。**0 是闭合、2.76 是张开**，和对面 meta.json 要的
 #: 「0=open、1=closed」正好相反，所以归一化时要取补。
 GRIPPER_TRAVEL_RAD = 2.76377472169236
@@ -241,7 +241,7 @@ def load_model(urdf, calibration: dict) -> tuple:
     """URDF 叠相机外参。`urdf` 收路径或已读好的 XML 文本（合并导出时每个 session
     一个模型，别为此重复读盘）。"""
     model = urdf_fk.RobotModel.from_urdf(urdf)
-    applied = model.apply_overrides(calibration.get('urdf_overrides'))
+    applied = model.apply_overrides(calibration.get('urdf_overrides') or {})
     return model, applied
 
 
@@ -688,7 +688,7 @@ def dataset_meta(sessions: list[Session], episodes: list, args, intrinsics: dict
                 'stored_raw': {
                     'open': GRIPPER_TRAVEL_RAD, 'closed': 0.0, 'unit': 'rad',
                     'source': 'left/right_eccentric_joint, gripper_limits in '
-                              'g1_motion_control/config/motion_control.yaml',
+                              'upper_vr/config/upper_body.yaml',
                 },
             },
         },
@@ -888,7 +888,7 @@ def main() -> int:
         return 1
     out = Path(args.out) if args.out else None
     writing = out is not None and not args.dry_run
-    if writing:
+    if out is not None and not args.dry_run:
         import h5py
         (out / 'data').mkdir(parents=True, exist_ok=True)
     records = []
@@ -915,7 +915,7 @@ def main() -> int:
             for line in _report(spaces, verbose=args.dry_run):
                 print(f'    {line}')
             records.append({'name': name, 'episode': episode, 'frames': grid.size})
-            if not writing:
+            if out is None or args.dry_run:
                 continue
 
             with h5py.File(out / 'data' / f'{name}.h5', 'w') as handle:
@@ -928,7 +928,7 @@ def main() -> int:
         if writing and not args.no_video:
             export_videos(session, plans, args, order, len(sessions))
 
-    if not writing:
+    if out is None or args.dry_run:
         return 0
     write_sidecars(out, sessions, all_episodes, args, intrinsics, records)
     print(f'写到 {out}')

@@ -42,6 +42,8 @@ def _load(name: str):
 
 
 def open_session(path):
+    if not (Path(path) / 'DONE').is_file():
+        raise ValueError('session 尚未封口，缺少 DONE')
     return _load('session_reader').Session(path)
 
 
@@ -57,15 +59,15 @@ def edits_path(root) -> Path:
 
 def describe(path) -> dict:
     """给面板用的 session 概要：整段范围 + 每条 episode 的时间窗。"""
-    sess = open_session(path)
     try:
-        t, _ = sess.table('motion_control_command')
+        from .replay import load_commands
+        sess = open_session(path)
+        t, _, _ = load_commands(sess)
     except (KeyError, OSError, ValueError) as exc:
-        # 勾选是可以不勾这一路的，所以“表不存在”是正常情况，不能报到堆栈上去
         return {'id': Path(path).name,
-                'error': f'读不出 motion_control_command（{exc}）—— 没录这一路就无法回放'}
+                'error': f'读不出 motion_control_command（{exc}）'}
     if t.size == 0:
-        return {'id': Path(path).name, 'error': '这次采集的 motion_control_command 是空的，放不了'}
+        return {'id': Path(path).name, 'error': 'motion_control_command 没有有效末端目标，放不了'}
     eps = []
     for e in sess.episodes(include_discarded=True):
         t0, t1 = float(e.get('t0', 0.0)), float(e.get('t1', 0.0))

@@ -170,6 +170,11 @@ const std::vector<std::shared_ptr<Kwr57DeviceNode>> & NativeBridgeNode::device_n
   return device_nodes_;
 }
 
+bool NativeBridgeNode::transport_failed() const
+{
+  return transport_failed_.load();
+}
+
 void NativeBridgeNode::receive_frame(int channel_id, const CanFrame & frame)
 {
   if (!frame.extended && !frame.remote) {

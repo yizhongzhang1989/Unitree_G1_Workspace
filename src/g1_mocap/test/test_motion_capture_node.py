@@ -1,6 +1,7 @@
 """Service handlers tested with a disabled headset server in an isolated ROS domain."""
 
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,11 +10,14 @@ import numpy as np
 import pytest
 import rclpy
 import yaml
+from aiohttp import web
+from rclpy.node import Node
 from rclpy.parameter import Parameter
 from std_srvs.srv import Trigger
 
 from g1_mocap.capture_stream import CaptureStream
 from g1_mocap.motion_capture_node import MotionCaptureNode
+from g1_mocap.retarget import RetargetCalibration
 from g1_mocap.skeleton import ControllerState
 from test_stream import payload
 
@@ -23,42 +27,45 @@ CONFIG = yaml.safe_load((ROOT / 'g1_mocap/config/mocap.yaml').read_text())['/moc
 
 
 @pytest.fixture
-def node(tmp_path):
+def node(tmp_path: Path, controlled_urdf: Path) -> Iterator[MotionCaptureNode]:
     parameters = dict(CONFIG)
     parameters.update(output_dir=str(tmp_path), model_confirmed=True,
-                      urdf_path=str(ROOT / 'unitree_g1_description/model/g1_description/g1_29dof_mode_15.urdf'))
+                      urdf_path=str(controlled_urdf))
     rclpy.init()
-    original = rclpy.node.Node.__init__
+    original = Node.__init__
 
     def initialize(instance, name):
         overrides = [Parameter(key, value=value) for key, value in parameters.items()]
         original(instance, name, parameter_overrides=overrides)
 
-    with patch.object(rclpy.node.Node, '__init__', initialize), \
+    with patch.object(Node, '__init__', initialize), \
             patch.object(CaptureStream, 'start'), patch.object(CaptureStream, 'stop'):
-        instance = MotionCaptureNode()
+        instance = None
         try:
+            instance = MotionCaptureNode()
             yield instance
         finally:
-            instance.destroy_node()
+            if instance is not None:
+                instance.destroy_node()
             rclpy.shutdown()
 
 
-def start_and_fill(node, *, root_offset=0.0):
-    node.stream._device = SimpleNamespace(closed=False)
-    node.stream._calibration = object()
+def start_and_fill(node: MotionCaptureNode, *, root_offset=0.0):
+    node.stream._device = web.WebSocketResponse()
+    node.stream._calibration = RetargetCalibration.__new__(RetargetCalibration)
     node.stream.last_valid_arrival = time.monotonic()
     response = node._start(None, Trigger.Response())
     assert response.success, response.message
     joints = np.asarray(CONFIG['default_joint_pos'])
     height = node.stream._retarget.stand_height + root_offset
     row = np.r_[[0, 0, height], [0, 0, 0, 1], joints]
+    assert node.stream.clip is not None
     for stamp in np.arange(271) / 90:
         node.stream.clip.append(stamp, row, id(node.stream.calibration))
     node.stream.last_valid_arrival = time.monotonic()
 
 
-def test_services_save_one_valid_take(node, tmp_path):
+def test_services_save_one_valid_take(node: MotionCaptureNode, tmp_path):
     start_and_fill(node)
     assert not node._start(None, Trigger.Response()).success
     response = node._stop(None, Trigger.Response())
@@ -69,7 +76,7 @@ def test_services_save_one_valid_take(node, tmp_path):
     assert not node._stop(None, Trigger.Response()).success
 
 
-def test_ground_penetration_is_saved_for_offline_refinement(node, tmp_path):
+def test_ground_penetration_is_saved_for_offline_refinement(node: MotionCaptureNode, tmp_path):
     start_and_fill(node, root_offset=-0.5)
     response = node._stop(None, Trigger.Response())
     assert response.success, response.message
@@ -78,7 +85,7 @@ def test_ground_penetration_is_saved_for_offline_refinement(node, tmp_path):
     assert np.loadtxt(files[0], delimiter=',').shape == (151, 36)
 
 
-def test_airborne_take_is_allowed_without_profile(node, tmp_path):
+def test_airborne_take_is_allowed_without_profile(node: MotionCaptureNode, tmp_path):
     assert not node.has_parameter('ground_profile')
     assert node.max_duration == 60.0
     start_and_fill(node, root_offset=0.5)
@@ -87,7 +94,7 @@ def test_airborne_take_is_allowed_without_profile(node, tmp_path):
     assert len(list((tmp_path / 'motions').glob('*.csv'))) == 1
 
 
-def test_discard_and_timeout_never_save(node, tmp_path):
+def test_discard_and_timeout_never_save(node: MotionCaptureNode, tmp_path):
     start_and_fill(node)
     assert node._discard(None, Trigger.Response()).success
     start_and_fill(node)
@@ -98,18 +105,18 @@ def test_discard_and_timeout_never_save(node, tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-def test_model_confirmation_required(node):
+def test_model_confirmation_required(node: MotionCaptureNode):
     node.model_confirmed = False
     response = node._start(None, Trigger.Response())
     assert not response.success and 'model' in response.message
 
 
-def test_shutdown_does_not_save(node, tmp_path):
+def test_shutdown_does_not_save(node: MotionCaptureNode, tmp_path):
     start_and_fill(node)
     assert not list(tmp_path.iterdir())
 
 
-def test_auto_stop_uses_completed_source(node, tmp_path):
+def test_auto_stop_uses_completed_source(node: MotionCaptureNode, tmp_path):
     start_and_fill(node)
     node.stream.complete = True
     node.stream.last_valid_arrival = time.monotonic() - 1
@@ -119,8 +126,9 @@ def test_auto_stop_uses_completed_source(node, tmp_path):
 
 
 @pytest.mark.parametrize('defect', ['invalid', 'orientation'])
-def test_real_ingest_recovery_cannot_save_failed_take(node, tmp_path, defect):
+def test_real_ingest_recovery_cannot_save_failed_take(node: MotionCaptureNode, tmp_path, defect):
     start_and_fill(node)
+    assert node.stream.clip is not None
     row = node.stream.clip.rows[-1]
     solved = SimpleNamespace(root_pos=row[:3], root_quat=row[[6, 3, 4, 5]],
                              joint_pos=row[7:])
@@ -141,9 +149,10 @@ def test_real_ingest_recovery_cannot_save_failed_take(node, tmp_path, defect):
 
 
 @pytest.mark.parametrize('button', ['a_x', 'b_y'])
-def test_stale_controller_command_does_not_touch_next_take(node, button):
+def test_stale_controller_command_does_not_touch_next_take(node: MotionCaptureNode, button):
     start_and_fill(node)
-    node._controllers((ControllerState(), ControllerState(connected=True, **{button: True})))
+    right = ControllerState(connected=True, a_x=button == 'a_x', b_y=button == 'b_y')
+    node._controllers((ControllerState(), right))
     node._discard(None, Trigger.Response())
     start_and_fill(node)
     current = node.stream.clip
@@ -151,7 +160,7 @@ def test_stale_controller_command_does_not_touch_next_take(node, button):
     assert node.stream.clip is current
 
 
-def test_queued_stop_cannot_restart_after_discard(node):
+def test_queued_stop_cannot_restart_after_discard(node: MotionCaptureNode):
     start_and_fill(node)
     node._controllers((ControllerState(), ControllerState(connected=True, a_x=True)))
     node._discard(None, Trigger.Response())
@@ -159,9 +168,10 @@ def test_queued_stop_cannot_restart_after_discard(node):
     assert node.stream.clip is None
 
 
-def test_stop_button_seals_take_before_reset_and_timer(node, tmp_path):
+def test_stop_button_seals_take_before_reset_and_timer(node: MotionCaptureNode, tmp_path):
     start_and_fill(node)
     clip = node.stream.clip
+    assert clip is not None
     rows_before = np.asarray(clip.rows).copy()
     row = rows_before[-1]
     solved = SimpleNamespace(root_pos=row[:3] + [10.0, 0.0, 0.0],
@@ -184,7 +194,7 @@ def test_stop_button_seals_take_before_reset_and_timer(node, tmp_path):
     np.testing.assert_allclose(np.loadtxt(saved[0], delimiter=',')[:, 0], 0.0)
 
 
-def test_reset_while_idle_does_not_report_recording_error(node):
+def test_reset_while_idle_does_not_report_recording_error(node: MotionCaptureNode):
     start_and_fill(node)
     node._discard(None, Trigger.Response())
     outcome = node.last_outcome
@@ -198,9 +208,10 @@ def test_reset_while_idle_does_not_report_recording_error(node):
     assert node.last_outcome == outcome
 
 
-def test_stop_button_does_not_clear_jump_during_recording(node, tmp_path):
+def test_stop_button_does_not_clear_jump_during_recording(node: MotionCaptureNode, tmp_path):
     start_and_fill(node)
     clip = node.stream.clip
+    assert clip is not None
     row = clip.rows[-1]
     solved = SimpleNamespace(root_pos=row[:3] + [10.0, 0.0, 0.0],
                              root_quat=row[[6, 3, 4, 5]], joint_pos=row[7:])

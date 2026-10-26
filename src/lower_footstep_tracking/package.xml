@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>lower_footstep_tracking</name>
+  <version>0.1.0</version>
+  <description>Independent G1 lower-body footstep tracking task.</description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>g1_motion_session</exec_depend>
+  <exec_depend>g1_rgmt_tracking_global</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>unitree_g1_ros2_control</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>pinocchio</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>unitree_g1_description</test_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+</package>

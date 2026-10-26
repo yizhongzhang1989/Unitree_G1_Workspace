@@ -121,7 +121,10 @@ def test_plugin_names_stay_recognisable_to_the_test_dashboard():
     # dashboard_node.classify_controller() 靠这个子串归类；改名会让页面
     # 把它当成 "other"，Engage 按钮和关节面板都会消失。
     plugins = ElementTree.parse(PACKAGE_ROOT / "controller_plugins.xml").getroot()
-    names = {element.get("name").lower() for element in plugins.findall("class")}
+    names = {
+        _required_attribute(element, "name").lower()
+        for element in plugins.findall("class")
+    }
 
     assert any("forward_command_controller" in name for name in names)
 
@@ -131,8 +134,8 @@ def test_arm_stiffness_default_is_owned_by_hardware_plugin():
 
     assert module._HARDWARE_ARGUMENTS["arm_stiffness_scale"] == ""
     description = module._robot_description(_context(module), PACKAGE_ROOT, "dual")
-    hardware = ElementTree.fromstring(description).find(
-        "./ros2_control/hardware")
+    hardware = _required_element(
+        ElementTree.fromstring(description), "./ros2_control/hardware")
     parameters = {
         parameter.get("name"): parameter.text
         for parameter in hardware.findall("param")
@@ -148,8 +151,8 @@ def test_arm_stiffness_explicit_override_reaches_hardware_plugin():
     context = _context(module, arm_stiffness_scale="2.5")
 
     description = module._robot_description(context, PACKAGE_ROOT, "dual")
-    hardware = ElementTree.fromstring(description).find(
-        "./ros2_control/hardware")
+    hardware = _required_element(
+        ElementTree.fromstring(description), "./ros2_control/hardware")
     parameters = {
         parameter.get("name"): parameter.text
         for parameter in hardware.findall("param")
@@ -163,8 +166,8 @@ def test_gripper_gains_only_come_from_gain_file():
     assert "gripper_kd" not in module._HARDWARE_ARGUMENTS
 
     description = module._robot_description(_context(module), PACKAGE_ROOT, "dual")
-    hardware = ElementTree.fromstring(description).find(
-        "./ros2_control/hardware")
+    hardware = _required_element(
+        ElementTree.fromstring(description), "./ros2_control/hardware")
     parameters = {
         parameter.get("name"): parameter.text
         for parameter in hardware.findall("param")
@@ -177,10 +180,10 @@ def test_control_launch_loads_fpc_inactive():
     module = _load_control_launch()
     nodes = module._control_nodes(_context(module))
     spawners = {
-        str(node._Node__arguments[0]): node._Node__arguments
+        str(_node_arguments(node)[0]): _node_arguments(node)
         for node in nodes
         if isinstance(node, Node) and
-        node._Node__node_executable == "spawner"
+        _node_executable(node) == "spawner"
     }
 
     def parameter_files(arguments):
@@ -207,7 +210,27 @@ _HEAD_JOINT = """<robot name="t">
 
 def _origin_of(root, joint):
     node = [j for j in root.iter("joint") if j.get("name") == joint][0]
-    return node.find("origin")
+    return _required_element(node, "origin")
+
+
+def _required_element(parent, path):
+    element = parent.find(path)
+    assert element is not None
+    return element
+
+
+def _required_attribute(element, name):
+    value = element.get(name)
+    assert value is not None
+    return value
+
+
+def _node_arguments(node):
+    return getattr(node, "_Node__arguments")
+
+
+def _node_executable(node):
+    return getattr(node, "_Node__node_executable")
 
 
 def test_calibrated_joint_origin_replaces_the_nominal_one():
@@ -256,9 +279,12 @@ def test_wrist_camera_link_is_injected_because_the_urdf_has_no_optical_frame():
     assert "camera_left" in {link.get("name") for link in root.iter("link")}
     joint = [j for j in root.iter("joint")][0]
     assert joint.get("type") == "fixed"
-    assert joint.find("parent").get("link") == "left_camera_mount_link"
-    assert joint.find("child").get("link") == "camera_left"
-    assert joint.find("origin").get("xyz") == "-0.0004 0.0401 0.0724"
+    assert _required_attribute(_required_element(joint, "parent"), "link") == \
+        "left_camera_mount_link"
+    assert _required_attribute(_required_element(joint, "child"), "link") == \
+        "camera_left"
+    assert _required_attribute(_required_element(joint, "origin"), "xyz") == \
+        "-0.0004 0.0401 0.0724"
 
 
 def test_injected_joint_is_skipped_when_its_parent_link_is_missing():

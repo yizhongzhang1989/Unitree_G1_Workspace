@@ -2,13 +2,13 @@
 
 发布三个 topic：
 
-``~/frame`` (``g1_mocap_msgs/MocapFrame``)
+``~/frame`` (``g1_mocap/msg/MocapFrame``)
     一帧的**全部**产物——关节角、根/锚位姿、key body 位置、人的原始骨架，
     加一个对齐好的时间戳。**跟随头显的 72/90 Hz，不做降采样**。
 ``~/joint_states`` (``sensor_msgs/JointState``)
     只有关节角。为生态兼容而留：``robot_state_publisher`` / rqt / plotjuggler
     直接就能用。要完整数据请订 ``~/frame``。
-``~/status`` (``g1_mocap_msgs/MocapStatus``)
+``~/status`` (``g1_mocap/msg/MocapStatus``)
     1 Hz 的链路状态，结构化，可直接用作看门狗判据。
 
 .. warning::
@@ -29,12 +29,13 @@ import time
 
 import numpy as np
 import rclpy
-from g1_mocap_msgs.msg import MocapControllers, MocapFrame, MocapStatus
+from g1_mocap.msg import MocapControllers, MocapFrame, MocapStatus
 from geometry_msgs.msg import Point, Pose
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
@@ -147,7 +148,7 @@ class MocapNode(Node):
         量级，每帧现算偏移足够。
         """
         offset = self.get_clock().now().nanoseconds * 1e-9 - time.monotonic()
-        return rclpy.time.Time(seconds=monotonic_t + offset).to_msg()
+        return Time(seconds=monotonic_t + offset).to_msg()
 
     def _publish_frame(self, stamped: float, raw: BodyFrame,
                        result: RetargetResult) -> None:

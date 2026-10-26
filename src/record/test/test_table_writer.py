@@ -3,7 +3,6 @@
 这些用例钉的是「Windows 上只有 numpy 也能读出来」这条底线，改实现时不许放宽。
 """
 
-import os
 import subprocess
 import sys
 import textwrap
@@ -111,8 +110,7 @@ def test_close_is_idempotent(tmp_path):
 def test_survives_sigkill(tmp_path):
     """录制中被 kill -9，已 flush 的部分必须仍是整行的整数倍、能完整读出。"""
     script = textwrap.dedent(f'''
-        import sys, time
-        sys.path.insert(0, {os.path.dirname(os.path.dirname(os.path.abspath(__file__)))!r})
+        import time
         from record.table_writer import TableWriter
         w = TableWriter({str(tmp_path / "k.bin")!r}, ["a", "b", "c"], chunk_rows=8)
         i = 0

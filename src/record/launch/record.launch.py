@@ -1,13 +1,14 @@
-"""采集节点 + 面板 + 数据管理。
+"""采集节点 + 面板 + 数据管理及内置回放。
 
-    ros2 launch record record.launch.py                 # 两个都起
+    ros2 launch record record.launch.py                 # 采集 + 数据管理与回放
     ros2 launch record record.launch.py data:=false     # 只起采集
 
-**两个节点分开进程但一起启动**：采集必须最简最稳，数据管理要读全盘、解码取帧、
+**录制与数据管理分开进程但一起启动**：采集必须最简最稳，数据管理要读全盘、解码取帧、
 删目录，负载画像完全不同，不能塞进同一个进程。但操作者不该记两条命令，所以放在
-一个 launch 里。互斥靠 `DONE` 文件天然完成 —— 没封口的 session 删不掉也放不了。
+一个 launch 里。DataManager 在自身进程内创建独立回放节点；未封口的数据不能删除或回放。
 
-前置：``all_data.launch.py`` 与 ``motion_control.launch.py`` 已起；头部相机建议用
+采集前置：``all_data.launch.py`` 与所需运动任务已起。真机回放前 FPC 必须已经 active，
+并由操作者停下其他目标源；回放不检查目标竞争。头部相机建议用
 ``color_format:=YUYV`` 起（省掉一次色彩转换，720p 编码从 98% 降到 60% 单核）::
 
     ros2 launch head_sensors head_camera.launch.py \\
@@ -40,13 +41,27 @@ _ARGS = {
 _DATA_ARGS = {
     'data': 'true',
     'data_port': '8221',
+    'replay_config': '',
 }
 
 
 def generate_launch_description() -> LaunchDescription:
+    arguments = [
+        DeclareLaunchArgument('output_root', default_value=_ARGS['output_root']),
+        DeclareLaunchArgument('dashboard_port', default_value=_ARGS['dashboard_port']),
+        DeclareLaunchArgument('head_image_topic', default_value=_ARGS['head_image_topic']),
+        DeclareLaunchArgument('head_camera_info_topic', default_value=_ARGS['head_camera_info_topic']),
+        DeclareLaunchArgument('head_fps', default_value=_ARGS['head_fps']),
+        DeclareLaunchArgument('wrist_left_url', default_value=_ARGS['wrist_left_url']),
+        DeclareLaunchArgument('wrist_right_url', default_value=_ARGS['wrist_right_url']),
+        DeclareLaunchArgument('round_items', default_value=_ARGS['round_items']),
+        DeclareLaunchArgument('round_moves', default_value=_ARGS['round_moves']),
+        DeclareLaunchArgument('data', default_value=_DATA_ARGS['data']),
+        DeclareLaunchArgument('data_port', default_value=_DATA_ARGS['data_port']),
+        DeclareLaunchArgument('replay_config', default_value=_DATA_ARGS['replay_config']),
+    ]
     return LaunchDescription([
-        *[DeclareLaunchArgument(k, default_value=v)
-          for k, v in {**_ARGS, **_DATA_ARGS}.items()],
+        *arguments,
         Node(
             package='record', executable='recorder', name='recorder',
             output='screen', emulate_tty=True,
@@ -61,6 +76,7 @@ def generate_launch_description() -> LaunchDescription:
                 'sessions_root': LaunchConfiguration('output_root'),
                 'dashboard_port': LaunchConfiguration('data_port'),
                 'peer_port': LaunchConfiguration('dashboard_port'),
+                'replay_config': LaunchConfiguration('replay_config'),
             }],
         ),
     ])

@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -22,17 +24,17 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
 import rclpy
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Float64MultiArray, String
+from rclpy.signals import SignalHandlerOptions
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from record.replay_node import ReplayTask
 
-from record.replay import Playback, load_commands, pose_from_status, ramp
 from record.replay_source import describe, edits_path, episode_label, open_session
 from record.webui import tree_entries
 
@@ -40,7 +42,7 @@ from record.webui import tree_entries
 # 否则下拉框里列的和 B 上真跑的会分叉。
 TOOLS_DIR = Path(get_package_share_directory('record')) / 'tools'
 sys.path.insert(0, str(TOOLS_DIR))
-import converters                                          # noqa: E402
+converters = importlib.import_module('converters')
 
 DEFAULT_ROOT = str(Path.home() / '.ros' / 'record' / 'sessions')
 DEFAULT_BUNDLES = str(Path.home() / '.ros' / 'record' / 'bundles')
@@ -97,44 +99,41 @@ class DataManager(Node):
     def __init__(self) -> None:
         super().__init__('data_manager')
         p = self.declare_parameter
-        self.root = Path(p('sessions_root', DEFAULT_ROOT).value)
+        self.root = Path(p('sessions_root', DEFAULT_ROOT).get_parameter_value().string_value)
         # 临时产物目录。**必须在 session 目录之外**：不然下一次 DONE 校验会把它
         # 当成多余，而且删 session 会连它一起删。下完就删，不长期占盘。
-        self._bundles = Path(p('bundles_root', DEFAULT_BUNDLES).value)
+        self._bundles = Path(p('bundles_root', DEFAULT_BUNDLES).get_parameter_value().string_value)
         self._bundles.mkdir(parents=True, exist_ok=True)
-        self.bundle_ttl_s = float(p('bundle_ttl_s', 1800.0).value)
-        self.urdf = str(p('urdf', '').value) or _share(
+        self.bundle_ttl_s = p('bundle_ttl_s', 1800.0).get_parameter_value().double_value
+        self.urdf = p('urdf', '').get_parameter_value().string_value or _share(
             'unitree_g1_description', 'model', 'final.urdf')
-        self.video_height = int(p('convert_video_height', 360).value)
-        self.render_fps = float(p('render_fps', 10.0).value)
-        self.render_width = int(p('render_width', 640).value)
-        self.rate_hz = float(p('rate_hz', 50.0).value)
-        self.ramp_s = float(p('ramp_s', 3.0).value)
-        self.cmd_topic = p('command_topic', '/motion_control/command').value
-        self.status_topic = p('status_topic', '/motion_control/status').value
-        self.peer_port = int(p('peer_port', 8220).value)
+        self.video_height = p('convert_video_height', 360).get_parameter_value().integer_value
+        self.render_fps = p('render_fps', 10.0).get_parameter_value().double_value
+        self.render_width = p('render_width', 640).get_parameter_value().integer_value
+        self.request_topic = p('request_topic', '/replay/request').get_parameter_value().string_value
+        self.status_topic = p('status_topic', '/replay/status').get_parameter_value().string_value
+        self.stop_service = p('stop_service', '/replay/stop').get_parameter_value().string_value
+        self.replay_config = p('replay_config', '').get_parameter_value().string_value
+        self.peer_port = p('peer_port', 8220).get_parameter_value().integer_value
         self._peer = (0.0, False)
 
         self._group = ReentrantCallbackGroup()
-        self.pub = self.create_publisher(Float64MultiArray, self.cmd_topic, _QOS)
+        self.pub = self.create_publisher(String, self.request_topic, _QOS)
         self.create_subscription(String, self.status_topic, self._on_status,
                                  _QOS, callback_group=self._group)
-        # 回放前要 engage，不应该逼着操作者先跑去控制台敲命令再回来点网页
-        ns = self.status_topic.rsplit('/', 1)[0] or '/motion_control'
         self._srv = {
-            name: self.create_client(Trigger, f'{ns}/{name}',
-                                     callback_group=self._group)
-            for name in ('engage', 'estop')
+            'replay_stop': self.create_client(Trigger, self.stop_service,
+                                              callback_group=self._group),
         }
 
         self._lock = threading.Lock()
         self._status: dict = {}
         self._status_t = 0.0
-        self._worker: threading.Thread | None = None
-        self._stop = threading.Event()
+        self._request_path = ''
         self.state = {'playing': False, 'session': '', 'label': '',
                       'phase': 'idle', 'progress': 0.0, 'elapsed': 0.0,
-                      'duration': 0.0, 'error': ''}
+                      'duration': 0.0, 'error': '',
+                      'session_path': '', 'grip': [], 'joint_positions': []}
         self._convert = {'running': False, 'session': '', 'sessions': [],
                          'format': '', 'token': '',
                          'log': [], 'error': '', 'done': False, 'bytes': 0,
@@ -299,9 +298,11 @@ class DataManager(Node):
         实测 1.88 ms，而它是被 1 Hz 轮询的 —— 占了这个端点全部 CPU 的四成。
         装没装依赖不会在节点跑着的时候变，真装了重启一下节点。
         """
-        if self._formats is None:
-            self._formats = converters.describe()
-        return self._formats
+        formats = self._formats
+        if formats is None:
+            formats = converters.describe()
+            self._formats = formats
+        return formats
 
     def tools_bundle(self) -> list:
         """B 上要的全套：`tools/` 整个 + 一份 URDF。
@@ -455,7 +456,9 @@ class DataManager(Node):
                                     stdin=subprocess.DEVNULL,
                                     env={**os.environ, 'PYTHONUNBUFFERED': '1'})
             self._proc = proc
-            for line in proc.stdout:
+            stdout = proc.stdout
+            assert stdout is not None
+            for line in stdout:
                 line = line.rstrip()
                 # 进度行不进日志：一秒好几条，会把真正要看的报告冲没
                 if line.startswith('@progress '):
@@ -623,27 +626,24 @@ class DataManager(Node):
                 self._render.update(done=False, bytes=0, error='')
         return {'session': session_id, 'label': label, 'bytes': size}
 
-    # ------------------------------------------------------------------ 控制层
+    # ------------------------------------------------------------------ 服务调用
 
     def trigger(self, name: str) -> dict:
-        """调控制层的 Trigger 服务。
-
-        急停不能等回放线程：先把发布停了再发服务，否则卡住的一拍还会接着发目标。
-        """
+        """在 HTTP 工作线程等待指定的 Trigger 服务，ROS executor 继续处理响应。"""
         client = self._srv.get(name)
         if client is None:
             raise ValueError(f'未知的服务 {name}')
-        if name == 'estop':
-            self._stop.set()
         if not client.wait_for_service(timeout_sec=2.0):
-            raise RuntimeError(f'{client.srv_name} 没人应答，控制栈起了吗')
+            raise RuntimeError(f'{client.srv_name} 没人应答，回放节点起了吗')
         future = client.call_async(Trigger.Request())
-        deadline = time.time() + 15.0
-        while not future.done() and time.time() < deadline:
+        deadline = time.monotonic() + 15.0
+        while not future.done() and time.monotonic() < deadline:
             time.sleep(0.02)
         if not future.done():
+            future.cancel()
             raise RuntimeError(f'{name} 超时未返回')
         res = future.result()
+        assert res is not None
         if not res.success:
             raise RuntimeError(res.message or f'{name} 被拒绝')
         return {'service': name, 'message': res.message}
@@ -652,24 +652,35 @@ class DataManager(Node):
 
     def _on_status(self, msg: String) -> None:
         try:
-            self._status = json.loads(msg.data)
-            self._status_t = time.time()
+            status = json.loads(msg.data)
+            if not isinstance(status, dict):
+                return
+            path = status.get('session_path', '')
+            if not isinstance(path, str):
+                return
+            with self._lock:
+                self._status = status
+                self._status_t = time.time()
+                if self._request_path and path != self._request_path:
+                    return
+                for key in ('phase', 'progress', 'elapsed', 'duration', 'label',
+                            'session_path', 'grip', 'joint_positions', 'error'):
+                    if key in status:
+                        self.state[key] = status[key]
+                self.state['playing'] = status.get('playing') is True
+                if path:
+                    self.state['session'] = Path(path).name
         except ValueError:
             pass
 
-    def _require_ready(self) -> np.ndarray:
+    def _require_ready(self) -> None:
         age = time.time() - self._status_t
         if not self._status or age > 1.0:
-            raise RuntimeError(f'{self.status_topic} 没有数据（{age:.1f}s 前），控制栈起了吗')
-        mode = self._status.get('arm_mode')
-        if mode != 'ik':
-            raise RuntimeError(f'arm_mode 是 {mode}，回放的是末端位姿，必须在 ik 模式下')
-        if not self._status.get('arms_live'):
-            raise RuntimeError('上肢还没被接管（arms_live 为假）—— 先按右下角「接管上肢」并等站立插值走完')
-        try:
-            return pose_from_status(self._status)
-        except ValueError as exc:
-            raise RuntimeError(f'读不出当前位姿：{exc}') from exc
+            raise RuntimeError(f'{self.status_topic} 没有数据（{age:.1f}s 前），回放节点起了吗')
+        if self._status.get('ready') is not True:
+            raise RuntimeError('回放节点尚未就绪，请等待模型和关节反馈就绪')
+        if self.pub.get_subscription_count() == 0:
+            raise RuntimeError(f'{self.request_topic} 没有回放接收者')
 
     def start(self, session_id: str, t0: float, t1: float,
               speed: float = 1.0, label: str = '') -> dict:
@@ -681,71 +692,32 @@ class DataManager(Node):
             d = self._dir(session_id)
             if not (d / 'DONE').is_file():
                 raise RuntimeError(f'{session_id} 没封口，不回放')
-            t, arm, grip = load_commands(open_session(d))
-            play = Playback(t, arm, grip, t0, t1, speed)
-            start_pose = self._require_ready()
+            t0, t1, speed = float(t0), float(t1), float(speed)
+            if not math.isfinite(t0) or not math.isfinite(t1) or t0 < 0.0 or t1 <= t0:
+                raise ValueError(f'回放区间 {t0}~{t1} 非法')
+            if not math.isfinite(speed) or not 0.05 <= speed <= 2.0:
+                raise ValueError(f'速度倍率 {speed} 超出 0.05~2.0')
+            self._require_ready()
+            request = {'session_path': str(d), 't0': t0, 't1': t1,
+                       'speed': speed, 'label': label}
+            self.pub.publish(String(data=json.dumps(request, allow_nan=False)))
 
-            self._stop.clear()
+            self._request_path = str(d)
             self.state.update(playing=True, session=session_id, label=label,
-                              phase='ramp', progress=0.0, elapsed=0.0,
-                              duration=round(play.duration, 2), error='')
-            self._worker = threading.Thread(target=self._run, daemon=True,
-                                            args=(play, start_pose))
-            self._worker.start()
+                              session_path=str(d), phase='loading', progress=0.0,
+                              elapsed=0.0, duration=0.0, error='',
+                              grip=[], joint_positions=[])
             return dict(self.state)
 
     def stop(self) -> dict:
-        self._stop.set()
-        w = self._worker
-        if w is not None:
-            w.join(timeout=5.0)
+        self.trigger('replay_stop')
         with self._lock:
             self.state.update(playing=False, phase='idle', progress=0.0, elapsed=0.0)
             return dict(self.state)
 
-    def _send(self, arm: np.ndarray, grip: np.ndarray) -> None:
-        self.pub.publish(Float64MultiArray(data=[float(x) for x in arm]))
-        self.pub.publish(Float64MultiArray(data=[float(x) for x in grip]))
-
-    def _run(self, play: Playback, start_pose: np.ndarray) -> None:
-        dt = 1.0 / self.rate_hz
-        try:
-            first_arm, first_grip, _ = play.sample(0.0)
-            targets = ramp(start_pose, first_arm, self.ramp_s, self.rate_hz)
-            for i, target in enumerate(targets):
-                if self._stop.is_set():
-                    return
-                self._send(target, first_grip)     # 缓入期间夹爪先到位，避免撞上再开
-                with self._lock:
-                    self.state['progress'] = (i + 1) / len(targets)
-                time.sleep(dt)
-
-            with self._lock:
-                self.state.update(phase='play', progress=0.0)
-            t0 = time.time()
-            while not self._stop.is_set():
-                elapsed = time.time() - t0
-                arm, grip, done = play.sample(elapsed)
-                self._send(arm, grip)
-                with self._lock:
-                    self.state['elapsed'] = elapsed
-                    self.state['progress'] = min(elapsed / max(play.duration, 1e-6), 1.0)
-                if done:
-                    break
-                time.sleep(dt)
-        except Exception as exc:                   # noqa: BLE001
-            self.get_logger().error(f'回放失败: {exc}')
-            with self._lock:
-                self.state['error'] = str(exc)
-        finally:
-            with self._lock:
-                self.state.update(playing=False, phase='idle')
-
     def status(self) -> dict:
         with self._lock:
             st = dict(self.state)
-        st['arm_mode'] = self._status.get('arm_mode', '')
-        st['arms_live'] = bool(self._status.get('arms_live'))
         st['status_age'] = round(time.time() - self._status_t, 1) if self._status_t else -1.0
         # 就绪与否走和真正开播同一套校验，否则面板说就绪、一点却报错
         try:
@@ -774,20 +746,29 @@ def _on_sigterm(signum, frame):   # noqa: ARG001
 
 
 def main() -> None:
-    rclpy.init()
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = DataManager()
+    replay = ReplayTask(config=node.replay_config, request_topic=node.request_topic,
+                        status_topic=node.status_topic, stop_service=node.stop_service,
+                        namespace=node.get_namespace())
     from record.data_dashboard import panel
-    dash = panel(node, port=int(node.declare_parameter('dashboard_port', 8221).value))
+    dash = panel(node, port=node.declare_parameter('dashboard_port', 8221)
+                 .get_parameter_value().integer_value)
     dash.start()
     executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
+    executor.add_node(replay)
     signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
-        node.stop()
         dash.stop()
-        node.destroy_node()
-        rclpy.try_shutdown()
+        try:
+            replay.stop()
+        finally:
+            executor.shutdown()
+            replay.destroy_node()
+            node.destroy_node()
+            rclpy.try_shutdown()

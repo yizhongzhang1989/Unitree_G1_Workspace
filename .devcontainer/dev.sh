@@ -13,9 +13,9 @@ COMPOSE=(docker compose -f "$HERE/docker-compose.yml")
 
 if [ "${1:-}" = "build" ]; then
     shift
-    # 本机直连不到镜像站，构建期必须借宿主的 SOCKS 代理。这些是 docker
+    # 本机直连不到镜像站，构建期必须借宿主的 HTTP 代理。这些是 docker
     # build 的预定义 ARG，只在构建期生效，不会写进镜像。
-    # 不传也能构建：docker-compose.yml 里给了 socks5h://127.0.0.1:1080 的默认值，
+    # 不传也能构建：docker-compose.yml 里给了 http://127.0.0.1:1080 的默认值，
     # 否则 VS Code 的 "Rebuild in Container" 不经过本脚本，就会无代理构建失败。
     export G1_BUILD_PROXY="${G1_BUILD_PROXY:-${ALL_PROXY:-${all_proxy:-}}}"
     export G1_USER_NAME="$(id -un)"

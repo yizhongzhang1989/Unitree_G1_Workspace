@@ -4,7 +4,7 @@
 ``g1_mocap`` 的 ``/mocap/controllers``，把「双手同时按 B/Y」翻译成 ``~/engage`` /
 ``~/start`` / ``~/estop`` 三个服务调用。
 
-按键规则和 ``g1_motion_control`` 的 ``vr_teleop`` 一模一样，是那边踩出来的：
+按键规则和 ``upper_vr`` 的 ``vr_teleop`` 一模一样，是那边踩出来的：
 
 * ``engage`` / ``start`` **松手才走**，``running``（这一步本来就是急停）**按下即走**。
   都按下即走的话，从站立长按会先把策略拉起来、再急停，中间那一秒机器人已经在跑了。
@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import rclpy
-from g1_mocap_msgs.msg import MocapControllers
+from g1_mocap.msg import MocapControllers
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String

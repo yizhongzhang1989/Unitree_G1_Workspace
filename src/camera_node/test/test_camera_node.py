@@ -368,11 +368,13 @@ class CameraInfoTest(unittest.TestCase):
     def test_exact_profile_is_used(self) -> None:
         entry = load_camera_info(self.path.name, 'camera_left', 1920, 1080)
 
+        assert entry is not None
         self.assertEqual(entry['camera_matrix'][0], 1500.0)
 
     def test_scale_relation_converts(self) -> None:
         entry = load_camera_info(self.path.name, 'camera_left', 640, 360)
 
+        assert entry is not None
         self.assertAlmostEqual(entry['camera_matrix'][0], 500.0)
         self.assertAlmostEqual(entry['camera_matrix'][2], 320.0)
         self.assertAlmostEqual(entry['camera_matrix'][8], 1.0)
@@ -390,6 +392,7 @@ class CameraInfoTest(unittest.TestCase):
     def test_message_fills_k_r_p(self) -> None:
         entry = load_camera_info(self.path.name, 'camera_left', 1920, 1080)
 
+        assert entry is not None
         message = camera_info_message(entry, 'camera_left')
 
         self.assertEqual(message.header.frame_id, 'camera_left')
@@ -400,7 +403,7 @@ class CameraInfoTest(unittest.TestCase):
         self.assertEqual(len(message.p), 12)
 
     def test_missing_entry_publishes_nothing(self) -> None:
-        node = _node(**{'calib_file': self.path.name})
+        node = _node(calib_file=self.path.name)
         node._load_camera_info((800, 600))
         node._on_frame(b'\x00' * (2 * 2 * 3), 2, 2)
 
@@ -408,7 +411,7 @@ class CameraInfoTest(unittest.TestCase):
         node._info_publisher.publish.assert_not_called()
 
     def test_info_rides_along_with_the_image(self) -> None:
-        node = _node(subscribers=1, **{'calib_file': self.path.name})
+        node = _node(subscribers=1, calib_file=self.path.name)
         node._publish_frames = True
         node._load_camera_info((1920, 1080))
         node._on_frame(b'\x00' * (2 * 2 * 3), 2, 2)

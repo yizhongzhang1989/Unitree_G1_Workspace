@@ -25,6 +25,7 @@ public:
   ~NativeBridgeNode() override;
 
   const std::vector<std::shared_ptr<Kwr57DeviceNode>> & device_nodes() const;
+  bool transport_failed() const;
   void shutdown_transport();
 
 private:

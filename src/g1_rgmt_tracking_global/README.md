@@ -1,8 +1,6 @@
 # g1_rgmt_tracking_global
 
-G1 全身动作跟踪层：50 Hz 输出 31 轴关节位置目标。
-29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动，2 个夹爪偏心轴由 VR
-手柄 trigger 控制。
+G1 全身动作跟踪层：50 Hz 输出 31 轴关节位置目标。29 轴（12 腿 + 3 腰 + 14 臂）由 RGMT 策略驱动，2 个夹爪偏心轴由 VR 手柄 trigger 控制。
 
 参考动作二选一，`reference_source`：
 
@@ -11,8 +9,7 @@ G1 全身动作跟踪层：50 Hz 输出 31 轴关节位置目标。
 | `motion`（默认） | `config/motions` 下录好的 NPZ | 放完回 IDLE |
 | `mocap` | PICO 全身动捕实时流（[`g1_mocap`](../g1_mocap/README.md)） | 没有，只能 estop |
 
-**不要和 `g1_motion_control` 或 `g1_gmt_tracking` 同时启动**——三者都往
-`/forward_position_controller/commands` 写，同时跑就是多个策略抢同一组电机。
+**本包独占 31 轴关节目标与 FPC 生命周期。** 不与 `g1_motion_session`、`lower_velocity_tracking`、`lower_footstep_tracking`、`upper_vr`、`upper_vla`、`upper_float`、record 回放任务或 `g1_gmt_tracking` 同时启动；注册掩码只协调 session 内的任务，不能隔离独立全身 tracking 发布器。
 
 ## 为什么叫 `_global`
 
@@ -161,7 +158,7 @@ ros2 launch g1_rgmt_tracking_global rgmt_tracking.launch.py odometry_mode:=odom_
 | `/g1_localization/torso_pose` | 10 Hz | 第 3 步 localization_node |
 | `/dog_odom` | 500 Hz | 机器人自带里程计 |
 
-状态机与 `g1_motion_control` 一致：
+操作入口沿用 engage、start 与 estop；本包状态转换如下：
 
 ```
 IDLE --engage--> (激活 FPC) --start--> STAND --(插值到位)--> RUNNING
@@ -257,8 +254,7 @@ ros2 run g1_rgmt_tracking_global mocap_teleop
 
 ### 手柄推状态机（`mocap_teleop`）
 
-**双手同时按 B/Y** 走一步：`idle`/`estop` → 站立 → 启动策略 → 急停。规则和
-`g1_motion_control` 的 `vr_teleop` 完全一致，是那边踩出来的：
+**双手同时按 B/Y** 走一步：`idle`/`estop` → 站立 → 启动策略 → 急停。规则与 `upper_vr` 的 `vr_teleop` 一致：
 
 - 站立 / 启动策略 **松手才走**，急停那一步 **按下即走**。都按下即走的话，从站立长按会先把
   策略拉起来、再急停，**中间那一秒机器人已经在跑了**。

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
+from aiohttp import web
 
 from .motion_capture import FPS, MotionClip, RejectedMotion
-from .skeleton import SMPL_JOINTS, STATUS_MESSAGES, STATUS_VALID, ClockAligner, parse_body
+from .retarget import RetargetCalibration, Retargeter, RetargetResult
+from .skeleton import SMPL_JOINTS, STATUS_MESSAGES, STATUS_VALID, BodyFrame, ClockAligner, parse_body
 from .stream import MocapStream
 
 
@@ -18,7 +22,7 @@ from .stream import MocapStream
 class SourceClip:
     """Unscaled PICO skeleton samples needed by offline retargeters."""
 
-    calibration: object
+    calibration: RetargetCalibration
     landmark_iterations: int = 2
     timestamps: list[float] = field(default_factory=list)
     sequences: list[int] = field(default_factory=list)
@@ -27,7 +31,7 @@ class SourceClip:
     statuses: list[int] = field(default_factory=list)
     messages: list[int] = field(default_factory=list)
 
-    def append(self, frame):
+    def append(self, frame: BodyFrame) -> None:
         if frame.rotations is None:
             raise ValueError('Source frame has no joint orientations')
         self.timestamps.append(float(frame.t))
@@ -37,7 +41,7 @@ class SourceClip:
         self.statuses.append(int(frame.status))
         self.messages.append(int(frame.message))
 
-    def save(self, path):
+    def save(self, path: str | Path) -> None:
         if not self.timestamps:
             raise ValueError('Source trajectory is empty')
         path = Path(path)
@@ -80,18 +84,19 @@ class SourceClip:
 
 
 class CaptureStream(MocapStream):
-    def __init__(self, retargeter, *, limits, landmark_iterations=2, **kwargs):
+    def __init__(self, retargeter: Retargeter, *,
+                 limits: tuple[npt.ArrayLike, npt.ArrayLike], landmark_iterations=2, **kwargs):
         super().__init__(retargeter, **kwargs)
         self.capture_lock = threading.RLock()
-        self.clip = None
-        self.source_clip = None
+        self.clip: MotionClip | None = None
+        self.source_clip: SourceClip | None = None
         self.limits = limits
         self.landmark_iterations = int(landmark_iterations)
         self.last_valid_arrival = float('-inf')
-        self.last_seq = None
-        self.last_source_t = None
-        self.last_device = None
-        self.on_preview = None
+        self.last_seq: int | None = None
+        self.last_source_t: float | None = None
+        self.last_device: web.WebSocketResponse | None = None
+        self.on_preview: Callable[[float, BodyFrame, RetargetResult], None] | None = None
         self.complete = False
         self.duration_limit = 60.0
         self.on_frame = self._capture_frame
@@ -109,11 +114,11 @@ class CaptureStream(MocapStream):
                 self._last_stamp = float('-inf')
             super()._note(**fields)
 
-    def _require_connection(self):
+    def _require_connection(self) -> None:
         if self._device is None or self._device.closed:
             raise RuntimeError('Headset must be connected')
 
-    def calibrate(self, *, min_frames=20):
+    def calibrate(self, *, min_frames: int = 20) -> RetargetCalibration:
         with self.capture_lock:
             if self.clip is not None:
                 self.clip.reject('Calibration attempted during recording')
@@ -137,41 +142,43 @@ class CaptureStream(MocapStream):
                     f'fresh-VALID={not stale}')
             return super().calibrate(min_frames=min_frames)
 
-    def begin(self, *, duration_limit=60.0, **quality):
+    def begin(self, *, duration_limit: float = 60.0, **quality: float) -> None:
         with self.capture_lock:
             if self.clip is not None:
                 raise RuntimeError('A take is already active; stop/discard it first')
             self._require_connection()
-            if not self.calibrated or time.monotonic() - self.last_valid_arrival > 0.2:
+            calibration = self.calibration
+            if calibration is None or time.monotonic() - self.last_valid_arrival > 0.2:
                 raise RuntimeError('Calibrate with fresh VALID tracking before recording')
             if not 2 <= duration_limit <= 60:
                 raise ValueError('Duration limit must be between 2 and 60 seconds')
             self.clip = MotionClip(*self.limits, **quality)
             self.source_clip = SourceClip(
-                self.calibration, landmark_iterations=self.landmark_iterations)
+                calibration, landmark_iterations=self.landmark_iterations)
             self.duration_limit = float(duration_limit)
             self.complete = False
             self.last_seq = None
             self.last_source_t = None
             self.last_device = self._device
 
-    def finish(self):
+    def finish(self) -> MotionClip:
         with self.capture_lock:
             if self.clip is None:
                 raise RuntimeError('No active take')
             clip, source = self.clip, self.source_clip
             self.clip = self.source_clip = None
+            assert source is not None
             clip.source = source if source.timestamps else None
             return clip
 
-    def seal(self):
+    def seal(self) -> None:
         with self.capture_lock:
             if self.clip is not None and not self.complete:
                 if time.monotonic() - self.last_valid_arrival > self.clip.max_gap:
                     self.clip.reject('Tracking lost before stop')
                 self.complete = True
 
-    def _capture_frame(self, stamped, raw, result):
+    def _capture_frame(self, stamped: float, raw: BodyFrame, result: RetargetResult) -> None:
         if self.clip is not None and not self.complete:
             if self.clip.stamps and raw.t - self.clip.stamps[0] > self.duration_limit:
                 interval = raw.t - self.clip.stamps[-1]
@@ -184,6 +191,7 @@ class CaptureStream(MocapStream):
             if not self.complete:
                 try:
                     self.clip.append(raw.t, row, id(self.calibration))
+                    assert self.source_clip is not None
                     self.source_clip.append(raw)
                     endpoint = min(self.duration_limit, 60.0 - 1.0 / FPS)
                     self.complete = self.clip.stamps[-1] - self.clip.stamps[0] >= endpoint

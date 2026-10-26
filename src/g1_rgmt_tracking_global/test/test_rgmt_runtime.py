@@ -44,6 +44,12 @@ OFFSETS = np.array([-15, -13, -11, -9, -8, -6, -5, -3, -2, -1, 0,
                     1, 2, 3, 5, 6, 8, 9, 11, 13, 15])
 
 
+def _torso_position(fuser: OdometryFuser) -> np.ndarray:
+    position = fuser.torso_position()
+    assert position is not None
+    return position
+
+
 def test_trigger_maps_open_to_closed_and_clamps():
     opened, closed = 2.76377472169236, 0.0
     assert _gripper_from_trigger(0.0, opened, closed) == pytest.approx(opened)
@@ -201,7 +207,7 @@ def test_torso_fk_matches_model_geometry():
 def test_odom_only_passes_through():
     fuser = OdometryFuser(mode='odom_only')
     fuser.push_odom(1.0, [1.0, 2.0, 0.8], [1.0, 0.0, 0.0, 0.0])
-    assert np.allclose(fuser.torso_position(), [1.0, 2.0, 0.8])
+    assert np.allclose(_torso_position(fuser), [1.0, 2.0, 0.8])
     assert fuser.stale(1.05) is None
     assert fuser.stale(2.0) is not None
 
@@ -212,7 +218,7 @@ def test_fused_first_lidar_frame_snaps_to_lidar():
     assert fuser.stale(0.0) is not None  # 没有里程计就该判超时
     fuser.push_odom(1.0, [0.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
     fuser.push_lidar(1.0, [5.0, 3.0, 0.8], [1.0, 0.0, 0.0, 0.0])
-    assert np.allclose(fuser.torso_position(), [5.0, 3.0, 0.8], atol=1e-9)
+    assert np.allclose(_torso_position(fuser), [5.0, 3.0, 0.8], atol=1e-9)
 
 
 def test_reset_lidar_origin_discards_old_correction_but_keeps_odom():
@@ -230,7 +236,7 @@ def test_reset_lidar_origin_discards_old_correction_but_keeps_odom():
     assert not fuser.push_lidar(1.0, [99.0, 99.0, 0.0], identity)
     fuser.push_odom(1.1, [1.0, 2.0, 0.8], identity)
     fuser.push_lidar(1.1, [0.0, 0.0, 0.0], identity)
-    assert np.allclose(fuser.torso_position(), [0.0, 0.0, 0.8], atol=1e-9)
+    assert np.allclose(_torso_position(fuser), [0.0, 0.0, 0.8], atol=1e-9)
 
 
 def test_fused_preserves_physical_height_when_lidar_origin_is_at_torso():
@@ -238,7 +244,7 @@ def test_fused_preserves_physical_height_when_lidar_origin_is_at_torso():
     fuser = OdometryFuser(mode='fused')
     fuser.push_odom(1.0, [1.0, 2.0, 0.72], [1.0, 0.0, 0.0, 0.0])
     fuser.push_lidar(1.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0])
-    assert np.allclose(fuser.torso_position(), [0.0, 0.0, 0.72], atol=1e-9)
+    assert np.allclose(_torso_position(fuser), [0.0, 0.0, 0.72], atol=1e-9)
     correction, _ = fuser.correction
     assert correction[2] == 0.0
 
@@ -251,7 +257,7 @@ def test_fused_rotates_orientation_into_lidar_world():
     fuser.push_odom(1.0, [1.0, 0.0, 0.72], identity)
     fuser.push_lidar(1.0, [0.0, 1.0, 0.0], lidar_yaw)
 
-    assert np.allclose(fuser.torso_position(), [0.0, 1.0, 0.72], atol=1e-9)
+    assert np.allclose(_torso_position(fuser), [0.0, 1.0, 0.72], atol=1e-9)
     assert np.allclose(fuser.orientation_in_world(identity), lidar_yaw, atol=1e-9)
 
 
@@ -278,7 +284,8 @@ def test_fused_pairs_lidar_with_matching_odom_stamp():
     corr, _ = fuser.correction
     assert np.allclose(corr, 0.0, atol=1e-9)
     # 若错误地和最新 odom(x=0.038) 配对，修正量会是 -0.028
-    assert np.allclose(fuser.torso_position()[0], 0.038, atol=1e-9)
+    assert np.allclose(_torso_position(fuser)[0], 0.038, atol=1e-9)
+
 
 def test_unpaired_lidar_does_not_refresh_the_health_timestamp():
     fuser = OdometryFuser(mode='fused', lidar_timeout_s=0.5)
@@ -305,10 +312,10 @@ def test_fused_yaw_update_preserves_stationary_position(origin, yaw_step):
     odom_position = np.asarray(origin) + [0.0, 0.0, 0.8]
     fuser.push_odom(1.0, odom_position, identity)
     assert fuser.push_lidar(1.0, [0.2, -0.4, 0.0], identity)
-    before = fuser.torso_position().copy()
+    before = _torso_position(fuser).copy()
     fuser.push_odom(1.1, odom_position, identity)
     assert fuser.push_lidar(1.1, [0.2, -0.4, 0.0], quat_from_axis('z', yaw_step))
-    np.testing.assert_allclose(fuser.torso_position(), before, atol=1e-12)
+    np.testing.assert_allclose(_torso_position(fuser), before, atol=1e-12)
     alpha = 1.0 - np.exp(-0.1 / 2.0)
     np.testing.assert_allclose(fuser.orientation_in_world(identity),
                                quat_from_axis('z', alpha * yaw_step), atol=1e-12)
@@ -334,7 +341,7 @@ def test_fused_updates_are_invariant_to_odom_coordinates(coordinate_yaw):
         lidar_orientation = quat_from_axis('z', 0.04 * step)
         assert original.push_lidar(stamp, lidar_position, lidar_orientation)
         assert shifted.push_lidar(stamp, lidar_position, lidar_orientation)
-        np.testing.assert_allclose(original.torso_position(), shifted.torso_position(), atol=1e-11)
+        np.testing.assert_allclose(_torso_position(original), _torso_position(shifted), atol=1e-11)
         np.testing.assert_allclose(original.orientation_in_world(orientation),
                                    shifted.orientation_in_world(quat_mul(coordinate_quat, orientation)),
                                    atol=1e-11)
@@ -351,7 +358,7 @@ def test_fused_limits_current_position_update_with_delayed_yaw(lidar_error):
     latest = paired + [0.02, 0.01, 0.02]
     fuser.push_odom(1.1, paired, identity)
     fuser.push_odom(1.13, latest, identity)
-    before = fuser.torso_position().copy()
+    before = _torso_position(fuser).copy()
     lidar_quat = quat_from_axis('z', 0.3)
     lidar_position = np.array([0.1 + lidar_error, 0.0, 0.0])
     desired_now = lidar_position + quat_apply(lidar_quat, latest - paired)
@@ -360,13 +367,13 @@ def test_fused_limits_current_position_update_with_delayed_yaw(lidar_error):
     alpha = 1.0 - np.exp(-0.1 / 2.0)
     expected_step = alpha * error * min(1.0, 0.05 / np.linalg.norm(error))
     assert fuser.push_lidar(1.1, lidar_position, lidar_quat)
-    np.testing.assert_allclose(fuser.torso_position(), before + expected_step, atol=1e-12)
-    assert np.linalg.norm(fuser.torso_position() - before) <= alpha * 0.05 + 1e-12
+    np.testing.assert_allclose(_torso_position(fuser), before + expected_step, atol=1e-12)
+    assert np.linalg.norm(_torso_position(fuser) - before) <= alpha * 0.05 + 1e-12
     assert fuser.correction[0][2] == 0.0
-    after = fuser.torso_position().copy()
+    after = _torso_position(fuser).copy()
     fast_step = np.array([0.02, -0.01, 0.003])
     fuser.push_odom(1.15, latest + fast_step, identity)
-    np.testing.assert_allclose(fuser.torso_position() - after,
+    np.testing.assert_allclose(_torso_position(fuser) - after,
                                quat_apply(quat_from_axis('z', alpha * 0.3), fast_step), atol=1e-12)
 
 
@@ -374,7 +381,7 @@ def test_odom_stamp_regression_clears_buffer():
     fuser = OdometryFuser(mode='odom_only')
     fuser.push_odom(10.0, [1.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
     fuser.push_odom(1.0, [0.0, 0.0, 0.8], [1.0, 0.0, 0.0, 0.0])
-    assert np.allclose(fuser.torso_position(), [0.0, 0.0, 0.8])
+    assert np.allclose(_torso_position(fuser), [0.0, 0.0, 0.8])
 
 
 def _policy(max_offset: float = 0.3):
@@ -398,17 +405,15 @@ def test_contract_matches_onnx_graph():
     assert np.allclose(spec.window_offsets, OFFSETS)
 
 
-def test_zero_action_tracks_the_current_reference():
+def test_zero_action_tracks_the_current_reference(monkeypatch):
     """训练使用 q_target=q_ref(t)+scale*action；部署不能把残差叠到默认站姿"""
     policy = _policy()
     clip, data = _aligned_clip()
 
-    class ZeroActionSession:
-        @staticmethod
-        def run(_outputs, _feed):
-            return [np.zeros((1, len(policy.spec.action_joint_names)), dtype=np.float32)]
+    def zero_action(_outputs, _feed):
+        return [np.zeros((1, len(policy.spec.action_joint_names)), dtype=np.float32)]
 
-    policy._session = ZeroActionSession()
+    monkeypatch.setattr(policy._session, 'run', zero_action)
     target = policy.step(
         joint_pos=policy.spec.default_joint_pos,
         joint_vel=np.zeros(len(policy.spec.obs_joint_names)),

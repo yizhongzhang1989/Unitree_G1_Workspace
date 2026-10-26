@@ -19,7 +19,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Sequence, Tuple
+from typing import Iterable, Sequence, Tuple, TypedDict
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -38,7 +38,57 @@ MINIMUM_SAMPLES = 3
 MINIMUM_ORIENTATION_SAMPLES = 4
 
 
-def _skew(vector: ArrayLike) -> np.ndarray:
+class FtCalibrationDocument(TypedDict):
+    force_bias: list[float]
+    torque_bias: list[float]
+    tool_mass: float
+    tool_com: list[float]
+    tool_first_moment: list[float]
+    rotation: list[float]
+    polarity: float
+    measurement_origin: list[float]
+
+
+class OrientationCoverage(TypedDict):
+    count: int
+    singular_values: list[float]
+    spread: float
+
+
+class FreeForceFit(TypedDict):
+    polarity: float
+    rotation: np.ndarray
+    mass: float
+    gains: np.ndarray
+    bias: np.ndarray
+    residual: np.ndarray
+    probability: float
+    significant: bool
+
+
+class FtFitStatistics(TypedDict):
+    sample_count: int
+    coverage: OrientationCoverage
+    force_residual_rms: float
+    torque_residual_rms: float
+    force_condition: float
+    torque_condition: float
+    inlier_fraction: float
+    first_moment: list[float]
+    measurement_origin: list[float]
+    orientation_estimated: bool
+    orientation_probability: float
+
+
+class FtDiagnostics(FtFitStatistics, total=False):
+    free_force_residual_rms: float
+    free_mass: float
+    principal_gains: list[float]
+    shape_error: float
+    misalignment_deg: float
+
+
+def _skew(vector: Iterable[float]) -> np.ndarray:
     x, y, z = (float(value) for value in vector)
     return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
 
@@ -109,31 +159,31 @@ class FtCalibration:
     def bias(self) -> np.ndarray:
         return np.concatenate([self.force_bias, self.torque_bias])
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> FtCalibrationDocument:
         """展平成 ROS 2 参数文件能直接吃的标量与数组。"""
         return {
-            "force_bias": [float(value) for value in self.force_bias],
-            "torque_bias": [float(value) for value in self.torque_bias],
+            "force_bias": self.force_bias.tolist(),
+            "torque_bias": self.torque_bias.tolist(),
             "tool_mass": float(self.mass),
-            "tool_com": [float(value) for value in self.com],
-            "tool_first_moment": [float(value) for value in self.first_moment],
-            "rotation": [float(value) for value in self.rotation.ravel()],
+            "tool_com": self.com.tolist(),
+            "tool_first_moment": self.first_moment.tolist(),
+            "rotation": self.rotation.ravel().tolist(),
             "polarity": float(self.polarity),
-            "measurement_origin": [float(value) for value in self.origin],
+            "measurement_origin": self.origin.tolist(),
         }
 
     @classmethod
-    def from_dict(cls, document: Dict[str, object]) -> "FtCalibration":
+    def from_dict(cls, document: FtCalibrationDocument) -> "FtCalibration":
         return cls(
-            force_bias=document["force_bias"],
-            torque_bias=document["torque_bias"],
+            force_bias=np.asarray(document["force_bias"], dtype=float),
+            torque_bias=np.asarray(document["torque_bias"], dtype=float),
             mass=document["tool_mass"],
-            com=document["tool_com"],
+            com=np.asarray(document["tool_com"], dtype=float),
             rotation=np.asarray(
                 document.get("rotation", np.eye(3).ravel()),
-                dtype=float).reshape(3, 3),
+                dtype=float),
             polarity=document.get("polarity", 1.0),
-            origin=document.get("measurement_origin", np.zeros(3)),
+            origin=np.asarray(document.get("measurement_origin", np.zeros(3)), dtype=float),
         )
 
 
@@ -192,7 +242,7 @@ def rezero(raw: ArrayLike, calibration: FtCalibration,
         polarity=calibration.polarity, origin=calibration.origin)
 
 
-def orientation_coverage(gravities: Sequence[ArrayLike]) -> Dict[str, object]:
+def orientation_coverage(gravities: Sequence[ArrayLike] | np.ndarray) -> OrientationCoverage:
     """朝向覆盖度：重力单位向量矩阵的奇异值决定各轴能不能分开。
 
     三个奇异值都明显非零时，零偏才和质量分得开、质心的三个分量才都可辨识。
@@ -217,7 +267,7 @@ def orientation_coverage(gravities: Sequence[ArrayLike]) -> Dict[str, object]:
 @dataclass(frozen=True)
 class FtSolution:
     calibration: FtCalibration
-    diagnostics: Dict[str, object]
+    diagnostics: FtDiagnostics
 
 
 def _fit(design: np.ndarray, observed: np.ndarray, blocks: np.ndarray,
@@ -253,7 +303,7 @@ def _polar_decomposition(
 def _free_force_fit(gravity: np.ndarray, forces: np.ndarray, blocks: np.ndarray,
                     identity: np.ndarray, robust: bool,
                     constrained_residual: np.ndarray, constrained_columns: int,
-                    significance: float) -> Dict[str, object]:
+                    significance: float) -> FreeForceFit:
     """解完整的 3x3 力标定矩阵，并对受约束模型做 F 检验。"""
     design = np.hstack([
         np.vstack([np.kron(np.eye(3), vector.reshape(1, 3))
@@ -319,13 +369,13 @@ def solve_ft_calibration(
     constrained, _, constrained_residual = _fit(
         constrained_design, forces, blocks, robust)
 
-    free: Dict[str, object] = {}
+    free: FreeForceFit | None = None
     if estimate_orientation and count >= MINIMUM_ORIENTATION_SAMPLES:
         free = _free_force_fit(
             gravity, forces, blocks, identity, robust, constrained_residual,
             constrained_design.shape[1], significance)
 
-    if free.get("significant"):
+    if free is not None and free["significant"]:
         polarity = free["polarity"]
         rotation = free["rotation"]
         mass = free["mass"]
@@ -357,7 +407,7 @@ def solve_ft_calibration(
         polarity=polarity,
         origin=reference,
     )
-    diagnostics = {
+    diagnostics: FtDiagnostics = {
         "sample_count": count,
         "coverage": orientation_coverage(gravity),
         "force_residual_rms": float(np.sqrt(np.mean(force_residual ** 2))),
@@ -367,10 +417,10 @@ def solve_ft_calibration(
         "inlier_fraction": inlier_fraction,
         "first_moment": [float(value) for value in first_moment],
         "measurement_origin": [float(value) for value in reference],
-        "orientation_estimated": bool(free.get("significant", False)),
-        "orientation_probability": float(free.get("probability", 1.0)),
+        "orientation_estimated": free is not None and free["significant"],
+        "orientation_probability": free["probability"] if free is not None else 1.0,
     }
-    if free:
+    if free is not None:
         diagnostics.update({
             "free_force_residual_rms": float(
                 np.sqrt(np.mean(free["residual"] ** 2))),
