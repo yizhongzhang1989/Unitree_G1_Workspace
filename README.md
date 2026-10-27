@@ -216,6 +216,8 @@ VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY
 | 参数 | 为什么 |
 |---|---|
 | `privileged: true` + `/dev:/dev` | USB（CANalyst-II）和相机设备直通 |
+| `runtime: nvidia` | 使用宿主已注册的 NVIDIA runtime，注入 Jetson CUDA 驱动库；只有设备节点不够 |
+| `NVIDIA_VISIBLE_DEVICES=all` / `NVIDIA_DRIVER_CAPABILITIES=compute,utility` | 请求 GPU 计算访问，不改变 CPU 版 ONNX Runtime |
 | `network_mode: host` | 与机器人同一网络栈，DDS 能在 `eth0` 上发现 `/lowstate` |
 | `ipc: host` | DDS 共享内存 |
 | `ulimits: rtprio 99 / memlock -1` | 让 `ros2_control_node` 拿到 SCHED_FIFO 和 mlockall |
@@ -225,6 +227,55 @@ VS Code 的 "Reopen in Container" 不经过 `dev.sh`，拿不到 `G1_BUILD_PROXY
 | 镜像内用户与宿主同 UID/GID | bind mount 里新建的文件不会变成 root 所有 |
 
 `build/`、`install/`、`log/` 都落在宿主工作区，容器销毁不丢。`devcontainer.json` 里设了 `shutdownAction: none`，关掉 VS Code 窗口**不会**停容器——机器人上不该因为关个编辑器就把控制栈杀了；要停用 `docker compose -f .devcontainer/docker-compose.yml down`。
+
+### Jetson CUDA 驱动访问
+
+本机已执行的检查、数据保护、获准重建、实测结果及回滚过程，见
+[Jetson GPU 配置记录](.devcontainer/JETSON_GPU.md)；可复用的验证入口为
+[`scripts/check_cuda_driver.py`](scripts/check_cuda_driver.py)。
+
+L4T R35.3.1 / JetPack 5.1.1 宿主提供 CUDA 11.4 驱动。宿主需已安装并在 Docker
+注册 `nvidia-container-runtime`；本项目只在 Compose 的 `dev` 服务显式选择它，
+不要求修改 Docker 的 `default-runtime`。这代 Jetson 使用
+`/etc/nvidia-container-runtime/host-files-for-container.d/l4t.csv` 注入厂商驱动库。
+不要安装桌面独显驱动、复制 CUDA stub，或把宿主整个 `/usr/lib` 挂进 Ubuntu 22.04
+容器；容器仍使用自己的 Ubuntu 系统库。
+
+修改 runtime 后必须**重新创建容器**，只执行 restart 不会生效。执行前先确认机器人
+任务允许中断，备份容器可写层中的用户配置、标定和数据。工作区、`.ros` 和
+`.vscode-server` 已 bind mount，其他 home 目录内容不一定持久化。
+对于现有 VS Code 容器，先从 `docker inspect` 的 Compose labels 核对项目名、
+全部 `config_files` 和 Mounts；沿用同一项目和 overrides，不能直接以默认项目名
+另起服务。历史 override 可能指定不同于 `g1-humble:latest` 的镜像，应保留现用镜像。
+宿主 runtime 已注册时不必重启 Docker，也不需要重建镜像。
+
+```bash
+# 宿主：只读确认 runtime 已注册，解析项目基础配置（现有容器还需合并其 overrides）
+docker info --format '{{range $name, $value := .Runtimes}}{{$name}} {{end}}'
+docker compose -f .devcontainer/docker-compose.yml config --quiet
+
+# 获准重建、重新创建现有容器后，在宿主用实际容器 ID 验证，不另起容器
+docker inspect <容器ID> --format '{{.HostConfig.Runtime}}'
+docker exec <容器ID> python3 /workspace/scripts/check_cuda_driver.py
+```
+
+验证脚本只使用 Python 标准库和 CUDA Driver API：输出真实驱动映射路径、
+`cuInit`、GPU 名称、上下文创建、4096 字节 GPU 分配、主机/GPU 往返复制比对及资源
+释放结果，任一步失败都会报错并以非零状态退出。不启动模型或机器人任务。
+**这不是 GPU 推理验证**：镜像仍安装 CPU 版 `onnxruntime`；CUDA EP、CUDA runtime、
+cuDNN/TensorRT 和 Python ABI 的匹配是后续独立工作，不应直接安装普通 PC 的 GPU wheel。
+
+2026-10-26 本机实测：L4T R35.3.1、NVIDIA runtime CSV 注入的
+`tegra/libcuda.so.1.1` 与宿主文件 SHA-256 一致；驱动 API 版本 `11040`，
+枚举到 1 个 `Orin` GPU，上述上下文、4096 字节往返复制及释放全部成功。
+容器保留 Ubuntu 22.04 的 glibc 2.35，未用宿主 glibc 2.31 替换。
+ONNX Runtime 1.23.2 仍只有 Azure / CPU providers。
+
+回滚 GPU 配置时，仅移除 Compose 新增的 `runtime: nvidia`、
+`NVIDIA_VISIBLE_DEVICES` 和 `NVIDIA_DRIVER_CAPABILITIES` 三项，再在获得中断许可后，
+使用原项目名和原 overrides 重新创建 `dev`；无需重启 Docker，也无需删除持久化数据。
+本次宿主 Docker/NVIDIA 配置未修改。若还需恢复重建前的完整可写层，应使用重建前保存的
+本地回滚镜像；镜像快照不包含 bind mount / volume 中的数据，这些数据应继续沿用原挂载。
 
 ### 实时调度（一次性宿主配置）
 宿主内核开了 `CONFIG_RT_GROUP_SCHED`（cgroup v1），**非根 cgroup 的实时带宽默认为 0**，此时 `sched_setscheduler()` 一律返回 EPERM——`privileged` 和 `RLIMIT_RTPRIO` 都救不了。`ros2_control_node` 会因此退回 SCHED_OTHER，500 Hz 控制环和 Flask、IK、相机编码抢同一批时间片。
