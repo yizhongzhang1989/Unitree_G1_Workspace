@@ -449,6 +449,16 @@ TEST(GravityFeedforwardTest, target_velocity_recovers_the_speed_from_a_50hz_stai
         gravity.update_target_velocity(target, kPeriod);
     }
     EXPECT_NEAR(gravity.target_velocity()[0], 0.0, 1e-6);
+
+    // Independent publishers updating other joints out of phase must not reset
+    // this joint's hold timer or corrupt its velocity estimate.
+    for (std::size_t step = 0; step < 2000; ++step) {
+        if (step % kDecimation == kDecimation - 1) target[1] += 0.01;
+        if (step % kDecimation == 0) commanded += kSpeed * kPeriod * kDecimation;
+        target[0] = commanded;
+        gravity.update_target_velocity(target, kPeriod);
+    }
+    EXPECT_NEAR(gravity.target_velocity()[0], kSpeed, 0.005);
 }
 
 /// Re-activation seeds from the target it is handed. Differencing against a

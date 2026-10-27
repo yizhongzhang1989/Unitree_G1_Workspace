@@ -166,6 +166,7 @@ bool GravityFeedforward::configure(
         });
     previous_target_.assign(joint_names.size(), 0.0);
     target_velocity_.assign(joint_names.size(), 0.0);
+    target_hold_time_.assign(joint_names.size(), 0.0);
     target_velocity_valid_ = false;
     subscribe_payload(node);
     return true;
@@ -385,11 +386,12 @@ bool GravityFeedforward::apply(
 
 void GravityFeedforward::update_target_velocity(
     const std::vector<double>& target, double elapsed) {
-    if (target_velocity_.size() != target.size()) {
+    if (target_velocity_.size() != target.size() ||
+        target_hold_time_.size() != target.size()) {
         target_velocity_.assign(target.size(), 0.0);
+        target_hold_time_.assign(target.size(), 0.0);
         previous_target_ = target;
         target_velocity_valid_ = false;
-        target_hold_time_ = 0.0;
         return;
     }
     // First cycle after activation: the previous target is whatever was left
@@ -397,37 +399,27 @@ void GravityFeedforward::update_target_velocity(
     if (!target_velocity_valid_) {
         previous_target_ = target;
         std::fill(target_velocity_.begin(), target_velocity_.end(), 0.0);
+        std::fill(target_hold_time_.begin(), target_hold_time_.end(), 0.0);
         target_velocity_valid_ = true;
-        target_hold_time_ = 0.0;
         return;
     }
     if (!(elapsed > 0.0)) return;
-    target_hold_time_ += elapsed;
 
-    // Difference across the step, not across the cycle. Commands arrive at
-    // 50 Hz and this runs at 500 Hz, so the target is a staircase: dividing by
-    // the control period would give nine zeroes and one spike ten times too
-    // big, and a low pass turns that into a 50 Hz ripple rather than the mean.
-    // Measured on the 0.3 rad/s staircase below: a 5 Hz filter settles into a
-    // 0.22-0.39 swing about a 0.3 target. Dividing by the time the target
-    // actually stood still recovers the commanded speed exactly, on the cycle
-    // it changes, with no ripple to feed into the friction sign.
-    const bool moved = !std::equal(target.begin(), target.end(), previous_target_.begin());
+    // Difference across the step, not across the cycle, and track hold time
+    // per joint so independent masked publishers (e.g. lower body vs arms)
+    // never reset each other's step duration.
     const double alpha = 1.0 - std::exp(-2.0 * M_PI * velocity_cutoff_hz_ * elapsed);
-    if (moved) {
-        for (std::size_t index = 0; index < target.size(); ++index) {
-            const double raw = (target[index] - previous_target_[index]) / target_hold_time_;
+    for (std::size_t index = 0; index < target.size(); ++index) {
+        target_hold_time_[index] += elapsed;
+        if (target[index] != previous_target_[index]) {
+            const double raw =
+                (target[index] - previous_target_[index]) / target_hold_time_[index];
             target_velocity_[index] += alpha * (raw - target_velocity_[index]);
             previous_target_[index] = target[index];
+            target_hold_time_[index] = 0.0;
+        } else if (target_hold_time_[index] > kTargetStaleSeconds) {
+            target_velocity_[index] -= alpha * target_velocity_[index];
         }
-        target_hold_time_ = 0.0;
-        return;
-    }
-    // Nothing new for longer than the publisher's period: the arm is being
-    // asked to stand still, so let the estimate fall away and take the
-    // friction push with it. Two missed 50 Hz frames of tolerance.
-    if (target_hold_time_ > kTargetStaleSeconds) {
-        for (double& velocity : target_velocity_) velocity -= alpha * velocity;
     }
 }
 

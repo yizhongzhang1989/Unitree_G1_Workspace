@@ -20,8 +20,8 @@ from rclpy.parameter import parameter_value_to_python
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
 from std_srvs.srv import Trigger
+from unitree_g1_ros2_control.msg import JointTargets
 
 from .constants import ALL_ARM_JOINTS, ARM_JOINTS, FT_SENSOR_LINKS, SIDES, mirror_arm_values
 from .ft_model import FtSample, KGF_TO_NEWTON, MINIMUM_ORIENTATION_SAMPLES, net_wrench, solve_ft_calibration
@@ -95,6 +95,7 @@ class AutoFtCalibration(Node):
         self.samples = {side: deque(maxlen=2000) for side in SIDES}
         self.records = []
         self.target = np.empty(0)
+        self.mask = 0
         self.moving = False
         self.last_publish = 0.0
         parameters = self.parameters(COMPENSATOR, [
@@ -185,7 +186,9 @@ class AutoFtCalibration(Node):
                 "%s %.3fs" % (name, age) for name, age in stale.items()))
         if time.monotonic() - self.last_publish > 0.2:
             raise RuntimeError("FPC command stream stalled")
-        self.output.publish(Float64MultiArray(data=self.target.tolist()))
+        message = JointTargets(mask=getattr(self, "mask", 0))
+        message.positions[:len(self.target)] = self.target
+        self.output.publish(message)
         self.last_publish = time.monotonic()
 
     def controller_state(self):
@@ -275,8 +278,7 @@ class AutoFtCalibration(Node):
             raise RuntimeError("force and payload nodes use different calibration files")
         self.wait(self.fresh, 10.0)
         state = self.controller_state()
-        topic = "/" + FPC + "/commands"
-        if self.count_publishers(topic):
+        if self.count_publishers("/" + FPC + "/commands"):
             raise RuntimeError("stop other FPC command publishers before calibration")
         names = self.parameters("/" + FPC, ["joints"])["joints"]
         if not names or not set(ALL_ARM_JOINTS).issubset(names) or not all(name in self.positions for name in names):
@@ -287,7 +289,10 @@ class AutoFtCalibration(Node):
             arm_slice = slice(index * 7, index * 7 + 7)
             gravity = sensor_orientation_from_table(self.table, side, initial[slots[arm_slice]]) @ self.gravity[side]
             check_coverage([sensor_orientation_from_table(self.table, side, pose[arm_slice]).T @ gravity for pose in poses])
-        self.output = self.create_publisher(Float64MultiArray, topic, QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
+        self.mask = int(sum(1 << int(slot) for slot in slots))
+        self.output = self.create_publisher(
+            JointTargets, "/" + FPC + "/joint_targets",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.wait(lambda: self.output.get_subscription_count() > 0, 3.0)
         self.switch("active")
         self.target, self.last_publish = initial.copy(), time.monotonic()

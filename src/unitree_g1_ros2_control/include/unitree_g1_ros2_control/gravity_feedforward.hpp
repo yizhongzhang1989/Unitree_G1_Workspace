@@ -130,7 +130,7 @@ public:
     void reset() noexcept {
         gravity_valid_ = false;
         target_velocity_valid_ = false;
-        target_hold_time_ = 0.0;
+        std::fill(target_hold_time_.begin(), target_hold_time_.end(), 0.0);
         std::fill(target_velocity_.begin(), target_velocity_.end(), 0.0);
     }
     bool gravity_valid() const noexcept { return gravity_valid_; }
@@ -268,7 +268,7 @@ private:
     static constexpr double kTargetStaleSeconds = 0.05;
     std::vector<double> previous_target_;
     std::vector<double> target_velocity_;
-    double target_hold_time_{0.0};
+    std::vector<double> target_hold_time_;
     bool target_velocity_valid_{false};
 
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_;
