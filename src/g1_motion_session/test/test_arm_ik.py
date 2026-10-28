@@ -1,6 +1,7 @@
 """Migrated arm mathematics/regressions and the in-process step/mixin contract."""
 
 import math
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -37,6 +38,32 @@ def test_reduced_model_keeps_only_the_arms(ik):
     assert np.all(ik.lower < ik.upper)
 
 
+def test_native_ik_model_is_created_once_and_reused(monkeypatch):
+    from g1_motion_session import _arm_ik_native
+
+    create = Mock(wraps=_arm_ik_native.create)
+    monkeypatch.setattr(_arm_ik_native, 'create', create)
+    model = make_ik()
+    seed = stand_posture(model)
+    targets = model.fk(seed)
+    targets['right'][0] += .01
+    for _ in range(10):
+        model.step(seed, targets, .02)
+    create.assert_called_once()
+
+
+def test_ik_backend_reports_cpp_and_rejects_removed_python_solver(bound_host):
+    assert bound_host.status_ik()['ik_backend'] == 'cpp'
+    result = bound_host.parameter_callbacks[0]([
+        Parameter('ik_rotation_weight', value=.5), Parameter('ik_backend', value='python'),
+    ])
+    assert not result.successful
+    assert bound_host._ik.rotation_weight == .01
+    assert 'only supports cpp' in result.reason
+    with pytest.raises(ValueError, match='Python solver has been removed'):
+        Host({'ik_backend': 'python'})
+
+
 def test_missing_joint_or_frame_fails_at_construction(ik):
     with pytest.raises(ValueError):
         ArmIK(urdf_xml(), ARM_JOINTS + ['no_such_joint'], TIP_FRAMES)
@@ -58,7 +85,7 @@ def test_fk_then_ik_recovers_the_pose(ik):
 def test_unreachable_target_is_best_effort_not_an_exception(ik):
     solved, pos_err, _, iters = ik.solve(
         np.zeros(14), {'right': [1.5, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0]})
-    assert iters == 11 and pos_err > 0.5
+    assert iters > 0 and pos_err > 0.5
     assert np.all(np.isfinite(solved))
     assert np.all(solved >= ik.lower - 1e-9) and np.all(solved <= ik.upper + 1e-9)
 
@@ -87,7 +114,7 @@ def test_rotation_weight_zero_releases_orientation_and_updates_live(ik):
     assert np.array_equal(position_only, seed)
     assert pos_err == pytest.approx(0.0)
     assert ori_err > 0.5
-    assert iters == 1
+    assert iters == 0
     ik.set_rotation_weight(1.0)
     full_pose, _, full_ori_err, iters = ik.solve(seed, {'right': target})
     assert not np.allclose(full_pose, seed)
@@ -203,9 +230,9 @@ def test_rescue_seed_never_fires_during_normal_tracking(configured_ik, monkeypat
     calls = []
     original = model.solve
 
-    def tracked(seed, targets):
+    def tracked(seed, targets, **kwargs):
         calls.append(1)
-        return original(seed, targets)
+        return original(seed, targets, **kwargs)
 
     monkeypatch.setattr(model, 'solve', tracked)
     solved = stand.copy()
@@ -301,24 +328,19 @@ def test_null_gain_moves_the_posture_when_the_elbow_is_pinned(configured_ik, ik)
 
 
 @pytest.mark.parametrize('max_iters', [0, 1, 10])
-def test_final_update_runs_once_and_reports_final_fk(monkeypatch, max_iters):
+def test_native_solve_runs_once_and_reports_final_fk(monkeypatch, max_iters):
+    from g1_motion_session import _arm_ik_native
+
     model = make_ik()
     model._iters = max_iters
     seed = stand_posture(model)
     target = {'right': model.fk(seed)['right'].copy()}
     target['right'][0] += 0.03
-    calls = []
-    original = model._final_update
-
-    def tracked(joints, goals, task_scale, iterations):
-        calls.append(iterations)
-        return original(joints, goals, task_scale, iterations)
-
-    monkeypatch.setattr(model, '_final_update', tracked)
+    solve = Mock(wraps=_arm_ik_native.solve)
+    monkeypatch.setattr(_arm_ik_native, 'solve', solve)
     solved, pos_err, ori_err, count = model.solve(seed, target)
-    assert len(calls) == 1
-    assert count == calls[0] + 1
-    assert count <= max_iters + 1
+    solve.assert_called_once()
+    assert 0 <= count <= 2 * max_iters + 1
     actual = model.fk(solved)['right']
     assert pos_err == pytest.approx(np.linalg.norm(actual[:3] - target['right'][:3]), abs=1e-12)
     orientation = 2 * math.acos(min(1.0, abs(float(np.dot(actual[3:], target['right'][3:])))))
@@ -326,10 +348,23 @@ def test_final_update_runs_once_and_reports_final_fk(monkeypatch, max_iters):
     left = [index for index, name in enumerate(model.joint_names) if name.startswith('left')]
     assert np.array_equal(solved[left], seed[left])
     assert np.all(solved >= model.lower) and np.all(solved <= model.upper)
-    calls.clear()
+    solve.reset_mock()
     held, pos_err, ori_err, count = model.solve(seed, {})
+    solve.assert_called_once()
     assert np.array_equal(held, seed)
     assert pos_err == ori_err == count == 0
+
+
+def test_native_failure_restores_python_execution(ik, monkeypatch):
+    seed = np.zeros(14)
+    targets = ik.fk(seed)
+    tip = ik._tip['right']
+    with monkeypatch.context() as patch:
+        patch.setitem(ik._tip, 'right', (ik.model.nframes + 1, tip[1]))
+        with pytest.raises(ValueError, match='IK frame out of range'):
+            ik.solve(seed, targets)
+    solved, position, _, _ = ik.solve(seed, targets)
+    assert np.isfinite(solved).all() and np.isfinite(position)
 
 
 def test_final_update_extension_return_with_rate_limit(configured_ik):
@@ -389,7 +424,7 @@ def test_step_limits_only_after_solve_and_reports_limited_fk(configured_ik, monk
     targets = model.fk(desired)
     calls = []
 
-    def solve(actual_seed, goals):
+    def solve(actual_seed, goals, *, joint_window=None):
         calls.append(actual_seed.copy())
         return desired.copy(), 0.0, 0.0, 11
 
@@ -415,7 +450,7 @@ def test_rescue_giveup_rearms_and_accepts_reference_only_on_improvement(configur
                   (seed.copy(), 0.1, 0.2, 11), (seed + 0.5, 0.08, 0.3, 7)]
     calls = []
 
-    def solve(actual_seed, goals):
+    def solve(actual_seed, goals, *, joint_window=None):
         calls.append(actual_seed.copy())
         return responses.pop(0)
 
@@ -438,7 +473,7 @@ def test_one_side_rescue_holds_uncommanded_joints(configured_ik, monkeypatch):
     model = configured_ik
     seed = stand_posture(model) + 0.1
     responses = [(seed.copy(), 0.1, 0.0, 11), (model.reference.copy(), 0.0, 0.0, 11)]
-    monkeypatch.setattr(model, 'solve', lambda *args: responses.pop(0))
+    monkeypatch.setattr(model, 'solve', lambda *args, **kwargs: responses.pop(0))
     target = model.step(seed, {'right': model.fk(seed)['right']}, 0.02)[0]
     left = [index for index, name in enumerate(model.joint_names) if name.startswith('left')]
     np.testing.assert_array_equal(target[left], seed[left])
@@ -509,7 +544,7 @@ def test_mixin_solve_commit_reset_use_only_final_published_seed(bound_host, monk
     status = host.status_ik()
     for side in targets:
         np.testing.assert_array_equal(status['limited_pose'][side], expected_fk[side])
-    assert status['ik_pos_err'] == round(max(np.linalg.norm(expected_fk[side][:3] - targets[side][:3]) for side in targets), 4)
+    assert status['ik_pos_err'] == round(max(np.linalg.norm(expected_fk[side][:3] - targets[side][:3]) for side in targets), 6)
     assert status['upper_executor'] == status['arm_mode'] == 'ik'
     assert status['ik_iterations'] > 0
     status['limited_pose']['left'][0] = 100.0

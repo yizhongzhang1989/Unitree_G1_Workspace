@@ -13,7 +13,7 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
-from .arm_ik import ArmIK, _pose_errors
+from .arm_ik import ArmIK, NullStatus, _pose_errors
 
 if TYPE_CHECKING:
     from threading import RLock
@@ -49,6 +49,8 @@ class _IKStatusFields(TypedDict):
     upper_executor: str
     arm_mode: str
     ik_ready: bool
+    ik_backend: str
+    ik_null_status: NullStatus | None
     base_frame: str
     tip_frames: dict[str, str]
     ik_rotation_weight: float
@@ -120,6 +122,8 @@ class ArmIKMixin:
             'right': self.declare('right_tip_frame', 'right_gripper_base'),
         }
         maximum_iterations = self.declare('ik_max_iters', 10)
+        if self.declare('ik_backend', 'cpp') != 'cpp':
+            raise ValueError('ik_backend only supports cpp; the Python solver has been removed')
         damping = self.declare('ik_damping', 0.05)
         tolerance_position = self.declare('ik_tol_pos', 0.001)
         tolerance_orientation = self.declare('ik_tol_ori', 0.0035)
@@ -159,6 +163,7 @@ class ArmIKMixin:
         self._ik_targets = {}
         self._ik_status = IKStatus(
             upper_ready=False, upper_executor='ik', arm_mode='ik', ik_ready=False,
+            ik_backend='cpp', ik_null_status=None,
             base_frame=self.base_frame, tip_frames=dict(self.tip_frames),
             ik_rotation_weight=weight, ik_pos_err=0.0, ik_ori_err=0.0,
             ik_iterations=0, ik_ms=0.0, limited_pose={})
@@ -194,6 +199,8 @@ class ArmIKMixin:
     def _set_ik_parameters(self, parameters: list['Parameter']):
         # 先校验整批参数再提交，后续无效项不能留下部分更新
         for parameter in parameters:
+            if parameter.name == 'ik_backend' and parameter.value != 'cpp':
+                return SetParametersResult(successful=False, reason='ik_backend only supports cpp')
             if parameter.name == 'ik_rotation_weight':
                 value = parameter.value
                 if not isinstance(value, (float, int)) or not math.isfinite(value) or not 0.0 <= value <= 1.0:
@@ -244,7 +251,8 @@ class ArmIKMixin:
             solved, position, orientation, iterations = self._ik.step(self._ik_seed, poses, self.dt)
             self._ik_targets = poses
             self._ik_status.update(
-                ik_pos_err=round(position, 4), ik_ori_err=round(orientation, 4),
+                ik_pos_err=round(position, 6), ik_ori_err=round(orientation, 6),
+                ik_null_status=self._ik.null_status,
                 ik_iterations=iterations, ik_ms=round((time.monotonic() - started) * 1e3, 2))
             return solved[self._arm_from_model], position, orientation, iterations
 
@@ -266,7 +274,7 @@ class ArmIKMixin:
         self._ik_status.update(
             upper_ready=True, ik_ready=True, limited_pose=reached,
             ik_rotation_weight=self._ik.rotation_weight,
-            ik_pos_err=round(position, 4), ik_ori_err=round(orientation, 4))
+            ik_pos_err=round(position, 6), ik_ori_err=round(orientation, 6))
 
     def reset_ik(self, positions31):
         """Reseed from actual preparation-end/measured joints and re-arm rescue."""
@@ -276,15 +284,17 @@ class ArmIKMixin:
             self._ik_targets = {}
             self._ik._rescue_miss = 0
             self._commit_ik_locked(positions31)
-            self._ik_status.update(ik_iterations=0, ik_ms=0.0)
+            self._ik_status.update(ik_iterations=0, ik_ms=0.0, ik_null_status=None)
 
     def status_ik(self) -> IKPublicStatus:
         """Original upper IK fields; limited_pose is committed command FK, not feedback."""
         with self.lock:
+            null_status = self._ik_status['ik_null_status']
             result: IKPublicStatus = {
                 **self._ik_status,
                 'upper_ready': self.ik_ready,
                 'ik_ready': self.ik_ready,
+                'ik_null_status': None if null_status is None else null_status.copy(),
                 'tip_frames': dict(self.tip_frames),
                 'limited_pose': {side: pose.tolist() for side, pose in self._ik_status['limited_pose'].items()},
             }

@@ -47,9 +47,44 @@ flowchart TD
 
 [TaskBase](g1_motion_session/task_base.py) 是会话内任务进程的 ROS 节点基类，提供登记客户端、事件订阅、任务状态发布、反馈订阅和掩码目标输出。控制周期数据不经会话转发。[ArmIKMixin](g1_motion_session/arm_ik_mixin.py) 在使用它的上肢进程内绑定机器人描述、求解与提交 IK，并共享[手臂 IK 配置](config/arm_ik.yaml)，不是远程 IK 服务。
 
+### 原生 IK 内核
+
+[ArmIK](g1_motion_session/arm_ik.py) 仅使用 C++ 高精度求解内核，不再提供 Python 后端或旧版单阶段 `standard` 求解分支。
+[原生扩展](src/arm_ik_native.cpp) 编译为进程内 `_arm_ik_native.so`，每个求解器只创建一次
+缩减 Pinocchio 模型与 Data，后续复用；没有每拍重新加载模型或进程间通信。
+每次 `solve` 只跨一次 Python/C++ 边界，配置解析和关节向量拷贝只做一次；
+GIL 用 RAII 管理，异常退出时也先恢复 GIL 再转换为 Python 异常。
+Mixin 保留 `ik_backend` 参数和状态字段作为兼容性标识，值固定为 `cpp`；
+旧配置指定 `python` 时启动明确报错，运行中修改为其他值也会拒绝。
+扩展缺失会明确报错，不静默回退。更新动态库后必须安全停止并重启节点。
+
+| 接口 | 数学求解 | 含关节限速窗口、救援种子及最终 FK 的控制管线 |
+|---|---|---|
+| 统一高精度接口 | `ArmIK.solve(seed, targets, *, joint_window=None)` | `ArmIK.step(seed, targets, dt)` |
+
+返回形状均为 `(q, position_error_m, orientation_error_rad, iterations)`。
+`ArmIK.solve` 首先用 SVD/Newton 和回溯线搜索求主任务；Newton 步无法降低加权误差时，
+再尝试使用配置阻尼的 DLS 步。随后将偏好项投影到严格 SVD 零空间，沿非线性解流形迭代优化。
+每次接受更新后重新计算雅可比与严格零空间基，沿投影梯度方向搜索（单步范数上限 `0.2 rad`），
+每步最多 8 次缩步并检查非线性 FK，必要时进行主任务回投影，只接受总加权偏好代价严格下降
+且位姿误差不超预算的调整。单个主任务候选、零空间外层迭代、整个零空间阶段的回投影总次数分别由
+`ik_max_iters` 限制；返回的迭代计数包含被拒主任务候选和回投影的实际工作。
+`ik_rotation_weight=0` 时只约束位置。
+
+`ArmIK.step` 将 `seed ± rate_limit * dt` 窗口施加于**整个求解**，不再容许主任务越过该窗口后
+依赖逐轴硬裁剪破坏末端轨迹。完整目标无法在窗口内满足容差时，从本拍起点沿 SE(3) 螺旋路径
+同时缩小平移和旋转任务，最多尝试 8 个候选（1 到 1/128），每次都从相同起点求解并验证实际 FK。
+返回误差始终相对于调用者的完整目标。成功的缩步不触发参考种子救援；没有可行候选时保持本拍起点
+并明确报告受阻。位置/姿态残差在状态中保留 6 位小数。
+`ArmIK.null_status` / Mixin 的 `ik_null_status` 报告最后一次求解的状态（`stationary` / `iteration_limit` / `blocked`）、
+零空间迭代数、总偏好及肘部代价、零空间投影梯度、`task_fraction`（实际执行的任务比例，`0` 表示没有可行候选，`1` 表示完整目标）和是否发生最终限速。
+
 ## 构建与启动
 
 在工作区根目录构建当前会话、任务与启动组合：
+
+原生扩展需要 CMake 3.18+、Python 开发头文件和与 Python 模块一致的 Pinocchio C++ 库。
+本机已验证两者均为 Pinocchio 4.0.0；不要混用另一套安装前缀的头文件/动态库。
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -149,7 +184,7 @@ ros2 launch robot_bringup motion_tasks.launch.py lower_task:=none upper_task:=fo
 
 `session.launch.py`、`whole_vr.launch.py` 和 `record_all.launch.py` 同样支持此覆盖。键盘组合默认读取 YAML，改变配置后在安全停机窗口重启运动组合；不要通过另起一套 session 来切换。倾角检查不保证能在失去平衡前阻止跌倒，仍需现场支撑和人工急停。
 
-各 launch 直接声明 ROS 参数文件列表：任务自己选择公共准备参数、自身默认配置与用户覆盖，只有 VR/VLA 加载共享手臂 IK；session launch 只选择自身配置。统一关节表最后加载，命令行专属覆盖随后应用。覆盖文件可用调用方包内相对路径或绝对路径。[CMakeLists.txt](CMakeLists.txt) 安装 Python 实现、生成的 ROS 接口、配置、launch 和可执行入口。
+各 launch 直接声明 ROS 参数文件列表：任务自己选择公共准备参数、自身默认配置与用户覆盖，VR、VLA、插孔等使用 IK 的任务加载共享手臂参数；session launch 只选择自身配置。统一关节表最后加载，命令行专属覆盖随后应用。覆盖文件可用调用方包内相对路径或绝对路径。[CMakeLists.txt](CMakeLists.txt) 安装 Python 实现、生成的 ROS 接口、配置、launch 和可执行入口。
 
 ## 验证
 
