@@ -551,18 +551,21 @@
 
       <!-- 右侧：按 1 -> 2 -> 3 -> 4 顺序排列 -->
       <div class="ui-col">
-        <!-- 1. 手臂浮动 -->
+        <!-- 1. 手臂浮动 / 冻结保持 -->
         <section class="ui-card">
           <div class="ui-card-head">
             <h2 class="ui-card-title">
               <span class="ui-step-num">1</span>
-              手臂浮动
+              手臂浮动 / 冻结保持
             </h2>
             <span id="float-state-tag" class="ui-tag active">默认模式</span>
           </div>
           <div class="ui-btn-row">
             <button id="mode-btn-float" class="ui-btn active" type="button" onclick="setMode('float')">
               进入手臂浮动（自由拖拽摆位）
+            </button>
+            <button id="mode-btn-hold" class="ui-btn" type="button" onclick="setMode('hold')">
+              冻结手臂（锁定当前位置）
             </button>
           </div>
         </section>
@@ -693,6 +696,9 @@
           </p>
 
           <div class="ui-btn-row" style="margin-top:8px">
+            <button class="ui-btn" type="button" onclick="setMode('hold')">
+              暂停并冻结手臂
+            </button>
             <button class="ui-btn danger" type="button" onclick="setMode('float')">
               停止并切换回手臂浮动
             </button>
@@ -1019,11 +1025,15 @@
       wrenchTag.textContent = `${inputStatusText(wSide)} · ${wSide.source || 'none'}`;
       wrenchTag.className = wSide.ready ? 'ui-tag ok' : 'ui-tag warn';
 
-      // 1. 手臂浮动状态
+      // 1. 手臂浮动 / 冻结状态
       const isFloat = st.mode === 'float';
+      const isHold = st.mode === 'hold';
       document.getElementById('mode-btn-float').classList.toggle('active', isFloat);
+      document.getElementById('mode-btn-hold').classList.toggle('active', isHold);
       const floatTag = document.getElementById('float-state-tag');
-      floatTag.textContent = isFloat ? '当前处于浮动' : ('当前: ' + (modeLabels[st.mode] || st.mode));
+      floatTag.textContent = isFloat
+        ? '当前处于浮动'
+        : (isHold ? '手臂已冻结 (Hold)' : ('当前: ' + (modeLabels[st.mode] || st.mode)));
       floatTag.className = isFloat ? 'ui-tag ok' : 'ui-tag active';
 
       // 2. 选择手 & 夹爪

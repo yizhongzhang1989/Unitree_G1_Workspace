@@ -30,7 +30,7 @@ ros2 service call /motion_control/engage std_srvs/srv/Trigger '{}'
 ## 控制模式与策略契约
 
 - `float`：以 50 Hz 发布双臂实测关节角跟随手拉摆位，夹爪保持当前设定开合度；若此前因 `/joint_states` 短暂超时进入错误态，反馈恢复后切回 `float` 可自动恢复运行。
-- `hold`：锁定并保持当前双臂末端位姿。
+- `hold`：冻结双臂当前 14 轴实测关节角（不运行 IK 零空间自运动），供下肢行走或等待期间锁定手臂姿态；可通过网页“冻结手臂（锁定当前位置）”按钮或调用 `/upper_insert/freeze`（兼容 `/upper_float/freeze`）触发，调用 `/upper_insert/unfreeze`（兼容 `/upper_float/unfreeze`）或点击浮动按钮即可解冻。
 - `mech_insert`：采集一帧新鲜视觉与实测 FK 计算完整尖端终点，转换为夹爪目标后交由 C++ 高精度 IK 持续跟踪；不随新帧反复重定向，修改孔位、深度或切换模式时自动清除旧机械终点。
 - `policy_insert`：以 50 Hz 运行 [policy.onnx](./config/policy.onnx) 双层 GRU 策略（输入 `obs[1,13] = [Δp_H, Δq_wxyz, F_T, M_T]`，输出 `actions[1,6]`，导出尺度为每单位 `1 mm / 0.5°`，详见 [DEPLOYMENT_ONNX.md](./config/DEPLOYMENT_ONNX.md) 与 [contract.json](./config/contract.json)）。每拍通过 500 Hz `/joint_states` 历史缓冲与差分 FK 补偿视觉延迟，在指令尖端位姿 `(p_tip_cmd, R_tip_cmd)` 上累加策略增量以保留抗重力/静摩擦偏置，并施加相对于实测尖端的 XY/Z 独立防积分饱和限幅（`max_tip_lead_m: 12 mm`、`max_tip_lead_deg: 4.0°`）。面板同时提供“策略单步执行 (走1步并保持)”与“仅算一步 (不移动)”按钮，便于逐步核验策略输出方向与末端执行响应。
 

@@ -254,6 +254,7 @@ class InsertTask(TaskBase, ArmIKMixin):
     _policy_step_count: int = 0
     _policy_tip_cmd: np.ndarray | None = None
     _last_policy_step_info: dict[str, Any] | None = None
+    _hold_joints: np.ndarray | None = None
 
     def __init__(self) -> None:
         super().__init__('upper_insert', slots=range(15, 31), imu_required=False)
@@ -452,6 +453,14 @@ class InsertTask(TaskBase, ArmIKMixin):
             side: self.create_client(Trigger, f'/grip_arm{i}/enable', callback_group=slow_group)
             for i, side in enumerate(SIDES)
         }
+        for srv_name in ('~/freeze', '/upper_float/freeze'):
+            self.create_service(
+                Trigger, srv_name, self._on_freeze_service, callback_group=slow_group
+            )
+        for srv_name in ('~/unfreeze', '/upper_float/unfreeze'):
+            self.create_service(
+                Trigger, srv_name, self._on_unfreeze_service, callback_group=slow_group
+            )
 
         self._vision_alive = True
         self._vision_executor: ProcessPoolExecutor | None = None
@@ -1261,12 +1270,45 @@ class InsertTask(TaskBase, ArmIKMixin):
                     self._seeded = True
             self.mode = new_mode
             self._mech_goal_pose = None
+            if new_mode == 'hold':
+                if prev_mode != 'hold' or self._hold_joints is None:
+                    self._hold_joints = (
+                        self._q[self.arm_slots].copy()
+                        if self._joint_stamp > 0.0 and np.all(np.isfinite(self._q[self.arm_slots]))
+                        else self.output.positions[self.arm_slots].copy()
+                    )
+            else:
+                self._hold_joints = None
             if new_mode in ('float', 'policy_insert'):
                 self.policy.reset()
                 self._policy_step_count = 0
                 self._policy_tip_cmd = None
             self._last_action[:] = 0.0
             self._last_action_6d[:] = 0.0
+
+    def _on_freeze_service(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        try:
+            self.set_mode('hold')
+            response.success = True
+            response.message = 'Arms frozen at measured positions'
+        except Exception as err:
+            response.success = False
+            response.message = str(err)
+        return response
+
+    def _on_unfreeze_service(
+        self, _request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
+        try:
+            self.set_mode('float')
+            response.success = True
+            response.message = 'Arm floating resumed'
+        except Exception as err:
+            response.success = False
+            response.message = str(err)
+        return response
 
     def set_active_arm(self, arm: str) -> None:
         if arm not in SIDES:
@@ -1884,6 +1926,7 @@ class InsertTask(TaskBase, ArmIKMixin):
                     self.policy.reset()
                     self._policy_step_count = 0
                 self.mode = 'hold'
+                self._hold_joints = None
                 self._mech_goal_pose = None
 
             cur_pose = self._measured_gripper_pose(self.active_arm)
@@ -2008,6 +2051,12 @@ class InsertTask(TaskBase, ArmIKMixin):
                     self.commit_ik(target)
                     self._seed_from_ik()
                     self._seeded = True
+            elif self.mode == 'hold' and self._hold_joints is not None:
+                target[self.arm_slots] = self._hold_joints
+                self._last_action[:] = 0.0
+                self._last_action_6d[:] = 0.0
+                if self.publish_target(target) and self.ik_ready:
+                    self.commit_ik(target)
             else:
                 if not self.ik_ready:
                     return
@@ -2048,6 +2097,7 @@ class InsertTask(TaskBase, ArmIKMixin):
                             self._safety_warning = safe_msg
                         self._sync_ik_to_measured()
                         self.mode = 'hold'
+                        self._hold_joints = self._q[self.arm_slots].copy()
                         self.policy.reset()
                         self._last_action_6d[:] = 0.0
                     elif not vis_valid:

@@ -215,9 +215,26 @@ def test_mechanical_goal_is_frozen_and_commit_follows_publish(task):
     np.testing.assert_array_equal(task.solve_ik.call_args.kwargs['targets']['right'], goal)
     assert task.commit_ik.call_count == 1
     task.policy.step.assert_not_called()
+    from std_srvs.srv import Trigger
+
     task.set_mode('hold')
     assert task._mech_goal_pose is None
     task._sync_ik_to_measured.assert_called_once()
+    latched = task._hold_joints.copy()
+    np.testing.assert_array_equal(latched, task._q[task.arm_slots])
+    task.publish_target.return_value = True
+    task.solve_ik.reset_mock()
+    task._q[task.arm_slots] += .25
+    # Repeated freeze keeps original latched joints without re-latching droop
+    res = task._on_freeze_service(Trigger.Request(), Trigger.Response())
+    assert res.success and task.mode == 'hold'
+    task._control()
+    task.solve_ik.assert_not_called()
+    np.testing.assert_array_equal(
+        task.publish_target.call_args.args[0][task.arm_slots], latched
+    )
+    res_unfreeze = task._on_unfreeze_service(Trigger.Request(), Trigger.Response())
+    assert res_unfreeze.success and task.mode == 'float' and task._hold_joints is None
 
 
 @pytest.mark.parametrize('arm', ['left', 'right'])
