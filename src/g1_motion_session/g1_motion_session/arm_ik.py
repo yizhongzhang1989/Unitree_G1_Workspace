@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 """In-process arm IK in base_frame, using xyzw unit quaternions.
 
-solve(seed, targets) retains the original DLS loop and final SVD update.
-step(seed, targets, dt) adds reference-seed rescue and a rate * dt limit.
+solve(seed, targets) separates primary pose solving and strict-null preference.
+step(seed, targets, dt) solves an executable pose step inside the per-tick joint
+window with reference-seed rescue and a rate * dt limit.
 Both return (target, position_error_m, orientation_error_rad, iterations).
 step errors describe the rate-limited target; iterations include rescue work.
-The caller owns the last published seed. Only the rescue miss count is stateful.
+The caller owns the last published seed. Only the rescue state is stateful.
 """
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import numpy as np
 import pinocchio as pin
 
-_I6 = np.eye(6)
+
+class NullStatus(TypedDict):
+    state: str
+    iterations: int
+    initial_cost: float
+    final_cost: float
+    initial_elbow_cost: float
+    final_elbow_cost: float
+    projected_gradient: float
+    elbow_priority: bool
+    rate_limited: bool
+    task_fraction: float
 
 
 def _pose_errors(reached, targets):
@@ -92,15 +106,13 @@ class ArmIK:
         self._max_step_pos = float(max_step_pos)
         self._max_step_ori = float(max_step_ori)
         self.set_rotation_weight(rotation_weight)
-        self._null_gain = None
-        self._null_target = np.full(self.model.nq, np.nan)
-        self._null_eye = {}
+        gains = np.zeros(self.model.nq)
+        null_angles = np.full(self.model.nq, np.nan)
         gate_lo, gate_hi = (float(v) for v in null_gate)
         if not 0.0 <= gate_lo < gate_hi:
             raise ValueError('null_gate 必须满足 0 <= lo < hi')
         self._gate_lo, self._gate_span = gate_lo, gate_hi - gate_lo
         if null_gain:
-            gains = np.zeros(self.model.nq)
             for name, gain in null_gain.items():
                 if name not in self.joint_names:
                     raise ValueError(f'null_gain 里的 {name} 不在手臂关节里')
@@ -108,10 +120,6 @@ class ArmIK:
                 if not np.isfinite(value) or value < 0.0:
                     raise ValueError(f'{name} 的 null_gain 必须是非负有限值')
                 gains[self.joint_names.index(name)] = value
-            if np.any(gains > 0.0):
-                self._null_gain = gains
-                self._null_eye = {side: np.eye(cols.size)
-                                  for side, (_, cols) in self._tip.items()}
         for name, target in (null_target or {}).items():
             if name not in self.joint_names:
                 raise ValueError(f'null_target 里的 {name} 不在手臂关节里')
@@ -119,18 +127,18 @@ class ArmIK:
             if not np.isfinite(value):
                 raise ValueError(f'{name} 的 null_target 必须是有限值')
             index = self.joint_names.index(name)
-            if self._null_gain is None or self._null_gain[index] <= 0.0:
+            if gains[index] <= 0.0:
                 raise ValueError(f'{name} 的 null_target 需要正的 null_gain')
-            self._null_target[index] = value
+            null_angles[index] = value
 
-        self._damping_matrix = self._lambda2 * _I6
         self._null_terms = {}
+        has_gains = np.any(gains > 0.0)
         for side, (_, cols) in self._tip.items():
-            reference_angles = self._null_target[cols]
+            reference_angles = null_angles[cols]
             ungated = np.isfinite(reference_angles)
             self._null_terms[side] = (
-                ungated, bool(ungated.any()), np.where(ungated, reference_angles, 0.0),
-                self._null_gain[cols] if self._null_gain is not None else None,
+                ungated, np.where(ungated, reference_angles, 0.0),
+                gains[cols] if has_gains else None,
             )
         by_name = dict(zip(arm_joints, reference)) if reference is not None else {}
         self.reference = np.array([by_name.get(name, 0.0) for name in self.joint_names])
@@ -144,10 +152,25 @@ class ArmIK:
         if reference is not None and (len(reference) != len(arm_joints) or not np.isfinite(self.reference).all()):
             raise ValueError('reference must contain one finite value per arm joint')
         self._rescue_miss = 0
+        self._rescue_target: np.ndarray | None = None
+        self._null_status: NullStatus | None = None
+        try:
+            from . import _arm_ik_native
+        except ImportError as error:
+            raise RuntimeError(
+                'Native IK extension unavailable; build g1_motion_session with colcon'
+            ) from error
+        self._native_module = _arm_ik_native
+        self._native = _arm_ik_native.create(urdf_xml, tuple(arm_joints))
 
     @property
     def rotation_weight(self) -> float:
         return self._rotation_weight
+
+    @property
+    def null_status(self) -> NullStatus | None:
+        """Last high-precision solve's local optimization status, not collision clearance."""
+        return None if self._null_status is None else self._null_status.copy()
 
     def set_rotation_weight(self, value: float) -> None:
         """设置旋转相对位置的任务权重；0 = 只跟位置，1 = 与位置同权。"""
@@ -156,11 +179,6 @@ class ArmIK:
             raise ValueError('rotation_weight 必须是 [0, 1] 内的有限值')
         self._rotation_weight = weight
 
-    def _place(self, q: np.ndarray) -> None:
-        """computeJointJacobians 内部已经做过正运动学，不必再单独调一次。"""
-        pin.computeJointJacobians(self.model, self.data, q)
-        pin.updateFramePlacements(self.model, self.data)
-
     def fk(self, q, *, clamp=True) -> dict:
         """Base-frame poses; clamp=False evaluates actual published/measured joints."""
         if clamp:
@@ -168,7 +186,8 @@ class ArmIK:
             np.minimum(bounded, self.upper, out=bounded)
         else:
             bounded = np.asarray(q, dtype=np.float64)
-        self._place(bounded)
+        pin.forwardKinematics(self.model, self.data, bounded)
+        pin.updateFramePlacements(self.model, self.data)
         poses = {}
         for side, (fid, _) in self._tip.items():
             bMt = self._oMb.actInv(self.data.oMf[fid])
@@ -176,142 +195,78 @@ class ArmIK:
                 [bMt.translation, pin.Quaternion(bMt.rotation).coeffs()])
         return poses
 
-    def _preference(self, angles, side):
-        ungated, _, reference, gains = self._null_terms[side]
-        if gains is None:
-            return None
-        offset = angles - reference
-        gate = np.where(ungated, 1.0, np.minimum(np.maximum(
-            (np.abs(offset) - self._gate_lo) / self._gate_span, 0.0), 1.0))
-        preference = -gains * gate * offset
-        return preference if preference.any() else None
-
-    def solve(self, seed, targets: dict):
+    def solve(self, seed, targets: dict, *, joint_window=None):
         """targets: ``{side: [x, y, z, qx, qy, qz, qw]}``，base_frame 系。
 
+        先解主任务，再迭代求解单拍严格零空间偏好并检查非线性位姿误差。
         没给到的一侧保持种子值不动。返回 ``(q, pos_err, ori_err, iters)``，
-        q 始终落在 URDF 限位内。有效目标固定追加一次严格零空间精修，
-        iters 包含该次更新；返回误差按最终输出重新 FK 计算。
+        q 始终落在 URDF 限位内。iters 包括主任务、零空间迭代及候选回投影。
+        null_status 区分局部驻点、预算耗尽和受阻，不保证偏好角度全部满足。
+        joint_window 约束整个求解；完整任务不可执行时沿 SE(3) 路径缩步。
         """
+        self._null_status = None
         q = np.maximum(np.asarray(seed, dtype=np.float64), self.lower)
         np.minimum(q, self.upper, out=q)
         goal = {side: self._oMb * pin.SE3(
             pin.Quaternion(np.asarray(pose[3:7], dtype=np.float64)).matrix(),
             np.asarray(pose[:3], dtype=np.float64))
             for side, pose in targets.items() if side in self._tip}
-        rotation_weight = self._rotation_weight
-        task_scale = np.array([1.0, 1.0, 1.0,
-                               np.sqrt(rotation_weight),
-                               np.sqrt(rotation_weight),
-                               np.sqrt(rotation_weight)])
-        has_ungated = any(self._null_terms[side][1] for side in goal)
-        for step in range(self._iters):
-            self._place(q)
-            errors = {}
-            for side, oMt in goal.items():
-                cur = self.data.oMf[self._tip[side][0]]
-                error = np.concatenate([oMt.translation - cur.translation,
-                                        pin.log3(oMt.rotation @ cur.rotation.T)])
-                side_pos = float(np.linalg.norm(error[:3]))
-                side_ori = float(np.linalg.norm(error[3:]))
-                chasing_ori = rotation_weight > 0.0 and side_ori > self._tol_ori
-                if side_pos > self._tol_pos or chasing_ori:
-                    capped = error.copy()
-                    if side_pos > self._max_step_pos > 0.0:
-                        capped[:3] *= self._max_step_pos / side_pos
-                    if side_ori > self._max_step_ori > 0.0:
-                        capped[3:] *= self._max_step_ori / side_ori
-                    errors[side] = capped
-            if not errors and not has_ungated:
-                return self._final_update(q, goal, task_scale, step)
-            for side in goal:
-                fid, cols = self._tip[side]
-                error = errors.get(side)
-                if error is None and not self._null_terms[side][1]:
-                    continue
-                jac = pin.getFrameJacobian(
-                    self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:, cols]
-                weighted_jac = task_scale[:, None] * jac
-                jjt = weighted_jac @ weighted_jac.T
-                preference = self._preference(q[cols], side)
-                if preference is None:
-                    if error is None:
-                        continue
-                    task = weighted_jac.T @ np.linalg.solve(
-                        jjt + self._damping_matrix, task_scale * error)
-                else:
-                    sharp = weighted_jac.T @ np.linalg.inv(jjt + self._damping_matrix)
-                    task = (self._null_eye[side] - sharp @ weighted_jac) @ preference
-                    if error is not None:
-                        task += sharp @ (task_scale * error)
-                q[cols] = np.minimum(np.maximum(q[cols] + task, self.lower[cols]), self.upper[cols])
-            if not errors:
-                return self._final_update(q, goal, task_scale, step + 1)
-        return self._final_update(q, goal, task_scale, self._iters)
-
-    def _final_update(self, q, goals, task_scale, iterations):
-        """原版求解之后固定追加一次 DLS + 严格零空间偏好，不做回溯。"""
-        self._place(q)
-        for side, target in goals.items():
-            fid, cols = self._tip[side]
-            actual = self.data.oMf[fid]
-            error = np.concatenate((target.translation - actual.translation,
-                                    pin.log3(target.rotation @ actual.rotation.T)))
-            position = float(np.linalg.norm(error[:3]))
-            orientation = float(np.linalg.norm(error[3:]))
-            if position > self._max_step_pos > 0:
-                error[:3] *= self._max_step_pos / position
-            if orientation > self._max_step_ori > 0:
-                error[3:] *= self._max_step_ori / orientation
-            jacobian = pin.getFrameJacobian(
-                self.model, self.data, fid, pin.LOCAL_WORLD_ALIGNED)[:, cols]
-            weighted = task_scale[:, None] * jacobian
-            step = weighted.T @ np.linalg.solve(
-                weighted @ weighted.T + self._damping_matrix, task_scale * error)
-            preference = self._preference(q[cols], side)
-            if preference is not None:
-                _, singular, vectors = np.linalg.svd(weighted, full_matrices=True)
-                threshold = np.finfo(float).eps * max(weighted.shape) * singular[0]
-                basis = vectors[int(np.count_nonzero(singular > threshold)):].T
-                step += basis @ (basis.T @ preference)
-            q[cols] = np.minimum(np.maximum(q[cols] + step, self.lower[cols]), self.upper[cols])
+        bounds = () if joint_window is None else tuple(
+            np.ascontiguousarray(bound, dtype=np.float64) for bound in joint_window)
+        if len(bounds) not in (0, 2):
+            raise ValueError('joint_window must contain lower and upper joint bounds')
+        position, orientation, iterations = self._native_module.solve(
+            self._native, self, q, goal, *bounds)
         pin.forwardKinematics(self.model, self.data, q)
         pin.updateFramePlacements(self.model, self.data)
-        position = orientation = 0.0
-        for side, target in goals.items():
-            actual = self.data.oMf[self._tip[side][0]]
-            position = max(position, float(np.linalg.norm(target.translation - actual.translation)))
-            orientation = max(orientation, float(np.linalg.norm(pin.log3(target.rotation @ actual.rotation.T))))
-        return q, position, orientation, iterations + bool(goals)
+        return q, position, orientation, iterations
 
     def step(self, seed, targets: dict, dt: float):
         """Return (model-order target, post-limit pos/ori errors, total iterations).
 
-        dt is seconds. Rate limiting happens once, after both IK solves. Rescue
-        re-arms only when the unlimited solve succeeds, as in the old pipeline.
+        Solve an executable pose step inside the per-tick joint window.
         """
         dt = float(dt)
         if not np.isfinite(dt) or dt < 0.0:
             raise ValueError('dt must be finite and nonnegative')
         seed = np.asarray(seed, dtype=np.float64)
-        solved, position, orientation, iterations = self.solve(seed, targets)
+        limit = self.rate_limit * dt
+        window = (seed - limit, seed + limit)
+        solved, position, orientation, iterations = self.solve(
+            seed, targets, joint_window=window)
+        selected_status = self._null_status
+        executable_partial = selected_status is not None and 0. < selected_status['task_fraction'] < 1.
         if position <= self.rescue_err:
+            self._rescue_miss = 0
+            self._rescue_target = None
+        elif (
+            selected_status is not None
+            and getattr(self, '_rescue_target', None) is not None
+            and _pose_errors(self.fk(self._rescue_target, clamp=False), targets)[0]
+            < position - self.rescue_err
+        ):
+            solved = self._rescue_target.copy()
+            self._rescue_miss = 0
+        elif executable_partial:
             self._rescue_miss = 0
         elif self._rescue_miss < self.rescue_giveup:
             alternate, alt_position, alt_orientation, alt_iterations = self.solve(
-                self.reference, targets)
+                self.reference, targets, joint_window=window)
             iterations += alt_iterations
             if alt_position < position - self.rescue_err:
                 solved = alternate
+                self._rescue_target = alternate.copy()
                 self._rescue_miss = 0
             else:
                 self._rescue_miss += 1
+                self._null_status = selected_status
         active = np.zeros(self.model.nq, dtype=bool)
         for side in targets:
             if side in self._tip:
                 active[self._tip[side][1]] = True
         solved[~active] = seed[~active]
-        limit = self.rate_limit * dt
+        if self._null_status is not None:
+            self._null_status['rate_limited'] = bool(np.any(np.abs(solved - seed) > limit))
         target = seed + np.clip(solved - seed, -limit, limit)
         reached = self.fk(target, clamp=False)
         position, orientation = _pose_errors(reached, targets)

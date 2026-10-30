@@ -61,6 +61,13 @@ def test_tick_keeps_spin_timeout_constant(monkeypatch):
     AutoFtCalibration.tick(node)
     assert len(timeouts) >= 5 and set(timeouts) == {0.001}
     node.output.publish.assert_called_once()
+    node.output.reset_mock()
+    node.mask = 0x1FFF8000
+    node.target = np.arange(31, dtype=float)
+    AutoFtCalibration.tick(node)
+    published = node.output.publish.call_args.args[0]
+    assert published.mask == 0x1FFF8000
+    np.testing.assert_array_equal(published.positions, np.arange(31, dtype=float))
 
 
 @pytest.fixture

@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Upper Insert 插孔控制台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f9;
+      --card: #ffffff;
+      --surface: #f8fafc;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #0f172a;
+      --muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: #eff6ff;
+      --success: #16a34a;
+      --success-hover: #15803d;
+      --success-soft: #f0fdf4;
+      --warn: #d97706;
+      --warn-soft: #fffbeb;
+      --danger: #dc2626;
+      --danger-hover: #b91c1c;
+      --danger-soft: #fef2f2;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+      color: inherit;
+    }
+
+    /* 悬浮消息提示（固定定位，绝不挤压页面布局） */
+    .ui-toast-wrap {
+      position: fixed;
+      top: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9999;
+      pointer-events: none;
+      width: max-content;
+      max-width: min(640px, 92vw);
+    }
+
+    .ui-toast {
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 18px;
+      border-radius: 999px;
+      background: #1e293b;
+      color: #ffffff;
+      font-size: 0.88rem;
+      font-weight: 600;
+      box-shadow: 0 10px 25px rgba(15, 23, 42, 0.18);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .ui-toast.error {
+      background: var(--danger);
+      color: #ffffff;
+    }
+
+    .ui-shell {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 18px 24px 32px;
+    }
+
+    .ui-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 18px;
+      margin-bottom: 18px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+    }
+
+    .ui-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .ui-brand h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .ui-top-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .ui-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 11px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .ui-pill strong {
+      color: var(--text);
+    }
+
+    .ui-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warn);
+    }
+
+    .ui-dot.ok {
+      background: var(--success);
+    }
+
+    .ui-dot.err {
+      background: var(--danger);
+    }
+
+    .ui-grid {
+      display: grid;
+      grid-template-columns: minmax(560px, 1.15fr) minmax(440px, 0.85fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .ui-col {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .ui-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+    }
+
+    .ui-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .ui-card-title {
+      margin: 0;
+      font-size: 0.98rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+    }
+
+    .ui-step-num {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      background: var(--primary);
+      color: #ffffff;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    .ui-tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    .ui-tag.ok {
+      background: var(--success-soft);
+      border-color: #bbf7d0;
+      color: var(--success);
+    }
+
+    .ui-tag.warn {
+      background: var(--warn-soft);
+      border-color: #fde68a;
+      color: var(--warn);
+    }
+
+    .ui-tag.active {
+      background: var(--primary-soft);
+      border-color: #bfdbfe;
+      color: var(--primary);
+    }
+
+    .ui-video-wrap {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .ui-video-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    .ui-summary-strip {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .ui-stat {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+    }
+
+    .ui-stat-label {
+      color: var(--muted);
+      font-size: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2px;
+    }
+
+    .ui-stat-val {
+      font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .ui-btn-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .ui-btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border-strong);
+      background: var(--card);
+      color: var(--text);
+      font-weight: 600;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: all 0.14s ease;
+      flex: 1 1 auto;
+      text-align: center;
+    }
+
+    .ui-btn:hover {
+      background: var(--surface);
+      border-color: #94a3b8;
+    }
+
+    .ui-btn:active {
+      transform: translateY(1px);
+    }
+
+    .ui-btn.active {
+      box-shadow: 0 2px 6px rgba(37, 99, 235, 0.22);
+    }
+
+    .ui-btn.active,
+    .ui-btn.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #ffffff;
+    }
+
+    .ui-btn.primary:hover {
+      background: var(--primary-hover);
+    }
+
+    .ui-btn.success {
+      background: var(--success);
+      border-color: var(--success);
+      color: #ffffff;
+    }
+
+    .ui-btn.success:hover {
+      background: var(--success-hover);
+    }
+
+    .ui-btn.danger {
+      background: var(--danger-soft);
+      border-color: #fecaca;
+      color: var(--danger);
+    }
+
+    .ui-btn.danger:hover {
+      background: var(--danger);
+      border-color: var(--danger);
+      color: #ffffff;
+    }
+
+    .ui-btn-sm {
+      padding: 5px 11px;
+      font-size: 0.78rem;
+      flex: 0 0 auto;
+    }
+
+    .ui-btn-xs {
+      padding: 1px 7px;
+      font-size: 0.72rem;
+      border-radius: 5px;
+      flex: 0 0 auto;
+    }
+
+    .ui-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .ui-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .ui-row label {
+      min-width: 76px;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.84rem;
+    }
+
+    .ui-input,
+    .ui-select {
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      padding: 6px 10px;
+      font-size: 0.86rem;
+      flex: 1 1 auto;
+    }
+
+    .ui-slider {
+      flex: 1 1 auto;
+      accent-color: var(--primary);
+    }
+
+    .ui-chip-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .ui-chip {
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      flex: 1 1 auto;
+      text-align: center;
+    }
+
+    .ui-chip:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: var(--primary-soft);
+    }
+
+    .ui-calib-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      font-size: 0.82rem;
+      margin-bottom: 10px;
+    }
+
+    .ui-calib-bar code {
+      font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .ui-input-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+
+    .ui-input-table th,
+    .ui-input-table td {
+      text-align: left;
+      padding: 8px 5px;
+      border-bottom: 1px solid var(--border);
+      overflow-wrap: anywhere;
+    }
+
+    .ui-input-note {
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin: 8px 0 0;
+    }
+
+    #input-warnings {
+      color: var(--warn);
+      padding-left: 20px;
+      font-size: 0.82rem;
+    }
+  </style>
+</head>
+<body>
+  <!-- 悬浮通知（固定在顶部中央，不改变任何布局高度） -->
+  <div class="ui-toast-wrap">
+    <div id="status-banner" class="ui-toast" hidden>
+      <span id="banner-text"></span>
+    </div>
+  </div>
+
+  <div class="ui-shell">
+    <header class="ui-topbar">
+      <div class="ui-brand">
+        <h1>Upper Insert 插孔控制台</h1>
+        <span id="vis-align-badge" class="ui-tag">等待标定码</span>
+      </div>
+      <div class="ui-top-right">
+        <div class="ui-pill">
+          <span id="conn-dot" class="ui-dot"></span>
+          <span id="conn-text">连接中</span>
+        </div>
+        <div class="ui-pill">
+          当前模式: <strong id="top-mode">手臂浮动</strong>
+        </div>
+        <span id="target-timing" class="ui-tag">目标发送: --</span>
+        <button class="ui-btn ui-btn-sm" type="button" onclick="sendSession('engage')">站立预备</button>
+        <button class="ui-btn ui-btn-sm danger" type="button" onclick="sendSession('estop')">紧急停止</button>
+      </div>
+    </header>
+
+    <div class="ui-grid">
+      <!-- 左侧：相机画面 + 精简状态栏 -->
+      <div class="ui-col">
+        <section class="ui-card">
+          <div class="ui-card-head">
+            <h2 class="ui-card-title">视觉定位画面</h2>
+            <span class="ui-tag">定位 <span id="top-fps">0.0</span> FPS · <span id="vision-cpu">CPU -- ms</span> · 预览 ≤5 FPS</span>
+          </div>
+          <div class="ui-row">
+            <label for="hole-select">选择插入孔位</label>
+            <select id="hole-select" class="ui-select" onchange="selectHole(this.value)">
+              <option value="auto">自动选择最近孔 (Auto)</option>
+            </select>
+          </div>
+          <p class="ui-input-note">机械插入和策略插入共用此选择。请先切回浮动或保持模式选孔，再启动插入。</p>
+          <div class="ui-video-wrap">
+            <img id="camera-stream" alt="实时视觉定位画面">
+          </div>
+
+          <div class="ui-summary-strip">
+            <div class="ui-stat">
+              <div class="ui-stat-label"><span>目标孔位</span></div>
+              <div class="ui-stat-val" id="m-hole">--</div>
+            </div>
+            <div class="ui-stat">
+              <div class="ui-stat-label"><span>平面误差 / 深度余量</span></div>
+              <div class="ui-stat-val" id="m-lat-depth">--</div>
+            </div>
+            <div class="ui-stat">
+              <div class="ui-stat-label"><span>末端力 / 力矩</span></div>
+              <div class="ui-stat-val" id="m-wrench">--</div>
+              <span id="wrench-health-tag" class="ui-tag warn">未收到</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="ui-card">
+          <div class="ui-card-head">
+            <h2 class="ui-card-title">策略必要输入</h2>
+            <span id="input-health-tag" class="ui-tag warn">等待状态</span>
+          </div>
+          <table class="ui-input-table">
+            <thead><tr><th>输入 / 来源</th><th>状态</th><th>年龄 / 超时</th></tr></thead>
+            <tbody id="input-health-rows"></tbody>
+          </table>
+          <ul id="input-warnings" hidden></ul>
+          <p class="ui-input-note">超时仅告警，不切换模式、不重置 GRU；视觉无效或超时时保持当前位置等待有效观测。</p>
+          <p class="ui-input-note">力觉年龄按本节点接收时间计算；视觉年龄从相机读图完成计算，尚不包含曝光及驱动缓冲延迟。</p>
+          <p class="ui-input-note">输入齐全不代表硬件安全。此面板未监测电机温度；过热时勿使能运动。原有力超限及运动会话保护保留。</p>
+        </section>
+      </div>
+
+      <!-- 右侧：按 1 -> 2 -> 3 -> 4 顺序排列 -->
+      <div class="ui-col">
+        <!-- 1. 手臂浮动 / 冻结保持 -->
+        <section class="ui-card">
+          <div class="ui-card-head">
+            <h2 class="ui-card-title">
+              <span class="ui-step-num">1</span>
+              手臂浮动 / 冻结保持
+            </h2>
+            <span id="float-state-tag" class="ui-tag active">默认模式</span>
+          </div>
+          <div class="ui-btn-row">
+            <button id="mode-btn-float" class="ui-btn active" type="button" onclick="setMode('float')">
+              进入手臂浮动（自由拖拽摆位）
+            </button>
+            <button id="mode-btn-hold" class="ui-btn" type="button" onclick="setMode('hold')">
+              冻结手臂（锁定当前位置）
+            </button>
+          </div>
+        </section>
+
+        <!-- 2. 选择手 / 夹爪开闭 -->
+        <section class="ui-card">
+          <div class="ui-card-head">
+            <h2 class="ui-card-title">
+              <span class="ui-step-num">2</span>
+              选择手 / 夹爪开闭
+            </h2>
+            <span id="grip-state-tag" class="ui-tag">右臂 · 闭合</span>
+          </div>
+
+          <div class="ui-row">
+            <label>执行手臂</label>
+            <div class="ui-btn-row" style="flex:1">
+              <button id="btn-arm-left" class="ui-btn" type="button" onclick="selectArm('left')">左臂 (Left)</button>
+              <button id="btn-arm-right" class="ui-btn active" type="button" onclick="selectArm('right')">右臂 (Right)</button>
+            </div>
+          </div>
+
+          <div class="ui-row">
+            <label>目标夹爪</label>
+            <div class="ui-btn-row" style="flex:1">
+              <button id="btn-grip-open" class="ui-btn" type="button" onclick="controlGripper('open')">打开夹爪</button>
+              <button id="btn-grip-close" class="ui-btn primary" type="button" onclick="controlGripper('close')">闭合夹爪 (夹紧插头)</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 末端标定 -->
+        <section class="ui-card">
+          <div class="ui-card-head">
+            <h2 class="ui-card-title">
+              <span class="ui-step-num">3</span>
+              末端标定 &amp; 力传感器校准
+            </h2>
+            <span id="cal-source-tag" class="ui-tag">URDF默认</span>
+          </div>
+
+          <div class="ui-calib-bar">
+            <span>传感器至末端: <code id="m-lever-dist">200.5 mm</code></span>
+            <span>相机TF相对图像: <code id="m-camera-tf-offset">--</code></span>
+            <span>力觉状态: <code id="m-ft-status">已就绪</code></span>
+          </div>
+
+          <div class="ui-btn-row">
+            <button id="btn-ft-calib" class="ui-btn primary" type="button" onclick="calibrateFt()">
+              手部力传感器重力校准 (6姿态)
+            </button>
+            <button id="btn-head-calib" class="ui-btn" type="button" onclick="calibrateTool('head_camera')">
+              主摄像机 + 发布 TF 标定末端
+            </button>
+            <button class="ui-btn ui-btn-sm" type="button" onclick="calibrateTool('nominal')">
+              恢复默认
+            </button>
+          </div>
+          <p id="head-calib-result" hidden style="margin:12px 0 0;font-size:0.85rem"></p>
+          <figure id="head-calib-preview" hidden style="margin:12px 0 0">
+            <a id="head-calib-link" target="_blank" rel="noopener">
+              <img id="head-calib-image" alt="本次标定实际使用的主相机图像与 ID1 检测结果"
+                   style="display:block;width:100%;max-height:420px;object-fit:contain;background:#111">
+            </a>
+            <figcaption style="margin-top:6px;font-size:0.8rem;color:var(--muted)">
+              本次主相机捕获 · ID1 坐标轴（X 红 / Y 绿 / Z 蓝）· 粉色十字 TIP = 计算尖端 T · 点击查看原尺寸
+            </figcaption>
+          </figure>
+        </section>
+
+        <!-- 4. 机械插入 / 策略插入，以及停止并切换回手臂浮动 -->
+        <section class="ui-card">
+          <div class="ui-card-head">
+            <h2 class="ui-card-title">
+              <span class="ui-step-num">4</span>
+              机械插入 / 策略插入
+            </h2>
+            <span class="ui-tag ok">policy.onnx (50Hz)</span>
+          </div>
+
+          <div class="ui-row">
+            <label for="depth-slider">插入深度</label>
+            <input id="depth-slider" class="ui-slider" type="range" min="-40" max="25" step="0.5" value="15.0"
+                   oninput="onDepthSlider(this.value)" onchange="updateMechParams()">
+            <input id="depth-input" class="ui-input" type="number" step="0.5" min="-80" max="60" value="15.0"
+                   style="max-width:74px" onchange="onDepthInput(this.value)">
+            <span style="color:var(--muted);font-size:0.82rem">mm</span>
+          </div>
+
+          <div class="ui-chip-row">
+            <button class="ui-chip" type="button" onclick="setDepthPreset(-15)">-15mm 上方靠近</button>
+            <button class="ui-chip" type="button" onclick="setDepthPreset(0)">0mm 孔口表面</button>
+            <button class="ui-chip" type="button" onclick="setDepthPreset(15)">+15mm 目标深度</button>
+          </div>
+
+          <div class="ui-btn-row">
+            <button id="mode-btn-mech_insert" class="ui-btn primary" type="button" onclick="setMode('mech_insert')">
+              机械插入
+            </button>
+            <button id="btn-policy-step" class="ui-btn success" type="button" onclick="stepPolicy(false)">
+              策略单步执行 (走1步并保持)
+            </button>
+            <button id="btn-policy-dry" class="ui-btn" type="button" onclick="stepPolicy(true)">
+              仅算一步 (不移动)
+            </button>
+          </div>
+          <div class="ui-btn-row" style="margin-top:8px">
+            <button id="mode-btn-policy_insert" class="ui-btn" type="button" onclick="setMode('policy_insert')">
+              策略连续插入 (50Hz)
+            </button>
+            <button id="btn-policy-reset" class="ui-btn ui-btn-sm" type="button" onclick="resetPolicy()">
+              重置策略状态
+            </button>
+          </div>
+          <div id="policy-step-diag" class="ui-calib-bar" hidden
+               style="margin-top:10px;display:flex;flex-direction:column;align-items:flex-start;gap:4px;font-size:0.8rem">
+            <div>
+              <strong id="diag-step-title">最近一步策略诊断</strong>
+              <span style="color:var(--muted);margin-left:6px" id="diag-step-hole"></span>
+            </div>
+            <div>孔系输入 Δp_H: <code id="diag-delta-h">--</code></div>
+            <div>策略输出 (孔系 H): 平移 <code id="diag-act-pos-h">--</code> · 旋转 <code id="diag-act-rot-h">--</code></div>
+            <div>躯干系 (+X前, +Y左, +Z上): 尖端位移 <code id="diag-tip-torso">--</code> · 夹爪位移 <code id="diag-grip-torso">--</code></div>
+            <div>保持与实测差 (指令-实测): <code id="diag-sag-torso">--</code></div>
+          </div>
+          <p style="color:var(--muted);font-size:0.82rem">
+            单步模式每次点击推理一步并在保持模式下累加目标，便于逐步对照策略输出与实际执行方向。
+          </p>
+
+          <div class="ui-btn-row" style="margin-top:8px">
+            <button class="ui-btn" type="button" onclick="setMode('hold')">
+              暂停并冻结手臂
+            </button>
+            <button class="ui-btn danger" type="button" onclick="setMode('float')">
+              停止并切换回手臂浮动
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let latestState = null;
+    let noticeUntil = 0;
+    let bannerTimer = null;
+    const holeNames = new Map([
+      ['rect_loose', '矩形孔（宽松）'],
+      ['rect_tight', '矩形孔（紧配）'],
+      ['circle_tight', '圆孔（紧配）'],
+      ['circle_loose', '圆孔（宽松）'],
+      ['triangle_tight', '三角孔（紧配）'],
+      ['triangle_loose', '三角孔（宽松）'],
+      ['hexagon_tight', '六边形孔（紧配）'],
+      ['hexagon_loose', '六边形孔（宽松）'],
+      ['pentagon', '五边形孔'],
+      ['L', 'L 形孔'],
+      ['Type-A', 'Type-A 孔'],
+      ['Type-C', 'Type-C 孔'],
+      ['m3', 'M3 孔'],
+      ['m3.5', 'M3.5 孔'],
+    ]);
+
+    function showBanner(msg, isError = false, durationMs = 3200) {
+      const banner = document.getElementById('status-banner');
+      const text = document.getElementById('banner-text');
+      text.textContent = msg;
+      banner.className = isError ? 'ui-toast error' : 'ui-toast';
+      banner.hidden = false;
+      noticeUntil = Date.now() + durationMs;
+      if (bannerTimer) clearTimeout(bannerTimer);
+      bannerTimer = setTimeout(() => {
+        if (Date.now() >= noticeUntil) {
+          banner.hidden = true;
+        }
+      }, durationMs + 50);
+    }
+
+    async function postCommand(payload) {
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          showBanner(data.error || '操作失败', true, 4000);
+          return { ok: false, error: data.error || '操作失败' };
+        }
+        if (data.message) {
+          showBanner(data.message, false, 2600);
+        }
+        if (data.state) {
+          renderState(data.state);
+        }
+        return data;
+      } catch (err) {
+        showBanner('请求异常: ' + err.message, true, 4000);
+        return { ok: false, error: '请求异常: ' + err.message };
+      }
+    }
+
+    function selectArm(arm) {
+      postCommand({ action: 'set_arm', arm });
+    }
+
+    function controlGripper(state) {
+      const arm = latestState ? latestState.active_arm : 'right';
+      postCommand({ action: 'gripper', arm, state });
+    }
+
+    function setMode(mode) {
+      postCommand({ action: 'set_mode', mode });
+    }
+
+    function stepPolicy(dryRun) {
+      postCommand({ action: 'step_policy', dry_run: Boolean(dryRun) });
+    }
+
+    function resetPolicy() {
+      postCommand({ action: 'reset_policy' });
+    }
+
+    function onDepthSlider(val) {
+      const num = parseFloat(val);
+      if (Number.isFinite(num)) {
+        document.getElementById('depth-input').value = num.toFixed(1);
+      }
+    }
+
+    function onDepthInput(val) {
+      const num = parseFloat(val);
+      if (Number.isFinite(num)) {
+        document.getElementById('depth-slider').value = Math.max(-40, Math.min(25, num));
+        updateMechParams();
+      }
+    }
+
+    function setDepthPreset(depthMm) {
+      document.getElementById('depth-input').value = depthMm.toFixed(1);
+      document.getElementById('depth-slider').value = Math.max(-40, Math.min(25, depthMm));
+      postCommand({ action: 'set_mech_params', insert_depth_mm: depthMm });
+    }
+
+    async function selectHole(hole) {
+      const select = document.getElementById('hole-select');
+      select.disabled = true;
+      try {
+        await postCommand({ action: 'set_mech_params', target_hole: hole });
+        if (latestState) select.value = latestState.target_hole;
+      } finally {
+        select.disabled = false;
+      }
+    }
+
+    function updateMechParams() {
+      const hole = document.getElementById('hole-select').value;
+      const depth = parseFloat(document.getElementById('depth-input').value);
+      const payload = {
+        action: 'set_mech_params',
+        target_hole: hole,
+      };
+      if (Number.isFinite(depth)) payload.insert_depth_mm = depth;
+      postCommand(payload);
+    }
+
+    async function calibrateTool(mode) {
+      const arm = latestState ? latestState.active_arm : 'right';
+      if (mode !== 'head_camera') {
+        return postCommand({ action: 'calibrate_tool', arm, mode });
+      }
+      const button = document.getElementById('btn-head-calib');
+      const result = document.getElementById('head-calib-result');
+      const preview = document.getElementById('head-calib-preview');
+      const image = document.getElementById('head-calib-image');
+      const link = document.getElementById('head-calib-link');
+      button.disabled = true;
+      preview.hidden = true;
+      result.hidden = false;
+      result.textContent = '正在捕获主相机并标定…';
+      try {
+        const data = await postCommand({ action: 'calibrate_tool', arm, mode });
+        result.textContent = data.ok ? data.message : data.error;
+        result.style.color = data.ok ? 'var(--muted)' : 'var(--danger)';
+        const response = await fetch('/head-calibration.jpg?t=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) {
+          result.textContent += '（本次没有可用截图）';
+          return;
+        }
+        const url = URL.createObjectURL(await response.blob());
+        if (image.src.startsWith('blob:')) URL.revokeObjectURL(image.src);
+        image.src = link.href = url;
+        preview.hidden = false;
+      } catch (err) {
+        result.textContent += '；截图加载失败: ' + err.message;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function calibrateFt() {
+      postCommand({ action: 'calibrate_ft' });
+    }
+
+    function sendSession(command) {
+      postCommand({ action: 'session', command });
+    }
+
+    function norm3(arr) {
+      if (!Array.isArray(arr) || arr.length < 3) return 0;
+      return Math.hypot(arr[0] || 0, arr[1] || 0, arr[2] || 0);
+    }
+
+    function inputStatusText(input) {
+      const labels = { missing: '未收到', invalid: '无效', stale: '已过期', ready: '新鲜' };
+      return labels[input.status] || (input.ready ? '已加载' : '未就绪');
+    }
+
+    function renderInputHealth(st) {
+      const health = st.policy_inputs || {};
+      const tag = document.getElementById('input-health-tag');
+      tag.textContent = health.ready ? '输入当前新鲜' : '输入有缺失 / 告警';
+      tag.className = health.ready ? 'ui-tag ok' : 'ui-tag warn';
+      const rows = document.getElementById('input-health-rows');
+      rows.replaceChildren();
+      const entries = Object.values(health.checks || {}).map(input => [input.label, input]);
+      for (const side of ['left', 'right']) {
+        const streams = (health.wrench_streams || {})[side] || {};
+        const prefix = side === 'left' ? '/arm0/' : '/arm1/';
+        for (const kind of ['raw', 'net']) {
+          entries.push([`${side === 'left' ? '左臂' : '右臂'} ${prefix}wrench_${kind}`, streams[kind] || {}]);
+        }
+      }
+      for (const [label, input] of entries) {
+        const row = document.createElement('tr');
+        const name = document.createElement('td');
+        name.textContent = label;
+        if (input.detail) {
+          const detail = document.createElement('div');
+          detail.className = 'ui-input-note';
+          detail.textContent = input.detail;
+          name.appendChild(detail);
+        }
+        const status = document.createElement('td');
+        const badge = document.createElement('span');
+        badge.className = input.ready ? 'ui-tag ok' : 'ui-tag warn';
+        badge.textContent = inputStatusText(input);
+        status.appendChild(badge);
+        const age = document.createElement('td');
+        age.textContent = input.timeout_ms !== undefined
+          ? `${input.age_ms === null || input.age_ms === undefined ? '--' : input.age_ms.toFixed(0)} / ${input.timeout_ms.toFixed(0)} ms`
+          : '--';
+        row.append(name, status, age);
+        rows.appendChild(row);
+      }
+      const warnings = document.getElementById('input-warnings');
+      warnings.replaceChildren();
+      for (const message of health.warnings || []) {
+        const item = document.createElement('li');
+        item.textContent = message;
+        warnings.appendChild(item);
+      }
+      warnings.hidden = warnings.childElementCount === 0;
+    }
+
+    function renderState(st) {
+      latestState = st;
+      renderInputHealth(st);
+      document.getElementById('conn-dot').className = 'ui-dot ok';
+      document.getElementById('conn-text').textContent = '已连接';
+
+      if (Date.now() > noticeUntil) {
+        if (st.error) {
+          showBanner('错误: ' + st.error, true, 3000);
+        } else if (st.safety_warning) {
+          showBanner('安全限幅: ' + st.safety_warning, true, 3000);
+        } else {
+          document.getElementById('status-banner').hidden = true;
+        }
+      }
+
+      const modeLabels = {
+        float: '手臂浮动',
+        hold: '位置保持',
+        mech_insert: '机械插入',
+        policy_insert: '策略插入',
+      };
+      document.getElementById('top-mode').textContent = modeLabels[st.mode] || st.mode;
+      const gains = st.policy_action_gains;
+      const gainTitle = gains
+        ? `策略平移 ×${gains.translation}，旋转 ×${gains.rotation}（相对模型导出尺度）`
+        : '';
+      const nullStatus = st.ik_null_status;
+      const nullLabels = {
+        stationary: '本拍偏好调整局部驻点（不代表偏好角度全部满足）',
+        iteration_limit: '迭代预算用尽，偏好未确认收敛',
+        blocked: '受关节约束或位姿回投影阻挡',
+        not_applicable: '无零空间任务',
+      };
+      const nullTitle = nullStatus
+        ? `零空间：${nullLabels[nullStatus.state] || nullStatus.state}，${nullStatus.iterations} 次`
+          + (nullStatus.task_fraction < 1 ? `；本拍任务步长 ${(nullStatus.task_fraction * 100).toFixed(1)}%` : '')
+          + (nullStatus.rate_limited ? '（该解已被关节限速裁剪）' : '')
+        : '';
+      document.getElementById('top-mode').title = [gainTitle, nullTitle].filter(Boolean).join('；');
+      const timing = st.target_timing;
+      const timingTag = document.getElementById('target-timing');
+      if (timing && timing.measured_hz != null) {
+        const stale = timing.last_target_age_ms > 200;
+        timingTag.textContent = stale
+          ? `目标发送已停止 · ${timing.last_target_age_ms.toFixed(0)} ms`
+          : `目标 ${timing.measured_hz.toFixed(1)} Hz · P95 ${timing.p95_gap_ms.toFixed(0)} ms`;
+        timingTag.className = stale || timing.measured_hz < timing.configured_hz * 0.9
+          ? 'ui-tag warn' : 'ui-tag ok';
+        timingTag.title = `近 ${timing.samples} 次实际发布，最大间隔 ${timing.max_gap_ms.toFixed(1)} ms`;
+      } else {
+        timingTag.textContent = '目标发送: --';
+        timingTag.className = 'ui-tag';
+        timingTag.removeAttribute('title');
+      }
+
+      const vis = st.vision || {};
+      document.getElementById('top-fps').textContent = (vis.fps || 0).toFixed(1);
+      const visionCpu = document.getElementById('vision-cpu');
+      const preproc = ({cuda: 'CUDA', cpu: 'CPU'})[vis.preprocess_backend] || '未启动';
+      visionCpu.textContent = `${vis.capture_format || '--'} · ${preproc} + C++ · CPU ${Number(vis.algo_cpu_ms || 0).toFixed(1)} ms`;
+      visionCpu.title = `视觉上限 ${vis.rate_limit_hz || '--'} Hz，显示频率为 EMA；累计新帧 ${vis.processed_frames || 0}；读帧完成到处理 ${Number(vis.processed_frame_age_ms || 0).toFixed(1)} ms（非曝光延迟）；IK ${st.ik_backend || '--'}；检测 CPU 时间不含通信/编码`;
+
+      const alignBadge = document.getElementById('vis-align-badge');
+      if (vis.valid) {
+        alignBadge.textContent = vis.orientation_ok ? '双码已对齐' : '姿态偏离';
+        alignBadge.className = vis.orientation_ok ? 'ui-tag ok' : 'ui-tag warn';
+      } else {
+        alignBadge.textContent = vis.status === 'stale'
+          ? '视觉位姿已过期'
+          : '等待双码 (' + (vis.missing_ids || []).join(',') + ')';
+        alignBadge.className = 'ui-tag warn';
+      }
+
+      document.getElementById('m-hole').textContent = vis.valid
+        ? (holeNames.get(vis.resolved_hole) || vis.resolved_hole) : '--';
+      document.getElementById('m-hole').title = vis.valid ? vis.resolved_hole : '';
+      document.getElementById('m-lat-depth').textContent = vis.valid
+        ? `XY ${vis.lateral_err_mm !== null ? vis.lateral_err_mm.toFixed(1) : '--'} · Z ${vis.depth_err_mm !== null ? (vis.depth_err_mm >= 0 ? '+' : '') + vis.depth_err_mm.toFixed(1) : '--'} mm`
+        : '--';
+
+      const arm = st.active_arm || 'right';
+      const wSide = (st.wrench && st.wrench[arm]) || {};
+      const fNorm = norm3(wSide.force_tip || wSide.force);
+      const mNorm = norm3(wSide.moment_tip || wSide.torque);
+      document.getElementById('m-wrench').textContent =
+        wSide.received
+          ? `${fNorm.toFixed(1)} N · ${mNorm.toFixed(2)} N·m${wSide.ready ? '' : '（历史值）'}`
+          : '--（未收到）';
+      const wrenchTag = document.getElementById('wrench-health-tag');
+      wrenchTag.textContent = `${inputStatusText(wSide)} · ${wSide.source || 'none'}`;
+      wrenchTag.className = wSide.ready ? 'ui-tag ok' : 'ui-tag warn';
+
+      // 1. 手臂浮动 / 冻结状态
+      const isFloat = st.mode === 'float';
+      const isHold = st.mode === 'hold';
+      document.getElementById('mode-btn-float').classList.toggle('active', isFloat);
+      document.getElementById('mode-btn-hold').classList.toggle('active', isHold);
+      const floatTag = document.getElementById('float-state-tag');
+      floatTag.textContent = isFloat
+        ? '当前处于浮动'
+        : (isHold ? '手臂已冻结 (Hold)' : ('当前: ' + (modeLabels[st.mode] || st.mode)));
+      floatTag.className = isFloat ? 'ui-tag ok' : 'ui-tag active';
+
+      // 2. 选择手 & 夹爪
+      document.getElementById('btn-arm-left').classList.toggle('active', arm === 'left');
+      document.getElementById('btn-arm-right').classList.toggle('active', arm === 'right');
+      const grip = st.gripper || {};
+      const gState = grip.state ? grip.state[arm] : 'closed';
+      document.getElementById('grip-state-tag').textContent =
+        `${arm === 'left' ? '左臂' : '右臂'} · ${gState === 'open' ? '已打开' : '已闭合'}`;
+
+      // 3. 末端标定 & 力传感器校准
+      const tc = st.tool_calibration || {};
+      document.getElementById('m-lever-dist').textContent =
+        tc.lever_arm_norm_mm !== undefined ? `${Number(tc.lever_arm_norm_mm).toFixed(1)} mm` : '--';
+      document.getElementById('m-ft-status').textContent =
+        tc.ft_calib_status || (tc.tool_mass_kg ? `${Number(tc.tool_mass_kg).toFixed(2)} kg` : '已就绪');
+      const ftBtn = document.getElementById('btn-ft-calib');
+      ftBtn.disabled = Boolean(tc.ft_calib_running);
+      ftBtn.textContent = tc.ft_calib_running
+        ? (tc.ft_calib_status || '力传感器校准中...')
+        : '手部力传感器重力校准 (6姿态)';
+      document.getElementById('cal-source-tag').textContent = tc.source || 'urdf_nominal';
+      const cameraOffset = tc.camera_tf_time_offset_s;
+      document.getElementById('m-camera-tf-offset').textContent =
+        Number.isFinite(cameraOffset)
+          ? (cameraOffset === 0 ? '同刻' : `${cameraOffset.toFixed(3)} s（标定时头部需静止）`)
+          : '--';
+
+      // 4. 机械插入 / 策略插入
+      const mechButton = document.getElementById('mode-btn-mech_insert');
+      mechButton.classList.toggle('active', st.mode === 'mech_insert');
+      mechButton.disabled = tc.source !== 'head_camera_tf';
+      mechButton.title = mechButton.disabled
+        ? '旧版或名义标定不能启动机械预定位；请使用主相机 + 发布 TF 重新标定并核验长度和方向'
+        : '仍需核验工具标定与现场运动条件；标定来源不代表已通过安全验证';
+      document.getElementById('mode-btn-policy_insert').classList.toggle('active', st.mode === 'policy_insert');
+
+      const diagBox = document.getElementById('policy-step-diag');
+      const ps = st.last_policy_step;
+      if (ps) {
+        diagBox.hidden = false;
+        const fmt3 = (arr, unit = '') => Array.isArray(arr)
+          ? `[${arr.map(v => (v >= 0 ? '+' : '') + Number(v).toFixed(2)).join(', ')}]${unit}`
+          : '--';
+        document.getElementById('diag-step-title').textContent =
+          ps.dry_run ? `仅推理预览 (当前累计 ${ps.step_index} 步)` : `已执行第 #${ps.step_index} 步`;
+        document.getElementById('diag-step-hole').textContent =
+          `目标孔: ${ps.target_hole} · 距离 ${Number(ps.distance_mm).toFixed(1)} mm · 轴偏 ${Number(ps.axis_angle_deg).toFixed(1)}° / 偏航 ${Number(ps.yaw_angle_deg).toFixed(1)}°`;
+        document.getElementById('diag-delta-h').textContent = fmt3(ps.delta_pos_h_mm, ' mm');
+        document.getElementById('diag-act-pos-h').textContent = fmt3(ps.act_pos_h_mm, ' mm');
+        document.getElementById('diag-act-rot-h').textContent = fmt3(ps.act_rot_h_deg, '°');
+        document.getElementById('diag-tip-torso').textContent = fmt3(ps.tip_step_torso_mm, ' mm');
+        document.getElementById('diag-grip-torso').textContent = fmt3(ps.gripper_step_torso_mm, ' mm');
+        document.getElementById('diag-sag-torso').textContent = fmt3(ps.sag_torso_mm, ' mm');
+      } else {
+        diagBox.hidden = true;
+      }
+
+      const holeSelect = document.getElementById('hole-select');
+      const holes = st.available_holes || [];
+      const sig = holes.join(',');
+      if (holeSelect.dataset.sig !== sig) {
+        holeSelect.dataset.sig = sig;
+        holeSelect.replaceChildren(
+          new Option('自动选择最近孔 (Auto)', 'auto'),
+          ...holes.map(h => new Option(holeNames.has(h) ? `${holeNames.get(h)} · ${h}` : h, h)),
+        );
+      }
+      if (document.activeElement !== holeSelect) {
+        holeSelect.value = st.target_hole || 'auto';
+      }
+
+      const depthInput = document.getElementById('depth-input');
+      const depthSlider = document.getElementById('depth-slider');
+      if (document.activeElement !== depthInput && document.activeElement !== depthSlider) {
+        depthInput.value = Number(st.insert_depth_mm).toFixed(1);
+        depthSlider.value = Math.max(-40, Math.min(25, Number(st.insert_depth_mm)));
+      }
+    }
+
+    let pollInFlight = false;
+    async function pollState() {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const res = await fetch('/api/state', { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        try {
+          renderState(data);
+        } catch (err) {
+          console.error('Render error:', err);
+        }
+      } catch (err) {
+        document.getElementById('conn-dot').className = 'ui-dot err';
+        document.getElementById('conn-text').textContent = '断开连接';
+        const tag = document.getElementById('input-health-tag');
+        tag.textContent = '连接中断，输入状态未知';
+        tag.className = 'ui-tag warn';
+        document.getElementById('input-health-rows').replaceChildren();
+        document.getElementById('input-warnings').hidden = true;
+        document.getElementById('wrench-health-tag').textContent = '连接中断 / 历史值';
+        document.getElementById('wrench-health-tag').className = 'ui-tag warn';
+      } finally {
+        pollInFlight = false;
+      }
+    }
+
+    window.addEventListener('load', () => {
+      setTimeout(() => {
+        const img = document.getElementById('camera-stream');
+        if (img) img.src = '/stream.mjpg';
+      }, 100);
+    });
+
+    pollState();
+    setInterval(pollState, 200);
+  </script>
+</body>
+</html>

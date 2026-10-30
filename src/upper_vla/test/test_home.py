@@ -221,6 +221,7 @@ def test_real_local_ik_tracks_cartesian_command_with_committed_feedback():
     node._ik_targets = {}
     node._ik_status = IKStatus(
         upper_ready=False, upper_executor='ik', arm_mode='ik', ik_ready=False,
+        ik_backend='cpp', ik_null_status=None,
         base_frame=node.base_frame, tip_frames=dict(node.tip_frames),
         ik_rotation_weight=.01, ik_pos_err=0., ik_ori_err=0., ik_iterations=0,
         ik_ms=0., limited_pose={})

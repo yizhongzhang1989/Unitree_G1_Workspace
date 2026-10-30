@@ -1,0 +1,61 @@
+/**:
+  ros__parameters:
+    control_rate_hz: 50.0
+    stand_s: 2.5
+    stand_clear_s: 0.4
+    stand_clear_roll: 0.7
+    passive_targets: [0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, -0.6, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0]
+    arm_joints:
+      - left_shoulder_pitch_joint
+      - left_shoulder_roll_joint
+      - left_shoulder_yaw_joint
+      - left_elbow_joint
+      - left_wrist_roll_joint
+      - left_wrist_pitch_joint
+      - left_wrist_yaw_joint
+      - right_shoulder_pitch_joint
+      - right_shoulder_roll_joint
+      - right_shoulder_yaw_joint
+      - right_elbow_joint
+      - right_wrist_roll_joint
+      - right_wrist_pitch_joint
+      - right_wrist_yaw_joint
+    gripper_joints: [left_eccentric_joint, right_eccentric_joint]
+    gripper_limits: [0.0, 2.76377472169236]
+    active_arm: right
+    default_mode: float
+    target_hole: auto
+    insert_depth_mm: 15.0
+    align_orientation: true
+    ik_max_iters: 20
+    ik_tol_pos: 0.00002
+    ik_tol_ori: 0.00007
+    ik_null_gain: [0.0, 0.05, 0.20, 0.20, 0.0, 0.0, 0.0,
+                   0.0, 0.05, 0.20, 0.20, 0.0, 0.0, 0.0]
+    wrench_order: force_torque
+    left_wrench_topic: /arm0/wrench_net
+    right_wrench_topic: /arm1/wrench_net
+    wrench_timeout_s: 0.2
+    wrench_filter_tau_s: 0.015
+    force_limit_n: 30.0
+    moment_limit_nm: 2.0
+    vision_timeout_s: 0.5
+    open_camera: true
+    vision_preprocess: cuda
+    vision_rate_hz: 30.0
+    camera_index: -1
+    action_scale: 1.0
+    max_step_m: 0.001
+    max_step_rad: 0.008726646259971648
+    max_policy_rot_deg: 0.5
+    vision_fk_alpha_pos: 0.35
+    vision_fk_alpha_rot: 0.25
+    vision_fk_coast_s: 1.0
+    policy_step_scale: 0.50
+    max_tip_lead_m: 0.012
+    max_tip_lead_deg: 4.0
+    web_host: 0.0.0.0
+    web_port: 8088
+    policy_node: /motion_control

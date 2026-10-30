@@ -16,18 +16,11 @@
 import os
 import subprocess
 
-from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (
-    DeclareLaunchArgument,
-    GroupAction,
-    IncludeLaunchDescription,
-    OpaqueFunction,
-    ResetLaunchConfigurations,
-)
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _reject_second_instance(context):
@@ -59,6 +52,7 @@ _ARGS = {
     # YUYV 是相机在 USB 上的原生格式，选它就少一道 YUYV->RGB8 转换、DDS 字节少 1/3，
     # 720p 录制实测 150%->114% 单核且不再丢帧；默认仍为 RGB8，不动现有下游。
     'color_format': 'RGB8',
+    'enable_depth': 'true',
     'depth_profile': '424x240x30',
     'align_depth': 'false',
     'pointcloud': 'false',
@@ -67,39 +61,66 @@ _ARGS = {
     # 机器人自带盆骨/躯干两个 IMU，相机 IMU 默认不开。
     'mount_frame': 'd435_link',
     'camera_base_frame': 'camera_link',
+    'initial_reset': 'false',
     'wait_for_device_timeout': '-1.0',
-    'reconnect_timeout': '6.0',
+    'reconnect_timeout': '2.0',
+    'respawn': 'true',
+    'respawn_delay': '2.0',
 }
 
 
-def generate_launch_description() -> LaunchDescription:
-    rs_launch = os.path.join(
-        get_package_share_directory('realsense2_camera'), 'launch', 'rs_launch.py')
+def _launch_realsense_node(context):
+    respawn = LaunchConfiguration('respawn').perform(context).lower() in ('true', '1', 'yes')
+    respawn_delay = float(LaunchConfiguration('respawn_delay').perform(context))
+    return [
+        Node(
+            package='realsense2_camera',
+            namespace=LaunchConfiguration('camera_namespace'),
+            name=LaunchConfiguration('camera_name'),
+            executable='realsense2_camera_node',
+            output='screen',
+            emulate_tty=True,
+            respawn=respawn,
+            respawn_delay=respawn_delay,
+            parameters=[{
+                'enable_color': True,
+                'enable_depth': ParameterValue(LaunchConfiguration('enable_depth'), value_type=bool),
+                'rgb_camera.color_profile': ParameterValue(
+                    LaunchConfiguration('color_profile'), value_type=str
+                ),
+                'rgb_camera.color_format': ParameterValue(
+                    LaunchConfiguration('color_format'), value_type=str
+                ),
+                'depth_module.depth_profile': ParameterValue(
+                    LaunchConfiguration('depth_profile'), value_type=str
+                ),
+                'align_depth.enable': ParameterValue(
+                    LaunchConfiguration('align_depth'), value_type=bool
+                ),
+                'pointcloud.enable': ParameterValue(
+                    LaunchConfiguration('pointcloud'), value_type=bool
+                ),
+                'enable_gyro': ParameterValue(LaunchConfiguration('enable_gyro'), value_type=bool),
+                'enable_accel': ParameterValue(LaunchConfiguration('enable_accel'), value_type=bool),
+                'initial_reset': ParameterValue(
+                    LaunchConfiguration('initial_reset'), value_type=bool
+                ),
+                'wait_for_device_timeout': ParameterValue(
+                    LaunchConfiguration('wait_for_device_timeout'), value_type=float
+                ),
+                'reconnect_timeout': ParameterValue(
+                    LaunchConfiguration('reconnect_timeout'), value_type=float
+                ),
+            }],
+        )
+    ]
 
+
+def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         *[DeclareLaunchArgument(k, default_value=v) for k, v in _ARGS.items()],
         OpaqueFunction(function=_reject_second_instance),
-        # rs_launch.py 会遍历整个上下文，对每个它不认识的 launch configuration 打一条
-        # 警告并附上完整参数表。ResetLaunchConfigurations 先求值再清空，只把它认得的
-        # 键传进去，日志才干净。
-        GroupAction([
-            ResetLaunchConfigurations({
-                'camera_namespace': LaunchConfiguration('camera_namespace'),
-                'camera_name': LaunchConfiguration('camera_name'),
-                'enable_color': 'true',
-                'enable_depth': 'true',
-                'rgb_camera.color_profile': LaunchConfiguration('color_profile'),
-                'rgb_camera.color_format': LaunchConfiguration('color_format'),
-                'depth_module.depth_profile': LaunchConfiguration('depth_profile'),
-                'align_depth.enable': LaunchConfiguration('align_depth'),
-                'pointcloud.enable': LaunchConfiguration('pointcloud'),
-                'enable_gyro': LaunchConfiguration('enable_gyro'),
-                'enable_accel': LaunchConfiguration('enable_accel'),
-                'wait_for_device_timeout': LaunchConfiguration('wait_for_device_timeout'),
-                'reconnect_timeout': LaunchConfiguration('reconnect_timeout'),
-            }),
-            IncludeLaunchDescription(PythonLaunchDescriptionSource(rs_launch)),
-        ]),
+        OpaqueFunction(function=_launch_realsense_node),
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',

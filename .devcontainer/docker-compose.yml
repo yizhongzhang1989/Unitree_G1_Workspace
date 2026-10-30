@@ -23,6 +23,8 @@ services:
 
     # USB（CANalyst-II）与相机直通
     privileged: true
+    # Jetson 通过 NVIDIA runtime 的 L4T CSV 注入宿主驱动；仅挂 /dev 不会带入 libcuda。
+    runtime: nvidia
     # 与机器人同一网络栈，DDS 才能在 eth0 上发现 /lowstate
     network_mode: host
     # DDS 共享内存
@@ -34,6 +36,8 @@ services:
     # 运行期默认使用 Remote Proxy 的 HTTP 端口，不继承宿主可能残留的 SOCKS 配置。
     # 代理地址不同时显式设置 G1_RUNTIME_PROXY；VS Code 的 remoteEnv 需同步修改。
     environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       HTTP_PROXY: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
       HTTPS_PROXY: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}
       ALL_PROXY: ${G1_RUNTIME_PROXY:-http://127.0.0.1:1080}

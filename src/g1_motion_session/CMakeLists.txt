@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.18)
 project(g1_motion_session)
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
@@ -8,6 +8,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}_interfaces
   "srv/RegisterTask.srv"
   LIBRARY_NAME ${PROJECT_NAME})
 ament_get_python_install_dir(PYTHON_INSTALL_DIR)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+find_package(pinocchio REQUIRED)
+Python3_add_library(_arm_ik_native MODULE src/arm_ik_native.cpp)
+target_link_libraries(_arm_ik_native PRIVATE pinocchio::pinocchio)
+target_compile_features(_arm_ik_native PRIVATE cxx_std_17)
+target_compile_options(_arm_ik_native PRIVATE -O3 -ffp-contract=off)
+install(TARGETS _arm_ik_native LIBRARY DESTINATION ${PYTHON_INSTALL_DIR}/g1_motion_session)
 install(DIRECTORY g1_motion_session/
   DESTINATION ${PYTHON_INSTALL_DIR}/g1_motion_session
   FILES_MATCHING PATTERN "*.py")

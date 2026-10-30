@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>upper_insert</name>
+  <version>0.1.0</version>
+  <description>6DoF ArUco plug-hole localization and 50Hz ONNX end-effector insertion control task.</description>
+  <maintainer email="ruigangli@microsoft.com">ruigangli</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <build_depend>python3-dev</build_depend>
+  <depend>libopencv-dev</depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>g1_motion_session</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>unitree_g1_ros2_control</exec_depend>
+  <!-- onnxruntime 没有 rosdep key，由 .devcontainer/Dockerfile 的 pip3 install 提供。 -->
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>unitree_g1_description</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

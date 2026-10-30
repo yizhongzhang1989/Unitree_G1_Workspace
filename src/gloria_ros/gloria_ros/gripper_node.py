@@ -154,6 +154,7 @@ class GloriaGripperNode(Node):
         self._last_parameter_value: Optional[float] = None  # 最近一次参数读取回包值
         self._disable_generation = 0  # 失能请求代次，用于取消并发中的使能流程
         self._shutting_down = False  # 标记节点是否进入关闭流程
+        self._enable_on_start = enable_on_start
         self._auto_enable_pending = enable_on_start  # 通信就绪后仍需执行启动自动使能
 
         rx_qos = QoSProfile(
@@ -555,11 +556,13 @@ class GloriaGripperNode(Node):
     def _srv_enable_cb(self, _request, response: Trigger.Response):
         response.success, response.message = self._enable()
         if response.success:
+            self._enable_on_start = True
             self._cancel_auto_enable()
         return response
 
     def _srv_disable_cb(self, _request, response: Trigger.Response):
         # 失能不等待操作锁，确保它可以取消正在等待反馈的使能流程
+        self._enable_on_start = False
         self._cancel_auto_enable()
         self._request_disable()
         response.success = True
@@ -655,6 +658,11 @@ class GloriaGripperNode(Node):
                 self._disable_generation += 1
                 self._enabled_requested = False
                 self._send_ctrl(_CTRL_DISABLE)
+                if getattr(self, "_enable_on_start", False):
+                    self._auto_enable_pending = True
+                    timer = getattr(self, "_enable_timer", None)
+                    if timer is not None and hasattr(timer, "reset"):
+                        timer.reset()
                 timed_out = True
         if timed_out:
             self.get_logger().error(

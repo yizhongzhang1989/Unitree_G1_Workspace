@@ -1,0 +1,17 @@
+{
+    "camera_name": "Microsoft Azure Kinect 4K Camera (1280x720)",
+    "camera_index": 6,
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "pixel_format": "YUYV",
+    "intrinsics": {
+        "calib_width": 1280,
+        "calib_height": 720,
+        "fx": 619.69,
+        "fy": 618.46,
+        "cx": 639.41,
+        "cy": 362.08
+    },
+    "dist_coeffs": [0.09296, -0.04049, 0.00035, 0.00065, -0.04315]
+}

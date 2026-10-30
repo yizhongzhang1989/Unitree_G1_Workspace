@@ -1,0 +1,287 @@
+{
+  "version": 1,
+  "actor_dimension": 13,
+  "action_dimension": 6,
+  "policy_period_seconds": 0.02,
+  "quaternion_order": "wxyz",
+  "physics_cuda_graph": true,
+  "observation_cuda_graph": true,
+  "position_observation_delay": {
+    "enabled": true,
+    "frames": [
+      0,
+      1
+    ],
+    "sampling": "independent uniform per episode; fixed until reset",
+    "channels": "actor dx/dy/dz only; historical full noisy error in fixed hole axes",
+    "reset": "replicate initial noisy position error; no history across episodes",
+    "clock": "policy-step length only; reads and graph capture do not advance history",
+    "quaternion_and_wrench": "current",
+    "critic": "clean and current; 57 dimensions"
+  },
+  "position_error": "historical target minus estimated tip, in fixed hole axes; see position_observation_delay",
+  "relative_orientation": "inverse(current) * target; canonical unit quaternion",
+  "wrench": "gravity-compensated downstream load, in nominal tool axes about nominal tip",
+  "inertia_compensated": false,
+  "rotation_center": "nominal tool tip",
+  "action": "H-frame translation and rotation-vector increment relative to actual tip",
+  "translation_limit_m": 0.001,
+  "rotation_component_limit_rad": 0.008726646259971648,
+  "target_composition": "p_target=p_current+dp; q_target=Exp(dr)*q_current",
+  "nominal_body_to_tip_m": [
+    0,
+    0,
+    -0.05
+  ],
+  "nominal_body_to_sensor_m": [
+    0,
+    0,
+    0.03
+  ],
+  "filter_seconds": 0.015,
+  "training_noise": {
+    "curriculum": {
+      "enabled": false,
+      "mode": "steps",
+      "zero_policy_steps": 25600,
+      "full_policy_steps": 204800,
+      "ramp_initial_scale": 0.2,
+      "evaluation_scale": 1.0,
+      "fixed_errors_sampling": "scale at episode reset, then fixed for the episode",
+      "success_window_episodes_per_shape": 1000,
+      "success_threshold_per_shape": 0.8,
+      "success_scale_increment": 0.1,
+      "success_initial_scale": 0.0,
+      "success_statistics": "recent completed episodes at current level; all shapes must pass",
+      "clearance_curriculum": false,
+      "clearance_levels_m": [
+        0.0001
+      ]
+    },
+    "position_std_m": 0.0005,
+    "rotation_vector_component_std_rad": 0.026179938779914945,
+    "force_std_n": 0.2,
+    "moment_std_nm": 0.001,
+    "force_bias_half_range_n": 0.5,
+    "moment_bias_half_range_nm": 0.01,
+    "wrench_bias_sampling": "independent uniform per axis at reset, fixed per episode; actor only",
+    "pose_sampling": "position Gaussian sampled at each policy frame, retained with historical error; rotation Gaussian per observation, current tip orientation",
+    "wrench_sampling": "independent Gaussian per observation after tip transform/filter",
+    "grasp_distribution": "gaussian",
+    "grasp_component_scale_m": 0.00125,
+    "grasp_scale_semantics": "std",
+    "grasp_sampling": "per episode"
+  },
+  "force_limit_n": 30.0,
+  "moment_limit_nm": 2.0,
+  "workspace_xy_m": 0.035,
+  "workspace_xy_geometry": "radial_disk",
+  "plate_outer_radius_m": 0.08,
+  "plate_coverage": "minimum outer inradius; zero retains legacy footprint",
+  "workspace_z_low_m": -0.025,
+  "workspace_z_high_m": 0.03,
+  "max_tilt_rad": 0.6108652381980153,
+  "hidden_state": [
+    2,
+    "batch",
+    128
+  ],
+  "training_shapes": [
+    "triangle",
+    "square",
+    "pentagon",
+    "hexagon",
+    "l"
+  ],
+  "initial_tip_position": {
+    "xy_half_range_m": 0.02,
+    "z_bounds_m": [
+      0.001,
+      0.01
+    ],
+    "whole_peg_plane_margin_m": 0.001,
+    "xy_curriculum_scaled": true
+  },
+  "initial_rotation_vector_half_ranges_rad": [
+    0.3490658503988659,
+    0.3490658503988659,
+    0.3490658503988659
+  ],
+  "shape_environment_counts": [
+    581,
+    573,
+    468,
+    422,
+    516
+  ],
+  "adaptive_sampling": false,
+  "target_depth_bounds_m": [
+    0.005,
+    0.022500000000000003
+  ],
+  "target_depth_sampling": "uniform per episode",
+  "depth_success": "reach or exceed target, with existing 0.2 mm tolerance",
+  "success_alignment_required": false,
+  "success_opening_required": true,
+  "success_opening": "true physical bottom-center XY inside hole outline, inclusive boundary; circle analytic",
+  "success_hold_steps": 5,
+  "success_safety_priority": true,
+  "preinsertion_tilt_weight": 0.0,
+  "xy_cost_radius_fraction": 0.25,
+  "inserted_load_cost": {
+    "enabled": true,
+    "activation": "true physical tip center z < -0.004 m; not lowest point",
+    "depth_m": 0.004,
+    "force": "filtered nominal-tool force rotated into hole axes, Fx/Fy norm / max_force",
+    "moment": "all three filtered nominal-tip moments, norm / max_moment",
+    "dead_zones": false,
+    "cost": "existing coefficients times squared clamped [0,1] normalized loads",
+    "before_insertion": "existing full force/moment norms with configured dead zones",
+    "safety": "unchanged full raw force/moment substep peaks"
+  },
+  "reward_adaptations": "negative dt-scaled running costs; decoupled XY/Z distance; continuous yaw cost; depth-blended tilt; terminal completion bonus",
+  "timeout_bootstrap": false,
+  "impedance_walk": {
+    "fraction": 0.1,
+    "rate_per_second": 0.05,
+    "target_interval_seconds": 1.0,
+    "time_constant_seconds": 1.0,
+    "nominal_disabled": true
+  },
+  "clearance_definition": "opposing-face dimension difference; each wall offset is half",
+  "simulation_only": true,
+  "onnx": {
+    "inputs": {
+      "obs": [
+        1,
+        13
+      ],
+      "h_in": [
+        2,
+        1,
+        128
+      ]
+    },
+    "outputs": {
+      "actions": [
+        1,
+        6
+      ],
+      "h_out": [
+        2,
+        1,
+        128
+      ]
+    },
+    "dtype": "float32",
+    "batch_size": 1,
+    "deterministic": true,
+    "normalization_in_model": true,
+    "action_clipping_in_model": false,
+    "preprocessing_in_model": false,
+    "safety_checks_in_model": false,
+    "std_head_pruned": true
+  },
+  "source": {
+    "checkpoint": "/home/ruigangli/InsertAnything/runs/continuous_position_delay20mm/onnx_latest_source.pt",
+    "iteration": 21335,
+    "sha256": "e3a4d6db80d1b29f5ccac493ed8c147eda7333071e7db5631395e83a8c4e8da1",
+    "curriculum_level": null,
+    "environment": {
+      "shapes": [
+        "triangle",
+        "square",
+        "pentagon",
+        "hexagon",
+        "l"
+      ],
+      "envs_per_shape": 512,
+      "shape_env_counts": [
+        581,
+        573,
+        468,
+        422,
+        516
+      ],
+      "adaptive_sampling": false,
+      "seed": 31415,
+      "physics_dt": 0.001,
+      "decimation": 20,
+      "physics_cuda_graph": true,
+      "observation_cuda_graph": true,
+      "position_observation_delay": true,
+      "inserted_load_cost": true,
+      "inserted_load_depth_m": 0.004,
+      "episode_seconds": 8.0,
+      "clearance": 0.0001,
+      "circle_sides": null,
+      "clearance_curriculum": false,
+      "clearance_levels": [
+        0.002,
+        0.001,
+        0.0005,
+        0.00025,
+        0.00015,
+        0.0001
+      ],
+      "scale": 1.0,
+      "target_depth_min_m": 0.005,
+      "target_depth_max_fraction": 0.9,
+      "fixed_target_depth_m": null,
+      "translation_limit": 0.001,
+      "rotation_limit": 0.008726646259971648,
+      "max_force": 30.0,
+      "max_moment": 2.0,
+      "filter_seconds": 0.015,
+      "initial_xy": 0.02,
+      "workspace_xy_radius_m": 0.035,
+      "plate_outer_radius_m": 0.08,
+      "initial_z_min": 0.001,
+      "initial_z_max": 0.01,
+      "initial_plane_margin": 0.001,
+      "initial_tilt": 0.3490658503988659,
+      "initial_yaw": 0.3490658503988659,
+      "position_bias": 0.0005,
+      "tip_calibration_error": 0.0005,
+      "grasp_position_error": 0.00125,
+      "grasp_error_distribution": "gaussian",
+      "sensor_rotation_error": 0.008726646259971648,
+      "position_noise": 0.0005,
+      "rotation_noise": 0.026179938779914945,
+      "force_noise": 0.2,
+      "moment_noise": 0.001,
+      "force_bias": 0.5,
+      "moment_bias": 0.01,
+      "noise_curriculum": false,
+      "noise_curriculum_mode": "steps",
+      "noise_zero_steps": 25600,
+      "noise_full_steps": 204800,
+      "dynamics": "train",
+      "training": true,
+      "success_hold_steps": 5,
+      "success_alignment_required": false,
+      "success_opening_required": true,
+      "curriculum_steps": 256000,
+      "impedance_walk_fraction": 0.1,
+      "impedance_walk_rate_per_second": 0.05,
+      "impedance_walk_interval_seconds": 1.0,
+      "impedance_walk_time_constant_seconds": 1.0,
+      "time_cost_per_second": 1.0,
+      "position_cost_per_second": 2.0,
+      "position_cost_cap": 2.0,
+      "xy_cost_radius_fraction": 0.25,
+      "orientation_cost_per_second": 1.0,
+      "orientation_cost_reference_deg": 5.0,
+      "preinsertion_tilt_weight": 0.0,
+      "force_cost_per_second": 1.0,
+      "moment_cost_per_second": 1.0,
+      "force_cost_free_n": 5.0,
+      "moment_cost_free_nm": 0.1,
+      "action_cost_per_second": 0.05,
+      "action_change_cost_per_second": 0.05,
+      "completion_bonus": 20.0,
+      "safety_failure_penalty": 200.0,
+      "timeout_penalty": 10.0
+    }
+  }
+}
